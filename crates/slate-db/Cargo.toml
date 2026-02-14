@@ -1,0 +1,11 @@
+[package]
+name = "slate-db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slate-store = { path = "../slate-store" }
+slate-query = { path = "../slate-query" }
+
+[dev-dependencies]
+tempfile = "3"
