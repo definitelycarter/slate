@@ -1,0 +1,11 @@
+[package]
+name = "slate-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slate-db = { path = "../slate-db" }
+slate-store = { path = "../slate-store" }
+slate-query = { path = "../slate-query" }
+rand = "0.8"
+tempfile = "3"
