@@ -7,5 +7,7 @@ edition = "2024"
 slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store" }
 slate-query = { path = "../slate-query" }
+slate-server = { path = "../slate-server" }
+slate-client = { path = "../slate-client" }
 rand = "0.8"
 tempfile = "3"

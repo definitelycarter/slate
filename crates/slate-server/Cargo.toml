@@ -1,12 +1,15 @@
 [package]
-name = "slate-db"
+name = "slate-server"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store" }
 slate-query = { path = "../slate-query" }
 serde = { version = "1", features = ["derive"] }
+bincode = "1"
 
 [dev-dependencies]
 tempfile = "3"
+slate-client = { path = "../slate-client" }
