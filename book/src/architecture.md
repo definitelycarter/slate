@@ -18,7 +18,10 @@ rust core (lib crate)
 slate/
   ├── slate-store   → Store/Transaction traits, Record/Value types, RocksDB impl (feature-gated)
   ├── slate-query   → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  └── slate-db      → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-db      → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-server  → TCP server, bincode wire protocol, thread-per-connection
+  ├── slate-client  → TCP client, connection pool (crossbeam channel)
+  └── slate-bench   → Benchmark suite (embedded + TCP, 100k records × 3 users)
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
@@ -215,6 +218,93 @@ For now, queries scan directly from RocksDB through the iterator pipeline.
 ### Partitioning (Future)
 
 The db layer will manage partitioning — grouping data by a partition key. The store has no concept of partitions. The db layer will decide how to compose partition keys from domain concepts (user, datasource, etc.).
+
+## TCP Interface (`slate-server` + `slate-client`)
+
+### Overview
+
+Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses bincode serialization with length-prefixed framing — fast, compact, and Rust-native. This enables architectures where the REST API (or other consumers) run as separate services.
+
+```
+┌──────────────┐         TCP (bincode)        ┌──────────────────┐
+│ slate-client │  ◄──────────────────────────► │  slate-server    │
+│ Client       │                               │  thread-per-conn │
+└──────────────┘                               │  Session         │
+                                               │    └─ Database   │
+                                               │        └─ Store  │
+                                               └──────────────────┘
+```
+
+### Wire Protocol
+
+Messages are length-prefixed: a 4-byte big-endian length followed by a bincode-serialized payload. All types on the wire implement `serde::Serialize + Deserialize`.
+
+```rust
+enum Request {
+    Insert(Record),
+    InsertBatch(Vec<Record>),
+    Delete(String),
+    GetById(String),
+    Query(Query),
+    SaveDatasource(Datasource),
+    GetDatasource(String),
+    ListDatasources,
+    DeleteDatasource(String),
+}
+
+enum Response {
+    Ok,
+    Record(Option<Record>),
+    Records(Vec<Record>),
+    Datasource(Option<Datasource>),
+    Datasources(Vec<Datasource>),
+    Error(String),
+}
+```
+
+### Server
+
+The server binds to a TCP address and spawns a thread per client connection. Each connection gets a `Session` that holds an `Arc<Database<RocksStore>>`. Every request is auto-committed — the session opens a transaction, performs the operation, and commits. No multi-request transactions over the wire (keeps the protocol stateless).
+
+```rust
+let server = Server::new(db, "127.0.0.1:9600");
+server.serve(); // blocks, listens for connections
+```
+
+### Client
+
+The client opens a TCP connection and provides methods that mirror the database API.
+
+```rust
+let mut client = Client::connect("127.0.0.1:9600")?;
+
+// Data operations
+client.insert(record)?;
+client.insert_batch(records)?;
+client.get_by_id("acct-1")?;     // -> Option<Record>
+client.delete("acct-1")?;
+client.query(&query)?;            // -> Vec<Record>
+
+// Catalog operations
+client.save_datasource(&ds)?;
+client.get_datasource("ds1")?;    // -> Option<Datasource>
+client.list_datasources()?;       // -> Vec<Datasource>
+client.delete_datasource("ds1")?;
+```
+
+### Connection Pool
+
+`ClientPool` manages a fixed set of pre-connected `Client` instances using a `crossbeam` bounded channel as a blocking queue. Connections are checked out with `pool.get()` and returned automatically on drop.
+
+```rust
+let pool = ClientPool::new("127.0.0.1:9600", 10)?; // 10 connections
+
+let mut client = pool.get()?; // blocks if all in use
+client.query(&query)?;
+// returns to pool on drop
+```
+
+Internally, `PooledClient` wraps an `Option<Client>` and implements `Deref`/`DerefMut` for transparent access. On `Drop`, the client is returned to the channel. The `Option` + `take()` + `expect("BUG: ...")` pattern (borrowed from sqlx) handles the provably-unreachable None case.
 
 ## Tier 4: API Layer
 
