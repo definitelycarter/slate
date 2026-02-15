@@ -13,26 +13,27 @@ use slate_db::Database;
 use slate_server::Server;
 use slate_store::RocksStore;
 
-fn main() {
-    println!("=== Slate Benchmark Suite ===\n");
+fn run_embedded(
+    cfg: &scenarios::BenchConfig,
+    users: usize,
+    all_results: &mut Vec<report::BenchResult>,
+) {
+    println!(
+        "========== EMBEDDED (direct) — {} records/user ==========\n",
+        cfg.label
+    );
 
-    let total_start = Instant::now();
-    let mut all_results = Vec::new();
-
-    // --- Embedded benchmarks ---
-
-    println!("========== EMBEDDED (direct) ==========\n");
-
-    for user in 0..3 {
+    for user in 0..users {
         println!("--- User {user} ---\n");
 
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let store = RocksStore::open(dir.path()).expect("failed to open store");
         let db = Database::new(store);
+        scenarios::setup_datasource(&db);
 
         // Phase 1: Bulk Insert
         println!("[Phase 1] Bulk Insert");
-        let insert_results = scenarios::bulk_insert(&db, user);
+        let insert_results = scenarios::bulk_insert(&db, user, cfg);
         if let Some(total) = insert_results.last() {
             total.print();
         }
@@ -41,12 +42,12 @@ fn main() {
 
         // Phase 2: Data Integrity
         println!("[Phase 2] Data Integrity Verification");
-        scenarios::verify_integrity(&db, user);
+        scenarios::verify_integrity(&db, user, cfg);
         println!();
 
         // Phase 3: Query Benchmarks
         println!("[Phase 3] Query Benchmarks");
-        let query_results = scenarios::query_benchmarks(&db, user);
+        let query_results = scenarios::query_benchmarks(&db, user, cfg);
         for r in &query_results {
             r.print();
         }
@@ -56,7 +57,7 @@ fn main() {
         // Phase 4: Concurrency
         println!("[Phase 4] Concurrency Tests");
         let db_arc = Arc::new(db);
-        let concurrency_results = scenarios::concurrency_tests(Arc::clone(&db_arc), user);
+        let concurrency_results = scenarios::concurrency_tests(Arc::clone(&db_arc), user, cfg);
         for r in &concurrency_results {
             r.print();
         }
@@ -65,33 +66,21 @@ fn main() {
 
         // Phase 5: Post-Concurrency Integrity
         println!("[Phase 5] Post-Concurrency Integrity");
-        scenarios::verify_post_concurrency(&db_arc, user);
+        scenarios::verify_post_concurrency(&db_arc, user, cfg);
         println!();
     }
+}
 
-    // --- Multi-prefix benchmarks ---
+fn main() {
+    println!("=== Slate Benchmark Suite ===\n");
 
-    println!("========== MULTI-PREFIX (shared DB) ==========\n");
-    {
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let store = RocksStore::open(dir.path()).expect("failed to open store");
-        let db = Database::new(store);
+    let total_start = Instant::now();
+    let mut all_results = Vec::new();
 
-        // Insert all 3 users into same DB
-        for user in 0..3 {
-            println!("[Setup] Inserting user {user} data");
-            scenarios::bulk_insert(&db, user);
-        }
-        println!();
+    // --- Embedded benchmarks ---
 
-        println!("[Phase] Multi-Prefix Query Benchmarks");
-        let multi_results = scenarios::multi_prefix_benchmarks(&db, 3);
-        for r in &multi_results {
-            r.print();
-        }
-        all_results.extend(multi_results);
-        println!();
-    }
+    run_embedded(&scenarios::CONFIG_10K, 3, &mut all_results);
+    run_embedded(&scenarios::CONFIG_100K, 3, &mut all_results);
 
     // --- TCP benchmarks ---
 
@@ -103,6 +92,7 @@ fn main() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let store = RocksStore::open(dir.path()).expect("failed to open store");
         let db = Database::new(store);
+        scenarios::setup_datasource(&db);
 
         // Find a free port
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");

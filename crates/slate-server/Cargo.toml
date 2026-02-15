@@ -3,6 +3,10 @@ name = "slate-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "slate-server"
+path = "src/main.rs"
+
 [dependencies]
 slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store" }

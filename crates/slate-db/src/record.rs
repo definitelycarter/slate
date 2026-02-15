@@ -2,10 +2,15 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cell::Cell;
+
+/// A record as returned by queries — columns with their latest cell values.
+///
+/// Each cell carries the value and timestamp.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
-    pub fields: HashMap<String, Value>,
+    pub cells: HashMap<String, Cell>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

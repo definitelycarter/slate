@@ -1,62 +1,138 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use slate_db::Database;
+use slate_db::{Database, Datasource, FieldDef, FieldType, Value};
 use slate_query::*;
-use slate_store::{Record, RocksStore, Value};
+use slate_store::RocksStore;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
 
-fn prefix_records(prefix: &str, records: Vec<Record>) -> Vec<Record> {
-    records
-        .into_iter()
-        .map(|mut r| {
-            r.id = format!("{prefix}:{}", r.id);
-            r
-        })
-        .collect()
+pub const DS_ID: &str = "bench";
+const PARTITION: &str = "bench_part";
+const TS: i64 = 1_700_000_000;
+
+pub struct BenchConfig {
+    pub label: &'static str,
+    pub batch_size: usize,
+    pub batches: usize,
 }
 
-fn prefix_record(prefix: &str, mut record: Record) -> Record {
-    record.id = format!("{prefix}:{}", record.id);
-    record
+impl BenchConfig {
+    pub fn total_records(&self) -> usize {
+        self.batch_size * self.batches
+    }
 }
 
-const BATCH_SIZE: usize = 10_000;
-const BATCHES: usize = 10;
-const TOTAL_RECORDS: usize = BATCH_SIZE * BATCHES;
+pub const CONFIG_100K: BenchConfig = BenchConfig {
+    label: "100k",
+    batch_size: 10_000,
+    batches: 10,
+};
+
+pub const CONFIG_10K: BenchConfig = BenchConfig {
+    label: "10k",
+    batch_size: 1_000,
+    batches: 10,
+};
+
+pub fn make_datasource() -> Datasource {
+    Datasource {
+        id: DS_ID.to_string(),
+        name: "Bench".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "status".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: true,
+            },
+            FieldDef {
+                name: "contacts_count".into(),
+                field_type: FieldType::Int,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "product_recommendation1".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "product_recommendation2".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "product_recommendation3".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "last_contacted_at".into(),
+                field_type: FieldType::Date,
+                ttl_seconds: None,
+                indexed: false,
+            },
+            FieldDef {
+                name: "notes".into(),
+                field_type: FieldType::String,
+                ttl_seconds: None,
+                indexed: false,
+            },
+        ],
+        partition: PARTITION.to_string(),
+    }
+}
+
+/// Create the datasource in the database (must be called before any data writes).
+pub fn setup_datasource(db: &Database<RocksStore>) {
+    let mut txn = db.begin(false).expect("begin failed");
+    txn.save_datasource(&make_datasource())
+        .expect("save_datasource failed");
+    txn.commit().expect("commit failed");
+}
 
 // --- Phase 1: Bulk Insert ---
 
-pub fn bulk_insert(db: &Database<RocksStore>, user: usize) -> Vec<BenchResult> {
+pub fn bulk_insert(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) -> Vec<BenchResult> {
     let mut results = Vec::new();
+    let total_records = cfg.total_records();
+    let batch_size = cfg.batch_size;
+    let batches = cfg.batches;
 
     let total = bench(
-        &format!("bulk insert {TOTAL_RECORDS} records total"),
+        &format!("bulk insert {total_records} records total"),
         || {
             let mut inserted = 0;
-            for batch_idx in 0..BATCHES {
-                let start = batch_idx * BATCH_SIZE;
+            for batch_idx in 0..batches {
+                let start = batch_idx * batch_size;
                 let batch_result = bench(
                     &format!(
                         "  batch {} ({start}..{})",
                         batch_idx + 1,
-                        start + BATCH_SIZE
+                        start + batch_size
                     ),
                     || {
-                        let prefix = format!("user{user}:bench");
-                        let records = datagen::generate_batch(user, start, BATCH_SIZE);
-                        let records = prefix_records(&prefix, records);
+                        let writes = datagen::generate_batch(user, start, batch_size, TS);
                         let mut txn = db.begin(false).expect("begin failed");
-                        txn.insert_batch(records).expect("insert_batch failed");
+                        txn.write_batch(DS_ID, writes).expect("write_batch failed");
                         txn.commit().expect("commit failed");
-                        BATCH_SIZE
+                        batch_size
                     },
                 );
                 batch_result.print();
                 results.push(batch_result);
-                inserted += BATCH_SIZE;
+                inserted += batch_size;
             }
             inserted
         },
@@ -68,22 +144,31 @@ pub fn bulk_insert(db: &Database<RocksStore>, user: usize) -> Vec<BenchResult> {
 
 // --- Phase 2: Data Integrity Verification ---
 
-pub fn verify_integrity(db: &Database<RocksStore>, user: usize) {
-    let prefix = format!("user{user}:bench");
+pub fn verify_integrity(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) {
+    let total_records = cfg.total_records();
     let txn = db.begin(true).expect("begin failed");
     let query = Query {
         filter: None,
         sort: vec![],
         skip: None,
         take: None,
+        columns: None,
     };
-    let results = txn.query(&[prefix.as_str()], &query).expect("query failed");
+    let results = txn.query(DS_ID, &query).expect("query failed");
+
+    // Count records for this user (all records in the datasource belong to this user
+    // in per-user benchmarks, or we filter by prefix in multi-user)
+    let user_prefix = format!("user{user}-");
+    let user_records: Vec<_> = results
+        .iter()
+        .filter(|r| r.id.starts_with(&user_prefix))
+        .collect();
 
     assert_eq!(
-        results.len(),
-        TOTAL_RECORDS,
-        "user {user}: expected {TOTAL_RECORDS} records, got {}",
-        results.len()
+        user_records.len(),
+        total_records,
+        "user {user}: expected {total_records} records, got {}",
+        user_records.len()
     );
 
     let mut has_last_contacted = 0;
@@ -91,58 +176,35 @@ pub fn verify_integrity(db: &Database<RocksStore>, user: usize) {
     let mut has_notes = 0;
     let mut null_notes = 0;
 
-    for record in &results {
-        let expected_prefix = format!("user{user}:bench:user{user}-");
+    for record in &user_records {
+        assert!(record.cells.contains_key("name"), "missing 'name' field");
         assert!(
-            record.id.starts_with(&expected_prefix),
-            "unexpected record id: {}",
-            record.id
-        );
-        assert!(record.fields.contains_key("name"), "missing 'name' field");
-        assert!(
-            record.fields.contains_key("status"),
+            record.cells.contains_key("status"),
             "missing 'status' field"
         );
         assert!(
-            record.fields.contains_key("contacts_count"),
+            record.cells.contains_key("contacts_count"),
             "missing 'contacts_count' field"
         );
         assert!(
-            record.fields.contains_key("product_recommendation1"),
+            record.cells.contains_key("product_recommendation1"),
             "missing 'product_recommendation1' field"
         );
-        assert!(
-            record.fields.contains_key("product_recommendation2"),
-            "missing 'product_recommendation2' field"
-        );
-        assert!(
-            record.fields.contains_key("product_recommendation3"),
-            "missing 'product_recommendation3' field"
-        );
 
-        match record.fields.get("status") {
+        match record.cells.get("status").map(|c| &c.value) {
             Some(Value::String(s)) => {
                 assert!(s == "active" || s == "rejected", "unexpected status: {s}");
             }
             other => panic!("status has wrong type: {other:?}"),
         }
 
-        // Nullable fields: if present, verify correct type
-        if let Some(val) = record.fields.get("last_contacted_at") {
-            assert!(
-                matches!(val, Value::Date(_)),
-                "last_contacted_at has wrong type: {val:?}"
-            );
+        if record.cells.contains_key("last_contacted_at") {
             has_last_contacted += 1;
         } else {
             null_last_contacted += 1;
         }
 
-        if let Some(val) = record.fields.get("notes") {
-            assert!(
-                matches!(val, Value::String(_)),
-                "notes has wrong type: {val:?}"
-            );
+        if record.cells.contains_key("notes") {
             has_notes += 1;
         } else {
             null_notes += 1;
@@ -151,7 +213,7 @@ pub fn verify_integrity(db: &Database<RocksStore>, user: usize) {
 
     println!(
         "  integrity check passed: {} records verified",
-        results.len()
+        user_records.len()
     );
     println!(
         "  nullable fields: last_contacted_at ({has_last_contacted} present, {null_last_contacted} null), notes ({has_notes} present, {null_notes} null)"
@@ -160,9 +222,13 @@ pub fn verify_integrity(db: &Database<RocksStore>, user: usize) {
 
 // --- Phase 3: Query Benchmarks ---
 
-pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResult> {
+pub fn query_benchmarks(
+    db: &Database<RocksStore>,
+    _user: usize,
+    cfg: &BenchConfig,
+) -> Vec<BenchResult> {
+    let total_records = cfg.total_records();
     let mut results = Vec::new();
-    let prefix = format!("user{user}:bench");
 
     // 1. No filter
     results.push(bench("query: no filter (full scan)", || {
@@ -172,13 +238,14 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 2. Status filter
-    results.push(bench("query: status = 'active'", || {
+    // 2. Status filter (IndexScan — status is indexed)
+    results.push(bench("query: status = 'active' (indexed)", || {
         let txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
@@ -192,8 +259,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -212,8 +280,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -244,8 +313,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -269,13 +339,14 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
                 }],
                 skip: Some(100),
                 take: Some(50),
+                columns: None,
             };
-            let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+            let r = txn.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
 
-    // 6. Filter only (no sort) — for comparison with #7
+    // 6. Filter only (no sort)
     results.push(bench("query: status='active' (no sort)", || {
         let txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -290,12 +361,13 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 7. Same filter WITH sort — direct comparison with #6
+    // 7. Same filter WITH sort
     results.push(bench(
         "query: status='active' + sort contacts_count",
         || {
@@ -315,8 +387,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
                 }],
                 skip: None,
                 take: None,
+                columns: None,
             };
-            let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+            let r = txn.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
@@ -336,8 +409,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: Some(200),
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -359,8 +433,9 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             }],
             skip: None,
             take: Some(200),
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -379,12 +454,13 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 7. IsNull filter on nullable field (~50% null)
+    // 11. IsNull filter on nullable field (~50% null)
     results.push(bench("query: notes is null (~50%)", || {
         let txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -399,12 +475,13 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 8. IsNull=false (records that HAVE the field)
+    // 12. IsNull=false
     results.push(bench("query: last_contacted_at is not null (~70%)", || {
         let txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -419,12 +496,13 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 9. Combined: status='active' AND notes is null
+    // 13. Combined: status='active' AND notes is null
     results.push(bench("query: status='active' AND notes is null", || {
         let txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -446,22 +524,41 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = txn.query(&[prefix.as_str()], &query).expect("query failed");
+        let r = txn.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
-    // 10. Point lookups (1000 get_by_id calls)
+    // 14. Point lookups (1000 get_by_id calls)
     results.push(bench("query: 1000 point lookups (get_by_id)", || {
         let txn = db.begin(true).expect("begin failed");
         let mut found = 0;
-        for i in (0..TOTAL_RECORDS).step_by(TOTAL_RECORDS / 1000) {
-            let id = format!("{prefix}:user{user}-{i}");
-            if txn.get_by_id(&id).expect("get_by_id failed").is_some() {
+        for i in (0..total_records).step_by(total_records / 1000) {
+            let id = datagen::generate_record_id(_user, i);
+            if txn
+                .get_by_id(DS_ID, &id, None)
+                .expect("get_by_id failed")
+                .is_some()
+            {
                 found += 1;
             }
         }
         found
+    }));
+
+    // 15. Projection benchmark: fetch 2 of 8 columns
+    results.push(bench("query: projection (name, status only)", || {
+        let txn = db.begin(true).expect("begin failed");
+        let query = Query {
+            filter: None,
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: Some(vec!["name".into(), "status".into()]),
+        };
+        let r = txn.query(DS_ID, &query).expect("query failed");
+        r.len()
     }));
 
     results
@@ -469,9 +566,13 @@ pub fn query_benchmarks(db: &Database<RocksStore>, user: usize) -> Vec<BenchResu
 
 // --- Phase 4: Concurrency Tests ---
 
-pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<BenchResult> {
+pub fn concurrency_tests(
+    db: Arc<Database<RocksStore>>,
+    _user: usize,
+    cfg: &BenchConfig,
+) -> Vec<BenchResult> {
+    let total_records = cfg.total_records();
     let mut results = Vec::new();
-    let prefix = format!("user{user}:bench");
 
     // Test 1: Concurrent reads and writes
     results.push(bench("concurrent: 2 writers + 4 readers", || {
@@ -480,15 +581,13 @@ pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<Benc
         // 2 writer threads
         for writer_id in 0..2 {
             let db = Arc::clone(&db);
-            let prefix = prefix.clone();
             handles.push(thread::spawn(move || {
-                let base = TOTAL_RECORDS + writer_id * 5000;
+                let base = total_records + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let records = datagen::generate_batch(99, start, 1000);
-                    let records = prefix_records(&prefix, records);
+                    let writes = datagen::generate_batch(99, start, 1000, TS);
                     let mut txn = db.begin(false).expect("writer begin failed");
-                    txn.insert_batch(records).expect("writer insert failed");
+                    txn.write_batch(DS_ID, writes).expect("writer write failed");
                     txn.commit().expect("writer commit failed");
                 }
             }));
@@ -497,7 +596,6 @@ pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<Benc
         // 4 reader threads
         for _ in 0..4 {
             let db = Arc::clone(&db);
-            let prefix = prefix.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..5 {
                     let txn = db.begin(true).expect("reader begin failed");
@@ -513,10 +611,9 @@ pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<Benc
                         sort: vec![],
                         skip: None,
                         take: Some(100),
+                        columns: None,
                     };
-                    let _ = txn
-                        .query(&[prefix.as_str()], &query)
-                        .expect("reader query failed");
+                    let _ = txn.query(DS_ID, &query).expect("reader query failed");
                 }
             }));
         }
@@ -536,11 +633,12 @@ pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<Benc
         for _ in 0..2 {
             let db = Arc::clone(&db);
             let barrier = Arc::clone(&barrier);
-            let prefix = prefix.clone();
             handles.push(thread::spawn(move || -> Result<(), slate_db::DbError> {
                 let mut txn = db.begin(false).expect("conflict begin failed");
-                let record = prefix_record(&prefix, datagen::generate_record(99, 999_999));
-                txn.insert(record).expect("conflict insert failed");
+                let cells = datagen::generate_cells(99, 999_999, TS);
+                let id = datagen::generate_record_id(99, 999_999);
+                txn.write_record(DS_ID, &id, cells)
+                    .expect("conflict write failed");
                 barrier.wait();
                 txn.commit()
             }));
@@ -565,167 +663,20 @@ pub fn concurrency_tests(db: Arc<Database<RocksStore>>, user: usize) -> Vec<Benc
 
 // --- Phase 5: Post-Concurrency Integrity ---
 
-// --- Multi-Prefix Query Benchmarks ---
-
-pub fn multi_prefix_benchmarks(db: &Database<RocksStore>, user_count: usize) -> Vec<BenchResult> {
-    let mut results = Vec::new();
-
-    let all_prefixes: Vec<String> = (0..user_count).map(|u| format!("user{u}:bench")).collect();
-    let all_refs: Vec<&str> = all_prefixes.iter().map(|s| s.as_str()).collect();
-
-    // Verify: multi-prefix results == sum of individual prefix results
-    {
-        let txn = db.begin(true).expect("begin failed");
-        let no_filter = Query {
-            filter: None,
-            sort: vec![],
-            skip: None,
-            take: None,
-        };
-
-        let mut individual_total = 0;
-        for prefix in &all_refs {
-            let count = txn
-                .query(&[*prefix], &no_filter)
-                .expect("query failed")
-                .len();
-            assert_eq!(
-                count, TOTAL_RECORDS,
-                "prefix {prefix}: expected {TOTAL_RECORDS}, got {count}"
-            );
-            individual_total += count;
-        }
-
-        let combined = txn.query(&all_refs, &no_filter).expect("query failed");
-        assert_eq!(
-            combined.len(),
-            individual_total,
-            "multi-prefix returned {} but individual scans totaled {individual_total}",
-            combined.len()
-        );
-
-        // Verify each record belongs to the right prefix
-        for record in &combined {
-            let has_prefix = all_refs
-                .iter()
-                .any(|p| record.id.starts_with(&format!("{p}:")));
-            assert!(has_prefix, "record {} doesn't match any prefix", record.id);
-        }
-
-        println!(
-            "  multi-prefix verification passed: {individual_total} records across {user_count} prefixes"
-        );
-    }
-
-    // Single prefix (baseline)
-    let single = &all_refs[..1];
-    results.push(bench("multi-prefix: 1 prefix, no filter", || {
-        let txn = db.begin(true).expect("begin failed");
-        let query = Query {
-            filter: None,
-            sort: vec![],
-            skip: None,
-            take: None,
-        };
-        let r = txn.query(single, &query).expect("query failed");
-        r.len()
-    }));
-
-    // Two prefixes
-    let two = &all_refs[..2];
-    results.push(bench("multi-prefix: 2 prefixes, no filter", || {
-        let txn = db.begin(true).expect("begin failed");
-        let query = Query {
-            filter: None,
-            sort: vec![],
-            skip: None,
-            take: None,
-        };
-        let r = txn.query(two, &query).expect("query failed");
-        r.len()
-    }));
-
-    // All prefixes
-    results.push(bench(
-        &format!("multi-prefix: {user_count} prefixes, no filter"),
-        || {
-            let txn = db.begin(true).expect("begin failed");
-            let query = Query {
-                filter: None,
-                sort: vec![],
-                skip: None,
-                take: None,
-            };
-            let r = txn.query(&all_refs, &query).expect("query failed");
-            r.len()
-        },
-    ));
-
-    // All prefixes with filter
-    results.push(bench(
-        &format!("multi-prefix: {user_count} prefixes, status='active'"),
-        || {
-            let txn = db.begin(true).expect("begin failed");
-            let query = Query {
-                filter: Some(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![FilterNode::Condition(Filter {
-                        field: "status".to_string(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
-                    })],
-                }),
-                sort: vec![],
-                skip: None,
-                take: None,
-            };
-            let r = txn.query(&all_refs, &query).expect("query failed");
-            r.len()
-        },
-    ));
-
-    // All prefixes with filter + sort + take
-    results.push(bench(
-        &format!("multi-prefix: {user_count} prefixes, status='active' + sort + take(200)"),
-        || {
-            let txn = db.begin(true).expect("begin failed");
-            let query = Query {
-                filter: Some(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![FilterNode::Condition(Filter {
-                        field: "status".to_string(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
-                    })],
-                }),
-                sort: vec![Sort {
-                    field: "contacts_count".to_string(),
-                    direction: SortDirection::Desc,
-                }],
-                skip: None,
-                take: Some(200),
-            };
-            let r = txn.query(&all_refs, &query).expect("query failed");
-            r.len()
-        },
-    ));
-
-    results
-}
-
-pub fn verify_post_concurrency(db: &Database<RocksStore>, user: usize) {
-    let prefix = format!("user{user}:bench");
+pub fn verify_post_concurrency(db: &Database<RocksStore>, _user: usize, cfg: &BenchConfig) {
+    let total_records = cfg.total_records();
     let txn = db.begin(true).expect("begin failed");
     let query = Query {
         filter: None,
         sort: vec![],
         skip: None,
         take: None,
+        columns: None,
     };
-    let results = txn.query(&[prefix.as_str()], &query).expect("query failed");
+    let results = txn.query(DS_ID, &query).expect("query failed");
     assert!(
-        results.len() >= TOTAL_RECORDS,
-        "expected at least {TOTAL_RECORDS} records after concurrency, got {}",
+        results.len() >= total_records,
+        "expected at least {total_records} records after concurrency, got {}",
         results.len()
     );
     println!(

@@ -5,12 +5,18 @@ pub struct Datasource {
     pub id: String,
     pub name: String,
     pub fields: Vec<FieldDef>,
+    pub partition: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDef {
     pub name: String,
     pub field_type: FieldType,
+    /// Optional TTL in seconds. When set, expire_at = timestamp + ttl_seconds.
+    pub ttl_seconds: Option<i64>,
+    /// When true, an index is maintained for this field on writes.
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,10 +1,9 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
-use slate_db::Datasource;
+use slate_db::{CellWrite, Datasource, Record};
 use slate_query::Query;
 use slate_server::protocol::{Request, Response};
-use slate_store::Record;
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -80,20 +79,52 @@ impl Client {
 
     // Data operations
 
-    pub fn insert(&mut self, record: Record) -> Result<(), ClientError> {
-        self.expect_ok(Request::Insert(record))
+    pub fn write_cells(
+        &mut self,
+        datasource_id: &str,
+        record_id: &str,
+        cells: Vec<CellWrite>,
+    ) -> Result<(), ClientError> {
+        self.expect_ok(Request::WriteCells {
+            datasource_id: datasource_id.to_string(),
+            record_id: record_id.to_string(),
+            cells,
+        })
     }
 
-    pub fn insert_batch(&mut self, records: Vec<Record>) -> Result<(), ClientError> {
-        self.expect_ok(Request::InsertBatch(records))
+    pub fn write_batch(
+        &mut self,
+        datasource_id: &str,
+        writes: Vec<(String, Vec<CellWrite>)>,
+    ) -> Result<(), ClientError> {
+        self.expect_ok(Request::WriteBatch {
+            datasource_id: datasource_id.to_string(),
+            writes,
+        })
     }
 
-    pub fn delete(&mut self, id: &str) -> Result<(), ClientError> {
-        self.expect_ok(Request::Delete(id.to_string()))
+    pub fn delete_record(
+        &mut self,
+        datasource_id: &str,
+        record_id: &str,
+    ) -> Result<(), ClientError> {
+        self.expect_ok(Request::DeleteRecord {
+            datasource_id: datasource_id.to_string(),
+            record_id: record_id.to_string(),
+        })
     }
 
-    pub fn get_by_id(&mut self, id: &str) -> Result<Option<Record>, ClientError> {
-        match self.request(Request::GetById(id.to_string()))? {
+    pub fn get_by_id(
+        &mut self,
+        datasource_id: &str,
+        record_id: &str,
+        columns: Option<&[&str]>,
+    ) -> Result<Option<Record>, ClientError> {
+        match self.request(Request::GetById {
+            datasource_id: datasource_id.to_string(),
+            record_id: record_id.to_string(),
+            columns: columns.map(|c| c.iter().map(|s| s.to_string()).collect()),
+        })? {
             Response::Record(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
@@ -102,9 +133,13 @@ impl Client {
         }
     }
 
-    pub fn query(&mut self, prefixes: &[&str], query: &Query) -> Result<Vec<Record>, ClientError> {
+    pub fn query(
+        &mut self,
+        datasource_id: &str,
+        query: &Query,
+    ) -> Result<Vec<Record>, ClientError> {
         match self.request(Request::Query {
-            prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            datasource_id: datasource_id.to_string(),
             query: query.clone(),
         })? {
             Response::Records(r) => Ok(r),

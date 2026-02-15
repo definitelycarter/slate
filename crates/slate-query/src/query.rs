@@ -9,4 +9,7 @@ pub struct Query {
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
+    /// Column projection — if Some, only these columns are returned.
+    /// If None, all columns are returned.
+    pub columns: Option<Vec<String>>,
 }

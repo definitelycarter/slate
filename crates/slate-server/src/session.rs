@@ -16,24 +16,49 @@ impl Session {
 
     pub fn handle(&self, request: Request) -> Response {
         match request {
-            Request::Insert(record) => self.write(|txn| {
-                txn.insert(record)?;
+            Request::WriteCells {
+                datasource_id,
+                record_id,
+                cells,
+            } => self.write(|txn| {
+                txn.write_record(&datasource_id, &record_id, cells)?;
                 Ok(Response::Ok)
             }),
-            Request::InsertBatch(records) => self.write(|txn| {
-                txn.insert_batch(records)?;
+            Request::WriteBatch {
+                datasource_id,
+                writes,
+            } => self.write(|txn| {
+                txn.write_batch(&datasource_id, writes)?;
                 Ok(Response::Ok)
             }),
-            Request::Delete(id) => self.write(|txn| {
-                txn.delete(&id)?;
+            Request::DeleteRecord {
+                datasource_id,
+                record_id,
+            } => self.write(|txn| {
+                txn.delete_record(&datasource_id, &record_id)?;
                 Ok(Response::Ok)
             }),
-            Request::GetById(id) => self.read(|txn| {
-                let record = txn.get_by_id(&id)?;
+            Request::GetById {
+                datasource_id,
+                record_id,
+                columns,
+            } => self.read(|txn| {
+                let col_refs: Vec<&str>;
+                let cols = match &columns {
+                    Some(c) => {
+                        col_refs = c.iter().map(|s| s.as_str()).collect();
+                        Some(col_refs.as_slice())
+                    }
+                    None => None,
+                };
+                let record = txn.get_by_id(&datasource_id, &record_id, cols)?;
                 Ok(Response::Record(record))
             }),
-            Request::Query { prefixes, query } => self.read(|txn| {
-                let records = txn.query(&prefixes, &query)?;
+            Request::Query {
+                datasource_id,
+                query,
+            } => self.read(|txn| {
+                let records = txn.query(&datasource_id, &query)?;
                 Ok(Response::Records(records))
             }),
             Request::SaveDatasource(ds) => self.write(|txn| {

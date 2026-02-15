@@ -8,8 +8,7 @@ default = ["rocksdb"]
 rocksdb = ["dep:rocksdb"]
 
 [dependencies]
-rocksdb = { version = "0.22", optional = true }
-serde = { version = "1", features = ["derive"] }
+rocksdb = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

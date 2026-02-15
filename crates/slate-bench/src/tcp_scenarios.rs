@@ -2,21 +2,12 @@ use std::thread;
 
 use slate_client::Client;
 use slate_query::*;
-use slate_store::Record;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
+use crate::scenarios::DS_ID;
 
-fn prefix_records(prefix: &str, records: Vec<Record>) -> Vec<Record> {
-    records
-        .into_iter()
-        .map(|mut r| {
-            r.id = format!("{prefix}:{}", r.id);
-            r
-        })
-        .collect()
-}
-
+const TS: i64 = 1_700_000_000;
 const BATCH_SIZE: usize = 10_000;
 const BATCHES: usize = 10;
 const TOTAL_RECORDS: usize = BATCH_SIZE * BATCHES;
@@ -39,10 +30,10 @@ pub fn bulk_insert(client: &mut Client, user: usize) -> Vec<BenchResult> {
                         start + BATCH_SIZE
                     ),
                     || {
-                        let prefix = format!("user{user}:bench");
-                        let records = datagen::generate_batch(user, start, BATCH_SIZE);
-                        let records = prefix_records(&prefix, records);
-                        client.insert_batch(records).expect("insert_batch failed");
+                        let writes = datagen::generate_batch(user, start, BATCH_SIZE, TS);
+                        client
+                            .write_batch(DS_ID, writes)
+                            .expect("write_batch failed");
                         BATCH_SIZE
                     },
                 );
@@ -60,22 +51,19 @@ pub fn bulk_insert(client: &mut Client, user: usize) -> Vec<BenchResult> {
 
 // --- Phase 2: Data Integrity Verification over TCP ---
 
-pub fn verify_integrity(client: &mut Client, user: usize) {
-    let prefix = format!("user{user}:bench");
+pub fn verify_integrity(client: &mut Client, _user: usize) {
     let query = Query {
         filter: None,
         sort: vec![],
         skip: None,
         take: None,
+        columns: None,
     };
-    let results = client
-        .query(&[prefix.as_str()], &query)
-        .expect("query failed");
+    let results = client.query(DS_ID, &query).expect("query failed");
 
-    assert_eq!(
-        results.len(),
-        TOTAL_RECORDS,
-        "user {user}: expected {TOTAL_RECORDS} records, got {}",
+    assert!(
+        results.len() >= TOTAL_RECORDS,
+        "expected at least {TOTAL_RECORDS} records, got {}",
         results.len()
     );
 
@@ -89,7 +77,6 @@ pub fn verify_integrity(client: &mut Client, user: usize) {
 
 pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
     let mut results = Vec::new();
-    let prefix = format!("user{user}:bench");
 
     // 1. No filter
     results.push(bench("tcp query: no filter (full scan)", || {
@@ -98,10 +85,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = client
-            .query(&[prefix.as_str()], &query)
-            .expect("query failed");
+        let r = client.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -119,10 +105,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = client
-            .query(&[prefix.as_str()], &query)
-            .expect("query failed");
+        let r = client.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -152,10 +137,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = client
-            .query(&[prefix.as_str()], &query)
-            .expect("query failed");
+        let r = client.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -173,10 +157,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             sort: vec![],
             skip: None,
             take: None,
+            columns: None,
         };
-        let r = client
-            .query(&[prefix.as_str()], &query)
-            .expect("query failed");
+        let r = client.query(DS_ID, &query).expect("query failed");
         r.len()
     }));
 
@@ -199,10 +182,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 }],
                 skip: None,
                 take: None,
+                columns: None,
             };
-            let r = client
-                .query(&[prefix.as_str()], &query)
-                .expect("query failed");
+            let r = client.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
@@ -223,10 +205,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 sort: vec![],
                 skip: None,
                 take: Some(200),
+                columns: None,
             };
-            let r = client
-                .query(&[prefix.as_str()], &query)
-                .expect("query failed");
+            let r = client.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
@@ -250,10 +231,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 }],
                 skip: None,
                 take: Some(200),
+                columns: None,
             };
-            let r = client
-                .query(&[prefix.as_str()], &query)
-                .expect("query failed");
+            let r = client.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
@@ -277,10 +257,9 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 }],
                 skip: Some(100),
                 take: Some(50),
+                columns: None,
             };
-            let r = client
-                .query(&[prefix.as_str()], &query)
-                .expect("query failed");
+            let r = client.query(DS_ID, &query).expect("query failed");
             r.len()
         },
     ));
@@ -289,8 +268,12 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
     results.push(bench("tcp query: 1000 point lookups (get_by_id)", || {
         let mut found = 0;
         for i in (0..TOTAL_RECORDS).step_by(TOTAL_RECORDS / 1000) {
-            let id = format!("{prefix}:user{user}-{i}");
-            if client.get_by_id(&id).expect("get_by_id failed").is_some() {
+            let id = datagen::generate_record_id(user, i);
+            if client
+                .get_by_id(DS_ID, &id, None)
+                .expect("get_by_id failed")
+                .is_some()
+            {
                 found += 1;
             }
         }
@@ -302,9 +285,8 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
 
 // --- Phase 4: Concurrent TCP clients ---
 
-pub fn concurrency_tests(addr: &str, user: usize) -> Vec<BenchResult> {
+pub fn concurrency_tests(addr: &str, _user: usize) -> Vec<BenchResult> {
     let mut results = Vec::new();
-    let prefix = format!("user{user}:bench");
 
     let addr_owned = addr.to_string();
     results.push(bench("tcp concurrent: 2 writers + 4 readers", || {
@@ -313,15 +295,15 @@ pub fn concurrency_tests(addr: &str, user: usize) -> Vec<BenchResult> {
         // 2 writer threads
         for writer_id in 0..2 {
             let addr = addr_owned.clone();
-            let prefix = prefix.clone();
             handles.push(thread::spawn(move || {
                 let mut client = Client::connect(&addr).expect("writer connect failed");
                 let base = TOTAL_RECORDS + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let records = datagen::generate_batch(99, start, 1000);
-                    let records = prefix_records(&prefix, records);
-                    client.insert_batch(records).expect("writer insert failed");
+                    let writes = datagen::generate_batch(99, start, 1000, TS);
+                    client
+                        .write_batch(DS_ID, writes)
+                        .expect("writer write failed");
                 }
             }));
         }
@@ -329,7 +311,6 @@ pub fn concurrency_tests(addr: &str, user: usize) -> Vec<BenchResult> {
         // 4 reader threads
         for _ in 0..4 {
             let addr = addr_owned.clone();
-            let prefix = prefix.clone();
             handles.push(thread::spawn(move || {
                 let mut client = Client::connect(&addr).expect("reader connect failed");
                 for _ in 0..5 {
@@ -345,10 +326,9 @@ pub fn concurrency_tests(addr: &str, user: usize) -> Vec<BenchResult> {
                         sort: vec![],
                         skip: None,
                         take: Some(100),
+                        columns: None,
                     };
-                    let _ = client
-                        .query(&[prefix.as_str()], &query)
-                        .expect("reader query failed");
+                    let _ = client.query(DS_ID, &query).expect("reader query failed");
                 }
             }));
         }
