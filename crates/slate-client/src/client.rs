@@ -30,8 +30,14 @@ impl From<std::io::Error> for ClientError {
     }
 }
 
-impl From<bincode::Error> for ClientError {
-    fn from(e: bincode::Error) -> Self {
+impl From<rmp_serde::encode::Error> for ClientError {
+    fn from(e: rmp_serde::encode::Error) -> Self {
+        ClientError::Serialization(e.to_string())
+    }
+}
+
+impl From<rmp_serde::decode::Error> for ClientError {
+    fn from(e: rmp_serde::decode::Error) -> Self {
         ClientError::Serialization(e.to_string())
     }
 }
@@ -50,7 +56,7 @@ impl Client {
     }
 
     fn request(&mut self, request: Request) -> Result<Response, ClientError> {
-        let bytes = bincode::serialize(&request)?;
+        let bytes = rmp_serde::to_vec(&request)?;
         let len = (bytes.len() as u32).to_be_bytes();
         self.writer.write_all(&len)?;
         self.writer.write_all(&bytes)?;
@@ -63,7 +69,7 @@ impl Client {
         let mut msg_buf = vec![0u8; len];
         self.reader.read_exact(&mut msg_buf)?;
 
-        let response: Response = bincode::deserialize(&msg_buf)?;
+        let response: Response = rmp_serde::from_slice(&msg_buf)?;
         Ok(response)
     }
 

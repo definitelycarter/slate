@@ -84,7 +84,7 @@ fn main() {
 
     // --- TCP benchmarks ---
 
-    println!("========== TCP (bincode over localhost) ==========\n");
+    println!("========== TCP (msgpack over localhost) ==========\n");
 
     for user in 0..3 {
         println!("--- TCP User {user} ---\n");

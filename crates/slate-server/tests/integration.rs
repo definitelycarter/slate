@@ -57,17 +57,15 @@ fn make_datasource() -> Datasource {
     }
 }
 
-fn make_cells(name: &str, status: &str, ts: i64) -> Vec<CellWrite> {
+fn make_cells(name: &str, status: &str) -> Vec<CellWrite> {
     vec![
         CellWrite {
             column: "name".into(),
             value: Value::String(name.into()),
-            timestamp: ts,
         },
         CellWrite {
             column: "status".into(),
             value: Value::String(status.into()),
-            timestamp: ts,
         },
     ]
 }
@@ -76,11 +74,10 @@ fn make_cells(name: &str, status: &str, ts: i64) -> Vec<CellWrite> {
 fn insert_and_get_by_id() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
-    let ts = 1_700_000_000;
 
     client.save_datasource(&make_datasource()).unwrap();
     client
-        .write_cells(DS_ID, "acct-1", make_cells("Acme Corp", "active", ts))
+        .write_cells(DS_ID, "acct-1", make_cells("Acme Corp", "active"))
         .unwrap();
 
     let result = client.get_by_id(DS_ID, "acct-1", None).unwrap();
@@ -107,16 +104,15 @@ fn get_by_id_not_found() {
 fn write_batch_and_query() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
-    let ts = 1_700_000_000;
 
     client.save_datasource(&make_datasource()).unwrap();
     client
         .write_batch(
             DS_ID,
             vec![
-                ("acct-1".into(), make_cells("Acme", "active", ts)),
-                ("acct-2".into(), make_cells("Globex", "rejected", ts)),
-                ("acct-3".into(), make_cells("Initech", "active", ts)),
+                ("acct-1".into(), make_cells("Acme", "active")),
+                ("acct-2".into(), make_cells("Globex", "rejected")),
+                ("acct-3".into(), make_cells("Initech", "active")),
             ],
         )
         .unwrap();
@@ -155,11 +151,10 @@ fn write_batch_and_query() {
 fn delete_record() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
-    let ts = 1_700_000_000;
 
     client.save_datasource(&make_datasource()).unwrap();
     client
-        .write_cells(DS_ID, "acct-1", make_cells("Acme", "active", ts))
+        .write_cells(DS_ID, "acct-1", make_cells("Acme", "active"))
         .unwrap();
     client.delete_record(DS_ID, "acct-1").unwrap();
 
@@ -216,7 +211,6 @@ fn datasource_crud() {
 fn query_with_sort_and_pagination() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
-    let ts = 1_700_000_000;
 
     // Create datasource with score field
     client.save_datasource(&make_datasource()).unwrap();
@@ -229,12 +223,10 @@ fn query_with_sort_and_pagination() {
                 CellWrite {
                     column: "name".into(),
                     value: Value::String(format!("Company-{i}")),
-                    timestamp: ts,
                 },
                 CellWrite {
                     column: "score".into(),
                     value: Value::Int(i),
-                    timestamp: ts,
                 },
             ],
         ));

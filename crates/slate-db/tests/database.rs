@@ -48,27 +48,23 @@ fn make_datasource() -> Datasource {
     }
 }
 
-fn make_cells(name: &str, revenue: f64, status: &str, active: bool, ts: i64) -> Vec<CellWrite> {
+fn make_cells(name: &str, revenue: f64, status: &str, active: bool) -> Vec<CellWrite> {
     vec![
         CellWrite {
             column: "name".into(),
             value: Value::String(name.into()),
-            timestamp: ts,
         },
         CellWrite {
             column: "revenue".into(),
             value: Value::Float(revenue),
-            timestamp: ts,
         },
         CellWrite {
             column: "status".into(),
             value: Value::String(status.into()),
-            timestamp: ts,
         },
         CellWrite {
             column: "active".into(),
             value: Value::Bool(active),
-            timestamp: ts,
         },
     ]
 }
@@ -85,37 +81,36 @@ fn no_filter_query() -> Query {
 
 /// Save the datasource and seed 5 records.
 fn seed_records(db: &Database<RocksStore>) {
-    let ts = 1_700_000_000;
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
     txn.write_record(
         DS_ID,
         "acct-1",
-        make_cells("Acme Corp", 50000.0, "active", true, ts),
+        make_cells("Acme Corp", 50000.0, "active", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-2",
-        make_cells("Globex", 80000.0, "snoozed", true, ts),
+        make_cells("Globex", 80000.0, "snoozed", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-3",
-        make_cells("Initech", 12000.0, "rejected", false, ts),
+        make_cells("Initech", 12000.0, "rejected", false),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-4",
-        make_cells("Umbrella", 95000.0, "active", true, ts),
+        make_cells("Umbrella", 95000.0, "active", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-5",
-        make_cells("Stark Industries", 200000.0, "active", false, ts),
+        make_cells("Stark Industries", 200000.0, "active", false),
     )
     .unwrap();
     txn.commit().unwrap();
@@ -199,16 +194,11 @@ fn make_empty_ds(id: &str) -> Datasource {
 #[test]
 fn write_and_get_by_id() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, ts),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -219,7 +209,6 @@ fn write_and_get_by_id() {
         Some(&Value::String("Acme".into()))
     );
     assert_eq!(cell_value(&record, "revenue"), Some(&Value::Float(50000.0)));
-    assert_eq!(record.cells.get("name").unwrap().timestamp, ts);
 }
 
 #[test]
@@ -236,16 +225,11 @@ fn get_by_id_not_found() {
 #[test]
 fn get_by_id_with_projection() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, ts),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -264,17 +248,11 @@ fn get_by_id_with_projection() {
 #[test]
 fn partial_write_updates_single_column() {
     let (db, _dir) = temp_db();
-    let ts1 = 1_700_000_000;
-    let ts2 = 1_700_001_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, ts1),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     // Partial write: update only status
@@ -285,7 +263,6 @@ fn partial_write_updates_single_column() {
         vec![CellWrite {
             column: "status".into(),
             value: Value::String("rejected".into()),
-            timestamp: ts2,
         }],
     )
     .unwrap();
@@ -297,17 +274,15 @@ fn partial_write_updates_single_column() {
         cell_value(&record, "status"),
         Some(&Value::String("rejected".into()))
     );
-    assert_eq!(record.cells.get("status").unwrap().timestamp, ts2);
     // Other fields unchanged
     assert_eq!(
         cell_value(&record, "name"),
         Some(&Value::String("Acme".into()))
     );
-    assert_eq!(record.cells.get("name").unwrap().timestamp, ts1);
 }
 
 #[test]
-fn latest_timestamp_wins() {
+fn last_write_wins() {
     let (db, _dir) = temp_db();
 
     let mut txn = db.begin(false).unwrap();
@@ -319,12 +294,10 @@ fn latest_timestamp_wins() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Old Name".into()),
-                timestamp: 1000,
             },
             CellWrite {
                 column: "name".into(),
                 value: Value::String("New Name".into()),
-                timestamp: 2000,
             },
         ],
     )
@@ -337,7 +310,6 @@ fn latest_timestamp_wins() {
         cell_value(&record, "name"),
         Some(&Value::String("New Name".into()))
     );
-    assert_eq!(record.cells.get("name").unwrap().timestamp, 2000);
 }
 
 // ── TTL / Expiry ────────────────────────────────────────────────
@@ -345,7 +317,6 @@ fn latest_timestamp_wins() {
 #[test]
 fn ttl_derives_expire_at_from_field_config() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&Datasource {
@@ -375,12 +346,10 @@ fn ttl_derives_expire_at_from_field_config() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Acme".into()),
-                timestamp: ts,
             },
             CellWrite {
                 column: "status".into(),
                 value: Value::String("active".into()),
-                timestamp: ts,
             },
         ],
     )
@@ -389,7 +358,7 @@ fn ttl_derives_expire_at_from_field_config() {
 
     let txn = db.begin(true).unwrap();
     let record = txn.get_by_id("ds_ttl", "acct-1", None).unwrap().unwrap();
-    // Both cells should be present with correct values
+    // Both cells should be present — status has TTL but was just written so not expired
     assert_eq!(
         cell_value(&record, "name"),
         Some(&Value::String("Acme".into()))
@@ -404,28 +373,7 @@ fn ttl_derives_expire_at_from_field_config() {
 fn expired_id_hides_record() {
     let (db, _dir) = temp_db();
 
-    // Use a datasource with _id TTL of 1 second
-    let mut txn = db.begin(false).unwrap();
-    txn.save_datasource(&make_datasource()).unwrap();
-
-    // Manually write an _id cell with an already-expired expire_at
-    // We need to go through write_record then separately write _id with expire
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        vec![CellWrite {
-            column: "name".into(),
-            value: Value::String("Acme".into()),
-            timestamp: 1000,
-        }],
-    )
-    .unwrap();
-    txn.commit().unwrap();
-
-    // Now overwrite _id with an expired timestamp by writing raw cells
-    // Since _id TTL isn't derived from field config (it's a system column),
-    // we test expiry through the low-level mechanism
-    // For this test, let's create a datasource that sets _id TTL
+    // Datasource with _id TTL of 0 seconds — record expires immediately
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&Datasource {
         id: "ds_expired".into(),
@@ -434,7 +382,7 @@ fn expired_id_hides_record() {
             FieldDef {
                 name: "_id".into(),
                 field_type: FieldType::Bool,
-                ttl_seconds: Some(1), // 1 second TTL
+                ttl_seconds: Some(0), // immediate expiry
                 indexed: false,
             },
             FieldDef {
@@ -447,21 +395,19 @@ fn expired_id_hides_record() {
         partition: "exp_part".into(),
     })
     .unwrap();
-    // Write with timestamp far in the past → _id expire_at = 1001 (way past)
     txn.write_record(
         "ds_expired",
         "acct-1",
         vec![CellWrite {
             column: "name".into(),
             value: Value::String("Acme".into()),
-            timestamp: 1000,
         }],
     )
     .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    // Record should be hidden because _id has expire_at = 1001 (far in the past)
+    // Record should be hidden because _id has expire_at = now (TTL 0 → immediately expired)
     assert!(
         txn.get_by_id("ds_expired", "acct-1", None)
             .unwrap()
@@ -470,7 +416,7 @@ fn expired_id_hides_record() {
 }
 
 #[test]
-fn expired_column_still_returned_with_metadata() {
+fn expired_column_hidden_from_record() {
     let (db, _dir) = temp_db();
 
     let mut txn = db.begin(false).unwrap();
@@ -487,14 +433,13 @@ fn expired_column_still_returned_with_metadata() {
             FieldDef {
                 name: "status".into(),
                 field_type: FieldType::String,
-                ttl_seconds: Some(1), // 1 second TTL
+                ttl_seconds: Some(0), // immediate expiry
                 indexed: false,
             },
         ],
         partition: "exp_col_part".into(),
     })
     .unwrap();
-    // Write with timestamp far in past → status expire_at = 1001
     txn.write_record(
         "ds_exp_col",
         "acct-1",
@@ -502,12 +447,10 @@ fn expired_column_still_returned_with_metadata() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Acme".into()),
-                timestamp: 1000,
             },
             CellWrite {
                 column: "status".into(),
                 value: Value::String("active".into()),
-                timestamp: 1000,
             },
         ],
     )
@@ -519,11 +462,12 @@ fn expired_column_still_returned_with_metadata() {
         .get_by_id("ds_exp_col", "acct-1", None)
         .unwrap()
         .unwrap();
-    // The expired column is still returned — the API layer decides what to do
-    assert!(record.cells.contains_key("status"));
+    // The expired column should be filtered out (TTL 0 → immediately expired)
+    assert!(!record.cells.contains_key("status"));
+    // Non-expired column still present
     assert_eq!(
-        cell_value(&record, "status"),
-        Some(&Value::String("active".into()))
+        cell_value(&record, "name"),
+        Some(&Value::String("Acme".into()))
     );
 }
 
@@ -532,16 +476,11 @@ fn expired_column_still_returned_with_metadata() {
 #[test]
 fn delete_record_removes_all_cells() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, ts),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
@@ -557,20 +496,16 @@ fn delete_record_removes_all_cells() {
 #[test]
 fn write_batch_multiple_records() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
     txn.write_batch(
         DS_ID,
         vec![
-            (
-                "acct-1".into(),
-                make_cells("Acme", 50000.0, "active", true, ts),
-            ),
+            ("acct-1".into(), make_cells("Acme", 50000.0, "active", true)),
             (
                 "acct-2".into(),
-                make_cells("Globex", 80000.0, "active", true, ts),
+                make_cells("Globex", 80000.0, "active", true),
             ),
         ],
     )
@@ -656,16 +591,11 @@ fn query_isnull_filter() {
         vec![CellWrite {
             column: "name".into(),
             value: Value::String("NoStatus".into()),
-            timestamp: 1_700_000_000,
         }],
     )
     .unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, 1_700_000_000),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -900,7 +830,6 @@ fn query_projection_includes_sort_columns() {
 #[test]
 fn datasource_isolation() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     // Two datasources in different partitions
@@ -935,7 +864,6 @@ fn datasource_isolation() {
         vec![CellWrite {
             column: "name".into(),
             value: Value::String("Alice".into()),
-            timestamp: ts,
         }],
     )
     .unwrap();
@@ -945,7 +873,6 @@ fn datasource_isolation() {
         vec![CellWrite {
             column: "name".into(),
             value: Value::String("Acme".into()),
-            timestamp: ts,
         }],
     )
     .unwrap();
@@ -972,16 +899,11 @@ fn datasource_isolation() {
 #[test]
 fn catalog_and_data_coexist() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        make_cells("Acme", 50000.0, "active", true, ts),
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -993,7 +915,6 @@ fn catalog_and_data_coexist() {
 #[test]
 fn query_index_scan_on_indexed_field() {
     let (db, _dir) = temp_db();
-    let ts = 1_700_000_000;
 
     // Create datasource with status indexed
     let ds = Datasource {
@@ -1025,12 +946,10 @@ fn query_index_scan_on_indexed_field() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Alice".into()),
-                timestamp: ts,
             },
             CellWrite {
                 column: "status".into(),
                 value: Value::String("active".into()),
-                timestamp: ts,
             },
         ],
     )
@@ -1042,12 +961,10 @@ fn query_index_scan_on_indexed_field() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Bob".into()),
-                timestamp: ts,
             },
             CellWrite {
                 column: "status".into(),
                 value: Value::String("rejected".into()),
-                timestamp: ts,
             },
         ],
     )
@@ -1059,12 +976,10 @@ fn query_index_scan_on_indexed_field() {
             CellWrite {
                 column: "name".into(),
                 value: Value::String("Charlie".into()),
-                timestamp: ts,
             },
             CellWrite {
                 column: "status".into(),
                 value: Value::String("active".into()),
-                timestamp: ts,
             },
         ],
     )

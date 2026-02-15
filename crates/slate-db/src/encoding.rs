@@ -1,31 +1,27 @@
-//! Key encoding for wide-column storage.
+//! Key encoding for record storage.
 //!
-//! Layout: `d:{record_id}\x00{column}`
-//!
-//! - `d:` prefix distinguishes data keys from future index keys (`i:`)
-//! - `\x00` null byte separator — record IDs and column names must not contain null bytes
-//! - Timestamp is stored in the value, not the key (last write wins)
+//! Data layout: `d:{record_id}` → serialized RecordValue (all columns in one value)
+//! Index layout: `i:{column}\x00{value_bytes}\x00{record_id}` → [] (empty value)
 
 const DATA_PREFIX: &[u8] = b"d:";
 const SEP: u8 = 0x00;
 
-/// Build a cell key: `d:{record_id}\x00{column}`
-pub fn cell_key(record_id: &str, column: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(DATA_PREFIX.len() + record_id.len() + 1 + column.len());
+/// Build a record key: `d:{record_id}`
+pub fn record_key(record_id: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(DATA_PREFIX.len() + record_id.len());
     key.extend_from_slice(DATA_PREFIX);
     key.extend_from_slice(record_id.as_bytes());
-    key.push(SEP);
-    key.extend_from_slice(column.as_bytes());
     key
 }
 
-/// Build a prefix for all cells of a record: `d:{record_id}\x00`
-pub fn record_prefix(record_id: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(DATA_PREFIX.len() + record_id.len() + 1);
-    key.extend_from_slice(DATA_PREFIX);
-    key.extend_from_slice(record_id.as_bytes());
-    key.push(SEP);
-    key
+/// Parse a record key back into record_id.
+///
+/// Expected format: `d:{record_id}`
+pub fn parse_record_key(key: &[u8]) -> Option<&str> {
+    if !key.starts_with(DATA_PREFIX) {
+        return None;
+    }
+    std::str::from_utf8(&key[DATA_PREFIX.len()..]).ok()
 }
 
 /// Build a prefix for scanning records by key prefix: `d:{prefix}`
@@ -34,24 +30,6 @@ pub fn data_scan_prefix(prefix: &str) -> Vec<u8> {
     key.extend_from_slice(DATA_PREFIX);
     key.extend_from_slice(prefix.as_bytes());
     key
-}
-
-/// Parse a cell key back into (record_id, column).
-///
-/// Expected format: `d:{record_id}\x00{column}`
-pub fn parse_cell_key(key: &[u8]) -> Option<(&str, &str)> {
-    // Must start with "d:"
-    if !key.starts_with(DATA_PREFIX) {
-        return None;
-    }
-    let rest = &key[DATA_PREFIX.len()..];
-
-    // Find \x00 — separates record_id from column
-    let sep_pos = rest.iter().position(|&b| b == SEP)?;
-    let record_id = std::str::from_utf8(&rest[..sep_pos]).ok()?;
-    let column = std::str::from_utf8(&rest[sep_pos + 1..]).ok()?;
-
-    Some((record_id, column))
 }
 
 // ── Index key encoding ──────────────────────────────────────────
@@ -150,29 +128,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cell_key_roundtrip() {
-        let key = cell_key("acct-123", "status");
-        let (record_id, column) = parse_cell_key(&key).unwrap();
-        assert_eq!(record_id, "acct-123");
-        assert_eq!(column, "status");
+    fn record_key_roundtrip() {
+        let key = record_key("bench:acct-123");
+        let id = parse_record_key(&key).unwrap();
+        assert_eq!(id, "bench:acct-123");
     }
 
     #[test]
-    fn record_prefix_matches_all_cells() {
-        let prefix = record_prefix("acct-1");
-        let k1 = cell_key("acct-1", "_id");
-        let k2 = cell_key("acct-1", "name");
-        let k3 = cell_key("acct-2", "name");
-        assert!(k1.starts_with(&prefix));
-        assert!(k2.starts_with(&prefix));
-        assert!(!k3.starts_with(&prefix));
-    }
-
-    #[test]
-    fn data_scan_prefix_matches_keyed_records() {
-        let prefix = data_scan_prefix("user1:bench");
-        let k1 = cell_key("user1:bench:acct-1", "name");
-        let k2 = cell_key("user2:bench:acct-1", "name");
+    fn data_scan_prefix_matches_record_keys() {
+        let prefix = data_scan_prefix("user1:bench:");
+        let k1 = record_key("user1:bench:acct-1");
+        let k2 = record_key("user2:bench:acct-1");
         assert!(k1.starts_with(&prefix));
         assert!(!k2.starts_with(&prefix));
     }

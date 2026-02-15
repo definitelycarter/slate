@@ -9,5 +9,5 @@ slate-store = { path = "../slate-store" }
 slate-query = { path = "../slate-query" }
 slate-server = { path = "../slate-server" }
 serde = { version = "1", features = ["derive"] }
-bincode = "1"
+rmp-serde = "1"
 crossbeam = "0.8"

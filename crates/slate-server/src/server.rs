@@ -69,10 +69,10 @@ fn handle_connection(
         let mut msg_buf = vec![0u8; len];
         reader.read_exact(&mut msg_buf)?;
 
-        let request: Request = bincode::deserialize(&msg_buf)?;
+        let request: Request = rmp_serde::from_slice(&msg_buf)?;
         let response = session.handle(request);
 
-        let response_bytes = bincode::serialize(&response)?;
+        let response_bytes = rmp_serde::to_vec(&response)?;
         let response_len = (response_bytes.len() as u32).to_be_bytes();
         writer.write_all(&response_len)?;
         writer.write_all(&response_bytes)?;

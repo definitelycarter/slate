@@ -14,27 +14,14 @@ For queries like `status='active' take(200)` without sort, the IndexScan current
 
 This is less impactful than indexed sort (the lazy iterator already short-circuits at ~1ms), but it would reduce unnecessary index I/O.
 
-## Single Key Per Record
+## ~~Single Key Per Record~~ ✅
 
-Currently each record with 8 columns = 8 RocksDB keys. At 100k records that's 800k keys, which causes key bloat (SST index overhead, key comparisons, poor cache locality) and likely explains the ~15x scaling for 10x data.
+Done. Each record is now a single RocksDB key (`d:{partition}:{record_id}` → `RecordValue`). Timestamp dropped, scans 2-3x faster, writes 3.6x faster, scaling is near-linear (10x for 10x data).
 
-Pack all columns into a single value per record:
+## ~~MessagePack for Wire Protocol~~ ✅
 
-```
-d:{record_id} → { col1: {value, expire_at}, col2: {value, expire_at}, ... }
-```
+Done. TCP wire protocol uses MessagePack (rmp-serde). Storage stays bincode. Performance is equivalent for paginated queries, ~10-16% overhead on large result set serialization — acceptable trade-off for cross-language compatibility.
 
-- Each column still carries its own `expire_at` for per-column TTL — expired columns are filtered on read
-- Drop `timestamp` from storage entirely — no versioning, last write wins, `expire_at` is all we need
-- 100k keys instead of 800k for 100k records
-- Scans iterate one key per record instead of grouping ~8 keys per record
-- `multi_get` and `read_cells_batch` become unnecessary — one `get()` returns the whole record
-- Partial updates: read-modify-write (read record, update changed columns, write back)
+## No Index on TTL Fields
 
-Trade-off: partial updates require a read-modify-write cycle instead of writing individual column keys. Acceptable for batch-oriented writes.
-
-## MessagePack for Wire Protocol
-
-Replace bincode with MessagePack (rmp-serde) for the TCP wire protocol. Bincode is Rust-specific with no stable spec — if we ever want non-Rust clients it's a dead end. MessagePack is cross-language, self-describing, and only slightly larger.
-
-Keep storage format separate — can evaluate MessagePack for storage too (self-describing format helps with debugging/migration tooling) but the hot path is deserializing during scans, so benchmark first.
+Reject field configs that have both `indexed: true` and `ttl_seconds: Some(...)` at `save_datasource` time. An expired column would leave stale index entries pointing to logically-gone values — either requiring background cleanup or read-time filtering that defeats the purpose of the index. Fail loud on write rather than dealing with it at query time.

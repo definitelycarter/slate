@@ -1,13 +1,39 @@
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, QueryValue};
 
-use crate::record::{Record, Value};
-
 use crate::error::DbError;
+use crate::record::{Record, Value};
 
 // ── Filter matching ─────────────────────────────────────────────
 
+pub(crate) fn matches_group(record: &Record, group: &FilterGroup) -> Result<bool, DbError> {
+    match group.logical {
+        LogicalOp::And => {
+            for child in &group.children {
+                if !matches_node(record, child)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        LogicalOp::Or => {
+            for child in &group.children {
+                if matches_node(record, child)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn matches_node(record: &Record, node: &FilterNode) -> Result<bool, DbError> {
+    match node {
+        FilterNode::Condition(filter) => matches_filter(record, filter),
+        FilterNode::Group(group) => matches_group(record, group),
+    }
+}
+
 fn matches_filter(record: &Record, filter: &Filter) -> Result<bool, DbError> {
-    // Extract the Value from the Cell, if present
     let field_value = record.cells.get(&filter.field).map(|cell| &cell.value);
 
     match filter.operator {
@@ -83,57 +109,7 @@ fn compare_values(
     }
 }
 
-// ── Lazy filter evaluation ───────────────────────────────────────
-//
-// Reads columns on-demand during evaluation so AND short-circuits
-// avoid reading columns for conditions that are never reached.
-
-/// Trait for reading a cell into a record on demand.
-pub(crate) trait CellReader {
-    fn read_cell(&self, record: &mut Record, column: &str) -> Result<(), DbError>;
-}
-
-pub(crate) fn matches_group_lazy<R: CellReader>(
-    record: &mut Record,
-    group: &FilterGroup,
-    reader: &R,
-) -> Result<bool, DbError> {
-    match group.logical {
-        LogicalOp::And => {
-            for child in &group.children {
-                if !matches_node_lazy(record, child, reader)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        LogicalOp::Or => {
-            for child in &group.children {
-                if matches_node_lazy(record, child, reader)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-    }
-}
-
-fn matches_node_lazy<R: CellReader>(
-    record: &mut Record,
-    node: &FilterNode,
-    reader: &R,
-) -> Result<bool, DbError> {
-    match node {
-        FilterNode::Condition(filter) => {
-            // Load the column on demand if not already present
-            if !record.cells.contains_key(&filter.field) {
-                reader.read_cell(record, &filter.field)?;
-            }
-            matches_filter(record, filter)
-        }
-        FilterNode::Group(group) => matches_group_lazy(record, group, reader),
-    }
-}
+// ── Value comparison for sorting ─────────────────────────────────
 
 pub(crate) fn compare_field_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     match (a, b) {

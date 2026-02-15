@@ -10,7 +10,6 @@ use crate::report::{BenchResult, bench};
 
 pub const DS_ID: &str = "bench";
 const PARTITION: &str = "bench_part";
-const TS: i64 = 1_700_000_000;
 
 pub struct BenchConfig {
     pub label: &'static str,
@@ -123,7 +122,7 @@ pub fn bulk_insert(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) ->
                         start + batch_size
                     ),
                     || {
-                        let writes = datagen::generate_batch(user, start, batch_size, TS);
+                        let writes = datagen::generate_batch(user, start, batch_size);
                         let mut txn = db.begin(false).expect("begin failed");
                         txn.write_batch(DS_ID, writes).expect("write_batch failed");
                         txn.commit().expect("commit failed");
@@ -585,7 +584,7 @@ pub fn concurrency_tests(
                 let base = total_records + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let writes = datagen::generate_batch(99, start, 1000, TS);
+                    let writes = datagen::generate_batch(99, start, 1000);
                     let mut txn = db.begin(false).expect("writer begin failed");
                     txn.write_batch(DS_ID, writes).expect("writer write failed");
                     txn.commit().expect("writer commit failed");
@@ -635,7 +634,7 @@ pub fn concurrency_tests(
             let barrier = Arc::clone(&barrier);
             handles.push(thread::spawn(move || -> Result<(), slate_db::DbError> {
                 let mut txn = db.begin(false).expect("conflict begin failed");
-                let cells = datagen::generate_cells(99, 999_999, TS);
+                let cells = datagen::generate_cells(99, 999_999);
                 let id = datagen::generate_record_id(99, 999_999);
                 txn.write_record(DS_ID, &id, cells)
                     .expect("conflict write failed");

@@ -7,7 +7,6 @@ use crate::datagen;
 use crate::report::{BenchResult, bench};
 use crate::scenarios::DS_ID;
 
-const TS: i64 = 1_700_000_000;
 const BATCH_SIZE: usize = 10_000;
 const BATCHES: usize = 10;
 const TOTAL_RECORDS: usize = BATCH_SIZE * BATCHES;
@@ -30,7 +29,7 @@ pub fn bulk_insert(client: &mut Client, user: usize) -> Vec<BenchResult> {
                         start + BATCH_SIZE
                     ),
                     || {
-                        let writes = datagen::generate_batch(user, start, BATCH_SIZE, TS);
+                        let writes = datagen::generate_batch(user, start, BATCH_SIZE);
                         client
                             .write_batch(DS_ID, writes)
                             .expect("write_batch failed");
@@ -300,7 +299,7 @@ pub fn concurrency_tests(addr: &str, _user: usize) -> Vec<BenchResult> {
                 let base = TOTAL_RECORDS + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let writes = datagen::generate_batch(99, start, 1000, TS);
+                    let writes = datagen::generate_batch(99, start, 1000);
                     client
                         .write_batch(DS_ID, writes)
                         .expect("writer write failed");
