@@ -15,6 +15,7 @@ pub trait Transaction {
     // Reads
     fn get_by_id(&self, id: &str) -> Result<Option<Record>, StoreError>;
     fn scan(&self) -> Result<Self::Iter, StoreError>;
+    fn scan_prefix(&self, prefix: &str) -> Result<Self::Iter, StoreError>;
 
     // Writes
     fn insert(&mut self, record: Record) -> Result<(), StoreError>;

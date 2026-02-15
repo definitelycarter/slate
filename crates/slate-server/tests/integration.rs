@@ -8,6 +8,8 @@ use slate_query::*;
 use slate_server::Server;
 use slate_store::{Record, RocksStore, Value};
 
+const PREFIX: &str = "test:ds1";
+
 fn start_server() -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = RocksStore::open(dir.path()).unwrap();
@@ -39,18 +41,22 @@ fn make_record(id: &str, name: &str, status: &str) -> Record {
     }
 }
 
+fn prefixed_id(id: &str) -> String {
+    format!("{PREFIX}:{id}")
+}
+
 #[test]
 fn insert_and_get_by_id() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
 
-    let record = make_record("acct-1", "Acme Corp", "active");
+    let record = make_record(&prefixed_id("acct-1"), "Acme Corp", "active");
     client.insert(record).unwrap();
 
-    let result = client.get_by_id("acct-1").unwrap();
+    let result = client.get_by_id(&prefixed_id("acct-1")).unwrap();
     assert!(result.is_some());
     let r = result.unwrap();
-    assert_eq!(r.id, "acct-1");
+    assert_eq!(r.id, prefixed_id("acct-1"));
     assert_eq!(
         r.fields.get("name"),
         Some(&Value::String("Acme Corp".to_string()))
@@ -62,7 +68,7 @@ fn get_by_id_not_found() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
 
-    let result = client.get_by_id("nonexistent").unwrap();
+    let result = client.get_by_id(&prefixed_id("nonexistent")).unwrap();
     assert!(result.is_none());
 }
 
@@ -72,9 +78,9 @@ fn insert_batch_and_query() {
     let mut client = Client::connect(&addr).unwrap();
 
     let records = vec![
-        make_record("acct-1", "Acme", "active"),
-        make_record("acct-2", "Globex", "rejected"),
-        make_record("acct-3", "Initech", "active"),
+        make_record(&prefixed_id("acct-1"), "Acme", "active"),
+        make_record(&prefixed_id("acct-2"), "Globex", "rejected"),
+        make_record(&prefixed_id("acct-3"), "Initech", "active"),
     ];
     client.insert_batch(records).unwrap();
 
@@ -85,7 +91,7 @@ fn insert_batch_and_query() {
         skip: None,
         take: None,
     };
-    let results = client.query(&query).unwrap();
+    let results = client.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 3);
 
     // Query with filter
@@ -102,7 +108,7 @@ fn insert_batch_and_query() {
         skip: None,
         take: None,
     };
-    let results = client.query(&query).unwrap();
+    let results = client.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -112,11 +118,11 @@ fn delete_record() {
     let mut client = Client::connect(&addr).unwrap();
 
     client
-        .insert(make_record("acct-1", "Acme", "active"))
+        .insert(make_record(&prefixed_id("acct-1"), "Acme", "active"))
         .unwrap();
-    client.delete("acct-1").unwrap();
+    client.delete(&prefixed_id("acct-1")).unwrap();
 
-    let result = client.get_by_id("acct-1").unwrap();
+    let result = client.get_by_id(&prefixed_id("acct-1")).unwrap();
     assert!(result.is_none());
 }
 
@@ -171,7 +177,7 @@ fn query_with_sort_and_pagination() {
         fields.insert("name".to_string(), Value::String(format!("Company-{i}")));
         fields.insert("score".to_string(), Value::Int(i));
         records.push(Record {
-            id: format!("r-{i}"),
+            id: prefixed_id(&format!("r-{i}")),
             fields,
         });
     }
@@ -186,10 +192,10 @@ fn query_with_sort_and_pagination() {
         skip: Some(5),
         take: Some(3),
     };
-    let results = client.query(&query).unwrap();
+    let results = client.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 3);
     // Descending: 19,18,17,16,15,14,13,12... skip 5 → 14,13,12
-    assert_eq!(results[0].id, "r-14");
-    assert_eq!(results[1].id, "r-13");
-    assert_eq!(results[2].id, "r-12");
+    assert_eq!(results[0].id, prefixed_id("r-14"));
+    assert_eq!(results[1].id, prefixed_id("r-13"));
+    assert_eq!(results[2].id, prefixed_id("r-12"));
 }

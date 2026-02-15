@@ -6,6 +6,8 @@ use slate_query::{
 };
 use slate_store::{Record, RocksStore, Value};
 
+const PREFIX: &str = "test:ds1";
+
 fn temp_db() -> (Database<RocksStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = RocksStore::open(dir.path()).unwrap();
@@ -54,18 +56,46 @@ fn make_record(id: &str, name: &str, revenue: f64, status: &str, active: bool) -
     }
 }
 
+fn prefixed_id(id: &str) -> String {
+    format!("{PREFIX}:{id}")
+}
+
 fn seed_records(db: &Database<RocksStore>) {
     let mut txn = db.begin(false).unwrap();
-    txn.insert(make_record("acct-1", "Acme Corp", 50000.0, "active", true))
-        .unwrap();
-    txn.insert(make_record("acct-2", "Globex", 80000.0, "snoozed", true))
-        .unwrap();
-    txn.insert(make_record("acct-3", "Initech", 12000.0, "rejected", false))
-        .unwrap();
-    txn.insert(make_record("acct-4", "Umbrella", 95000.0, "active", true))
-        .unwrap();
     txn.insert(make_record(
-        "acct-5",
+        &prefixed_id("acct-1"),
+        "Acme Corp",
+        50000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-2"),
+        "Globex",
+        80000.0,
+        "snoozed",
+        true,
+    ))
+    .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-3"),
+        "Initech",
+        12000.0,
+        "rejected",
+        false,
+    ))
+    .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-4"),
+        "Umbrella",
+        95000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-5"),
         "Stark Industries",
         200000.0,
         "active",
@@ -200,7 +230,7 @@ fn query_no_filters() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 5);
 }
 
@@ -223,7 +253,7 @@ fn query_eq_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -246,9 +276,9 @@ fn query_icontains_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-1");
+    assert_eq!(results[0].id, prefixed_id("acct-1"));
 }
 
 #[test]
@@ -270,9 +300,9 @@ fn query_istartswith_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-5");
+    assert_eq!(results[0].id, prefixed_id("acct-5"));
 }
 
 #[test]
@@ -294,9 +324,9 @@ fn query_iendswith_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-3");
+    assert_eq!(results[0].id, prefixed_id("acct-3"));
 }
 
 #[test]
@@ -318,7 +348,7 @@ fn query_gt_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2); // Umbrella (95k) and Stark (200k)
 }
 
@@ -341,7 +371,7 @@ fn query_lte_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2); // Acme (50k) and Initech (12k)
 }
 
@@ -357,12 +387,18 @@ fn query_isnull_filter() {
         Value::String("NoStatus Inc".to_string()),
     );
     txn.insert(Record {
-        id: "acct-x".to_string(),
+        id: prefixed_id("acct-x"),
         fields,
     })
     .unwrap();
-    txn.insert(make_record("acct-1", "Acme", 50000.0, "active", true))
-        .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-1"),
+        "Acme",
+        50000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -379,9 +415,9 @@ fn query_isnull_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-x");
+    assert_eq!(results[0].id, prefixed_id("acct-x"));
 }
 
 #[test]
@@ -410,7 +446,7 @@ fn query_and_multiple_filters() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2); // Umbrella (95k) and Stark (200k)
 }
 
@@ -440,7 +476,7 @@ fn query_or_filter() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2); // Globex (snoozed) and Initech (rejected)
 }
 
@@ -481,7 +517,7 @@ fn query_nested_and_or() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     // Acme (active, name matches), Umbrella (active, revenue 95k), Stark (active, revenue 200k)
     assert_eq!(results.len(), 3);
 }
@@ -503,10 +539,10 @@ fn query_sort_asc() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 5);
-    assert_eq!(results[0].id, "acct-3"); // Initech 12k
-    assert_eq!(results[4].id, "acct-5"); // Stark 200k
+    assert_eq!(results[0].id, prefixed_id("acct-3")); // Initech 12k
+    assert_eq!(results[4].id, prefixed_id("acct-5")); // Stark 200k
 }
 
 #[test]
@@ -524,10 +560,10 @@ fn query_sort_desc() {
         skip: None,
         take: None,
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 5);
-    assert_eq!(results[0].id, "acct-5"); // Stark 200k
-    assert_eq!(results[4].id, "acct-3"); // Initech 12k
+    assert_eq!(results[0].id, prefixed_id("acct-5")); // Stark 200k
+    assert_eq!(results[4].id, prefixed_id("acct-3")); // Initech 12k
 }
 
 // --- Pagination tests ---
@@ -547,10 +583,10 @@ fn query_take() {
         skip: None,
         take: Some(2),
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "acct-5"); // Stark 200k
-    assert_eq!(results[1].id, "acct-4"); // Umbrella 95k
+    assert_eq!(results[0].id, prefixed_id("acct-5")); // Stark 200k
+    assert_eq!(results[1].id, prefixed_id("acct-4")); // Umbrella 95k
 }
 
 #[test]
@@ -568,10 +604,10 @@ fn query_skip_and_take() {
         skip: Some(1),
         take: Some(2),
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "acct-1"); // Acme 50k (skipped Initech 12k)
-    assert_eq!(results[1].id, "acct-2"); // Globex 80k
+    assert_eq!(results[0].id, prefixed_id("acct-1")); // Acme 50k (skipped Initech 12k)
+    assert_eq!(results[1].id, prefixed_id("acct-2")); // Globex 80k
 }
 
 #[test]
@@ -597,10 +633,10 @@ fn query_filter_sort_paginate() {
         skip: Some(1),
         take: Some(1),
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 1);
     // Active sorted desc: Stark(200k), Umbrella(95k), Acme(50k) → skip 1 → Umbrella
-    assert_eq!(results[0].id, "acct-4");
+    assert_eq!(results[0].id, prefixed_id("acct-4"));
 }
 
 // --- Streaming take without sort ---
@@ -617,6 +653,104 @@ fn query_take_without_sort_streams() {
         skip: None,
         take: Some(2),
     };
-    let results = txn.query(&query).unwrap();
+    let results = txn.query(&[PREFIX], &query).unwrap();
     assert_eq!(results.len(), 2);
+}
+
+// --- Partition isolation ---
+
+#[test]
+fn partition_isolation() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert(make_record(
+        "alice:contacts:acct-1",
+        "Alice Corp",
+        10000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
+    txn.insert(make_record(
+        "bob:contacts:acct-1",
+        "Bob Corp",
+        20000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let no_filter = Query {
+        filter: None,
+        sort: vec![],
+        skip: None,
+        take: None,
+    };
+
+    // Each partition sees only its own records
+    let alice_results = txn.query(&["alice:contacts"], &no_filter).unwrap();
+    assert_eq!(alice_results.len(), 1);
+    assert_eq!(alice_results[0].id, "alice:contacts:acct-1");
+    assert_eq!(
+        alice_results[0].fields.get("name"),
+        Some(&Value::String("Alice Corp".to_string()))
+    );
+
+    let bob_results = txn.query(&["bob:contacts"], &no_filter).unwrap();
+    assert_eq!(bob_results.len(), 1);
+    assert_eq!(bob_results[0].id, "bob:contacts:acct-1");
+    assert_eq!(
+        bob_results[0].fields.get("name"),
+        Some(&Value::String("Bob Corp".to_string()))
+    );
+
+    // Multi-prefix query sees both
+    let both_results = txn
+        .query(&["alice:contacts", "bob:contacts"], &no_filter)
+        .unwrap();
+    assert_eq!(both_results.len(), 2);
+}
+
+// --- Catalog does not interfere with data ---
+
+#[test]
+fn catalog_and_data_coexist() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&Datasource {
+        id: "ds1".to_string(),
+        name: "SBA".to_string(),
+        fields: vec![],
+    })
+    .unwrap();
+    txn.insert(make_record(
+        &prefixed_id("acct-1"),
+        "Acme",
+        50000.0,
+        "active",
+        true,
+    ))
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+
+    // Catalog only sees datasources
+    let datasources = txn.list_datasources().unwrap();
+    assert_eq!(datasources.len(), 1);
+
+    // Data query only sees records
+    let query = Query {
+        filter: None,
+        sort: vec![],
+        skip: None,
+        take: None,
+    };
+    let records = txn.query(&[PREFIX], &query).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, prefixed_id("acct-1"));
 }

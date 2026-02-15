@@ -31,13 +31,11 @@ impl Catalog {
     }
 
     pub fn list<T: Transaction>(&self, txn: &T) -> Result<Vec<Datasource>, DbError> {
-        let iter = txn.scan()?;
+        let iter = txn.scan_prefix(CATALOG_PREFIX)?;
         let mut datasources = Vec::new();
         for result in iter {
             let record = result?;
-            if record.id.starts_with(CATALOG_PREFIX) {
-                datasources.push(record_to_datasource(&record)?);
-            }
+            datasources.push(record_to_datasource(&record)?);
         }
         Ok(datasources)
     }
@@ -180,7 +178,9 @@ fn value_to_field_type(value: &Value) -> Result<FieldType, DbError> {
                             .map(value_to_field_def)
                             .collect::<Result<Vec<_>, _>>()?,
                         _ => {
-                            return Err(DbError::InvalidQuery("missing fields for map".to_string()));
+                            return Err(DbError::InvalidQuery(
+                                "missing fields for map".to_string(),
+                            ));
                         }
                     };
                     Ok(FieldType::Map(fields))

@@ -102,8 +102,11 @@ impl Client {
         }
     }
 
-    pub fn query(&mut self, query: &Query) -> Result<Vec<Record>, ClientError> {
-        match self.request(Request::Query(query.clone()))? {
+    pub fn query(&mut self, prefixes: &[&str], query: &Query) -> Result<Vec<Record>, ClientError> {
+        match self.request(Request::Query {
+            prefixes: prefixes.iter().map(|p| p.to_string()).collect(),
+            query: query.clone(),
+        })? {
             Response::Records(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(

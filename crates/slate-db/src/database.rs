@@ -6,6 +6,25 @@ use crate::datasource::Datasource;
 use crate::error::DbError;
 use crate::exec;
 
+struct MultiIter<I> {
+    iters: Vec<I>,
+    current: usize,
+}
+
+impl<I: Iterator> Iterator for MultiIter<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current < self.iters.len() {
+            if let Some(item) = self.iters[self.current].next() {
+                return Some(item);
+            }
+            self.current += 1;
+        }
+        None
+    }
+}
+
 pub struct Database<S: Store> {
     store: S,
     catalog: Catalog,
@@ -78,9 +97,21 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     // Query
 
-    pub fn query(&self, query: &Query) -> Result<Vec<Record>, DbError> {
-        let iter = self.txn.scan()?;
-        exec::execute(iter, query)
+    pub fn query(
+        &self,
+        prefixes: &[impl AsRef<str>],
+        query: &Query,
+    ) -> Result<Vec<Record>, DbError> {
+        let mut iters = Vec::with_capacity(prefixes.len());
+
+        for prefix in prefixes {
+            let scan = format!("{}:", prefix.as_ref());
+            let iter = self.txn.scan_prefix(&scan)?;
+            iters.push(iter);
+        }
+
+        let multi = MultiIter { iters, current: 0 };
+        exec::execute(multi, query)
     }
 
     // Lifecycle

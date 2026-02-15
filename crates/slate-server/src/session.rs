@@ -32,8 +32,8 @@ impl Session {
                 let record = txn.get_by_id(&id)?;
                 Ok(Response::Record(record))
             }),
-            Request::Query(query) => self.read(|txn| {
-                let records = txn.query(&query)?;
+            Request::Query { prefixes, query } => self.read(|txn| {
+                let records = txn.query(&prefixes, &query)?;
                 Ok(Response::Records(records))
             }),
             Request::SaveDatasource(ds) => self.write(|txn| {

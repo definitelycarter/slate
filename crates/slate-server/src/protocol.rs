@@ -10,8 +10,8 @@ pub enum Request {
     InsertBatch(Vec<Record>),
     Delete(String),
     GetById(String),
-    Query(Query),
-    // Catalog
+    Query { prefixes: Vec<String>, query: Query },
+    // Catalog (global)
     SaveDatasource(Datasource),
     GetDatasource(String),
     ListDatasources,

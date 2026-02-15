@@ -1,4 +1,4 @@
-use rocksdb::{IteratorMode, OptimisticTransactionDB};
+use rocksdb::{Direction, IteratorMode, OptimisticTransactionDB};
 
 use crate::error::StoreError;
 use crate::record::{Record, Value};
@@ -203,6 +203,25 @@ impl<'db> Transaction for RocksTransaction<'db> {
         let mut records = Vec::new();
         for item in iter {
             let (key, value) = item.map_err(|e| StoreError::Storage(e.to_string()))?;
+            let id = std::str::from_utf8(&key)?.to_string();
+            records.push(Self::deserialize_record(&id, &value));
+        }
+        Ok(RocksIterator {
+            records: records.into_iter(),
+        })
+    }
+
+    fn scan_prefix(&self, prefix: &str) -> Result<Self::Iter, StoreError> {
+        let prefix_bytes = prefix.as_bytes();
+        let iter = self
+            .txn()?
+            .iterator(IteratorMode::From(prefix_bytes, Direction::Forward));
+        let mut records = Vec::new();
+        for item in iter {
+            let (key, value) = item.map_err(|e| StoreError::Storage(e.to_string()))?;
+            if !key.starts_with(prefix_bytes) {
+                break;
+            }
             let id = std::str::from_utf8(&key)?.to_string();
             records.push(Self::deserialize_record(&id, &value));
         }
