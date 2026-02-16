@@ -4,18 +4,18 @@ use std::sync::Arc;
 use std::thread;
 
 use slate_db::Database;
-use slate_store::RocksStore;
+use slate_store::Store;
 
 use crate::protocol::Request;
 use crate::session::Session;
 
-pub struct Server {
-    db: Arc<Database<RocksStore>>,
+pub struct Server<S: Store> {
+    db: Arc<Database<S>>,
     addr: String,
 }
 
-impl Server {
-    pub fn new(db: Database<RocksStore>, addr: impl Into<String>) -> Self {
+impl<S: Store + Send + Sync + 'static> Server<S> {
+    pub fn new(db: Database<S>, addr: impl Into<String>) -> Self {
         Self {
             db: Arc::new(db),
             addr: addr.into(),
@@ -46,9 +46,9 @@ impl Server {
     }
 }
 
-fn handle_connection(
+fn handle_connection<S: Store>(
     stream: TcpStream,
-    db: Arc<Database<RocksStore>>,
+    db: Arc<Database<S>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let session = Session::new(db);
     let mut reader = BufReader::new(stream.try_clone()?);

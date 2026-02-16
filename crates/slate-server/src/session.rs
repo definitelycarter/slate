@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
 use slate_db::Database;
-use slate_store::RocksStore;
+use slate_store::Store;
 
 use crate::protocol::{Request, Response};
 
-pub struct Session {
-    db: Arc<Database<RocksStore>>,
+pub struct Session<S: Store> {
+    db: Arc<Database<S>>,
 }
 
-impl Session {
-    pub fn new(db: Arc<Database<RocksStore>>) -> Self {
+impl<S: Store> Session<S> {
+    pub fn new(db: Arc<Database<S>>) -> Self {
         Self { db }
     }
 
@@ -82,9 +82,7 @@ impl Session {
 
     fn read<F>(&self, f: F) -> Response
     where
-        F: FnOnce(
-            &slate_db::DatabaseTransaction<'_, RocksStore>,
-        ) -> Result<Response, slate_db::DbError>,
+        F: FnOnce(&slate_db::DatabaseTransaction<'_, S>) -> Result<Response, slate_db::DbError>,
     {
         match self.db.begin(true) {
             Ok(txn) => match f(&txn) {
@@ -97,9 +95,7 @@ impl Session {
 
     fn write<F>(&self, f: F) -> Response
     where
-        F: FnOnce(
-            &mut slate_db::DatabaseTransaction<'_, RocksStore>,
-        ) -> Result<Response, slate_db::DbError>,
+        F: FnOnce(&mut slate_db::DatabaseTransaction<'_, S>) -> Result<Response, slate_db::DbError>,
     {
         match self.db.begin(false) {
             Ok(mut txn) => match f(&mut txn) {
