@@ -7,17 +7,19 @@ use crate::error::ListError;
 /// Consumers implement this trait to connect Slate to upstream systems.
 /// The loader is called when data for a given key is missing or stale.
 ///
-/// Not implemented yet — will be backed by a gRPC client when wired up.
+/// Returns an iterator of BSON documents. Each loader implementation
+/// owns the conversion to BSON — a REST loader converts from JSON,
+/// a gRPC loader gets typed fields from protobuf.
 pub trait Loader: Send + Sync {
     fn load(
         &self,
         collection: &str,
         key: &str,
         metadata: &HashMap<String, String>,
-    ) -> Result<(), ListError>;
+    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError>;
 }
 
-/// A no-op loader that does nothing. Use when data is pre-populated.
+/// A no-op loader that returns an empty iterator. Use when data is pre-populated.
 pub struct NoopLoader;
 
 impl Loader for NoopLoader {
@@ -26,7 +28,7 @@ impl Loader for NoopLoader {
         _collection: &str,
         _key: &str,
         _metadata: &HashMap<String, String>,
-    ) -> Result<(), ListError> {
-        Ok(())
+    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError> {
+        Ok(Box::new(std::iter::empty()))
     }
 }

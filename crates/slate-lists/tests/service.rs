@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use bson::doc;
@@ -9,6 +10,65 @@ use slate_lists::*;
 use slate_query::*;
 use slate_server::Server;
 use slate_store::MemoryStore;
+
+/// A fake loader that streams 10 BSON documents one at a time.
+struct FakeLoader;
+
+impl Loader for FakeLoader {
+    fn load(
+        &self,
+        _collection: &str,
+        _key: &str,
+        _metadata: &HashMap<String, String>,
+    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError> {
+        let docs = (0..10).map(|i| {
+            Ok(doc! {
+                "_id": format!("fake-{i}"),
+                "name": format!("Company {i}"),
+                "status": if i % 2 == 0 { "active" } else { "inactive" },
+                "revenue": (i as f64 + 1.0) * 10000.0,
+            })
+        });
+        Ok(Box::new(docs))
+    }
+}
+
+/// A loader that counts how many times it's been called.
+struct CountingLoader {
+    call_count: AtomicUsize,
+}
+
+impl CountingLoader {
+    fn new() -> Self {
+        Self {
+            call_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
+    }
+}
+
+impl Loader for CountingLoader {
+    fn load(
+        &self,
+        _collection: &str,
+        _key: &str,
+        _metadata: &HashMap<String, String>,
+    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        let docs = (0..10).map(|i| {
+            Ok(doc! {
+                "_id": format!("counted-{i}"),
+                "name": format!("Company {i}"),
+                "status": if i % 2 == 0 { "active" } else { "inactive" },
+                "revenue": (i as f64 + 1.0) * 10000.0,
+            })
+        });
+        Ok(Box::new(docs))
+    }
+}
 
 const COLLECTION: &str = "accounts";
 
@@ -268,6 +328,120 @@ fn get_list_data_empty_collection() {
 
     assert_eq!(response.total, 0);
     assert!(response.records.is_empty());
+}
+
+// ── Loader tests ────────────────────────────────────────────────
+
+#[test]
+fn loader_streams_documents_into_empty_collection() {
+    let addr = start_server();
+    // No seed data — collection is empty, loader should fire
+
+    let pool = ClientPool::new(&addr, 2).unwrap();
+    let service = ListService::new(pool, FakeLoader);
+    let config = no_filter_config();
+
+    let response = service
+        .get_list_data(&config, "user-1", &ListRequest::default(), &HashMap::new())
+        .unwrap();
+
+    // FakeLoader inserts 10 documents
+    assert_eq!(response.total, 10);
+    assert_eq!(response.records.len(), 10);
+}
+
+#[test]
+fn loader_with_list_filters() {
+    let addr = start_server();
+
+    let pool = ClientPool::new(&addr, 2).unwrap();
+    let service = ListService::new(pool, FakeLoader);
+    let config = test_config(); // filters: status = active
+
+    let response = service
+        .get_list_data(&config, "user-1", &ListRequest::default(), &HashMap::new())
+        .unwrap();
+
+    // FakeLoader inserts 10 docs, 5 are active (even indices)
+    assert_eq!(response.total, 5);
+    assert_eq!(response.records.len(), 5);
+}
+
+#[test]
+fn loader_with_user_filters_and_sort() {
+    let addr = start_server();
+
+    let pool = ClientPool::new(&addr, 2).unwrap();
+    let service = ListService::new(pool, FakeLoader);
+    let config = no_filter_config();
+
+    let request = ListRequest {
+        filters: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "revenue".into(),
+                operator: Operator::Gt,
+                value: QueryValue::Float(50000.0),
+            })],
+        }),
+        sort: vec![Sort {
+            field: "revenue".into(),
+            direction: SortDirection::Desc,
+        }],
+        ..Default::default()
+    };
+
+    let response = service
+        .get_list_data(&config, "user-1", &request, &HashMap::new())
+        .unwrap();
+
+    // revenue > 50k: Company 5 (60k), Company 6 (70k), Company 7 (80k), Company 8 (90k), Company 9 (100k)
+    assert_eq!(response.total, 5);
+    // Sorted desc: 100k, 90k, 80k, 70k, 60k
+    assert_eq!(response.records[0].get_str("name").unwrap(), "Company 9");
+    assert_eq!(response.records[4].get_str("name").unwrap(), "Company 5");
+}
+
+#[test]
+fn loader_not_called_when_data_exists() {
+    let addr = start_server();
+    seed_data(&addr); // Pre-populate with 5 accounts
+
+    let pool = ClientPool::new(&addr, 2).unwrap();
+    let service = ListService::new(pool, FakeLoader);
+    let config = no_filter_config();
+
+    let response = service
+        .get_list_data(&config, "user-1", &ListRequest::default(), &HashMap::new())
+        .unwrap();
+
+    // Should have the 5 seeded records, NOT the 10 from FakeLoader
+    assert_eq!(response.total, 5);
+    assert_eq!(response.records.len(), 5);
+}
+
+#[test]
+fn loader_called_once_across_multiple_requests() {
+    let addr = start_server();
+
+    let loader = CountingLoader::new();
+    let pool = ClientPool::new(&addr, 2).unwrap();
+    let service = ListService::new(pool, loader);
+    let config = no_filter_config();
+
+    // First request — collection empty, loader should fire
+    let response1 = service
+        .get_list_data(&config, "user-1", &ListRequest::default(), &HashMap::new())
+        .unwrap();
+    assert_eq!(response1.total, 10);
+    assert_eq!(service.loader().count(), 1);
+
+    // Second request — data exists, loader should NOT fire
+    let response2 = service
+        .get_list_data(&config, "user-1", &ListRequest::default(), &HashMap::new())
+        .unwrap();
+    assert_eq!(response2.total, 10);
+    assert_eq!(service.loader().count(), 1); // still 1, not 2
 }
 
 // ── No matching filters ─────────────────────────────────────────

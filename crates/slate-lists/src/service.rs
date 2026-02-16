@@ -14,8 +14,35 @@ pub struct ListService<L: Loader> {
 }
 
 impl<L: Loader> ListService<L> {
+    const BATCH_SIZE: usize = 1000;
+
     pub fn new(pool: ClientPool, loader: L) -> Self {
         Self { pool, loader }
+    }
+
+    pub fn loader(&self) -> &L {
+        &self.loader
+    }
+
+    fn batch_insert(
+        &self,
+        collection: &str,
+        docs: Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>,
+    ) -> Result<(), ListError> {
+        let mut batch = Vec::with_capacity(Self::BATCH_SIZE);
+        for doc_result in docs {
+            batch.push(doc_result?);
+            if batch.len() >= Self::BATCH_SIZE {
+                self.pool
+                    .get()?
+                    .insert_many(collection, std::mem::take(&mut batch))?;
+                batch.reserve(Self::BATCH_SIZE);
+            }
+        }
+        if !batch.is_empty() {
+            self.pool.get()?.insert_many(collection, batch)?;
+        }
+        Ok(())
     }
 
     pub fn get_list_data(
@@ -28,7 +55,8 @@ impl<L: Loader> ListService<L> {
         // 1. Check if data exists for this key
         let count = self.pool.get()?.count(&config.collection, None)?;
         if count == 0 {
-            self.loader.load(&config.collection, key, metadata)?;
+            let docs_iter = self.loader.load(&config.collection, key, metadata)?;
+            self.batch_insert(&config.collection, docs_iter)?;
         }
 
         // 2. Merge list default filters with user filters
