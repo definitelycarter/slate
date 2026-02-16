@@ -68,7 +68,7 @@ fn insert_one_and_find_one() {
     assert_eq!(result.id, "acct-1");
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("_id", QueryValue::String("acct-1".into()))),
         sort: vec![],
@@ -109,7 +109,7 @@ fn insert_one_auto_generated_id() {
     assert!(!result.id.is_empty());
     assert!(result.id.contains('-')); // UUID format
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), result.id);
@@ -134,7 +134,7 @@ fn insert_many_batch() {
     assert_eq!(results[1].id, "acct-2");
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let all = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(all.len(), 2);
 }
@@ -146,7 +146,7 @@ fn find_no_filters() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 5);
 }
@@ -156,7 +156,7 @@ fn find_eq_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -173,7 +173,7 @@ fn find_gt_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(FilterGroup {
             logical: LogicalOp::And,
@@ -206,7 +206,7 @@ fn find_isnull_filter() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(FilterGroup {
             logical: LogicalOp::And,
@@ -231,7 +231,7 @@ fn find_or_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(FilterGroup {
             logical: LogicalOp::Or,
@@ -264,7 +264,7 @@ fn find_sort_asc() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -286,7 +286,7 @@ fn find_sort_desc() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -309,7 +309,7 @@ fn find_skip_and_take() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -331,7 +331,7 @@ fn find_filter_sort_paginate() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![Sort {
@@ -354,7 +354,7 @@ fn find_with_projection() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -377,7 +377,7 @@ fn find_projection_includes_filter_columns() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -398,7 +398,7 @@ fn find_projection_includes_sort_columns() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         skip: None,
@@ -442,7 +442,7 @@ fn update_one_merge() {
     assert_eq!(result.modified, 1);
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("status").unwrap(), "rejected");
@@ -481,7 +481,7 @@ fn update_one_upsert() {
     assert!(result.upserted_id.is_some());
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "Upserted");
@@ -501,7 +501,7 @@ fn update_many_multiple() {
     assert_eq!(result.modified, 3);
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("archived".into()))),
         sort: vec![],
@@ -536,7 +536,7 @@ fn replace_one_full_replacement() {
     assert_eq!(result.modified, 1);
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "New Corp");
@@ -565,7 +565,7 @@ fn delete_one_removes_record() {
     assert_eq!(result.deleted, 1);
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 0);
 }
@@ -581,7 +581,7 @@ fn delete_many_removes_matching() {
     assert_eq!(result.deleted, 3);
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 2);
 }
@@ -593,7 +593,7 @@ fn count_all() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let count = txn.count(COLLECTION, None).unwrap();
     assert_eq!(count, 5);
 }
@@ -603,7 +603,7 @@ fn count_with_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let filter = eq_filter("status", QueryValue::String("active".into()));
     let count = txn.count(COLLECTION, Some(&filter)).unwrap();
     assert_eq!(count, 3);
@@ -629,7 +629,7 @@ fn create_and_use_index() {
     txn.create_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -655,7 +655,7 @@ fn drop_index() {
     txn.create_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let indexes = txn.list_indexes(COLLECTION).unwrap();
     assert_eq!(indexes, vec!["status"]);
 
@@ -663,7 +663,7 @@ fn drop_index() {
     txn.drop_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let indexes = txn.list_indexes(COLLECTION).unwrap();
     assert!(indexes.is_empty());
 }
@@ -681,7 +681,7 @@ fn list_collections() {
         .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let mut collections = txn.list_collections().unwrap();
     collections.sort();
     assert_eq!(collections, vec!["accounts", "contacts"]);
@@ -700,7 +700,7 @@ fn drop_collection() {
     txn.drop_collection(COLLECTION).unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 0);
     let collections = txn.list_collections().unwrap();
@@ -720,7 +720,7 @@ fn collection_isolation() {
         .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let contacts = txn.find("contacts", &no_filter_query()).unwrap();
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
@@ -752,7 +752,7 @@ fn index_maintained_on_insert() {
     txn.commit().unwrap();
 
     // Index scan should work
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -786,7 +786,7 @@ fn index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Old index value should not match
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -828,7 +828,7 @@ fn index_maintained_on_delete() {
     txn.commit().unwrap();
 
     // Index should be empty
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", QueryValue::String("active".into()))),
         sort: vec![],
@@ -862,7 +862,7 @@ fn nested_doc_write_and_read() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let results = txn.find("nested", &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     let record = &results[0];
@@ -889,7 +889,7 @@ fn dot_notation_filter_eq() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter(
             "address.city",
@@ -926,7 +926,7 @@ fn dot_notation_sort() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -964,7 +964,7 @@ fn dot_notation_projection() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1002,7 +1002,7 @@ fn dot_notation_projection_multiple_subfields() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1037,7 +1037,7 @@ fn dot_notation_isnull_missing_parent() {
         .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(FilterGroup {
             logical: LogicalOp::And,
@@ -1069,7 +1069,7 @@ fn dot_notation_deep_nesting() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter(
             "data.level1.level2.value",
@@ -1090,7 +1090,7 @@ fn projection_only_uses_selective_read() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1116,7 +1116,7 @@ fn find_by_id_returns_document() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let doc = txn.find_by_id(COLLECTION, "acct-1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
     assert_eq!(doc.get_str("name").unwrap(), "Acme Corp");
@@ -1128,7 +1128,7 @@ fn find_by_id_not_found() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let result = txn.find_by_id(COLLECTION, "nonexistent", None).unwrap();
     assert!(result.is_none());
 }
@@ -1137,7 +1137,7 @@ fn find_by_id_not_found() {
 fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let result = txn.find_by_id("no_such_collection", "id-1", None).unwrap();
     assert!(result.is_none());
 }
@@ -1147,7 +1147,7 @@ fn find_by_id_with_projection() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let txn = db.begin(true).unwrap();
+    let mut txn = db.begin(true).unwrap();
     let doc = txn
         .find_by_id(COLLECTION, "acct-1", Some(&["name", "status"]))
         .unwrap()

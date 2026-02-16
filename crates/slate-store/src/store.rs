@@ -23,10 +23,11 @@ pub trait Store {
 
 pub trait Transaction {
     // Reads
-    fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError>;
-    fn multi_get(&self, cf: &str, keys: &[&[u8]]) -> Result<Vec<Option<Box<[u8]>>>, StoreError>;
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError>;
+    fn multi_get(&mut self, cf: &str, keys: &[&[u8]])
+    -> Result<Vec<Option<Box<[u8]>>>, StoreError>;
     fn scan_prefix(
-        &self,
+        &mut self,
         cf: &str,
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>;

@@ -46,7 +46,7 @@ impl Catalog {
         Ok(())
     }
 
-    pub fn list_collections<T: Transaction>(&self, txn: &T) -> Result<Vec<String>, DbError> {
+    pub fn list_collections<T: Transaction>(&self, txn: &mut T) -> Result<Vec<String>, DbError> {
         let iter = txn.scan_prefix(SYS_CF, COL_PREFIX)?;
         let mut collections = Vec::new();
         for result in iter {
@@ -103,7 +103,7 @@ impl Catalog {
 
     pub fn list_indexes<T: Transaction>(
         &self,
-        txn: &T,
+        txn: &mut T,
         collection: &str,
     ) -> Result<Vec<String>, DbError> {
         let prefix = idx_collection_prefix(collection);

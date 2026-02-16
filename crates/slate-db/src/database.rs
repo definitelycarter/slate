@@ -66,7 +66,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
         // Index maintenance
-        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         for field in &indexed_fields {
             if let Some(value) = exec::get_path(&doc, field) {
                 let idx_key = encoding::index_key(field, value, &id);
@@ -85,7 +85,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ) -> Result<Vec<InsertResult>, DbError> {
         self.catalog.ensure_collection(&mut self.txn, collection)?;
 
-        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         let mut results = Vec::with_capacity(docs.len());
 
         for mut doc in docs {
@@ -115,10 +115,14 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Find documents matching a query (filter, sort, skip, take, projection).
     /// Returns an empty result set if the collection doesn't exist.
-    pub fn find(&self, collection: &str, query: &Query) -> Result<Vec<bson::Document>, DbError> {
-        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+    pub fn find(
+        &mut self,
+        collection: &str,
+        query: &Query,
+    ) -> Result<Vec<bson::Document>, DbError> {
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         let plan = planner::plan(collection, &indexed_fields, query);
-        match executor::execute(&self.txn, &plan) {
+        match executor::execute(&mut self.txn, &plan) {
             Ok(iter) => iter.collect(),
             Err(DbError::Store(ref e)) if e.to_string().contains("column family not found") => {
                 Ok(vec![])
@@ -129,7 +133,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Get a single document by `_id`. Direct key lookup — O(1).
     pub fn find_by_id(
-        &self,
+        &mut self,
         collection: &str,
         id: &str,
         columns: Option<&[&str]>,
@@ -155,7 +159,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Find the first document matching a query.
     pub fn find_one(
-        &self,
+        &mut self,
         collection: &str,
         query: &Query,
     ) -> Result<Option<bson::Document>, DbError> {
@@ -270,7 +274,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 .unwrap_or_default();
 
             let key = encoding::record_key(&id);
-            let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+            let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
             // Delete old index entries
             self.delete_index_entries(collection, &id, &matched_doc, &indexed_fields)?;
@@ -363,7 +367,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     // ── Count ───────────────────────────────────────────────────
 
     /// Count documents matching a filter.
-    pub fn count(&self, collection: &str, filter: Option<&FilterGroup>) -> Result<u64, DbError> {
+    pub fn count(
+        &mut self,
+        collection: &str,
+        filter: Option<&FilterGroup>,
+    ) -> Result<u64, DbError> {
         let query = Query {
             filter: filter.cloned(),
             sort: vec![],
@@ -424,15 +432,15 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     }
 
     /// List indexed fields for a collection.
-    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>, DbError> {
-        self.catalog.list_indexes(&self.txn, collection)
+    pub fn list_indexes(&mut self, collection: &str) -> Result<Vec<String>, DbError> {
+        self.catalog.list_indexes(&mut self.txn, collection)
     }
 
     // ── Collection operations ───────────────────────────────────
 
     /// List all known collection names.
-    pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
-        self.catalog.list_collections(&self.txn)
+    pub fn list_collections(&mut self) -> Result<Vec<String>, DbError> {
+        self.catalog.list_collections(&mut self.txn)
     }
 
     /// Drop a collection and all its data, indexes, and metadata.
@@ -488,7 +496,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         update: &bson::Document,
     ) -> Result<bool, DbError> {
         let key = encoding::record_key(id);
-        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
         let mut existing = match self.txn.get(collection, &key)? {
             Some(bytes) => bson::from_slice::<bson::Document>(&bytes)?,
@@ -550,7 +558,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         doc: &bson::Document,
     ) -> Result<(), DbError> {
         let key = encoding::record_key(id);
-        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
         // The doc from find() has _id but the stored doc doesn't, so we need
         // to read the stored doc for accurate index values

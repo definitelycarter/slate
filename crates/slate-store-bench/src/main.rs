@@ -130,7 +130,7 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
         let keys: Vec<Vec<u8>> = (0..BATCH_SIZE).map(|i| make_key(base + i)).collect();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
 
-        let txn = store.begin(true).unwrap();
+        let mut txn = store.begin(true).unwrap();
         let results = txn.multi_get(CF, &key_refs).unwrap();
 
         for (i, result) in results.into_iter().enumerate() {
@@ -153,7 +153,7 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
 
     // -- Scan phase: prefix scan a subset --
     let scan_start = Instant::now();
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let scan_count: usize = txn.scan_prefix(CF, b"d:rec:").unwrap().count();
     assert_eq!(scan_count, TOTAL_RECORDS, "scan returned wrong count");
     let scan_time = scan_start.elapsed();
@@ -225,7 +225,7 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
                     let key = make_key(id);
 
                     match store.begin(true) {
-                        Ok(txn) => match txn.get("stress", &key) {
+                        Ok(mut txn) => match txn.get("stress", &key) {
                             Ok(Some(data)) => {
                                 if verify_value(id, &data) {
                                     read_successes.fetch_add(1, Ordering::Relaxed);
@@ -311,7 +311,7 @@ fn test_rollback_integrity<S: Store>(store: &S, name: &str) {
     txn.rollback().unwrap();
 
     // Verify nothing changed
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert_eq!(
         &*txn.get("rollback", b"key1").unwrap().unwrap(),
         b"original"
@@ -344,7 +344,7 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
     txn.commit().unwrap();
 
     // Reader takes a snapshot
-    let reader = store.begin(true).unwrap();
+    let mut reader = store.begin(true).unwrap();
     assert_eq!(&*reader.get("isolation", b"key1").unwrap().unwrap(), b"v1");
 
     // Writer modifies data after reader started
@@ -358,7 +358,7 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
     assert!(reader.get("isolation", b"key2").unwrap().is_none());
 
     // New reader should see new data
-    let reader2 = store.begin(true).unwrap();
+    let mut reader2 = store.begin(true).unwrap();
     assert_eq!(&*reader2.get("isolation", b"key1").unwrap().unwrap(), b"v2");
     assert_eq!(
         &*reader2.get("isolation", b"key2").unwrap().unwrap(),
@@ -398,7 +398,7 @@ fn test_delete_range_integrity<S: Store>(store: &S, name: &str) {
         .unwrap();
 
     // Verify: 0-199 present, 200-799 gone, 800-999 present
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let mut present = 0;
     let mut absent = 0;
     for i in 0..count {

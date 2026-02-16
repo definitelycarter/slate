@@ -16,7 +16,7 @@ fn put_and_get() {
     txn.put(CF, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"value1");
 }
@@ -24,7 +24,7 @@ fn put_and_get() {
 #[test]
 fn get_missing_key_returns_none() {
     let (store, _dir) = temp_store();
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"nonexistent").unwrap();
     assert!(result.is_none());
 }
@@ -40,7 +40,7 @@ fn put_and_delete() {
     txn.delete(CF, b"key1").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"key1").unwrap();
     assert!(result.is_none());
 }
@@ -60,7 +60,7 @@ fn put_batch() {
     .unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert_eq!(
         &*txn.get(CF, b"accounts:1:email").unwrap().unwrap(),
         b"a@test.com"
@@ -85,7 +85,7 @@ fn scan_prefix_returns_matching_pairs() {
     txn.put(CF, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(CF, b"accounts:1:")
         .unwrap()
@@ -105,7 +105,7 @@ fn scan_prefix_no_matches() {
     txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(CF, b"contacts:")
         .unwrap()
@@ -125,7 +125,7 @@ fn scan_prefix_broader() {
     txn.put(CF, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(CF, b"accounts:")
         .unwrap()
@@ -169,7 +169,7 @@ fn overwrite_key() {
     txn.put(CF, b"key1", b"new").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"new");
 }
@@ -181,7 +181,7 @@ fn rollback_discards_writes() {
     txn.put(CF, b"key1", b"value1").unwrap();
     txn.rollback().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"key1").unwrap();
     assert!(result.is_none());
 }
@@ -198,7 +198,7 @@ fn rollback_does_not_affect_committed_data() {
     txn.delete(CF, b"key1").unwrap();
     txn.rollback().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert!(txn.get(CF, b"key1").unwrap().is_some());
     assert!(txn.get(CF, b"key2").unwrap().is_none());
 }
@@ -210,7 +210,7 @@ fn empty_value() {
     txn.put(CF, b"index:key", b"").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get(CF, b"index:key").unwrap().unwrap();
     assert_eq!(&*result, b"");
 }
@@ -227,7 +227,7 @@ fn create_and_use_cf() {
     txn.put("accounts", b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get("accounts", b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"value1");
 }
@@ -244,7 +244,7 @@ fn cf_isolation() {
     txn.put("cf_b", b"key1", b"value_b").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert_eq!(&*txn.get("cf_a", b"key1").unwrap().unwrap(), b"value_a");
     assert_eq!(&*txn.get("cf_b", b"key1").unwrap().unwrap(), b"value_b");
 }
@@ -254,7 +254,7 @@ fn get_on_missing_cf_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let store = RocksStore::open(dir.path()).unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get("nonexistent", b"key1");
     assert!(result.is_err());
 }
@@ -271,7 +271,7 @@ fn drop_cf_removes_data() {
 
     store.drop_cf("temp").unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get("temp", b"key1");
     assert!(result.is_err()); // CF no longer exists
 }
@@ -295,7 +295,7 @@ fn delete_range_clears_matching_keys() {
         .delete_range("data", b"b".to_vec()..b"d".to_vec())
         .unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert!(txn.get("data", b"a").unwrap().is_some());
     assert!(txn.get("data", b"b").unwrap().is_none());
     assert!(txn.get("data", b"c").unwrap().is_none());
@@ -317,7 +317,7 @@ fn delete_range_unbounded_clears_all() {
 
     store.delete_range("cache", ..).unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert!(txn.get("cache", b"x").unwrap().is_none());
     assert!(txn.get("cache", b"y").unwrap().is_none());
     assert!(txn.get("cache", b"z").unwrap().is_none());
@@ -340,7 +340,7 @@ fn delete_range_inclusive_end() {
         .delete_range("data", b"a".to_vec()..=b"b".to_vec())
         .unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     assert!(txn.get("data", b"a").unwrap().is_none());
     assert!(txn.get("data", b"b").unwrap().is_none());
     assert!(txn.get("data", b"c").unwrap().is_some());
@@ -360,7 +360,7 @@ fn cfs_persist_across_reopen() {
 
     // Reopen — CF and data should still be there
     let store = RocksStore::open(dir.path()).unwrap();
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let result = txn.get("persistent", b"key").unwrap().unwrap();
     assert_eq!(&*result, b"value");
 }
@@ -374,7 +374,7 @@ fn multi_get_returns_matching_values() {
     txn.put(CF, b"k3", b"v3").unwrap();
     txn.commit().unwrap();
 
-    let txn = store.begin(true).unwrap();
+    let mut txn = store.begin(true).unwrap();
     let keys: Vec<&[u8]> = vec![b"k1", b"k2", b"missing", b"k3"];
     let results = txn.multi_get(CF, &keys).unwrap();
     assert_eq!(results.len(), 4);

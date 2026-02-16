@@ -12,14 +12,14 @@ type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a
 
 /// Executes a query plan tree, returning a lazy document iterator.
 pub fn execute<'a, T: Transaction + 'a>(
-    txn: &'a T,
+    txn: &'a mut T,
     node: &'a PlanNode,
 ) -> Result<DocIter<'a>, DbError> {
     execute_node(txn, node)
 }
 
 fn execute_node<'a, T: Transaction + 'a>(
-    txn: &'a T,
+    txn: &'a mut T,
     node: &'a PlanNode,
 ) -> Result<DocIter<'a>, DbError> {
     match node {
@@ -115,7 +115,7 @@ fn materialize_doc(
 
 /// Scan all records in a partition. Key format: `d:{_id}`.
 fn execute_scan<'a, T: Transaction + 'a>(
-    txn: &'a T,
+    txn: &'a mut T,
     partition: &'a str,
     columns: Option<&'a [String]>,
 ) -> Result<DocIter<'a>, DbError> {
@@ -152,7 +152,7 @@ fn execute_scan<'a, T: Transaction + 'a>(
 
 /// Index scan — look up record IDs from the index, multi_get full records.
 fn execute_index_scan<'a, T: Transaction + 'a>(
-    txn: &'a T,
+    txn: &'a mut T,
     partition: &'a str,
     column: &'a str,
     value: &'a bson::Bson,

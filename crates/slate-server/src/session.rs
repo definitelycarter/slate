@@ -105,10 +105,10 @@ impl<S: Store> Session<S> {
 
     fn read<F>(&self, f: F) -> Response
     where
-        F: FnOnce(&slate_db::DatabaseTransaction<'_, S>) -> Result<Response, slate_db::DbError>,
+        F: FnOnce(&mut slate_db::DatabaseTransaction<'_, S>) -> Result<Response, slate_db::DbError>,
     {
         match self.db.begin(true) {
-            Ok(txn) => match f(&txn) {
+            Ok(mut txn) => match f(&mut txn) {
                 Ok(response) => response,
                 Err(e) => Response::Error(e.to_string()),
             },

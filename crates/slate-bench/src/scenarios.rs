@@ -87,7 +87,7 @@ pub fn bulk_insert<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) -
 
 pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) {
     let total_records = cfg.total_records();
-    let txn = db.begin(true).expect("begin failed");
+    let mut txn = db.begin(true).expect("begin failed");
     let query = Query {
         filter: None,
         sort: vec![],
@@ -173,7 +173,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 1. No filter
     results.push(bench("query: no filter (full scan)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: None,
             sort: vec![],
@@ -187,7 +187,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 2. Status filter (IndexScan — status is indexed)
     results.push(bench("query: status = 'active' (indexed)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -208,7 +208,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 3. Product recommendation filter
     results.push(bench("query: product_recommendation1 = 'ProductA'", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -229,7 +229,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 4. Combined filters: status AND rec1 AND rec2
     results.push(bench("query: status + rec1 + rec2 (AND)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -264,7 +264,7 @@ pub fn query_benchmarks<S: Store>(
     results.push(bench(
         "query: status='active' + sort contacts_count + skip/take",
         || {
-            let txn = db.begin(true).expect("begin failed");
+            let mut txn = db.begin(true).expect("begin failed");
             let query = Query {
                 filter: Some(FilterGroup {
                     logical: LogicalOp::And,
@@ -289,7 +289,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 6. Filter only (no sort)
     results.push(bench("query: status='active' (no sort)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -312,7 +312,7 @@ pub fn query_benchmarks<S: Store>(
     results.push(bench(
         "query: status='active' + sort contacts_count",
         || {
-            let txn = db.begin(true).expect("begin failed");
+            let mut txn = db.begin(true).expect("begin failed");
             let query = Query {
                 filter: Some(FilterGroup {
                     logical: LogicalOp::And,
@@ -337,7 +337,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 8. Filter with take(200) — no sort
     results.push(bench("query: status='active' take(200) (no sort)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -358,7 +358,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 9. Filter with take(200) — with sort
     results.push(bench("query: status='active' + sort + take(200)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -382,7 +382,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 10. IsNull filter on nullable field (~30% null)
     results.push(bench("query: last_contacted_at is null (~30%)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -403,7 +403,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 11. IsNull filter on nullable field (~50% null)
     results.push(bench("query: notes is null (~50%)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -424,7 +424,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 12. IsNull=false
     results.push(bench("query: last_contacted_at is not null (~70%)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -445,7 +445,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 13. Combined: status='active' AND notes is null
     results.push(bench("query: status='active' AND notes is null", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -473,7 +473,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 14. Point lookups (1000 find_by_id calls)
     results.push(bench("query: 1000 point lookups (find_by_id)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let mut found = 0;
         for i in (0..total_records).step_by(total_records / 1000) {
             let id = datagen::generate_record_id(_user, i);
@@ -490,7 +490,7 @@ pub fn query_benchmarks<S: Store>(
 
     // 15. Projection benchmark: fetch 2 of 8 columns
     results.push(bench("query: projection (name, status only)", || {
-        let txn = db.begin(true).expect("begin failed");
+        let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
             filter: None,
             sort: vec![],
@@ -540,7 +540,7 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
             let db = Arc::clone(&db);
             handles.push(thread::spawn(move || {
                 for _ in 0..5 {
-                    let txn = db.begin(true).expect("reader begin failed");
+                    let mut txn = db.begin(true).expect("reader begin failed");
                     let query = Query {
                         filter: Some(FilterGroup {
                             logical: LogicalOp::And,
@@ -574,7 +574,7 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
 
 pub fn verify_post_concurrency<S: Store>(db: &Database<S>, _user: usize, cfg: &BenchConfig) {
     let total_records = cfg.total_records();
-    let txn = db.begin(true).expect("begin failed");
+    let mut txn = db.begin(true).expect("begin failed");
     let query = Query {
         filter: None,
         sort: vec![],

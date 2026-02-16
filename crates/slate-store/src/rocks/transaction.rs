@@ -1,4 +1,9 @@
-use rocksdb::{Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use rocksdb::{
+    BoundColumnFamily, Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options,
+};
 
 use crate::error::StoreError;
 use crate::store::Transaction;
@@ -9,6 +14,7 @@ pub struct RocksTransaction<'db> {
     txn: Option<rocksdb::Transaction<'db, DB>>,
     db: &'db DB,
     read_only: bool,
+    cf_cache: HashMap<String, Arc<BoundColumnFamily<'db>>>,
 }
 
 impl<'db> RocksTransaction<'db> {
@@ -18,6 +24,7 @@ impl<'db> RocksTransaction<'db> {
             txn: Some(txn),
             db,
             read_only,
+            cf_cache: HashMap::new(),
         })
     }
 
@@ -31,14 +38,23 @@ impl<'db> RocksTransaction<'db> {
         }
         Ok(())
     }
-}
 
-impl<'db> Transaction for RocksTransaction<'db> {
-    fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError> {
-        let cf_handle = self
+    fn cf_handle(&mut self, cf: &str) -> Result<Arc<BoundColumnFamily<'db>>, StoreError> {
+        if let Some(handle) = self.cf_cache.get(cf) {
+            return Ok(Arc::clone(handle));
+        }
+        let handle = self
             .db
             .cf_handle(cf)
             .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        self.cf_cache.insert(cf.to_string(), Arc::clone(&handle));
+        Ok(handle)
+    }
+}
+
+impl<'db> Transaction for RocksTransaction<'db> {
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError> {
+        let cf_handle = self.cf_handle(cf)?;
         let data = self
             .txn()?
             .get_cf(&cf_handle, key)
@@ -46,11 +62,12 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(data.map(|v| v.into_boxed_slice()))
     }
 
-    fn multi_get(&self, cf: &str, keys: &[&[u8]]) -> Result<Vec<Option<Box<[u8]>>>, StoreError> {
-        let cf_handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+    fn multi_get(
+        &mut self,
+        cf: &str,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Box<[u8]>>>, StoreError> {
+        let cf_handle = self.cf_handle(cf)?;
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf_handle, *k)).collect();
         let results = txn.multi_get_cf(cf_keys);
@@ -64,15 +81,12 @@ impl<'db> Transaction for RocksTransaction<'db> {
     }
 
     fn scan_prefix(
-        &self,
+        &mut self,
         cf: &str,
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>
     {
-        let cf_handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        let cf_handle = self.cf_handle(cf)?;
         let prefix_owned = prefix.to_vec();
         let iter = self
             .txn()?
@@ -80,7 +94,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),
-                Err(_) => true, // propagate errors
+                Err(_) => true,
             })
             .map(|item| {
                 item.map(|(k, v)| (k, v))
@@ -91,10 +105,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
 
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        let cf_handle = self.cf_handle(cf)?;
         self.txn()?
             .put_cf(&cf_handle, key, value)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
@@ -103,10 +114,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
 
     fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        let cf_handle = self.cf_handle(cf)?;
         let txn = self.txn()?;
         for (key, value) in entries {
             txn.put_cf(&cf_handle, key, value)
@@ -117,10 +125,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
 
     fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self
-            .db
-            .cf_handle(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        let cf_handle = self.cf_handle(cf)?;
         self.txn()?
             .delete_cf(&cf_handle, key)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
@@ -134,6 +139,10 @@ impl<'db> Transaction for RocksTransaction<'db> {
             self.db
                 .create_cf(name, &opts)
                 .map_err(|e| StoreError::Storage(e.to_string()))?;
+        }
+        // Pre-warm cache for the newly created CF
+        if let Some(handle) = self.db.cf_handle(name) {
+            self.cf_cache.insert(name.to_string(), handle);
         }
         Ok(())
     }
