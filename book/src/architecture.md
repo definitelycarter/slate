@@ -29,55 +29,41 @@ slate/
 
 ### Overview
 
-The store is a dumb, schema-unaware key-value storage layer. It stores and retrieves `Record`s within transactions. It knows nothing about datasources, users, schemas, or query optimization — those are higher-level concerns handled by `slate-db`.
-
-### Record Model
-
-Records have a string ID and a dynamic set of fields. Field values are represented as a `Value` enum supporting multiple types including nested structures. Absent fields are treated as null — there is no explicit `Null` variant.
-
-```rust
-pub struct Record {
-    pub id: String,
-    pub fields: HashMap<String, Value>,
-}
-
-pub enum Value {
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Date(i64),
-    List(Vec<Value>),
-    Map(HashMap<String, Value>),
-}
-```
+The store is a dumb, schema-unaware key-value storage layer. It stores and retrieves raw bytes within column-family-scoped transactions. It knows nothing about records, datasources, users, schemas, or query optimization — those are higher-level concerns handled by `slate-db`.
 
 ### Store Trait
 
-The `Store` trait provides a minimal interface: begin a transaction (read-write or read-only). Uses a GAT for the transaction lifetime.
+The `Store` trait provides column family management, range deletion, and transaction creation. Uses a GAT for the transaction lifetime.
 
 ```rust
 pub trait Store {
     type Txn<'a>: Transaction where Self: 'a;
 
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, StoreError>;
+    fn create_cf(&self, name: &str) -> Result<(), StoreError>;
+    fn drop_cf(&self, name: &str) -> Result<(), StoreError>;
+    fn delete_range(&self, cf: &str, range: impl RangeBounds<Vec<u8>>) -> Result<(), StoreError>;
 }
 ```
 
 ### Transaction Trait
 
-All operations go through a transaction. Read-only transactions return errors on write operations (enforced at runtime).
+All read/write operations go through a transaction. Read-only transactions return errors on write operations (enforced at runtime). Everything is raw bytes — serialization is the caller's responsibility.
 
 ```rust
 pub trait Transaction {
-    type Iter: Iterator<Item = Result<Record, StoreError>>;
+    // Reads
+    fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError>;
+    fn multi_get(&self, cf: &str, keys: &[&[u8]]) -> Result<Vec<Option<Box<[u8]>>>, StoreError>;
+    fn scan_prefix(&self, cf: &str, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>;
 
-    fn get_by_id(&self, id: &str) -> Result<Option<Record>, StoreError>;
-    fn scan(&self) -> Result<Self::Iter, StoreError>;
+    // Writes
+    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
+    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
+    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError>;
 
-    fn insert(&mut self, record: Record) -> Result<(), StoreError>;
-    fn delete(&mut self, id: &str) -> Result<(), StoreError>;
-
+    // Lifecycle
     fn commit(self) -> Result<(), StoreError>;
     fn rollback(self) -> Result<(), StoreError>;
 }
@@ -177,7 +163,28 @@ pub enum QueryValue {
 
 ### Overview
 
-The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management and query execution.
+The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and the record model. This is where raw bytes become typed data — `slate-db` owns serialization (bincode) and the `Record`/`Value` types.
+
+### Record Model
+
+Records have a string ID and a dynamic set of fields. Field values are represented as a `Value` enum supporting multiple types including nested structures. Absent fields are treated as null — there is no explicit `Null` variant.
+
+```rust
+pub struct Record {
+    pub id: String,
+    pub fields: HashMap<String, Value>,
+}
+
+pub enum Value {
+    String(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Date(i64),
+    List(Vec<Value>),
+    Map(HashMap<String, Value>),
+}
+```
 
 ### Database and Transactions
 
