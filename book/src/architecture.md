@@ -123,6 +123,7 @@ pub struct Query {
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
+    pub columns: Option<Vec<String>>,  // column projection
 }
 ```
 
@@ -163,16 +164,20 @@ pub enum QueryValue {
 
 ### Overview
 
-The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and the record model. This is where raw bytes become typed data — `slate-db` owns serialization (bincode) and the `Record`/`Value` types.
+The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and the record/cell model. This is where raw bytes become typed data — `slate-db` owns serialization (bincode) and the `Record`/`Value`/`Cell` types.
 
-### Record Model
+### Record and Cell Model
 
-Records have a string ID and a dynamic set of fields. Field values are represented as a `Value` enum supporting multiple types including nested structures. Absent fields are treated as null — there is no explicit `Null` variant.
+Records have a string ID and a map of cells. Each `Cell` wraps a `Value`. Field values are represented as a `Value` enum supporting multiple types including nested structures.
 
 ```rust
 pub struct Record {
     pub id: String,
-    pub fields: HashMap<String, Value>,
+    pub cells: HashMap<String, Cell>,
+}
+
+pub struct Cell {
+    pub value: Value,
 }
 
 pub enum Value {
@@ -186,32 +191,56 @@ pub enum Value {
 }
 ```
 
+Writes use a cell-based model for partial updates — only the specified columns are written, existing columns are preserved via read-modify-write:
+
+```rust
+pub struct CellWrite {
+    pub column: String,
+    pub value: Value,
+}
+```
+
+Internally, each record is stored as a single key-value pair. The stored form (`RecordValue`) includes per-cell and per-record TTL expiry timestamps, computed from the datasource field configuration.
+
 ### Database and Transactions
 
-The `Database` struct owns a store and provides a `begin()` method that returns a `DatabaseTransaction`. All catalog and data operations go through the transaction:
+The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All catalog and data operations go through the transaction:
 
 ```rust
 let db = Database::new(store);
 
 let mut txn = db.begin(false)?;
 txn.save_datasource(&datasource)?;
-txn.insert(record)?;
-txn.insert_batch(records)?;
+txn.write_record("ds1", "rec-1", vec![
+    CellWrite { column: "name".into(), value: Value::String("Alice".into()) },
+])?;
+txn.write_batch("ds1", vec![("rec-2".into(), cells), ...])?;
+txn.delete_record("ds1", "rec-1")?;
 txn.commit()?;
 
 let txn = db.begin(true)?;
-let results = txn.query(&query)?;
+let record = txn.get_by_id("ds1", "rec-1", None)?;           // all columns
+let record = txn.get_by_id("ds1", "rec-1", Some(&["name"]))?; // projection
+let results = txn.query("ds1", &query)?;
 ```
 
 ### Datasource Catalog
 
-The `Catalog` is a unit struct owned by `Database`. It stores datasource definitions as records in the same store, separated by a key prefix (`__ds__`). Catalog methods take a transaction reference — no separate store needed.
+The `Catalog` is a unit struct owned by `Database`. It stores datasource definitions in the `_sys` column family with a `__ds__:` key prefix. Catalog methods take a transaction reference.
 
 ```rust
 pub struct Datasource {
     pub id: String,
     pub name: String,
     pub fields: Vec<FieldDef>,
+    pub partition: String,  // column family name for this datasource's data
+}
+
+pub struct FieldDef {
+    pub name: String,
+    pub field_type: FieldType,
+    pub ttl_seconds: Option<i64>,  // per-field TTL
+    pub indexed: bool,             // maintain index on writes
 }
 
 pub enum FieldType {
@@ -221,22 +250,35 @@ pub enum FieldType {
 }
 ```
 
-### Query Execution (Volcano/Iterator Model)
+Each datasource gets its own column family (`partition`). The catalog itself lives in the shared `_sys` column family.
 
-Query execution uses a streaming iterator pipeline inspired by the Volcano model:
+### Query Execution (Planner + Volcano Iterator)
+
+Query execution has two phases: planning and execution.
+
+**Planning** builds a tree of `PlanNode`s:
 
 ```
-RocksDB scan (streaming iterator)
-  → FilterIterator (streaming, only passes matching records)
-    → Sort (collects filtered results only, if needed)
-      → Skip/Take (streaming on sorted or filtered results)
+Projection (optional column selection)
+  → Limit (skip/take)
+    → Sort (collects if needed)
+      → Filter (streaming residual filters)
+        → Scan or IndexScan (base operation)
 ```
+
+**Index optimization:** For top-level AND groups, the planner looks for `Eq` conditions on indexed columns and rewrites them as `IndexScan` nodes. The consumed condition is removed from the filter, and remaining conditions become a residual `Filter` node. OR groups cannot use indexes and always fall back to full scan.
+
+**Execution** is lazy/streaming where possible:
+- `Scan` / `IndexScan` yield records one at a time
+- `Filter` passes through matching records (streaming)
+- `Sort` materializes the filtered set (necessary for ordering)
+- `Limit` applies skip/take (streaming)
+- `Projection` strips unneeded columns
 
 Key properties:
-- **Filters are pushed down** — applied during scan, not after collecting all records.
-- **No sort needed** — filter + skip + take are fully streaming. Only matching records are materialized.
-- **Sort needed** — only the filtered set is collected into memory for sorting.
-- **Errors propagate** — scan and deserialization errors are not silently swallowed.
+- **Filters are pushed down** — applied during scan, not after collecting all records
+- **Index pushdown** — indexed `Eq` conditions narrow the scan to matching keys
+- **Errors propagate** — scan and deserialization errors are not silently swallowed
 
 ### Future: Arrow Materialized Views
 
@@ -246,20 +288,16 @@ Arrow-based materialized views may be added later as a query optimization. They 
 - Use double-buffer swapping for concurrent read access
 - Be gated behind a per-partition mutex to prevent duplicate materialization
 
-For now, queries scan directly from RocksDB through the iterator pipeline.
-
-### Partitioning (Future)
-
-The db layer will manage partitioning — grouping data by a partition key. The store has no concept of partitions. The db layer will decide how to compose partition keys from domain concepts (user, datasource, etc.).
+For now, queries scan directly from the store through the iterator pipeline.
 
 ## TCP Interface (`slate-server` + `slate-client`)
 
 ### Overview
 
-Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses bincode serialization with length-prefixed framing — fast, compact, and Rust-native. This enables architectures where the REST API (or other consumers) run as separate services.
+Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization with length-prefixed framing — compact, cross-language, and serde-compatible. This enables architectures where the REST API (or other consumers) run as separate services.
 
 ```
-┌──────────────┐         TCP (bincode)        ┌──────────────────┐
+┌──────────────┐       TCP (MessagePack)      ┌──────────────────┐
 │ slate-client │  ◄──────────────────────────► │  slate-server    │
 │ Client       │                               │  thread-per-conn │
 └──────────────┘                               │  Session         │
@@ -270,15 +308,17 @@ Slate can run as a standalone TCP server, allowing clients in separate processes
 
 ### Wire Protocol
 
-Messages are length-prefixed: a 4-byte big-endian length followed by a bincode-serialized payload. All types on the wire implement `serde::Serialize + Deserialize`.
+Messages are length-prefixed: a 4-byte big-endian length followed by a MessagePack-serialized payload (via `rmp_serde`). All types on the wire implement `serde::Serialize + Deserialize`.
 
 ```rust
 enum Request {
-    Insert(Record),
-    InsertBatch(Vec<Record>),
-    Delete(String),
-    GetById(String),
-    Query(Query),
+    // Data (all scoped to a datasource)
+    WriteCells { datasource_id: String, record_id: String, cells: Vec<CellWrite> },
+    WriteBatch { datasource_id: String, writes: Vec<(String, Vec<CellWrite>)> },
+    DeleteRecord { datasource_id: String, record_id: String },
+    GetById { datasource_id: String, record_id: String, columns: Option<Vec<String>> },
+    Query { datasource_id: String, query: Query },
+    // Catalog (global)
     SaveDatasource(Datasource),
     GetDatasource(String),
     ListDatasources,
@@ -297,7 +337,7 @@ enum Response {
 
 ### Server
 
-The server binds to a TCP address and spawns a thread per client connection. Each connection gets a `Session` that holds an `Arc<Database<RocksStore>>`. Every request is auto-committed — the session opens a transaction, performs the operation, and commits. No multi-request transactions over the wire (keeps the protocol stateless).
+The server binds to a TCP address and spawns a thread per client connection. Each connection gets a `Session` that holds an `Arc<Database<S>>`. Every request is auto-committed — the session opens a transaction, performs the operation, and commits. No multi-request transactions over the wire (keeps the protocol stateless).
 
 ```rust
 let server = Server::new(db, "127.0.0.1:9600");
@@ -306,17 +346,18 @@ server.serve(); // blocks, listens for connections
 
 ### Client
 
-The client opens a TCP connection and provides methods that mirror the database API.
+The client opens a TCP connection and provides methods that mirror the database API. All data operations are scoped to a datasource.
 
 ```rust
 let mut client = Client::connect("127.0.0.1:9600")?;
 
-// Data operations
-client.insert(record)?;
-client.insert_batch(records)?;
-client.get_by_id("acct-1")?;     // -> Option<Record>
-client.delete("acct-1")?;
-client.query(&query)?;            // -> Vec<Record>
+// Data operations (scoped to datasource)
+client.write_cells("ds1", "rec-1", vec![CellWrite { ... }])?;
+client.write_batch("ds1", vec![("rec-2".into(), cells)])?;
+client.get_by_id("ds1", "rec-1", None)?;          // -> Option<Record>
+client.get_by_id("ds1", "rec-1", Some(&["name"]))?; // with projection
+client.delete_record("ds1", "rec-1")?;
+client.query("ds1", &query)?;                      // -> Vec<Record>
 
 // Catalog operations
 client.save_datasource(&ds)?;
