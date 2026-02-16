@@ -1,18 +1,23 @@
 use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort};
 
 use crate::datasource::Datasource;
-use crate::record::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
     /// Full scan — yields all record IDs under a prefix.
-    Scan { partition: String, prefix: String },
+    /// `columns` limits materialization to only these top-level keys (None = all).
+    Scan {
+        partition: String,
+        prefix: String,
+        columns: Option<Vec<String>>,
+    },
 
     /// Index lookup — yields record IDs matching a value from the index.
     IndexScan {
         partition: String,
         column: String,
-        value: Value,
+        value: bson::Bson,
+        columns: Option<Vec<String>>,
     },
 
     /// Read filter columns per record, evaluate predicate, skip non-matching.
@@ -51,14 +56,21 @@ pub fn plan(datasource: &Datasource, query: &Query) -> PlanNode {
     let partition = datasource.partition.clone();
     let prefix = format!("{}:", datasource.id);
 
+    // Compute the set of top-level keys the scan must materialize.
+    // If projection is specified, we only need: projection ∪ filter ∪ sort columns
+    // (mapped to top-level keys for dot-notation paths).
+    // If no projection, None means materialize everything.
+    let scan_columns = compute_scan_columns(query);
+
     // Step 1: Try to extract an indexed Eq condition from the filter
     let (input, residual_filter) = match &query.filter {
-        Some(group) => match try_index_scan(datasource, group) {
+        Some(group) => match try_index_scan(datasource, group, scan_columns.clone()) {
             Some((index_node, residual)) => (index_node, residual),
             None => (
                 PlanNode::Scan {
                     partition: partition.clone(),
                     prefix,
+                    columns: scan_columns,
                 },
                 Some(group.clone()),
             ),
@@ -67,6 +79,7 @@ pub fn plan(datasource: &Datasource, query: &Query) -> PlanNode {
             PlanNode::Scan {
                 partition: partition.clone(),
                 prefix,
+                columns: scan_columns,
             },
             None,
         ),
@@ -114,6 +127,57 @@ pub fn plan(datasource: &Datasource, query: &Query) -> PlanNode {
     node
 }
 
+/// Compute the top-level keys that scan nodes must materialize.
+/// Returns None if no projection is specified (materialize everything).
+fn compute_scan_columns(query: &Query) -> Option<Vec<String>> {
+    let proj = query.columns.as_ref()?;
+
+    let mut keys: Vec<String> = Vec::new();
+
+    // Projection columns (top-level key for dot paths)
+    for col in proj {
+        let top = top_level_key(col);
+        if !keys.contains(&top.to_string()) {
+            keys.push(top.to_string());
+        }
+    }
+
+    // Filter columns
+    if let Some(group) = &query.filter {
+        collect_filter_columns(group, &mut keys);
+    }
+
+    // Sort columns
+    for sort in &query.sort {
+        let top = top_level_key(&sort.field);
+        if !keys.contains(&top.to_string()) {
+            keys.push(top.to_string());
+        }
+    }
+
+    Some(keys)
+}
+
+/// Extract top-level key from a potentially dotted path.
+fn top_level_key(path: &str) -> &str {
+    path.split('.').next().unwrap_or(path)
+}
+
+/// Collect all field names referenced in a filter group (as top-level keys).
+fn collect_filter_columns(group: &FilterGroup, out: &mut Vec<String>) {
+    for child in &group.children {
+        match child {
+            FilterNode::Condition(filter) => {
+                let top = top_level_key(&filter.field).to_string();
+                if !out.contains(&top) {
+                    out.push(top);
+                }
+            }
+            FilterNode::Group(sub) => collect_filter_columns(sub, out),
+        }
+    }
+}
+
 /// Try to extract an indexed Eq condition from a top-level AND group.
 ///
 /// Returns `Some((IndexScan node, residual filter))` if an indexed Eq
@@ -124,6 +188,7 @@ pub fn plan(datasource: &Datasource, query: &Query) -> PlanNode {
 fn try_index_scan(
     datasource: &Datasource,
     group: &FilterGroup,
+    scan_columns: Option<Vec<String>>,
 ) -> Option<(PlanNode, Option<FilterGroup>)> {
     if group.logical != LogicalOp::And {
         return None;
@@ -149,7 +214,8 @@ fn try_index_scan(
     let index_node = PlanNode::IndexScan {
         partition: datasource.partition.clone(),
         column: filter.field.clone(),
-        value: query_value_to_value(&filter.value),
+        value: query_value_to_bson(&filter.value),
+        columns: scan_columns,
     };
 
     // Build residual: all children except the one we consumed
@@ -180,14 +246,16 @@ fn is_indexed(datasource: &Datasource, field: &str) -> bool {
         .any(|f| f.name == field && f.indexed)
 }
 
-fn query_value_to_value(qv: &slate_query::QueryValue) -> Value {
+fn query_value_to_bson(qv: &slate_query::QueryValue) -> bson::Bson {
     match qv {
-        slate_query::QueryValue::String(s) => Value::String(s.clone()),
-        slate_query::QueryValue::Int(i) => Value::Int(*i),
-        slate_query::QueryValue::Float(f) => Value::Float(*f),
-        slate_query::QueryValue::Bool(b) => Value::Bool(*b),
-        slate_query::QueryValue::Date(d) => Value::Date(*d),
-        slate_query::QueryValue::Null => Value::Bool(false),
+        slate_query::QueryValue::String(s) => bson::Bson::String(s.clone()),
+        slate_query::QueryValue::Int(i) => bson::Bson::Int64(*i),
+        slate_query::QueryValue::Float(f) => bson::Bson::Double(*f),
+        slate_query::QueryValue::Bool(b) => bson::Bson::Boolean(*b),
+        slate_query::QueryValue::Date(d) => {
+            bson::Bson::DateTime(bson::DateTime::from_millis(*d * 1000))
+        }
+        slate_query::QueryValue::Null => bson::Bson::Null,
     }
 }
 
@@ -195,6 +263,7 @@ fn query_value_to_value(qv: &slate_query::QueryValue) -> Value {
 mod tests {
     use super::*;
     use crate::datasource::{FieldDef, FieldType};
+    use bson::Bson;
     use slate_query::{Filter, QueryValue, SortDirection};
 
     fn test_datasource(indexed_fields: &[&str]) -> Datasource {
@@ -205,19 +274,16 @@ mod tests {
                 FieldDef {
                     name: "name".into(),
                     field_type: FieldType::String,
-                    ttl_seconds: None,
                     indexed: indexed_fields.contains(&"name"),
                 },
                 FieldDef {
                     name: "status".into(),
                     field_type: FieldType::String,
-                    ttl_seconds: None,
                     indexed: indexed_fields.contains(&"status"),
                 },
                 FieldDef {
                     name: "score".into(),
                     field_type: FieldType::Int,
-                    ttl_seconds: None,
                     indexed: indexed_fields.contains(&"score"),
                 },
             ],
@@ -256,6 +322,7 @@ mod tests {
             PlanNode::Scan {
                 partition: "p1".into(),
                 prefix: "ds1:".into(),
+                columns: None,
             }
         );
     }
@@ -287,7 +354,8 @@ mod tests {
             PlanNode::IndexScan {
                 partition: "p1".into(),
                 column: "status".into(),
-                value: Value::String("active".into()),
+                value: Bson::String("active".into()),
+                columns: None,
             }
         );
     }

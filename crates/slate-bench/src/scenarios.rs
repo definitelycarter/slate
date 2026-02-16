@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use slate_db::{Database, Datasource, FieldDef, FieldType, Value};
+use slate_db::{Database, Datasource, FieldDef, FieldType};
 use slate_query::*;
 use slate_store::Store;
 
@@ -43,49 +43,49 @@ pub fn make_datasource() -> Datasource {
             FieldDef {
                 name: "name".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "status".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: true,
             },
             FieldDef {
                 name: "contacts_count".into(),
                 field_type: FieldType::Int,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "product_recommendation1".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "product_recommendation2".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "product_recommendation3".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "last_contacted_at".into(),
                 field_type: FieldType::Date,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "notes".into(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
         ],
@@ -160,7 +160,11 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
     let user_prefix = format!("user{user}-");
     let user_records: Vec<_> = results
         .iter()
-        .filter(|r| r.id.starts_with(&user_prefix))
+        .filter(|r| {
+            r.get_str("_id")
+                .map(|id| id.starts_with(&user_prefix))
+                .unwrap_or(false)
+        })
         .collect();
 
     assert_eq!(
@@ -176,34 +180,31 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
     let mut null_notes = 0;
 
     for record in &user_records {
-        assert!(record.cells.contains_key("name"), "missing 'name' field");
+        assert!(record.contains_key("name"), "missing 'name' field");
+        assert!(record.contains_key("status"), "missing 'status' field");
         assert!(
-            record.cells.contains_key("status"),
-            "missing 'status' field"
-        );
-        assert!(
-            record.cells.contains_key("contacts_count"),
+            record.contains_key("contacts_count"),
             "missing 'contacts_count' field"
         );
         assert!(
-            record.cells.contains_key("product_recommendation1"),
+            record.contains_key("product_recommendation1"),
             "missing 'product_recommendation1' field"
         );
 
-        match record.cells.get("status").map(|c| &c.value) {
-            Some(Value::String(s)) => {
+        match record.get_str("status") {
+            Ok(s) => {
                 assert!(s == "active" || s == "rejected", "unexpected status: {s}");
             }
-            other => panic!("status has wrong type: {other:?}"),
+            Err(e) => panic!("status has wrong type: {e}"),
         }
 
-        if record.cells.contains_key("last_contacted_at") {
+        if record.contains_key("last_contacted_at") {
             has_last_contacted += 1;
         } else {
             null_last_contacted += 1;
         }
 
-        if record.cells.contains_key("notes") {
+        if record.contains_key("notes") {
             has_notes += 1;
         } else {
             null_notes += 1;

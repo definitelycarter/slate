@@ -9,6 +9,7 @@ pub enum DbError {
     DatasourceNotFound(String),
     InvalidQuery(String),
     InvalidKey(String),
+    InvalidBson(String),
     Serialization(String),
 }
 
@@ -20,6 +21,7 @@ impl fmt::Display for DbError {
             DbError::DatasourceNotFound(id) => write!(f, "datasource not found: {id}"),
             DbError::InvalidQuery(msg) => write!(f, "invalid query: {msg}"),
             DbError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
+            DbError::InvalidBson(msg) => write!(f, "invalid bson: {msg}"),
             DbError::Serialization(msg) => write!(f, "serialization error: {msg}"),
         }
     }
@@ -35,6 +37,24 @@ impl From<StoreError> for DbError {
 
 impl From<bincode::Error> for DbError {
     fn from(e: bincode::Error) -> Self {
+        DbError::Serialization(e.to_string())
+    }
+}
+
+impl From<bson::ser::Error> for DbError {
+    fn from(e: bson::ser::Error) -> Self {
+        DbError::Serialization(e.to_string())
+    }
+}
+
+impl From<bson::de::Error> for DbError {
+    fn from(e: bson::de::Error) -> Self {
+        DbError::Serialization(e.to_string())
+    }
+}
+
+impl From<bson::raw::Error> for DbError {
+    fn from(e: bson::raw::Error) -> Self {
         DbError::Serialization(e.to_string())
     }
 }

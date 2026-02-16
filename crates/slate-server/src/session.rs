@@ -16,12 +16,12 @@ impl Session {
 
     pub fn handle(&self, request: Request) -> Response {
         match request {
-            Request::WriteCells {
+            Request::WriteRecord {
                 datasource_id,
                 record_id,
-                cells,
+                doc,
             } => self.write(|txn| {
-                txn.write_record(&datasource_id, &record_id, cells)?;
+                txn.write_record(&datasource_id, &record_id, doc)?;
                 Ok(Response::Ok)
             }),
             Request::WriteBatch {

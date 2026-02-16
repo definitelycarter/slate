@@ -1,5 +1,4 @@
 mod catalog;
-mod cell;
 mod database;
 mod datasource;
 mod encoding;
@@ -9,8 +8,8 @@ mod executor;
 mod planner;
 mod record;
 
-pub use cell::{Cell, CellWrite};
+pub use bson::{Bson, Document};
 pub use database::{Database, DatabaseTransaction};
 pub use datasource::{Datasource, FieldDef, FieldType};
 pub use error::DbError;
-pub use record::{Record, Value};
+pub use record::{validate_bson, validate_document};

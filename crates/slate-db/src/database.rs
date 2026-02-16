@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 
+use bson::Bson;
 use slate_query::Query;
 use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
-use crate::cell::{Cell, CellWrite, RecordValue, StoredCell};
 use crate::datasource::Datasource;
 use crate::encoding;
 use crate::error::DbError;
+use crate::exec;
 use crate::executor;
 use crate::planner;
-use crate::record::{Record, Value};
+use crate::record;
 
 const SYS_CF: &str = "_sys";
 const ID_COLUMN: &str = "_id";
@@ -78,97 +79,52 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         format!("{datasource_id}:{record_id}")
     }
 
-    /// Deduplicate cells: last write per column wins.
-    fn dedup_cells(cells: Vec<CellWrite>) -> Vec<CellWrite> {
-        let mut best: HashMap<String, CellWrite> = HashMap::new();
-        for cell in cells {
-            best.insert(cell.column.clone(), cell);
-        }
-        best.into_values().collect()
-    }
-
-    /// Compute expire_at for a cell based on the datasource field TTL config.
-    fn compute_expire_at(ds: &Datasource, column: &str) -> Option<i64> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        ds.fields
-            .iter()
-            .find(|f| f.name == column)
-            .and_then(|f| f.ttl_seconds)
-            .map(|ttl| now + ttl)
-    }
-
     // ── Write operations ────────────────────────────────────────────
 
-    /// Write cells for a record. Uses read-modify-write to merge with existing data.
-    /// Auto-sets record-level expire_at from _id field TTL.
+    /// Write a document for a record. Uses read-modify-write to merge with existing data.
     pub fn write_record(
         &mut self,
         datasource_id: &str,
         record_id: &str,
-        cells: Vec<CellWrite>,
+        doc: bson::Document,
     ) -> Result<(), DbError> {
+        record::validate_document(&doc)?;
         let ds = self.require_datasource(datasource_id)?;
         let full_id = Self::full_record_id(datasource_id, record_id);
         let key = encoding::record_key(&full_id);
 
-        let cells = Self::dedup_cells(cells);
-
         // Read existing record for merge (partial writes)
-        let mut record_value = match self.txn.get(&ds.partition, &key)? {
-            Some(bytes) => bincode::deserialize(&bytes)?,
-            None => RecordValue {
-                expire_at: None,
-                cells: HashMap::new(),
-            },
+        let mut existing = match self.txn.get(&ds.partition, &key)? {
+            Some(bytes) => bson::from_slice::<bson::Document>(&bytes)?,
+            None => bson::Document::new(),
         };
 
         // Track old indexed values for cleanup
-        let old_indexed: HashMap<String, Value> = ds
+        let old_indexed: HashMap<String, Bson> = ds
             .fields
             .iter()
             .filter(|f| f.indexed)
-            .filter_map(|f| {
-                record_value
-                    .cells
-                    .get(&f.name)
-                    .map(|sc| (f.name.clone(), sc.value.clone()))
-            })
+            .filter_map(|f| exec::get_path(&existing, &f.name).map(|v| (f.name.clone(), v.clone())))
             .collect();
 
-        // Merge new cells
-        for cell in &cells {
-            if cell.column == ID_COLUMN {
-                record_value.expire_at = Self::compute_expire_at(&ds, ID_COLUMN);
+        // Merge new fields
+        for (column, value) in &doc {
+            if column == ID_COLUMN {
                 continue;
             }
-            let expire_at = Self::compute_expire_at(&ds, &cell.column);
-            record_value.cells.insert(
-                cell.column.clone(),
-                StoredCell {
-                    value: cell.value.clone(),
-                    expire_at,
-                },
-            );
+            existing.insert(column.clone(), value.clone());
         }
 
-        // Auto-set record expire_at if no _id was explicitly written
-        if !cells.iter().any(|c| c.column == ID_COLUMN) && record_value.expire_at.is_none() {
-            record_value.expire_at = Self::compute_expire_at(&ds, ID_COLUMN);
-        }
-
-        // Write the single record key
+        // Write raw BSON bytes
         self.txn
-            .put(&ds.partition, &key, &bincode::serialize(&record_value)?)?;
+            .put(&ds.partition, &key, &bson::to_vec(&existing)?)?;
 
         // Index maintenance
         for field in &ds.fields {
             if !field.indexed {
                 continue;
             }
-            let new_value = record_value.cells.get(&field.name).map(|sc| &sc.value);
+            let new_value = exec::get_path(&existing, &field.name);
             let old_value = old_indexed.get(&field.name);
 
             // Delete old index entry if value changed
@@ -193,9 +149,14 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn write_batch(
         &mut self,
         datasource_id: &str,
-        writes: Vec<(String, Vec<CellWrite>)>,
+        writes: Vec<(String, bson::Document)>,
     ) -> Result<(), DbError> {
         let ds = self.require_datasource(datasource_id)?;
+
+        // Validate all documents first
+        for (_, doc) in &writes {
+            record::validate_document(doc)?;
+        }
 
         // Batch read existing records
         let full_ids: Vec<String> = writes
@@ -204,64 +165,44 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             .collect();
         let keys: Vec<Vec<u8>> = full_ids.iter().map(|id| encoding::record_key(id)).collect();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-        let existing = self.txn.multi_get(&ds.partition, &key_refs)?;
+        let existing_records = self.txn.multi_get(&ds.partition, &key_refs)?;
 
-        for (i, (_, cells)) in writes.into_iter().enumerate() {
+        for (i, (_, doc)) in writes.into_iter().enumerate() {
             let full_id = &full_ids[i];
-            let cells = Self::dedup_cells(cells);
 
-            let mut record_value = match &existing[i] {
-                Some(bytes) => bincode::deserialize(bytes)?,
-                None => RecordValue {
-                    expire_at: None,
-                    cells: HashMap::new(),
-                },
+            let mut existing = match &existing_records[i] {
+                Some(bytes) => bson::from_slice::<bson::Document>(bytes)?,
+                None => bson::Document::new(),
             };
 
             // Track old indexed values for cleanup
-            let old_indexed: HashMap<String, Value> = ds
+            let old_indexed: HashMap<String, Bson> = ds
                 .fields
                 .iter()
                 .filter(|f| f.indexed)
                 .filter_map(|f| {
-                    record_value
-                        .cells
-                        .get(&f.name)
-                        .map(|sc| (f.name.clone(), sc.value.clone()))
+                    exec::get_path(&existing, &f.name).map(|v| (f.name.clone(), v.clone()))
                 })
                 .collect();
 
-            // Merge new cells
-            for cell in &cells {
-                if cell.column == ID_COLUMN {
-                    record_value.expire_at = Self::compute_expire_at(&ds, ID_COLUMN);
+            // Merge new fields
+            for (column, value) in &doc {
+                if column == ID_COLUMN {
                     continue;
                 }
-                let expire_at = Self::compute_expire_at(&ds, &cell.column);
-                record_value.cells.insert(
-                    cell.column.clone(),
-                    StoredCell {
-                        value: cell.value.clone(),
-                        expire_at,
-                    },
-                );
+                existing.insert(column.clone(), value.clone());
             }
 
-            // Auto-set record expire_at
-            if !cells.iter().any(|c| c.column == ID_COLUMN) && record_value.expire_at.is_none() {
-                record_value.expire_at = Self::compute_expire_at(&ds, ID_COLUMN);
-            }
-
-            // Write the single record key
+            // Write raw BSON bytes
             self.txn
-                .put(&ds.partition, &keys[i], &bincode::serialize(&record_value)?)?;
+                .put(&ds.partition, &keys[i], &bson::to_vec(&existing)?)?;
 
             // Index maintenance
             for field in &ds.fields {
                 if !field.indexed {
                     continue;
                 }
-                let new_value = record_value.cells.get(&field.name).map(|sc| &sc.value);
+                let new_value = exec::get_path(&existing, &field.name);
                 let old_value = old_indexed.get(&field.name);
 
                 if let Some(old_val) = old_value {
@@ -289,12 +230,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
         // Read record to get indexed values for cleanup
         if let Some(bytes) = self.txn.get(&ds.partition, &key)? {
-            let record_value: RecordValue = bincode::deserialize(&bytes)?;
+            let doc: bson::Document = bson::from_slice(&bytes)?;
             for field in &ds.fields {
                 if field.indexed {
-                    if let Some(stored_cell) = record_value.cells.get(&field.name) {
-                        let idx_key =
-                            encoding::index_key(&field.name, &stored_cell.value, &full_id);
+                    if let Some(value) = exec::get_path(&doc, &field.name) {
+                        let idx_key = encoding::index_key(&field.name, value, &full_id);
                         self.txn.delete(&ds.partition, &idx_key)?;
                     }
                 }
@@ -313,7 +253,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         datasource_id: &str,
         record_id: &str,
         columns: Option<&[&str]>,
-    ) -> Result<Option<Record>, DbError> {
+    ) -> Result<Option<bson::Document>, DbError> {
         let ds = self.require_datasource(datasource_id)?;
         let full_id = Self::full_record_id(datasource_id, record_id);
         let key = encoding::record_key(&full_id);
@@ -323,36 +263,16 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             None => return Ok(None),
         };
 
-        let record_value: RecordValue = bincode::deserialize(&bytes)?;
+        let mut doc: bson::Document = bson::from_slice(&bytes)?;
+        doc.insert("_id", record_id);
 
-        // Check record-level expiry
-        if is_expired(record_value.expire_at) {
-            return Ok(None);
+        // Apply projection
+        if let Some(wanted) = columns {
+            let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
+            exec::apply_projection(&mut doc, &cols);
         }
 
-        // Build cells, filtering expired and applying projection
-        let mut cells = HashMap::new();
-        for (col, stored_cell) in record_value.cells {
-            if is_expired(stored_cell.expire_at) {
-                continue;
-            }
-            if let Some(wanted) = columns {
-                if !wanted.contains(&col.as_str()) {
-                    continue;
-                }
-            }
-            cells.insert(
-                col,
-                Cell {
-                    value: stored_cell.value,
-                },
-            );
-        }
-
-        Ok(Some(Record {
-            id: record_id.to_string(),
-            cells,
-        }))
+        Ok(Some(doc))
     }
 
     // ── Query ───────────────────────────────────────────────────────
@@ -361,7 +281,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ///
     /// Builds a plan tree from the query, then executes it lazily:
     /// Scan/IndexScan → Filter → Sort → Limit → Projection
-    pub fn query(&self, datasource_id: &str, query: &Query) -> Result<Vec<Record>, DbError> {
+    pub fn query(
+        &self,
+        datasource_id: &str,
+        query: &Query,
+    ) -> Result<Vec<bson::Document>, DbError> {
         let ds = self.require_datasource(datasource_id)?;
         let ds_prefix = format!("{datasource_id}:");
 
@@ -380,19 +304,5 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn rollback(self) -> Result<(), DbError> {
         self.txn.rollback()?;
         Ok(())
-    }
-}
-
-/// Check if an expire_at timestamp has passed.
-pub(crate) fn is_expired(expire_at: Option<i64>) -> bool {
-    match expire_at {
-        Some(expire_at) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64;
-            expire_at <= now
-        }
-        None => false,
     }
 }

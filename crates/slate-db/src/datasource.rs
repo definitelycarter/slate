@@ -12,8 +12,6 @@ pub struct Datasource {
 pub struct FieldDef {
     pub name: String,
     pub field_type: FieldType,
-    /// Optional TTL in seconds. When set, expire_at = now + ttl_seconds.
-    pub ttl_seconds: Option<i64>,
     /// When true, an index is maintained for this field on writes.
     #[serde(default)]
     pub indexed: bool,

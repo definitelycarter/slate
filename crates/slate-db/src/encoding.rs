@@ -38,23 +38,26 @@ pub fn data_scan_prefix(prefix: &str) -> Vec<u8> {
 //
 // - Sorted by column, then value, then record_id
 // - Scanning `i:{column}\x00{value_bytes}\x00` gives all record IDs with that exact value
-// - value_bytes = canonical byte encoding of the Value
+// - value_bytes = canonical byte encoding of the Bson value
 
 const INDEX_PREFIX: &[u8] = b"i:";
 
-/// Encode a Value into canonical bytes for index key ordering.
+/// Encode a Bson value into canonical bytes for index key ordering.
 ///
 /// The encoding must sort correctly under lexicographic byte comparison.
-pub fn encode_value(value: &super::record::Value) -> Vec<u8> {
-    use super::record::Value;
+pub fn encode_value(value: &bson::Bson) -> Vec<u8> {
     match value {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Int(i) => {
-            // Flip the sign bit so signed integers sort correctly as unsigned bytes
+        bson::Bson::String(s) => s.as_bytes().to_vec(),
+        bson::Bson::Int32(i) => {
+            let wide = *i as i64;
+            let unsigned = (wide as u64) ^ (1u64 << 63);
+            unsigned.to_be_bytes().to_vec()
+        }
+        bson::Bson::Int64(i) => {
             let unsigned = (*i as u64) ^ (1u64 << 63);
             unsigned.to_be_bytes().to_vec()
         }
-        Value::Float(f) => {
+        bson::Bson::Double(f) => {
             let bits = f.to_bits();
             // IEEE 754: flip all bits if negative, else flip sign bit only
             let sortable = if bits & (1u64 << 63) != 0 {
@@ -64,17 +67,18 @@ pub fn encode_value(value: &super::record::Value) -> Vec<u8> {
             };
             sortable.to_be_bytes().to_vec()
         }
-        Value::Bool(b) => vec![*b as u8],
-        Value::Date(d) => {
-            let unsigned = (*d as u64) ^ (1u64 << 63);
+        bson::Bson::Boolean(b) => vec![*b as u8],
+        bson::Bson::DateTime(dt) => {
+            let millis = dt.timestamp_millis();
+            let unsigned = (millis as u64) ^ (1u64 << 63);
             unsigned.to_be_bytes().to_vec()
         }
-        _ => vec![], // List/Map not indexable
+        _ => vec![], // Array/Document/Null not indexable
     }
 }
 
 /// Build an index key: `i:{column}\x00{value_bytes}\x00{record_id}`
-pub fn index_key(column: &str, value: &super::record::Value, record_id: &str) -> Vec<u8> {
+pub fn index_key(column: &str, value: &bson::Bson, record_id: &str) -> Vec<u8> {
     let value_bytes = encode_value(value);
     let mut key = Vec::with_capacity(
         INDEX_PREFIX.len() + column.len() + 1 + value_bytes.len() + 1 + record_id.len(),
@@ -89,7 +93,7 @@ pub fn index_key(column: &str, value: &super::record::Value, record_id: &str) ->
 }
 
 /// Build a prefix to scan all record IDs for a column+value: `i:{column}\x00{value_bytes}\x00`
-pub fn index_scan_prefix(column: &str, value: &super::record::Value) -> Vec<u8> {
+pub fn index_scan_prefix(column: &str, value: &bson::Bson) -> Vec<u8> {
     let value_bytes = encode_value(value);
     let mut key = Vec::with_capacity(INDEX_PREFIX.len() + column.len() + 1 + value_bytes.len() + 1);
     key.extend_from_slice(INDEX_PREFIX);
@@ -145,8 +149,7 @@ mod tests {
 
     #[test]
     fn index_key_roundtrip() {
-        use crate::record::Value;
-        let key = index_key("status", &Value::String("active".into()), "ds1:rec-1");
+        let key = index_key("status", &bson::Bson::String("active".into()), "ds1:rec-1");
         let (column, record_id) = parse_index_key(&key).unwrap();
         assert_eq!(column, "status");
         assert_eq!(record_id, "ds1:rec-1");
@@ -154,12 +157,11 @@ mod tests {
 
     #[test]
     fn index_scan_prefix_matches_keys() {
-        use crate::record::Value;
-        let prefix = index_scan_prefix("status", &Value::String("active".into()));
-        let k1 = index_key("status", &Value::String("active".into()), "rec-1");
-        let k2 = index_key("status", &Value::String("active".into()), "rec-2");
-        let k3 = index_key("status", &Value::String("rejected".into()), "rec-1");
-        let k4 = index_key("name", &Value::String("active".into()), "rec-1");
+        let prefix = index_scan_prefix("status", &bson::Bson::String("active".into()));
+        let k1 = index_key("status", &bson::Bson::String("active".into()), "rec-1");
+        let k2 = index_key("status", &bson::Bson::String("active".into()), "rec-2");
+        let k3 = index_key("status", &bson::Bson::String("rejected".into()), "rec-1");
+        let k4 = index_key("name", &bson::Bson::String("active".into()), "rec-1");
         assert!(k1.starts_with(&prefix));
         assert!(k2.starts_with(&prefix));
         assert!(!k3.starts_with(&prefix)); // different value
@@ -168,10 +170,9 @@ mod tests {
 
     #[test]
     fn index_int_sort_order() {
-        use crate::record::Value;
-        let k1 = index_key("score", &Value::Int(10), "rec-1");
-        let k2 = index_key("score", &Value::Int(20), "rec-1");
-        let k3 = index_key("score", &Value::Int(-5), "rec-1");
+        let k1 = index_key("score", &bson::Bson::Int64(10), "rec-1");
+        let k2 = index_key("score", &bson::Bson::Int64(20), "rec-1");
+        let k3 = index_key("score", &bson::Bson::Int64(-5), "rec-1");
         assert!(k3 < k1); // -5 < 10
         assert!(k1 < k2); // 10 < 20
     }

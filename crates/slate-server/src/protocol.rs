@@ -1,18 +1,18 @@
 use serde::{Deserialize, Serialize};
-use slate_db::{CellWrite, Datasource, Record};
+use slate_db::Datasource;
 use slate_query::Query;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     // Data
-    WriteCells {
+    WriteRecord {
         datasource_id: String,
         record_id: String,
-        cells: Vec<CellWrite>,
+        doc: bson::Document,
     },
     WriteBatch {
         datasource_id: String,
-        writes: Vec<(String, Vec<CellWrite>)>,
+        writes: Vec<(String, bson::Document)>,
     },
     DeleteRecord {
         datasource_id: String,
@@ -37,8 +37,8 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Ok,
-    Record(Option<Record>),
-    Records(Vec<Record>),
+    Record(Option<bson::Document>),
+    Records(Vec<bson::Document>),
     Datasource(Option<Datasource>),
     Datasources(Vec<Datasource>),
     Error(String),

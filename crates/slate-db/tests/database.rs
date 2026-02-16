@@ -1,4 +1,5 @@
-use slate_db::{CellWrite, Database, Datasource, FieldDef, FieldType, Value};
+use bson::doc;
+use slate_db::{Database, Datasource, FieldDef, FieldType};
 use slate_query::{
     Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, QueryValue, Sort, SortDirection,
 };
@@ -22,25 +23,25 @@ fn make_datasource() -> Datasource {
             FieldDef {
                 name: "name".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "revenue".to_string(),
                 field_type: FieldType::Float,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "status".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "active".to_string(),
                 field_type: FieldType::Bool,
-                ttl_seconds: None,
+
                 indexed: false,
             },
         ],
@@ -48,25 +49,13 @@ fn make_datasource() -> Datasource {
     }
 }
 
-fn make_cells(name: &str, revenue: f64, status: &str, active: bool) -> Vec<CellWrite> {
-    vec![
-        CellWrite {
-            column: "name".into(),
-            value: Value::String(name.into()),
-        },
-        CellWrite {
-            column: "revenue".into(),
-            value: Value::Float(revenue),
-        },
-        CellWrite {
-            column: "status".into(),
-            value: Value::String(status.into()),
-        },
-        CellWrite {
-            column: "active".into(),
-            value: Value::Bool(active),
-        },
-    ]
+fn make_doc(name: &str, revenue: f64, status: &str, active: bool) -> bson::Document {
+    doc! {
+        "name": name,
+        "revenue": revenue,
+        "status": status,
+        "active": active,
+    }
 }
 
 fn no_filter_query() -> Query {
@@ -86,38 +75,34 @@ fn seed_records(db: &Database<RocksStore>) {
     txn.write_record(
         DS_ID,
         "acct-1",
-        make_cells("Acme Corp", 50000.0, "active", true),
+        make_doc("Acme Corp", 50000.0, "active", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-2",
-        make_cells("Globex", 80000.0, "snoozed", true),
+        make_doc("Globex", 80000.0, "snoozed", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-3",
-        make_cells("Initech", 12000.0, "rejected", false),
+        make_doc("Initech", 12000.0, "rejected", false),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-4",
-        make_cells("Umbrella", 95000.0, "active", true),
+        make_doc("Umbrella", 95000.0, "active", true),
     )
     .unwrap();
     txn.write_record(
         DS_ID,
         "acct-5",
-        make_cells("Stark Industries", 200000.0, "active", false),
+        make_doc("Stark Industries", 200000.0, "active", false),
     )
     .unwrap();
     txn.commit().unwrap();
-}
-
-fn cell_value<'a>(record: &'a slate_db::Record, col: &str) -> Option<&'a Value> {
-    record.cells.get(col).map(|c| &c.value)
 }
 
 // ── Catalog tests ───────────────────────────────────────────────
@@ -197,18 +182,15 @@ fn write_and_get_by_id() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let record = txn.get_by_id(DS_ID, "acct-1", None).unwrap().unwrap();
-    assert_eq!(record.id, "acct-1");
-    assert_eq!(
-        cell_value(&record, "name"),
-        Some(&Value::String("Acme".into()))
-    );
-    assert_eq!(cell_value(&record, "revenue"), Some(&Value::Float(50000.0)));
+    assert_eq!(record.get_str("_id").unwrap(), "acct-1");
+    assert_eq!(record.get_str("name").unwrap(), "Acme");
+    assert_eq!(record.get_f64("revenue").unwrap(), 50000.0);
 }
 
 #[test]
@@ -228,7 +210,7 @@ fn get_by_id_with_projection() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
@@ -237,10 +219,11 @@ fn get_by_id_with_projection() {
         .get_by_id(DS_ID, "acct-1", Some(&["name", "status"]))
         .unwrap()
         .unwrap();
-    assert_eq!(record.cells.len(), 2);
-    assert!(record.cells.contains_key("name"));
-    assert!(record.cells.contains_key("status"));
-    assert!(!record.cells.contains_key("revenue"));
+    // _id + name + status = 3 keys
+    assert_eq!(record.len(), 3);
+    assert!(record.contains_key("name"));
+    assert!(record.contains_key("status"));
+    assert!(!record.contains_key("revenue"));
 }
 
 // ── Partial writes ──────────────────────────────────────────────
@@ -251,34 +234,21 @@ fn partial_write_updates_single_column() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
     // Partial write: update only status
     let mut txn = db.begin(false).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        vec![CellWrite {
-            column: "status".into(),
-            value: Value::String("rejected".into()),
-        }],
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "acct-1", doc! { "status": "rejected" })
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let record = txn.get_by_id(DS_ID, "acct-1", None).unwrap().unwrap();
-    assert_eq!(
-        cell_value(&record, "status"),
-        Some(&Value::String("rejected".into()))
-    );
+    assert_eq!(record.get_str("status").unwrap(), "rejected");
     // Other fields unchanged
-    assert_eq!(
-        cell_value(&record, "name"),
-        Some(&Value::String("Acme".into()))
-    );
+    assert_eq!(record.get_str("name").unwrap(), "Acme");
 }
 
 #[test]
@@ -287,188 +257,17 @@ fn last_write_wins() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(
-        DS_ID,
-        "acct-1",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Old Name".into()),
-            },
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("New Name".into()),
-            },
-        ],
-    )
-    .unwrap();
+    // First write
+    txn.write_record(DS_ID, "acct-1", doc! { "name": "Old Name" })
+        .unwrap();
+    // Second write overwrites the field
+    txn.write_record(DS_ID, "acct-1", doc! { "name": "New Name" })
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let record = txn.get_by_id(DS_ID, "acct-1", None).unwrap().unwrap();
-    assert_eq!(
-        cell_value(&record, "name"),
-        Some(&Value::String("New Name".into()))
-    );
-}
-
-// ── TTL / Expiry ────────────────────────────────────────────────
-
-#[test]
-fn ttl_derives_expire_at_from_field_config() {
-    let (db, _dir) = temp_db();
-
-    let mut txn = db.begin(false).unwrap();
-    txn.save_datasource(&Datasource {
-        id: "ds_ttl".into(),
-        name: "TTL Test".into(),
-        fields: vec![
-            FieldDef {
-                name: "name".into(),
-                field_type: FieldType::String,
-                ttl_seconds: None, // no TTL
-                indexed: false,
-            },
-            FieldDef {
-                name: "status".into(),
-                field_type: FieldType::String,
-                ttl_seconds: Some(3600), // 1 hour
-                indexed: false,
-            },
-        ],
-        partition: "ttl_part".into(),
-    })
-    .unwrap();
-    txn.write_record(
-        "ds_ttl",
-        "acct-1",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Acme".into()),
-            },
-            CellWrite {
-                column: "status".into(),
-                value: Value::String("active".into()),
-            },
-        ],
-    )
-    .unwrap();
-    txn.commit().unwrap();
-
-    let txn = db.begin(true).unwrap();
-    let record = txn.get_by_id("ds_ttl", "acct-1", None).unwrap().unwrap();
-    // Both cells should be present — status has TTL but was just written so not expired
-    assert_eq!(
-        cell_value(&record, "name"),
-        Some(&Value::String("Acme".into()))
-    );
-    assert_eq!(
-        cell_value(&record, "status"),
-        Some(&Value::String("active".into()))
-    );
-}
-
-#[test]
-fn expired_id_hides_record() {
-    let (db, _dir) = temp_db();
-
-    // Datasource with _id TTL of 0 seconds — record expires immediately
-    let mut txn = db.begin(false).unwrap();
-    txn.save_datasource(&Datasource {
-        id: "ds_expired".into(),
-        name: "Expired".into(),
-        fields: vec![
-            FieldDef {
-                name: "_id".into(),
-                field_type: FieldType::Bool,
-                ttl_seconds: Some(0), // immediate expiry
-                indexed: false,
-            },
-            FieldDef {
-                name: "name".into(),
-                field_type: FieldType::String,
-                ttl_seconds: None,
-                indexed: false,
-            },
-        ],
-        partition: "exp_part".into(),
-    })
-    .unwrap();
-    txn.write_record(
-        "ds_expired",
-        "acct-1",
-        vec![CellWrite {
-            column: "name".into(),
-            value: Value::String("Acme".into()),
-        }],
-    )
-    .unwrap();
-    txn.commit().unwrap();
-
-    let txn = db.begin(true).unwrap();
-    // Record should be hidden because _id has expire_at = now (TTL 0 → immediately expired)
-    assert!(
-        txn.get_by_id("ds_expired", "acct-1", None)
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn expired_column_hidden_from_record() {
-    let (db, _dir) = temp_db();
-
-    let mut txn = db.begin(false).unwrap();
-    txn.save_datasource(&Datasource {
-        id: "ds_exp_col".into(),
-        name: "Exp Col".into(),
-        fields: vec![
-            FieldDef {
-                name: "name".into(),
-                field_type: FieldType::String,
-                ttl_seconds: None,
-                indexed: false,
-            },
-            FieldDef {
-                name: "status".into(),
-                field_type: FieldType::String,
-                ttl_seconds: Some(0), // immediate expiry
-                indexed: false,
-            },
-        ],
-        partition: "exp_col_part".into(),
-    })
-    .unwrap();
-    txn.write_record(
-        "ds_exp_col",
-        "acct-1",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Acme".into()),
-            },
-            CellWrite {
-                column: "status".into(),
-                value: Value::String("active".into()),
-            },
-        ],
-    )
-    .unwrap();
-    txn.commit().unwrap();
-
-    let txn = db.begin(true).unwrap();
-    let record = txn
-        .get_by_id("ds_exp_col", "acct-1", None)
-        .unwrap()
-        .unwrap();
-    // The expired column should be filtered out (TTL 0 → immediately expired)
-    assert!(!record.cells.contains_key("status"));
-    // Non-expired column still present
-    assert_eq!(
-        cell_value(&record, "name"),
-        Some(&Value::String("Acme".into()))
-    );
+    assert_eq!(record.get_str("name").unwrap(), "New Name");
 }
 
 // ── Delete ──────────────────────────────────────────────────────
@@ -479,7 +278,7 @@ fn delete_record_removes_all_cells() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
@@ -502,11 +301,8 @@ fn write_batch_multiple_records() {
     txn.write_batch(
         DS_ID,
         vec![
-            ("acct-1".into(), make_cells("Acme", 50000.0, "active", true)),
-            (
-                "acct-2".into(),
-                make_cells("Globex", 80000.0, "active", true),
-            ),
+            ("acct-1".into(), make_doc("Acme", 50000.0, "active", true)),
+            ("acct-2".into(), make_doc("Globex", 80000.0, "active", true)),
         ],
     )
     .unwrap();
@@ -585,16 +381,9 @@ fn query_isnull_filter() {
     txn.save_datasource(&make_datasource()).unwrap();
 
     // Record without "status" column
-    txn.write_record(
-        DS_ID,
-        "acct-x",
-        vec![CellWrite {
-            column: "name".into(),
-            value: Value::String("NoStatus".into()),
-        }],
-    )
-    .unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-x", doc! { "name": "NoStatus" })
+        .unwrap();
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
@@ -615,7 +404,7 @@ fn query_isnull_filter() {
     };
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-x");
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-x");
 }
 
 #[test]
@@ -669,8 +458,8 @@ fn query_sort_asc() {
     };
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 5);
-    assert_eq!(results[0].id, "acct-3"); // Initech 12k
-    assert_eq!(results[4].id, "acct-5"); // Stark 200k
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-3"); // Initech 12k
+    assert_eq!(results[4].get_str("_id").unwrap(), "acct-5"); // Stark 200k
 }
 
 #[test]
@@ -690,8 +479,8 @@ fn query_sort_desc() {
         columns: None,
     };
     let results = txn.query(DS_ID, &query).unwrap();
-    assert_eq!(results[0].id, "acct-5"); // Stark 200k
-    assert_eq!(results[4].id, "acct-3"); // Initech 12k
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-5"); // Stark 200k
+    assert_eq!(results[4].get_str("_id").unwrap(), "acct-3"); // Initech 12k
 }
 
 // ── Pagination ──────────────────────────────────────────────────
@@ -714,8 +503,8 @@ fn query_skip_and_take() {
     };
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "acct-1"); // Acme 50k (skipped Initech 12k)
-    assert_eq!(results[1].id, "acct-2"); // Globex 80k
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-1"); // Acme 50k (skipped Initech 12k)
+    assert_eq!(results[1].get_str("_id").unwrap(), "acct-2"); // Globex 80k
 }
 
 #[test]
@@ -743,7 +532,7 @@ fn query_filter_sort_paginate() {
     };
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, "acct-4"); // Umbrella 95k
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-4"); // Umbrella 95k
 }
 
 // ── Projection in query ─────────────────────────────────────────
@@ -764,10 +553,10 @@ fn query_with_projection() {
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 5);
     for record in &results {
-        assert!(record.cells.contains_key("name"));
-        assert!(record.cells.contains_key("status"));
-        assert!(!record.cells.contains_key("revenue"));
-        assert!(!record.cells.contains_key("active"));
+        assert!(record.contains_key("name"));
+        assert!(record.contains_key("status"));
+        assert!(!record.contains_key("revenue"));
+        assert!(!record.contains_key("active"));
     }
 }
 
@@ -794,8 +583,8 @@ fn query_projection_includes_filter_columns() {
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 3);
     for record in &results {
-        assert!(record.cells.contains_key("name"));
-        assert!(!record.cells.contains_key("status")); // filter col stripped
+        assert!(record.contains_key("name"));
+        assert!(!record.contains_key("status")); // filter col stripped
     }
 }
 
@@ -817,11 +606,11 @@ fn query_projection_includes_sort_columns() {
     };
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "acct-5"); // Stark 200k
-    assert_eq!(results[1].id, "acct-4"); // Umbrella 95k
+    assert_eq!(results[0].get_str("_id").unwrap(), "acct-5"); // Stark 200k
+    assert_eq!(results[1].get_str("_id").unwrap(), "acct-4"); // Umbrella 95k
     for record in &results {
-        assert!(record.cells.contains_key("name"));
-        assert!(!record.cells.contains_key("revenue")); // sort col stripped
+        assert!(record.contains_key("name"));
+        assert!(!record.contains_key("revenue")); // sort col stripped
     }
 }
 
@@ -839,7 +628,6 @@ fn datasource_isolation() {
         fields: vec![FieldDef {
             name: "name".into(),
             field_type: FieldType::String,
-            ttl_seconds: None,
             indexed: false,
         }],
         partition: "contacts_part".into(),
@@ -851,47 +639,26 @@ fn datasource_isolation() {
         fields: vec![FieldDef {
             name: "name".into(),
             field_type: FieldType::String,
-            ttl_seconds: None,
             indexed: false,
         }],
         partition: "accounts_part".into(),
     })
     .unwrap();
 
-    txn.write_record(
-        "contacts",
-        "c-1",
-        vec![CellWrite {
-            column: "name".into(),
-            value: Value::String("Alice".into()),
-        }],
-    )
-    .unwrap();
-    txn.write_record(
-        "accounts",
-        "a-1",
-        vec![CellWrite {
-            column: "name".into(),
-            value: Value::String("Acme".into()),
-        }],
-    )
-    .unwrap();
+    txn.write_record("contacts", "c-1", doc! { "name": "Alice" })
+        .unwrap();
+    txn.write_record("accounts", "a-1", doc! { "name": "Acme" })
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let contacts = txn.query("contacts", &no_filter_query()).unwrap();
     assert_eq!(contacts.len(), 1);
-    assert_eq!(
-        cell_value(&contacts[0], "name"),
-        Some(&Value::String("Alice".into()))
-    );
+    assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
     let accounts = txn.query("accounts", &no_filter_query()).unwrap();
     assert_eq!(accounts.len(), 1);
-    assert_eq!(
-        cell_value(&accounts[0], "name"),
-        Some(&Value::String("Acme".into()))
-    );
+    assert_eq!(accounts[0].get_str("name").unwrap(), "Acme");
 }
 
 // ── Catalog + data coexist ──────────────────────────────────────
@@ -902,7 +669,7 @@ fn catalog_and_data_coexist() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&make_datasource()).unwrap();
-    txn.write_record(DS_ID, "acct-1", make_cells("Acme", 50000.0, "active", true))
+    txn.write_record(DS_ID, "acct-1", make_doc("Acme", 50000.0, "active", true))
         .unwrap();
     txn.commit().unwrap();
 
@@ -924,13 +691,13 @@ fn query_index_scan_on_indexed_field() {
             FieldDef {
                 name: "name".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "status".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: true,
             },
         ],
@@ -939,51 +706,12 @@ fn query_index_scan_on_indexed_field() {
 
     let mut txn = db.begin(false).unwrap();
     txn.save_datasource(&ds).unwrap();
-    txn.write_record(
-        DS_ID,
-        "r1",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Alice".into()),
-            },
-            CellWrite {
-                column: "status".into(),
-                value: Value::String("active".into()),
-            },
-        ],
-    )
-    .unwrap();
-    txn.write_record(
-        DS_ID,
-        "r2",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Bob".into()),
-            },
-            CellWrite {
-                column: "status".into(),
-                value: Value::String("rejected".into()),
-            },
-        ],
-    )
-    .unwrap();
-    txn.write_record(
-        DS_ID,
-        "r3",
-        vec![
-            CellWrite {
-                column: "name".into(),
-                value: Value::String("Charlie".into()),
-            },
-            CellWrite {
-                column: "status".into(),
-                value: Value::String("active".into()),
-            },
-        ],
-    )
-    .unwrap();
+    txn.write_record(DS_ID, "r1", doc! { "name": "Alice", "status": "active" })
+        .unwrap();
+    txn.write_record(DS_ID, "r2", doc! { "name": "Bob", "status": "rejected" })
+        .unwrap();
+    txn.write_record(DS_ID, "r3", doc! { "name": "Charlie", "status": "active" })
+        .unwrap();
     txn.commit().unwrap();
 
     // Query with Eq on indexed field — planner should produce IndexScan
@@ -1005,8 +733,384 @@ fn query_index_scan_on_indexed_field() {
     let results = txn.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 2);
 
-    let mut names: Vec<_> = results.iter().map(|r| cell_value(r, "name")).collect();
-    names.sort_by_key(|v| format!("{:?}", v));
-    assert_eq!(names[0], Some(&Value::String("Alice".into())));
-    assert_eq!(names[1], Some(&Value::String("Charlie".into())));
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names[0], "Alice");
+    assert_eq!(names[1], "Charlie");
+}
+
+// ── Nested documents + dot-notation ─────────────────────────────
+
+fn make_nested_datasource() -> Datasource {
+    Datasource {
+        id: "nested_ds".to_string(),
+        name: "Nested".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".to_string(),
+                field_type: FieldType::String,
+                indexed: false,
+            },
+            FieldDef {
+                name: "address".to_string(),
+                field_type: FieldType::String, // FieldType doesn't matter for nested docs
+                indexed: false,
+            },
+        ],
+        partition: "nested_part".to_string(),
+    }
+}
+
+#[test]
+fn nested_doc_write_and_read() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! {
+            "name": "Alice",
+            "address": {
+                "city": "Austin",
+                "state": "TX",
+                "zip": "78701"
+            }
+        },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let record = txn.get_by_id("nested_ds", "r1", None).unwrap().unwrap();
+    assert_eq!(record.get_str("name").unwrap(), "Alice");
+    let addr = record.get_document("address").unwrap();
+    assert_eq!(addr.get_str("city").unwrap(), "Austin");
+    assert_eq!(addr.get_str("state").unwrap(), "TX");
+    assert_eq!(addr.get_str("zip").unwrap(), "78701");
+}
+
+#[test]
+fn dot_notation_filter_eq() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! { "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
+    )
+    .unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r2",
+        doc! { "name": "Bob", "address": { "city": "Denver", "state": "CO" } },
+    )
+    .unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r3",
+        doc! { "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "address.city".into(),
+                operator: Operator::Eq,
+                value: QueryValue::String("Austin".into()),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.query("nested_ds", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice", "Charlie"]);
+}
+
+#[test]
+fn dot_notation_sort() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! { "name": "Alice", "address": { "city": "Zurich" } },
+    )
+    .unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r2",
+        doc! { "name": "Bob", "address": { "city": "Austin" } },
+    )
+    .unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r3",
+        doc! { "name": "Charlie", "address": { "city": "Denver" } },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: None,
+        sort: vec![Sort {
+            field: "address.city".into(),
+            direction: SortDirection::Asc,
+        }],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.query("nested_ds", &query).unwrap();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].get_str("name").unwrap(), "Bob"); // Austin
+    assert_eq!(results[1].get_str("name").unwrap(), "Charlie"); // Denver
+    assert_eq!(results[2].get_str("name").unwrap(), "Alice"); // Zurich
+}
+
+#[test]
+fn dot_notation_projection() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! {
+            "name": "Alice",
+            "address": {
+                "city": "Austin",
+                "state": "TX",
+                "zip": "78701"
+            }
+        },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Project only name and address.city
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: None,
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: Some(vec!["name".into(), "address.city".into()]),
+    };
+    let results = txn.query("nested_ds", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    let record = &results[0];
+    assert_eq!(record.get_str("name").unwrap(), "Alice");
+    // address should only contain city, not state or zip
+    let addr = record.get_document("address").unwrap();
+    assert_eq!(addr.get_str("city").unwrap(), "Austin");
+    assert!(!addr.contains_key("state"));
+    assert!(!addr.contains_key("zip"));
+}
+
+#[test]
+fn dot_notation_projection_multiple_subfields() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! {
+            "name": "Alice",
+            "address": {
+                "city": "Austin",
+                "state": "TX",
+                "zip": "78701"
+            }
+        },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Project address.city and address.zip (not state)
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: None,
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: Some(vec![
+            "name".into(),
+            "address.city".into(),
+            "address.zip".into(),
+        ]),
+    };
+    let results = txn.query("nested_ds", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    let record = &results[0];
+    let addr = record.get_document("address").unwrap();
+    assert_eq!(addr.get_str("city").unwrap(), "Austin");
+    assert_eq!(addr.get_str("zip").unwrap(), "78701");
+    assert!(!addr.contains_key("state"));
+}
+
+#[test]
+fn dot_notation_isnull_missing_parent() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    // Record with address
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! { "name": "Alice", "address": { "city": "Austin" } },
+    )
+    .unwrap();
+    // Record without address at all
+    txn.write_record("nested_ds", "r2", doc! { "name": "Bob" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "address.city".into(),
+                operator: Operator::IsNull,
+                value: QueryValue::Bool(true),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.query("nested_ds", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "r2");
+}
+
+#[test]
+fn dot_notation_deep_nesting() {
+    let (db, _dir) = temp_db();
+
+    let ds = Datasource {
+        id: "deep_ds".to_string(),
+        name: "Deep".to_string(),
+        fields: vec![FieldDef {
+            name: "data".to_string(),
+            field_type: FieldType::String,
+            indexed: false,
+        }],
+        partition: "deep_part".to_string(),
+    };
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&ds).unwrap();
+    txn.write_record(
+        "deep_ds",
+        "r1",
+        doc! { "data": { "level1": { "level2": { "value": "found" } } } },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Filter on 3-level deep path
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "data.level1.level2.value".into(),
+                operator: Operator::Eq,
+                value: QueryValue::String("found".into()),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.query("deep_ds", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "r1");
+}
+
+#[test]
+fn dot_notation_get_by_id_projection() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.save_datasource(&make_nested_datasource()).unwrap();
+    txn.write_record(
+        "nested_ds",
+        "r1",
+        doc! {
+            "name": "Alice",
+            "address": {
+                "city": "Austin",
+                "state": "TX",
+                "zip": "78701"
+            }
+        },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let record = txn
+        .get_by_id("nested_ds", "r1", Some(&["name", "address.city"]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.get_str("name").unwrap(), "Alice");
+    let addr = record.get_document("address").unwrap();
+    assert_eq!(addr.get_str("city").unwrap(), "Austin");
+    assert!(!addr.contains_key("state"));
+    assert!(!addr.contains_key("zip"));
+}
+
+#[test]
+fn projection_only_uses_selective_read() {
+    // Projection without filter or sort — scan should use selective materialization
+    let (db, _dir) = temp_db();
+    seed_records(&db);
+
+    let txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: None,
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: Some(vec!["name".into()]),
+    };
+    let results = txn.query(DS_ID, &query).unwrap();
+    assert_eq!(results.len(), 5);
+    for record in &results {
+        assert!(record.contains_key("_id"));
+        assert!(record.contains_key("name"));
+        assert!(!record.contains_key("revenue"));
+        assert!(!record.contains_key("status"));
+        assert!(!record.contains_key("active"));
+    }
 }

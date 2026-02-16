@@ -1,8 +1,9 @@
 use std::net::TcpListener;
 use std::thread;
 
+use bson::doc;
 use slate_client::Client;
-use slate_db::{CellWrite, Database, Datasource, FieldDef, FieldType, Value};
+use slate_db::{Database, Datasource, FieldDef, FieldType};
 use slate_query::*;
 use slate_server::Server;
 use slate_store::RocksStore;
@@ -37,19 +38,19 @@ fn make_datasource() -> Datasource {
             FieldDef {
                 name: "name".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "status".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "score".to_string(),
                 field_type: FieldType::Int,
-                ttl_seconds: None,
+
                 indexed: false,
             },
         ],
@@ -57,17 +58,11 @@ fn make_datasource() -> Datasource {
     }
 }
 
-fn make_cells(name: &str, status: &str) -> Vec<CellWrite> {
-    vec![
-        CellWrite {
-            column: "name".into(),
-            value: Value::String(name.into()),
-        },
-        CellWrite {
-            column: "status".into(),
-            value: Value::String(status.into()),
-        },
-    ]
+fn make_doc(name: &str, status: &str) -> bson::Document {
+    doc! {
+        "name": name,
+        "status": status,
+    }
 }
 
 #[test]
@@ -77,17 +72,14 @@ fn insert_and_get_by_id() {
 
     client.save_datasource(&make_datasource()).unwrap();
     client
-        .write_cells(DS_ID, "acct-1", make_cells("Acme Corp", "active"))
+        .write_record(DS_ID, "acct-1", make_doc("Acme Corp", "active"))
         .unwrap();
 
     let result = client.get_by_id(DS_ID, "acct-1", None).unwrap();
     assert!(result.is_some());
     let r = result.unwrap();
-    assert_eq!(r.id, "acct-1");
-    assert_eq!(
-        r.cells.get("name").map(|c| &c.value),
-        Some(&Value::String("Acme Corp".to_string()))
-    );
+    assert_eq!(r.get_str("_id").unwrap(), "acct-1");
+    assert_eq!(r.get_str("name").unwrap(), "Acme Corp");
 }
 
 #[test]
@@ -110,9 +102,9 @@ fn write_batch_and_query() {
         .write_batch(
             DS_ID,
             vec![
-                ("acct-1".into(), make_cells("Acme", "active")),
-                ("acct-2".into(), make_cells("Globex", "rejected")),
-                ("acct-3".into(), make_cells("Initech", "active")),
+                ("acct-1".into(), make_doc("Acme", "active")),
+                ("acct-2".into(), make_doc("Globex", "rejected")),
+                ("acct-3".into(), make_doc("Initech", "active")),
             ],
         )
         .unwrap();
@@ -154,7 +146,7 @@ fn delete_record() {
 
     client.save_datasource(&make_datasource()).unwrap();
     client
-        .write_cells(DS_ID, "acct-1", make_cells("Acme", "active"))
+        .write_record(DS_ID, "acct-1", make_doc("Acme", "active"))
         .unwrap();
     client.delete_record(DS_ID, "acct-1").unwrap();
 
@@ -174,13 +166,13 @@ fn datasource_crud() {
             FieldDef {
                 name: "name".to_string(),
                 field_type: FieldType::String,
-                ttl_seconds: None,
+
                 indexed: false,
             },
             FieldDef {
                 name: "revenue".to_string(),
                 field_type: FieldType::Float,
-                ttl_seconds: None,
+
                 indexed: false,
             },
         ],
@@ -219,16 +211,10 @@ fn query_with_sort_and_pagination() {
     for i in 0..20 {
         writes.push((
             format!("r-{i}"),
-            vec![
-                CellWrite {
-                    column: "name".into(),
-                    value: Value::String(format!("Company-{i}")),
-                },
-                CellWrite {
-                    column: "score".into(),
-                    value: Value::Int(i),
-                },
-            ],
+            doc! {
+                "name": format!("Company-{i}"),
+                "score": i as i64,
+            },
         ));
     }
     client.write_batch(DS_ID, writes).unwrap();
@@ -246,7 +232,7 @@ fn query_with_sort_and_pagination() {
     let results = client.query(DS_ID, &query).unwrap();
     assert_eq!(results.len(), 3);
     // Descending: 19,18,17,16,15,14,13,12... skip 5 → 14,13,12
-    assert_eq!(results[0].id, "r-14");
-    assert_eq!(results[1].id, "r-13");
-    assert_eq!(results[2].id, "r-12");
+    assert_eq!(results[0].get_str("_id").unwrap(), "r-14");
+    assert_eq!(results[1].get_str("_id").unwrap(), "r-13");
+    assert_eq!(results[2].get_str("_id").unwrap(), "r-12");
 }

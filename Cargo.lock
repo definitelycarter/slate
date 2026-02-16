@@ -1185,6 +1185,7 @@ dependencies = [
 name = "slate-bench"
 version = "0.1.0"
 dependencies = [
+ "bson",
  "rand 0.8.5",
  "slate-client",
  "slate-db",
@@ -1198,6 +1199,7 @@ dependencies = [
 name = "slate-client"
 version = "0.1.0"
 dependencies = [
+ "bson",
  "crossbeam",
  "rmp-serde",
  "serde",
@@ -1212,6 +1214,7 @@ name = "slate-db"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bson",
  "serde",
  "slate-query",
  "slate-store",
@@ -1239,6 +1242,7 @@ dependencies = [
 name = "slate-server"
 version = "0.1.0"
 dependencies = [
+ "bson",
  "rmp-serde",
  "serde",
  "slate-client",

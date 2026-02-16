@@ -1,24 +1,21 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
 
+use bson::RawDocumentBuf;
 use slate_store::Transaction;
 
-use crate::cell::{Cell, RecordValue};
-use crate::database::is_expired;
 use crate::encoding;
 use crate::error::DbError;
 use crate::exec;
 use crate::planner::PlanNode;
-use crate::record::Record;
 
-type RecordIter<'a> = Box<dyn Iterator<Item = Result<Record, DbError>> + 'a>;
+type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a>;
 
-/// Executes a query plan tree, returning a lazy record iterator.
+/// Executes a query plan tree, returning a lazy document iterator.
 pub fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     node: &'a PlanNode,
     ds_prefix: &'a str,
-) -> Result<RecordIter<'a>, DbError> {
+) -> Result<DocIter<'a>, DbError> {
     execute_node(txn, node, ds_prefix)
 }
 
@@ -26,23 +23,28 @@ fn execute_node<'a, T: Transaction + 'a>(
     txn: &'a T,
     node: &'a PlanNode,
     ds_prefix: &'a str,
-) -> Result<RecordIter<'a>, DbError> {
+) -> Result<DocIter<'a>, DbError> {
     match node {
-        PlanNode::Scan { partition, prefix } => execute_scan(txn, partition, prefix, ds_prefix),
+        PlanNode::Scan {
+            partition,
+            prefix,
+            columns,
+        } => execute_scan(txn, partition, prefix, ds_prefix, columns.as_deref()),
 
         PlanNode::IndexScan {
             partition,
             column,
             value,
-        } => execute_index_scan(txn, partition, column, value, ds_prefix),
+            columns,
+        } => execute_index_scan(txn, partition, column, value, ds_prefix, columns.as_deref()),
 
         PlanNode::Filter { predicate, input } => {
             let source = execute_node(txn, input, ds_prefix)?;
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
-                Ok(record) => match exec::matches_group(&record, predicate) {
-                    Ok(true) => Some(Ok(record)),
+                Ok(doc) => match exec::matches_group(&doc, predicate) {
+                    Ok(true) => Some(Ok(doc)),
                     Ok(false) => None,
                     Err(e) => Some(Err(e)),
                 },
@@ -52,13 +54,12 @@ fn execute_node<'a, T: Transaction + 'a>(
         PlanNode::Sort { sorts, input } => {
             let source = execute_node(txn, input, ds_prefix)?;
 
-            // Records already have all columns — just sort
-            let mut records: Vec<Record> = source.collect::<Result<Vec<_>, _>>()?;
+            let mut docs: Vec<bson::Document> = source.collect::<Result<Vec<_>, _>>()?;
 
-            records.sort_by(|a, b| {
+            docs.sort_by(|a, b| {
                 for sort in sorts {
-                    let a_val = a.cells.get(&sort.field).map(|c| &c.value);
-                    let b_val = b.cells.get(&sort.field).map(|c| &c.value);
+                    let a_val = exec::get_path(a, &sort.field);
+                    let b_val = exec::get_path(b, &sort.field);
                     let ord = exec::compare_field_values(a_val, b_val);
                     let ord = match sort.direction {
                         slate_query::SortDirection::Asc => ord,
@@ -71,7 +72,7 @@ fn execute_node<'a, T: Transaction + 'a>(
                 std::cmp::Ordering::Equal
             });
 
-            Ok(Box::new(records.into_iter().map(Ok)))
+            Ok(Box::new(docs.into_iter().map(Ok)))
         }
 
         PlanNode::Limit { skip, take, input } => {
@@ -88,24 +89,49 @@ fn execute_node<'a, T: Transaction + 'a>(
             let cols = columns.clone();
 
             Ok(Box::new(source.map(move |result| {
-                let mut record = result?;
-                let proj_set: HashSet<&str> = cols.iter().map(|s| s.as_str()).collect();
-                record.cells.retain(|k, _| proj_set.contains(k.as_str()));
-                Ok(record)
+                let mut doc = result?;
+                exec::apply_projection(&mut doc, &cols);
+                Ok(doc)
             })))
         }
     }
 }
 
-/// Scan all records under a prefix. One key = one record.
+/// Materialize a document from raw BSON bytes.
+/// If `columns` is Some, only read the specified top-level keys (selective projection).
+/// If None, materialize the entire document.
+fn materialize_doc(
+    raw: &RawDocumentBuf,
+    columns: Option<&HashSet<&str>>,
+) -> Result<bson::Document, DbError> {
+    match columns {
+        Some(cols) => {
+            let mut doc = bson::Document::new();
+            for result in raw.iter() {
+                let (key, raw_val) = result?;
+                if cols.contains(key) {
+                    doc.insert(key, bson::Bson::try_from(raw_val)?);
+                }
+            }
+            Ok(doc)
+        }
+        None => Ok(raw.to_document()?),
+    }
+}
+
+/// Scan all records under a prefix. One key = one record (raw BSON bytes).
 fn execute_scan<'a, T: Transaction + 'a>(
     txn: &'a T,
     partition: &'a str,
     prefix: &'a str,
     ds_prefix: &'a str,
-) -> Result<RecordIter<'a>, DbError> {
+    columns: Option<&'a [String]>,
+) -> Result<DocIter<'a>, DbError> {
     let scan_prefix = encoding::data_scan_prefix(prefix);
     let iter = txn.scan_prefix(partition, &scan_prefix)?;
+
+    let col_set: Option<HashSet<&str>> =
+        columns.map(|cols| cols.iter().map(|s| s.as_str()).collect());
 
     Ok(Box::new(iter.filter_map(move |result| match result {
         Err(e) => Some(Err(DbError::from(e))),
@@ -115,25 +141,23 @@ fn execute_scan<'a, T: Transaction + 'a>(
                 None => return None,
             };
 
-            let record_value: RecordValue = match bincode::deserialize(&value) {
-                Ok(rv) => rv,
+            let raw = match RawDocumentBuf::from_bytes(value.into_vec()) {
+                Ok(r) => r,
                 Err(_) => return None,
             };
 
-            if is_expired(record_value.expire_at) {
-                return None;
-            }
+            let mut doc = match materialize_doc(&raw, col_set.as_ref()) {
+                Ok(d) => d,
+                Err(_) => return None,
+            };
 
             let short_id = full_record_id
                 .strip_prefix(ds_prefix)
                 .unwrap_or(full_record_id);
 
-            let cells = build_cells(record_value.cells);
+            doc.insert("_id", short_id);
 
-            Some(Ok(Record {
-                id: short_id.to_string(),
-                cells,
-            }))
+            Some(Ok(doc))
         }
     })))
 }
@@ -143,11 +167,15 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     txn: &'a T,
     partition: &'a str,
     column: &'a str,
-    value: &'a crate::record::Value,
+    value: &'a bson::Bson,
     ds_prefix: &'a str,
-) -> Result<RecordIter<'a>, DbError> {
+    columns: Option<&'a [String]>,
+) -> Result<DocIter<'a>, DbError> {
     let prefix = encoding::index_scan_prefix(column, value);
     let iter = txn.scan_prefix(partition, &prefix)?;
+
+    let col_set: Option<HashSet<&str>> =
+        columns.map(|cols| cols.iter().map(|s| s.as_str()).collect());
 
     // Collect record IDs from index
     let record_ids: Vec<String> = iter
@@ -168,43 +196,25 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
     let values = txn.multi_get(partition, &key_refs)?;
 
-    let mut records = Vec::new();
+    let mut docs = Vec::new();
     for (full_id, value_opt) in record_ids.iter().zip(values) {
         if let Some(bytes) = value_opt {
-            let record_value: RecordValue = match bincode::deserialize(&bytes) {
-                Ok(rv) => rv,
+            let raw = match RawDocumentBuf::from_bytes(bytes.into_vec()) {
+                Ok(r) => r,
                 Err(_) => continue,
             };
 
-            if is_expired(record_value.expire_at) {
-                continue;
-            }
+            let mut doc = match materialize_doc(&raw, col_set.as_ref()) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
 
             let short_id = full_id.strip_prefix(ds_prefix).unwrap_or(full_id);
-            let cells = build_cells(record_value.cells);
+            doc.insert("_id", short_id);
 
-            records.push(Record {
-                id: short_id.to_string(),
-                cells,
-            });
+            docs.push(doc);
         }
     }
 
-    Ok(Box::new(records.into_iter().map(Ok)))
-}
-
-/// Build a cells HashMap from stored cells, filtering out expired ones.
-fn build_cells(stored: HashMap<String, crate::cell::StoredCell>) -> HashMap<String, Cell> {
-    let mut cells = HashMap::new();
-    for (col, stored_cell) in stored {
-        if !is_expired(stored_cell.expire_at) {
-            cells.insert(
-                col,
-                Cell {
-                    value: stored_cell.value,
-                },
-            );
-        }
-    }
-    cells
+    Ok(Box::new(docs.into_iter().map(Ok)))
 }

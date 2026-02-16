@@ -1,7 +1,7 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
-use slate_db::{CellWrite, Datasource, Record};
+use slate_db::Datasource;
 use slate_query::Query;
 use slate_server::protocol::{Request, Response};
 
@@ -85,23 +85,23 @@ impl Client {
 
     // Data operations
 
-    pub fn write_cells(
+    pub fn write_record(
         &mut self,
         datasource_id: &str,
         record_id: &str,
-        cells: Vec<CellWrite>,
+        doc: bson::Document,
     ) -> Result<(), ClientError> {
-        self.expect_ok(Request::WriteCells {
+        self.expect_ok(Request::WriteRecord {
             datasource_id: datasource_id.to_string(),
             record_id: record_id.to_string(),
-            cells,
+            doc,
         })
     }
 
     pub fn write_batch(
         &mut self,
         datasource_id: &str,
-        writes: Vec<(String, Vec<CellWrite>)>,
+        writes: Vec<(String, bson::Document)>,
     ) -> Result<(), ClientError> {
         self.expect_ok(Request::WriteBatch {
             datasource_id: datasource_id.to_string(),
@@ -125,7 +125,7 @@ impl Client {
         datasource_id: &str,
         record_id: &str,
         columns: Option<&[&str]>,
-    ) -> Result<Option<Record>, ClientError> {
+    ) -> Result<Option<bson::Document>, ClientError> {
         match self.request(Request::GetById {
             datasource_id: datasource_id.to_string(),
             record_id: record_id.to_string(),
@@ -143,7 +143,7 @@ impl Client {
         &mut self,
         datasource_id: &str,
         query: &Query,
-    ) -> Result<Vec<Record>, ClientError> {
+    ) -> Result<Vec<bson::Document>, ClientError> {
         match self.request(Request::Query {
             datasource_id: datasource_id.to_string(),
             query: query.clone(),
