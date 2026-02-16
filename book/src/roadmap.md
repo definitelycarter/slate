@@ -14,45 +14,13 @@ For queries like `status='active' take(200)` without sort, the IndexScan current
 
 This is less impactful than indexed sort, but it would reduce unnecessary index I/O.
 
-## Multi-Tenant Deployment
+## Loader Implementations
 
-Each tenant gets an isolated stack (API + DB). Tenant key is an opaque string — consumers map it to their own concepts (business unit, dept, etc). The DB is ephemeral in-memory — CRDs are the source of truth, data is backfilled lazily from upstream on first request. No PVCs needed.
+The `Loader` trait is defined and tested with `NoopLoader` and `FakeLoader`. Real implementations are TODO:
 
-### K8s Architecture
+### gRPC Loader
 
-- **Tenant CRD** → tenant operator provisions pods and services
-- **Datasource CRD** → configures loader endpoint, TTL, and forwarded headers
-- **List CRD** → list operator pushes query configs (columns, sort, filters, page size) into tenant DB
-- **Gateway** → routes requests by tenant key header to the correct API service
-
-### Lists API
-
-Read-only API served by each tenant's API instance:
-
-- `GET /v1/lists` — all list configs
-- `GET /v1/lists/{id}` — single list config
-- `GET /v1/lists/{id}/data` — execute query, return records. Lazily backfills from upstream if DB is empty.
-
-### Loader (data pipeline)
-
-Slate doesn't know about upstream systems. Consumers implement a **loader** — a gRPC service that streams records back when called. Slate's list API checks staleness (via TTL on the datasource) and calls the loader to refresh when needed.
-
-**Datasource CRD config:**
-
-```yaml
-loader:
-  endpoint: grpc://prospect-loader:50051
-  ttl: 3600
-  forwardHeaders:
-    - Authorization
-    - X-SF-Token
-```
-
-**Flow:** `GET /v1/lists/{id}/data` → check staleness → call loader → stream records → `write_batch` → serve response.
-
-Auth context (headers, tokens) is forwarded from the incoming request to the loader via `metadata`. Slate is a passthrough — the consumer's loader handles upstream auth, cross-source dependencies, transforms, etc.
-
-**Protobuf contract:**
+Implement a gRPC streaming loader using the protobuf contract:
 
 ```protobuf
 syntax = "proto3";
@@ -63,23 +31,56 @@ service Loader {
 }
 
 message LoadRequest {
-  string datasource_id = 1;
-  map<string, string> metadata = 2;  // forwarded headers, auth context
+  string collection = 1;
+  string key = 2;
+  map<string, string> metadata = 3;
 }
 
 message LoadResponse {
-  string record_id = 1;
-  bytes document = 2;  // BSON-encoded document
+  bytes document = 1;  // BSON-encoded document
 }
 ```
 
-**Conversion:** `LoadResponse` → `bson::Document` (via `bson::from_slice` on the `document` bytes) → `write_batch`. The loader serializes each record as BSON, which Slate deserializes directly into a `bson::Document`. Slate buffers N records from the stream and batch-writes them.
+Each `LoadResponse` → `bson::from_slice` → `bson::Document`. The trait already returns a streaming iterator, so the gRPC stream maps naturally.
+
+### REST Loader
+
+Implement an HTTP loader that calls an external endpoint, receives a JSON array, and converts each item to `bson::Document`.
+
+### Datasource CRD
+
+Configure loader endpoint, TTL, and forwarded headers per collection:
+
+```yaml
+loader:
+  endpoint: grpc://prospect-loader:50051
+  ttl: 3600
+  forwardHeaders:
+    - Authorization
+    - X-SF-Token
+```
+
+## Platform Adapters
+
+`ListHttp` uses raw `http::Request`/`http::Response`. Thin adapter binaries are needed for each platform:
+
+- **Knative adapter** — small binary with HTTP server, forwards to `ListHttp::handle()`
+- **Lambda adapter** — wraps `ListHttp` with `lambda_http::run()`
+
+## Kubernetes Operator
+
+- **List CRD** → operator creates one Knative Service per list, injects ListConfig as ConfigMap
+- **Datasource CRD** → configures loader endpoint, TTL, forwarded headers
+- **Gateway API / Kourier** → routes `/lists/{id}/*` to correct Knative Service
+
+## Staleness / TTL
+
+Currently the loader fires when `count == 0`. Add TTL-based staleness:
+- Track last-loaded timestamp per key
+- If data exists but is older than TTL → reload
+- TTL comes from the Datasource CRD config
 
 ## Test Coverage
-
-### REST API tests (`slate-api`)
-
-No tests exist for route handlers. Cover list endpoints, error responses (404, 400), and JSON serialization.
 
 ### Error paths
 

@@ -4,6 +4,7 @@ use slate_query::{FilterGroup, Sort};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListRequest {
     pub filters: Option<FilterGroup>,
+    #[serde(default)]
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,

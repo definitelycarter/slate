@@ -1217,7 +1217,9 @@ name = "slate-lists"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "http",
  "serde",
+ "serde_json",
  "slate-client",
  "slate-db",
  "slate-query",

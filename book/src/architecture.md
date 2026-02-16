@@ -21,6 +21,7 @@ slate/
   ├── slate-db           → Database, Catalog, query execution, depends on slate-store + slate-query
   ├── slate-server       → TCP server, MessagePack wire protocol, thread-per-connection
   ├── slate-client       → TCP client, connection pool (crossbeam channel)
+  ├── slate-lists        → List service, config types, HTTP handler, loader trait
   ├── slate-bench        → DB-level benchmark suite (embedded + TCP, both backends)
   └── slate-store-bench  → Store-level stress test (500k records, race conditions, data integrity)
 ```
@@ -357,72 +358,152 @@ client.query(&query)?;
 
 Internally, `PooledClient` wraps an `Option<Client>` and implements `Deref`/`DerefMut` for transparent access. On `Drop`, the client is returned to the channel. The `Option` + `take()` + `expect("BUG: ...")` pattern (borrowed from sqlx) handles the provably-unreachable None case.
 
-## Tier 4: API Layer
+## Tier 4: Lists Layer (`slate-lists`)
 
-A REST API that can run locally during development and be deployed to the cloud later.
+### Overview
 
-### Datasource Endpoints
+Lists are saved view configurations that define how data is presented. A list has a title, a target collection, default filters, and column definitions. The lists layer is framework-agnostic — it uses raw `http::Request`/`http::Response` from the `http` crate, with no dependency on axum, lambda_http, or any framework.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/datasources` | Create a datasource (schema definition) |
-| GET | `/datasources` | List datasources |
-| GET | `/datasources/:id` | Get a datasource and its schema |
-| PUT | `/datasources/:id` | Update a datasource schema |
-| DELETE | `/datasources/:id` | Delete a datasource |
+### List Config
 
-### Item Endpoints
+List configurations come from external sources (Kubernetes CRDs, AWS CDK, config files) and are injected at startup. The HTTP layer treats them as read-only.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/datasources/:id/items` | Bulk load items for a user |
-| GET | `/datasources/:id/items` | Query items (filters, sorting) |
-| DELETE | `/datasources/:id/items` | Invalidate/clear a user's cached items |
+```rust
+pub struct ListConfig {
+    pub id: String,
+    pub title: String,
+    pub collection: String,
+    pub filters: Option<FilterGroup>,  // default list-level filters
+    pub columns: Vec<Column>,
+}
 
-### List Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/lists` | Create a list |
-| GET | `/lists` | Get user's lists |
-| GET | `/lists/:id/items` | Execute list query, return matching items |
-
-### List Model
-
-Lists are filtered views over items. They are a **top-level resource** with an optional `datasource_id`:
-
-- **`datasource_id` is set** — list is scoped to a single datasource. Full schema fields available for filtering, sorting, and column display.
-- **`datasource_id` is null** — list spans all of a user's datasources. Only fields common across all datasources (schema intersection) are available.
-
-Two default lists ship out of the box:
-- **Snoozed** — `datasource_id = null`, filters by `status = 'snoozed'` across all datasources.
-- **Rejected** — `datasource_id = null`, filters by `status = 'rejected'` across all datasources.
-
-These are not special-cased — they are regular list configurations that happen to be pre-created. Users cannot create their own cross-datasource lists.
-
-### Query Syntax
-
-Django-style filter syntax via query parameters:
-
-```
-name=foo                    → exact match
-name__icontains=foo         → case-insensitive contains
-revenue__gt=50000           → greater than
-created_at__gte=1707900000  → date range
+pub struct Column {
+    pub field: String,       // dot-notation path (e.g. "address.city")
+    pub header: String,      // display label
+    pub width: u32,          // pixel width
+    pub pinned: bool,        // sticky column
+}
 ```
 
-For `OR` groups and complex filters, JSON request bodies are used instead of query strings.
+### ListService
 
-### List Column Configuration
+The core service handles filter merging, lazy loading, and query execution over TCP.
 
-Each list has a column configuration that controls the UI presentation:
+```rust
+pub struct ListService<L: Loader> {
+    pool: ClientPool,
+    loader: L,
+}
+```
 
-- **Columns** — an ordered list of columns, each referencing a datasource field.
-- **Display config** — per-column rendering configuration. Default is `toString`.
-- **Visibility** — columns are explicitly opted in.
-- **Sort** — available sort options are dictated by the field type.
+**`get_list_data(config, key, request, metadata)`:**
 
-Column configuration is a **UI-layer concern**.
+1. Check if data exists — `count(collection)`. If empty, call `loader.load()` to stream documents from an external source, batch-inserting in chunks of 1000.
+2. Merge list default filters with user-provided filters (AND them together).
+3. Build projection from the list's column `field` values — only fetch fields the view needs.
+4. Execute the query with filters, sort, skip/take, and projection.
+5. Return `ListResponse { records, total }`.
+
+### Loader Trait
+
+The loader abstracts data population from external sources. It returns a streaming iterator of BSON documents — each implementation owns its conversion to BSON.
+
+```rust
+pub trait Loader: Send + Sync {
+    fn load(
+        &self,
+        collection: &str,
+        key: &str,
+        metadata: &HashMap<String, String>,
+    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError>;
+}
+```
+
+- **REST loader** — calls an HTTP endpoint, deserializes a JSON array, converts each item to `bson::Document`, yields as iterator.
+- **gRPC loader** — connects via gRPC streaming, each message is a document, true streaming.
+- **NoopLoader** — returns empty iterator, for pre-populated data.
+
+Loading is **per-key** (e.g. per user). If the collection has no data for a key, the loader fires. If data exists but filters return empty, that's a legit empty result — no loading. Duplicate loads are idempotent.
+
+### HTTP Handler
+
+`ListHttp` holds a single `ListConfig` and a `ListService`. One service instance per list.
+
+```rust
+pub struct ListHttp<L: Loader> {
+    config: ListConfig,
+    service: ListService<L>,
+}
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/config` | Return this service's list config as JSON |
+| POST | `/data` | Execute list query, return matching records |
+
+**Request context:**
+- `X-List-Key` header — the per-user/per-tenant key for loading
+- `X-Meta-*` headers — metadata forwarded to the loader (auth tokens, tenant context)
+- Request body — `ListRequest` JSON (filters, sort, skip, take). Empty body uses defaults.
+
+The `handle` method takes `http::Request<Vec<u8>>` and returns `http::Response<Vec<u8>>`. This is the boundary that platform adapters call into.
+
+## Deployment Architecture
+
+### One List, One Service
+
+Each list is deployed as its own isolated service instance. The list config is injected via environment/config at startup. Routing to the correct service is handled at the infrastructure layer, not in application code.
+
+```
+                                    ┌──────────────────────┐
+                                    │  List Service A      │
+  ┌────────────┐                    │  (Active Accounts)   │
+  │            │  /lists/active ──► │  ListHttp + DB + TCP │
+  │  Gateway / │                    └──────────────────────┘
+  │  Router    │                    ┌──────────────────────┐
+  │            │  /lists/snoozed ─► │  List Service B      │
+  │            │                    │  (Snoozed Accounts)  │
+  └────────────┘                    │  ListHttp + DB + TCP │
+                                    └──────────────────────┘
+```
+
+### Kubernetes / Knative
+
+- **List CRD** — defines a list config (title, collection, filters, columns)
+- **Operator** — watches List CRDs, creates a Knative Service per list
+- **Knative Serving** — manages the service lifecycle, scale-to-zero when idle
+- **Gateway API / Kourier** — routes `/lists/{id}/*` to the correct Knative Service
+- **Config injection** — operator renders the ListConfig as a ConfigMap or env var, mounted into the pod
+
+Each service runs its own in-memory DB (MemoryStore), TCP server, and ListService. Data is ephemeral — lazily loaded from upstream via the loader on first request. No PVCs needed.
+
+### AWS
+
+- **Lambda** — one function per list, wraps `ListHttp` with `lambda_http`
+- **API Gateway** — routes `/lists/{id}/*` to the correct Lambda function
+- **CDK / CloudFormation** — defines list configs, provisions Lambda functions and API Gateway routes
+- **Config injection** — list config passed as Lambda environment variable
+
+Same `ListHttp` handler, different adapter. The Lambda binary is a thin wrapper:
+
+```rust
+// Pseudocode
+fn main() {
+    let config: ListConfig = from_env("LIST_CONFIG");
+    let service = ListService::new(pool, loader);
+    let handler = ListHttp::new(config, service);
+    lambda_http::run(|req| handler.handle(req));
+}
+```
+
+### Why One-Per-Service?
+
+- **Independent scaling** — hot lists scale up, cold lists scale to zero
+- **Simple config** — one env var per service, no routing logic in app code
+- **Isolation** — a misbehaving list doesn't affect others
+- **Matches serverless** — Lambda and Knative both model this naturally
 
 ## Tier 5: Frontend
 

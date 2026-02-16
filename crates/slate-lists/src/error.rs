@@ -19,6 +19,15 @@ impl fmt::Display for ListError {
 
 impl std::error::Error for ListError {}
 
+impl ListError {
+    pub fn status_code(&self) -> http::StatusCode {
+        match self {
+            ListError::NotFound(_) => http::StatusCode::NOT_FOUND,
+            ListError::Client(_) | ListError::Loader(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 impl From<slate_client::ClientError> for ListError {
     fn from(e: slate_client::ClientError) -> Self {
         ListError::Client(e)
