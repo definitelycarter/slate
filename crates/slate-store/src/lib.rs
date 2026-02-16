@@ -9,3 +9,9 @@ mod rocks;
 
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksStore;
+
+#[cfg(feature = "memory")]
+mod memory;
+
+#[cfg(feature = "memory")]
+pub use memory::MemoryStore;

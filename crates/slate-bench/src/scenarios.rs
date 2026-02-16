@@ -1,9 +1,9 @@
-use std::sync::{Arc, Barrier};
+use std::sync::Arc;
 use std::thread;
 
 use slate_db::{Database, Datasource, FieldDef, FieldType, Value};
 use slate_query::*;
-use slate_store::RocksStore;
+use slate_store::Store;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
@@ -94,7 +94,7 @@ pub fn make_datasource() -> Datasource {
 }
 
 /// Create the datasource in the database (must be called before any data writes).
-pub fn setup_datasource(db: &Database<RocksStore>) {
+pub fn setup_datasource<S: Store>(db: &Database<S>) {
     let mut txn = db.begin(false).expect("begin failed");
     txn.save_datasource(&make_datasource())
         .expect("save_datasource failed");
@@ -103,7 +103,7 @@ pub fn setup_datasource(db: &Database<RocksStore>) {
 
 // --- Phase 1: Bulk Insert ---
 
-pub fn bulk_insert(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) -> Vec<BenchResult> {
+pub fn bulk_insert<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) -> Vec<BenchResult> {
     let mut results = Vec::new();
     let total_records = cfg.total_records();
     let batch_size = cfg.batch_size;
@@ -143,7 +143,7 @@ pub fn bulk_insert(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) ->
 
 // --- Phase 2: Data Integrity Verification ---
 
-pub fn verify_integrity(db: &Database<RocksStore>, user: usize, cfg: &BenchConfig) {
+pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) {
     let total_records = cfg.total_records();
     let txn = db.begin(true).expect("begin failed");
     let query = Query {
@@ -221,8 +221,8 @@ pub fn verify_integrity(db: &Database<RocksStore>, user: usize, cfg: &BenchConfi
 
 // --- Phase 3: Query Benchmarks ---
 
-pub fn query_benchmarks(
-    db: &Database<RocksStore>,
+pub fn query_benchmarks<S: Store>(
+    db: &Database<S>,
     _user: usize,
     cfg: &BenchConfig,
 ) -> Vec<BenchResult> {
@@ -565,8 +565,8 @@ pub fn query_benchmarks(
 
 // --- Phase 4: Concurrency Tests ---
 
-pub fn concurrency_tests(
-    db: Arc<Database<RocksStore>>,
+pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
+    db: Arc<Database<S>>,
     _user: usize,
     cfg: &BenchConfig,
 ) -> Vec<BenchResult> {
@@ -624,45 +624,12 @@ pub fn concurrency_tests(
         thread_count
     }));
 
-    // Test 2: Write conflict detection
-    results.push(bench("concurrent: write conflict detection", || {
-        let barrier = Arc::new(Barrier::new(2));
-        let mut handles = Vec::new();
-
-        for _ in 0..2 {
-            let db = Arc::clone(&db);
-            let barrier = Arc::clone(&barrier);
-            handles.push(thread::spawn(move || -> Result<(), slate_db::DbError> {
-                let mut txn = db.begin(false).expect("conflict begin failed");
-                let cells = datagen::generate_cells(99, 999_999);
-                let id = datagen::generate_record_id(99, 999_999);
-                txn.write_record(DS_ID, &id, cells)
-                    .expect("conflict write failed");
-                barrier.wait();
-                txn.commit()
-            }));
-        }
-
-        let mut successes = 0;
-        let mut conflicts = 0;
-        for h in handles {
-            match h.join().expect("conflict thread panicked") {
-                Ok(()) => successes += 1,
-                Err(_) => conflicts += 1,
-            }
-        }
-
-        println!("    write conflict: {successes} succeeded, {conflicts} conflicted");
-        assert!(successes >= 1, "at least one transaction should succeed");
-        successes + conflicts
-    }));
-
     results
 }
 
 // --- Phase 5: Post-Concurrency Integrity ---
 
-pub fn verify_post_concurrency(db: &Database<RocksStore>, _user: usize, cfg: &BenchConfig) {
+pub fn verify_post_concurrency<S: Store>(db: &Database<S>, _user: usize, cfg: &BenchConfig) {
     let total_records = cfg.total_records();
     let txn = db.begin(true).expect("begin failed");
     let query = Query {

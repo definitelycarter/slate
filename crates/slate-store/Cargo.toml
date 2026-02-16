@@ -6,9 +6,12 @@ edition = "2024"
 [features]
 default = ["rocksdb"]
 rocksdb = ["dep:rocksdb"]
+memory = ["dep:imbl", "dep:arc-swap"]
 
 [dependencies]
 rocksdb = { version = "0.24", optional = true }
+imbl = { version = "4", optional = true }
+arc-swap = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,0 +1,13 @@
+[package]
+name = "slate-store-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "slate-store-bench"
+path = "src/main.rs"
+
+[dependencies]
+slate-store = { path = "../slate-store", features = ["rocksdb", "memory"] }
+rand = "0.8"
+tempfile = "3"

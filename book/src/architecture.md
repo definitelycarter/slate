@@ -16,12 +16,13 @@ rust core (lib crate)
 
 ```
 slate/
-  ├── slate-store   → Store/Transaction traits, Record/Value types, RocksDB impl (feature-gated)
-  ├── slate-query   → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  ├── slate-db      → Database, Catalog, query execution, depends on slate-store + slate-query
-  ├── slate-server  → TCP server, bincode wire protocol, thread-per-connection
-  ├── slate-client  → TCP client, connection pool (crossbeam channel)
-  └── slate-bench   → Benchmark suite (embedded + TCP, 100k records × 3 users)
+  ├── slate-store        → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
+  ├── slate-query        → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
+  ├── slate-db           → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-server       → TCP server, bincode wire protocol, thread-per-connection
+  ├── slate-client       → TCP client, connection pool (crossbeam channel)
+  ├── slate-bench        → DB-level benchmark suite (embedded + TCP, both backends)
+  └── slate-store-bench  → Store-level stress test (500k records, race conditions, data integrity)
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
@@ -96,6 +97,31 @@ The default implementation uses RocksDB (feature-gated). RocksDB provides:
 - MVCC-like behavior built in — no need to implement our own
 
 Other implementations can be added behind feature flags.
+
+### Implementation: In-Memory (`MemoryStore`)
+
+The in-memory implementation (feature-gated behind `memory`) is designed for ephemeral cache workloads where data is populated from an upstream source and doesn't need to survive process restarts.
+
+**Why not RocksDB for caching?** RocksDB is a disk-backed LSM engine — it pays for durability (WAL, compaction, fsync) that an ephemeral cache doesn't need. At 500k records, MemoryStore writes are 2x faster and reads are 1.5-1.9x faster.
+
+**Why not an external database (MongoDB, Redis)?** The data model is already document-shaped (`Record` with nested `Value` types). Adding an external database means shipping a server dependency, managing connections, and translating between type systems. An embedded in-memory store gives zero operational overhead, no network round-trips, and direct Rust type access.
+
+**Why not partial deserialization with BSON?** BSON supports skipping nested fields without full deserialization. But at 50 fields with small nested arrays, bincode full deserialization is already fast enough that partial reads don't pay for themselves. The overhead of a self-describing format (field names stored per document) is a constant tax on every read/write.
+
+**Architecture** (inspired by SurrealDB's [echodb](https://github.com/surrealdb/echodb)):
+
+- **`imbl::OrdMap`** per column family — immutable B-tree with structural sharing. Snapshot clones are O(1), not O(n). Ordered keys give sorted iteration for `scan_prefix` and `delete_range`.
+- **`arc_swap::ArcSwap`** per column family — lock-free atomic pointer swap. Readers load the current pointer without blocking. Writers swap in a new pointer on commit.
+- **`std::sync::Mutex`** write lock — serializes writers. Acquired at `begin(false)`, released on commit/rollback.
+
+**Concurrency model:**
+
+- Readers snapshot via `ArcSwap::load` (lock-free) and see a consistent point-in-time view.
+- Writers acquire the mutex, clone the OrdMap (cheap via structural sharing), mutate locally, and atomically swap on commit.
+- Multiple concurrent readers never block each other or writers.
+- A reader that started before a commit continues seeing old data (snapshot isolation).
+
+**Memory footprint:** ~5-6 KB per record (50 fields, small nested arrays). At 500k records, ~2.5-3 GB — fits comfortably in an 8 GB ECS container with headroom for request handling, sorting, and transient allocations.
 
 ## Tier 2: Query Layer (`slate-query`)
 

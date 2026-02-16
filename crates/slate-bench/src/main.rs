@@ -11,24 +11,24 @@ use std::time::Instant;
 use slate_client::Client;
 use slate_db::Database;
 use slate_server::Server;
-use slate_store::RocksStore;
+use slate_store::{MemoryStore, RocksStore, Store};
 
-fn run_embedded(
+fn run_embedded<S: Store + Send + Sync + 'static>(
+    backend: &str,
     cfg: &scenarios::BenchConfig,
     users: usize,
     all_results: &mut Vec<report::BenchResult>,
+    make_db: impl Fn() -> Database<S>,
 ) {
     println!(
-        "========== EMBEDDED (direct) — {} records/user ==========\n",
+        "========== EMBEDDED ({backend}) — {} records/user ==========\n",
         cfg.label
     );
 
     for user in 0..users {
         println!("--- User {user} ---\n");
 
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let store = RocksStore::open(dir.path()).expect("failed to open store");
-        let db = Database::new(store);
+        let db = make_db();
         scenarios::setup_datasource(&db);
 
         // Phase 1: Bulk Insert
@@ -71,16 +71,56 @@ fn run_embedded(
     }
 }
 
+fn make_rocks_db() -> Database<RocksStore> {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let store = RocksStore::open(dir.path()).expect("failed to open store");
+    std::mem::forget(dir);
+    Database::new(store)
+}
+
+fn make_memory_db() -> Database<MemoryStore> {
+    Database::new(MemoryStore::new())
+}
+
 fn main() {
     println!("=== Slate Benchmark Suite ===\n");
 
     let total_start = Instant::now();
     let mut all_results = Vec::new();
 
-    // --- Embedded benchmarks ---
+    // --- Embedded benchmarks: RocksStore ---
 
-    run_embedded(&scenarios::CONFIG_10K, 3, &mut all_results);
-    run_embedded(&scenarios::CONFIG_100K, 3, &mut all_results);
+    run_embedded(
+        "RocksStore",
+        &scenarios::CONFIG_10K,
+        3,
+        &mut all_results,
+        make_rocks_db,
+    );
+    run_embedded(
+        "RocksStore",
+        &scenarios::CONFIG_100K,
+        3,
+        &mut all_results,
+        make_rocks_db,
+    );
+
+    // --- Embedded benchmarks: MemoryStore ---
+
+    run_embedded(
+        "MemoryStore",
+        &scenarios::CONFIG_10K,
+        3,
+        &mut all_results,
+        make_memory_db,
+    );
+    run_embedded(
+        "MemoryStore",
+        &scenarios::CONFIG_100K,
+        3,
+        &mut all_results,
+        make_memory_db,
+    );
 
     // --- TCP benchmarks ---
 
@@ -89,9 +129,7 @@ fn main() {
     for user in 0..3 {
         println!("--- TCP User {user} ---\n");
 
-        let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let store = RocksStore::open(dir.path()).expect("failed to open store");
-        let db = Database::new(store);
+        let db = make_rocks_db();
         scenarios::setup_datasource(&db);
 
         // Find a free port

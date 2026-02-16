@@ -146,6 +146,68 @@ Scan-heavy queries scale ~10x for 10x data — near-linear. Sort remains slightl
 
 Write conflict recovery/retry is left to the application layer.
 
+## RocksStore vs MemoryStore (DB-Level)
+
+Same workload as embedded benchmarks, run against both storage backends. 100k records per user.
+
+### Bulk Insert — 100k Records
+
+| Backend | Time | Per Record |
+|---------|------|------------|
+| RocksStore | ~545ms | ~0.0055ms |
+| MemoryStore | ~282ms | ~0.0028ms |
+| **Speedup** | **1.9x** | |
+
+### Queries — 100k Records
+
+| Query | RocksStore | MemoryStore | Speedup |
+|-------|-----------|-------------|---------|
+| Full scan (no filter) | 114ms | 103ms | 1.1x |
+| status = 'active' (indexed) | 90ms | 66ms | 1.4x |
+| product_recommendation1 = 'ProductA' | 102ms | 96ms | 1.1x |
+| status + rec1 + rec2 (AND) | 88ms | 65ms | 1.4x |
+| status='active' + sort + skip/take | 129ms | 106ms | 1.2x |
+| status='active' (no sort) | 87ms | 65ms | 1.3x |
+| status='active' + sort | 128ms | 115ms | 1.1x |
+| 1,000 point lookups | 3.1ms | 2.6ms | 1.2x |
+| projection (name, status only) | 122ms | 115ms | 1.1x |
+
+### Queries — 500k Records
+
+At higher scale, the gap widens — especially for indexed queries and writes.
+
+| Query | RocksStore | MemoryStore | Speedup |
+|-------|-----------|-------------|---------|
+| Bulk insert 500k | 2,954ms | 1,513ms | **2.0x** |
+| Full scan | 653ms | 518ms | 1.3x |
+| status = 'active' (indexed) | 627ms | 336ms | **1.9x** |
+| status + rec1 + rec2 (AND) | 611ms | 350ms | **1.7x** |
+| status='active' (no sort) | 608ms | 335ms | **1.8x** |
+| status='active' + sort | 931ms | 658ms | 1.4x |
+| 1,000 point lookups | 5.1ms | 3.4ms | 1.5x |
+| Concurrency (2w + 4r) | 4,775ms | 2,176ms | **2.2x** |
+
+### Key Observations
+
+- **Writes are 2x faster** — MemoryStore has no WAL, no fsync, no LSM compaction. Batch write times stay flat (~30ms/10k) while RocksDB creeps from 49ms to 66ms as data grows.
+- **Indexed queries are 1.4-1.9x faster** — index scans hit the store heavily; in-memory B-tree lookups beat RocksDB's block cache.
+- **Full scans are modest (1.1-1.3x)** — the bottleneck is bincode deserialization, which is identical for both backends. Storage read time is a small fraction.
+- **Concurrent workloads are 2.2x faster** — MemoryStore's lock-free reads via `ArcSwap` avoid RocksDB's internal locking overhead.
+
+### Store-Level Stress Test (`slate-store-bench`)
+
+Raw key-value performance at 500k records with 10 KB values (~4.7 GB total data). Tests verify zero data loss and zero corruption.
+
+| Operation | MemoryStore | RocksStore | Speedup |
+|-----------|------------|-----------|---------|
+| Write 500k records | 4,455ms (112k rec/s) | 5,507ms (91k rec/s) | 1.2x |
+| Read all 500k | 278ms (1.8M rec/s) | 1,861ms (269k rec/s) | **6.7x** |
+| Scan prefix (full) | 147ms | 1,000ms | **6.8x** |
+
+**Integrity checks passed:** rollback, snapshot isolation, delete_range, concurrent stress (4 readers + 1 writer).
+
+The 6-7x raw read speedup narrows to 1.1-1.9x at the DB level because DB queries pay for bincode deserialization and filter evaluation on every record — costs that dominate the storage read time.
+
 ## Query Planner
 
 The query planner builds a plan tree from the query and datasource schema:
