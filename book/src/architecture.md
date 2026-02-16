@@ -19,7 +19,7 @@ slate/
   ├── slate-store        → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
   ├── slate-query        → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
   ├── slate-db           → Database, Catalog, query execution, depends on slate-store + slate-query
-  ├── slate-server       → TCP server, bincode wire protocol, thread-per-connection
+  ├── slate-server       → TCP server, MessagePack wire protocol, thread-per-connection
   ├── slate-client       → TCP client, connection pool (crossbeam channel)
   ├── slate-bench        → DB-level benchmark suite (embedded + TCP, both backends)
   └── slate-store-bench  → Store-level stress test (500k records, race conditions, data integrity)
@@ -90,9 +90,7 @@ The in-memory implementation (feature-gated behind `memory`) is designed for eph
 
 **Why not RocksDB for caching?** RocksDB is a disk-backed LSM engine — it pays for durability (WAL, compaction, fsync) that an ephemeral cache doesn't need. At 500k records, MemoryStore writes are 2x faster and reads are 1.5-1.9x faster.
 
-**Why not an external database (MongoDB, Redis)?** The data model is already document-shaped (`Record` with nested `Value` types). Adding an external database means shipping a server dependency, managing connections, and translating between type systems. An embedded in-memory store gives zero operational overhead, no network round-trips, and direct Rust type access.
-
-**Why not partial deserialization with BSON?** BSON supports skipping nested fields without full deserialization. But at 50 fields with small nested arrays, bincode full deserialization is already fast enough that partial reads don't pay for themselves. The overhead of a self-describing format (field names stored per document) is a constant tax on every read/write.
+**Why not an external database (MongoDB, Redis)?** The data model is already document-shaped (`bson::Document` with nested types). Adding an external database means shipping a server dependency, managing connections, and translating between type systems. An embedded in-memory store gives zero operational overhead, no network round-trips, and direct Rust type access.
 
 **Architecture** (inspired by SurrealDB's [echodb](https://github.com/surrealdb/echodb)):
 
@@ -107,7 +105,7 @@ The in-memory implementation (feature-gated behind `memory`) is designed for eph
 - Multiple concurrent readers never block each other or writers.
 - A reader that started before a commit continues seeing old data (snapshot isolation).
 
-**Memory footprint:** ~5-6 KB per record (50 fields, small nested arrays). At 500k records, ~2.5-3 GB — fits comfortably in an 8 GB ECS container with headroom for request handling, sorting, and transient allocations.
+**Memory footprint:** ~1.2 KB per record on disk/in-store (960 bytes BSON data + keys + index entries for a 50-field document). At 500k records, ~0.7 GB; at 1M records, ~1.4 GB including BTreeMap overhead — fits comfortably in a 2-4 GB container.
 
 ## Tier 2: Query Layer (`slate-query`)
 
@@ -164,43 +162,26 @@ pub enum QueryValue {
 
 ### Overview
 
-The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and the record/cell model. This is where raw bytes become typed data — `slate-db` owns serialization (bincode) and the `Record`/`Value`/`Cell` types.
+The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and document storage. Records are stored as raw BSON bytes (`bson::to_vec` of a `bson::Document`), with no intermediate type system — the `bson::Document` is the record.
 
-### Record and Cell Model
+### Document Model
 
-Records have a string ID and a map of cells. Each `Cell` wraps a `Value`. Field values are represented as a `Value` enum supporting multiple types including nested structures.
-
-```rust
-pub struct Record {
-    pub id: String,
-    pub cells: HashMap<String, Cell>,
-}
-
-pub struct Cell {
-    pub value: Value,
-}
-
-pub enum Value {
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Date(i64),
-    List(Vec<Value>),
-    Map(HashMap<String, Value>),
-}
-```
-
-Writes use a cell-based model for partial updates — only the specified columns are written, existing columns are preserved via read-modify-write:
+Records are `bson::Document` values. There is no custom `Record`, `Cell`, or `Value` type — BSON's native types (`String`, `Int64`, `Double`, `Boolean`, `DateTime`, `Array`, `Document`) are used directly. This means nested documents and arrays are first-class citizens.
 
 ```rust
-pub struct CellWrite {
-    pub column: String,
-    pub value: Value,
-}
+let doc = doc! {
+    "name": "Alice",
+    "status": "active",
+    "contacts_count": 42,
+    "address": {
+        "city": "Austin",
+        "state": "TX",
+        "zip": "78701"
+    }
+};
 ```
 
-Internally, each record is stored as a single key-value pair. The stored form (`RecordValue`) includes per-cell and per-record TTL expiry timestamps, computed from the datasource field configuration.
+Writes use a read-modify-write pattern — the new document is merged with the existing record so that unspecified fields are preserved. Each record is stored as a single key-value pair (`d:{partition}:{record_id}` → raw BSON bytes).
 
 ### Database and Transactions
 
@@ -211,10 +192,13 @@ let db = Database::new(store);
 
 let mut txn = db.begin(false)?;
 txn.save_datasource(&datasource)?;
-txn.write_record("ds1", "rec-1", vec![
-    CellWrite { column: "name".into(), value: Value::String("Alice".into()) },
+txn.write_record("ds1", "rec-1", doc! {
+    "name": "Alice",
+    "status": "active",
+})?;
+txn.write_batch("ds1", vec![
+    ("rec-2".into(), doc! { "name": "Bob" }),
 ])?;
-txn.write_batch("ds1", vec![("rec-2".into(), cells), ...])?;
 txn.delete_record("ds1", "rec-1")?;
 txn.commit()?;
 
@@ -239,8 +223,7 @@ pub struct Datasource {
 pub struct FieldDef {
     pub name: String,
     pub field_type: FieldType,
-    pub ttl_seconds: Option<i64>,  // per-field TTL
-    pub indexed: bool,             // maintain index on writes
+    pub indexed: bool,  // maintain index on writes
 }
 
 pub enum FieldType {
@@ -263,38 +246,32 @@ Projection (optional column selection)
   → Limit (skip/take)
     → Sort (collects if needed)
       → Filter (streaming residual filters)
-        → Scan or IndexScan (base operation)
+        → Scan { columns } or IndexScan { columns } (base operation)
 ```
+
+**Column pushdown:** The planner computes the set of required columns (union of projection + filter + sort fields, mapped to top-level keys for dot-notation paths) and passes them to the Scan/IndexScan node. When present, only those fields are materialized from `RawDocumentBuf`; otherwise full document deserialization.
 
 **Index optimization:** For top-level AND groups, the planner looks for `Eq` conditions on indexed columns and rewrites them as `IndexScan` nodes. The consumed condition is removed from the filter, and remaining conditions become a residual `Filter` node. OR groups cannot use indexes and always fall back to full scan.
 
 **Execution** is lazy/streaming where possible:
-- `Scan` / `IndexScan` yield records one at a time
-- `Filter` passes through matching records (streaming)
-- `Sort` materializes the filtered set (necessary for ordering)
+- `Scan` / `IndexScan` yield records one at a time, with selective materialization from `RawDocumentBuf`
+- `Filter` passes through matching records (streaming). Supports dot-notation paths (e.g. `"address.city"`) via `get_path()`
+- `Sort` materializes the filtered set (necessary for ordering). Supports dot-notation sort keys
 - `Limit` applies skip/take (streaming)
-- `Projection` strips unneeded columns
+- `Projection` strips unneeded columns. For dot-notation paths, trims nested documents to only requested sub-paths (e.g. `"address.city"` returns `{ "address": { "city": "Austin" } }`)
 
 Key properties:
+- **Selective materialization** — scan nodes only deserialize the fields needed for the query, not the entire document
+- **Dot-notation field access** — filters, sorts, and projections support paths like `"address.city"` for nested document traversal
 - **Filters are pushed down** — applied during scan, not after collecting all records
 - **Index pushdown** — indexed `Eq` conditions narrow the scan to matching keys
 - **Errors propagate** — scan and deserialization errors are not silently swallowed
-
-### Future: Arrow Materialized Views
-
-Arrow-based materialized views may be added later as a query optimization. They would:
-- Live in the db layer, not the store
-- Be materialized per partition after a transaction commits
-- Use double-buffer swapping for concurrent read access
-- Be gated behind a per-partition mutex to prevent duplicate materialization
-
-For now, queries scan directly from the store through the iterator pipeline.
 
 ## TCP Interface (`slate-server` + `slate-client`)
 
 ### Overview
 
-Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization with length-prefixed framing — compact, cross-language, and serde-compatible. This enables architectures where the REST API (or other consumers) run as separate services.
+Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization (rmp-serde) with length-prefixed framing. MessagePack was chosen over BSON for the wire because it's more compact for structured enum data — benchmarks showed BSON wire format 32-76% slower for bulk transfers (see Benchmarks). This enables architectures where the REST API (or other consumers) run as separate services.
 
 ```
 ┌──────────────┐       TCP (MessagePack)      ┌──────────────────┐
@@ -313,8 +290,8 @@ Messages are length-prefixed: a 4-byte big-endian length followed by a MessagePa
 ```rust
 enum Request {
     // Data (all scoped to a datasource)
-    WriteCells { datasource_id: String, record_id: String, cells: Vec<CellWrite> },
-    WriteBatch { datasource_id: String, writes: Vec<(String, Vec<CellWrite>)> },
+    WriteRecord { datasource_id: String, record_id: String, doc: bson::Document },
+    WriteBatch { datasource_id: String, writes: Vec<(String, bson::Document)> },
     DeleteRecord { datasource_id: String, record_id: String },
     GetById { datasource_id: String, record_id: String, columns: Option<Vec<String>> },
     Query { datasource_id: String, query: Query },
@@ -327,8 +304,8 @@ enum Request {
 
 enum Response {
     Ok,
-    Record(Option<Record>),
-    Records(Vec<Record>),
+    Record(Option<bson::Document>),
+    Records(Vec<bson::Document>),
     Datasource(Option<Datasource>),
     Datasources(Vec<Datasource>),
     Error(String),
@@ -352,12 +329,12 @@ The client opens a TCP connection and provides methods that mirror the database 
 let mut client = Client::connect("127.0.0.1:9600")?;
 
 // Data operations (scoped to datasource)
-client.write_cells("ds1", "rec-1", vec![CellWrite { ... }])?;
-client.write_batch("ds1", vec![("rec-2".into(), cells)])?;
-client.get_by_id("ds1", "rec-1", None)?;          // -> Option<Record>
+client.write_record("ds1", "rec-1", doc! { "name": "Alice", "status": "active" })?;
+client.write_batch("ds1", vec![("rec-2".into(), doc! { "name": "Bob" })])?;
+client.get_by_id("ds1", "rec-1", None)?;          // -> Option<bson::Document>
 client.get_by_id("ds1", "rec-1", Some(&["name"]))?; // with projection
 client.delete_record("ds1", "rec-1")?;
-client.query("ds1", &query)?;                      // -> Vec<Record>
+client.query("ds1", &query)?;                      // -> Vec<bson::Document>
 
 // Catalog operations
 client.save_datasource(&ds)?;

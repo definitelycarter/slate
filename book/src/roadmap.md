@@ -6,17 +6,13 @@ Currently, `Sort` materializes the entire filtered set before sorting in memory.
 
 If the sort field is indexed, we can walk the index in sorted order instead of materializing. Sort + take(200) becomes an index range scan that stops after 200 qualifying rows — O(k) instead of O(n).
 
-This would turn queries like `sort + take(200)` from ~140ms to something closer to the ~10ms range.
+This would turn queries like `sort + take(200)` from ~124ms to something closer to the ~10ms range.
 
 ## Count/Limit Pushdown on IndexScan
 
 For queries like `status='active' take(200)` without sort, the IndexScan currently yields all matching record IDs from the index (~50k), then Limit takes 200. The IndexScan could accept an optional limit and stop walking the index after enough matches, avoiding the full index traversal.
 
 This is less impactful than indexed sort, but it would reduce unnecessary index I/O.
-
-## No Index on TTL Fields
-
-Reject field configs that have both `indexed: true` and `ttl_seconds: Some(...)` at `save_datasource` time. An expired column would leave stale index entries pointing to logically-gone values — either requiring background cleanup or read-time filtering that defeats the purpose of the index. Fail loud on write rather than dealing with it at query time.
 
 ## Multi-Tenant Deployment
 
@@ -73,31 +69,11 @@ message LoadRequest {
 
 message LoadResponse {
   string record_id = 1;
-  map<string, FieldValue> fields = 2;
-}
-
-message FieldValue {
-  oneof value {
-    string string_value = 1;
-    int64 int_value = 2;
-    double float_value = 3;
-    bool bool_value = 4;
-    int64 date_value = 5;
-    ListValue list_value = 6;
-    MapValue map_value = 7;
-  }
-}
-
-message ListValue {
-  repeated FieldValue values = 1;
-}
-
-message MapValue {
-  map<string, FieldValue> entries = 1;
+  bytes document = 2;  // BSON-encoded document
 }
 ```
 
-**Conversion:** `LoadResponse` → `CellWrite` vec → `write_batch`. `FieldValue` oneof maps directly to Slate's `Value` enum. Slate buffers N records from the stream and batch-writes them.
+**Conversion:** `LoadResponse` → `bson::Document` (via `bson::from_slice` on the `document` bytes) → `write_batch`. The loader serializes each record as BSON, which Slate deserializes directly into a `bson::Document`. Slate buffers N records from the stream and batch-writes them.
 
 ## Test Coverage
 
@@ -111,7 +87,7 @@ Verify that when an indexed value changes (e.g. status "active" → "rejected"),
 
 ### Error paths
 
-Test behavior for: writing to a nonexistent datasource, querying a deleted datasource, writing unknown column names, malformed queries.
+Test behavior for: writing to a nonexistent datasource, querying a deleted datasource, malformed queries.
 
 ### Encoding edge cases
 
