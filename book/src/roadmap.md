@@ -16,12 +16,12 @@ This is less impactful than indexed sort, but it would reduce unnecessary index 
 
 ## Multi-Tenant Deployment
 
-Each tenant gets an isolated stack (API + DB). Tenant key is an opaque string — consumers map it to their own concepts (business unit, dept, etc). The DB is ephemeral — CRDs are the source of truth, data is backfilled lazily from upstream on first request.
+Each tenant gets an isolated stack (API + DB). Tenant key is an opaque string — consumers map it to their own concepts (business unit, dept, etc). The DB is ephemeral in-memory — CRDs are the source of truth, data is backfilled lazily from upstream on first request. No PVCs needed.
 
 ### K8s Architecture
 
-- **Tenant CRD** → tenant operator provisions pods, services, volumes
-- **Datasource CRD** → tenant operator connects via TCP, creates datasource schema
+- **Tenant CRD** → tenant operator provisions pods and services
+- **Datasource CRD** → configures loader endpoint, TTL, and forwarded headers
 - **List CRD** → list operator pushes query configs (columns, sort, filters, page size) into tenant DB
 - **Gateway** → routes requests by tenant key header to the correct API service
 
@@ -79,23 +79,15 @@ message LoadResponse {
 
 ### REST API tests (`slate-api`)
 
-No tests exist for route handlers. Cover datasource CRUD endpoints, error responses (404, 400), and JSON serialization.
-
-### Index maintenance on updates
-
-Verify that when an indexed value changes (e.g. status "active" → "rejected"), the old index entry is deleted and the new one is created. Also verify index cleanup on record deletion.
+No tests exist for route handlers. Cover list endpoints, error responses (404, 400), and JSON serialization.
 
 ### Error paths
 
-Test behavior for: writing to a nonexistent datasource, querying a deleted datasource, malformed queries.
+Test behavior for: malformed queries, missing collections, invalid filter operators.
 
 ### Encoding edge cases
 
 Negative ints in index keys, empty strings, special characters in record IDs, very long values.
-
-### Concurrent write conflicts
-
-Unit tests (not just bench) for optimistic transaction conflict detection and correct rollback behavior.
 
 ### ClientPool
 
