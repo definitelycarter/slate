@@ -1,17 +1,19 @@
 # Slate
 
-A dynamic storage engine built in Rust. Schema-flexible records on top of RocksDB with query execution, a TCP server/client, and native + web frontends (planned).
+A document database built in Rust. Schema-flexible BSON documents on top of RocksDB (or in-memory) with query execution, indexing, a TCP server/client, and native + web frontends (planned).
 
 ## Crate Structure
 
 ```
 slate/
-  ├── slate-store   → Store/Transaction traits, Record/Value types, RocksDB impl
-  ├── slate-query   → Query model: filters, operators, sorting (pure data structures)
-  ├── slate-db      → Database layer: query execution (Volcano/iterator), datasource catalog
-  ├── slate-server  → TCP server with bincode wire protocol, thread-per-connection
-  ├── slate-client  → TCP client with connection pool
-  └── slate-bench   → Benchmark suite (embedded + TCP)
+  ├── slate-store        → Store/Transaction traits, MemoryStore + RocksDB backends
+  ├── slate-query        → Query model: filters, operators, sorting (pure data structures)
+  ├── slate-db           → Database layer: collections, indexes, query execution (Volcano/iterator)
+  ├── slate-server       → TCP server with MessagePack wire protocol, thread-per-connection
+  ├── slate-client       → TCP client with connection pool
+  ├── slate-api          → API layer (planned)
+  ├── slate-bench        → Database-level benchmark suite (embedded, multi-user)
+  └── slate-store-bench  → Store-level benchmark suite (raw read/write throughput)
 ```
 
 ## Quick Start
@@ -21,10 +23,13 @@ slate/
 cargo build
 
 # Run tests
-cargo test
+cargo test --workspace
 
-# Run benchmarks (3 users × 100k records each)
+# Run database benchmarks (3 users x 100k records each)
 cargo run --release -p slate-bench
+
+# Run store benchmarks (500k x 10KB records)
+cargo run --release -p slate-store-bench
 ```
 
 ## Usage
@@ -32,17 +37,37 @@ cargo run --release -p slate-bench
 ### Embedded
 
 ```rust
+use bson::doc;
 use slate_db::Database;
-use slate_store::{RocksStore, Record, Value};
+use slate_store::RocksStore;
 
-let store = RocksStore::new("/tmp/slate-data");
+let store = RocksStore::open("/tmp/slate-data")?;
 let db = Database::new(store);
 
+// Insert
 let mut txn = db.begin(false)?;
-txn.insert(Record::new("acct-1", [
-    ("name", Value::String("Acme Corp".into())),
-    ("status", Value::String("active".into())),
-]))?;
+txn.insert_one("accounts", doc! {
+    "_id": "acct-1",
+    "name": "Acme Corp",
+    "status": "active",
+    "revenue": 50000.0
+})?;
+txn.commit()?;
+
+// Query
+let mut txn = db.begin(true)?;
+let results = txn.find("accounts", &query)?;
+let doc = txn.find_by_id("accounts", "acct-1", None)?;
+let count = txn.count("accounts", None)?;
+
+// Update
+let mut txn = db.begin(false)?;
+txn.update_one("accounts", &filter, doc! { "status": "archived" }, false)?;
+txn.commit()?;
+
+// Indexes
+let mut txn = db.begin(false)?;
+txn.create_index("accounts", "status")?;
 txn.commit()?;
 ```
 
@@ -52,37 +77,29 @@ txn.commit()?;
 use slate_server::Server;
 
 let server = Server::new(db, "127.0.0.1:9600");
-server.serve(); // blocks
+server.serve()?;
 ```
 
 ### TCP Client
 
 ```rust
+use bson::doc;
 use slate_client::{Client, ClientPool};
 
-// Single connection
 let mut client = Client::connect("127.0.0.1:9600")?;
-client.insert(record)?;
-let results = client.query(&query)?;
+client.insert_one("accounts", doc! { "name": "Acme" })?;
+let results = client.find("accounts", &query)?;
+let doc = client.find_by_id("accounts", "acct-1", None)?;
 
 // Connection pool
 let pool = ClientPool::new("127.0.0.1:9600", 10)?;
-let mut client = pool.get()?; // blocks if all in use, returns on drop
-client.query(&query)?;
+let mut client = pool.get()?;
+client.find("accounts", &query)?;
 ```
 
-## Performance (100k records, Apple Silicon)
+## Performance
 
-| Operation | Embedded | TCP |
-|-----------|----------|-----|
-| Bulk insert (100k) | 194ms | 283ms |
-| Full scan | 74ms | 148ms |
-| Filter (~50k results) | 80ms | 123ms |
-| Filter + take(200) | 69ms | 73ms |
-| Filter + sort + take(200) | 127ms | 131ms |
-| Point lookup (get_by_id) | 0.001ms | 0.04ms |
-
-See [full benchmark results](book/src/benchmarks.md) for details.
+See [benchmarks](book/src/benchmarks.md) for full results including MemoryStore vs RocksDB comparisons across bulk inserts, queries, indexes, and concurrency tests.
 
 ## Documentation
 
