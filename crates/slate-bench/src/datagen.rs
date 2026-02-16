@@ -37,9 +37,13 @@ pub fn generate_record_id(user: usize, seq: usize) -> String {
     format!("user{user}-{seq}")
 }
 
-/// Generate a batch of (record_id, doc) tuples.
-pub fn generate_batch(user: usize, start: usize, count: usize) -> Vec<(String, bson::Document)> {
+/// Generate a batch of documents with `_id` included (for insert_many).
+pub fn generate_batch_docs(user: usize, start: usize, count: usize) -> Vec<bson::Document> {
     (start..start + count)
-        .map(|seq| (generate_record_id(user, seq), generate_doc(user, seq)))
+        .map(|seq| {
+            let mut doc = generate_doc(user, seq);
+            doc.insert("_id", generate_record_id(user, seq));
+            doc
+        })
         .collect()
 }

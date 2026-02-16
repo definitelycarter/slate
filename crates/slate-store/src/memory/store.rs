@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::{Bound, RangeBounds};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use arc_swap::ArcSwap;
 use imbl::OrdMap;
@@ -14,37 +14,41 @@ pub(crate) type ColumnFamily = OrdMap<Vec<u8>, Vec<u8>>;
 
 pub struct MemoryStore {
     cfs: RwLock<HashMap<String, Arc<ArcSwap<ColumnFamily>>>>,
-    write_lock: Arc<Mutex<()>>,
+    write_lock: Mutex<()>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
             cfs: RwLock::new(HashMap::new()),
-            write_lock: Arc::new(Mutex::new(())),
+            write_lock: Mutex::new(()),
         }
     }
 
-    /// Snapshot all column families. Cheap due to imbl structural sharing.
-    pub(crate) fn snapshot_cfs(&self) -> HashMap<String, ColumnFamily> {
-        let cfs = self.cfs.read().unwrap();
-        cfs.iter()
-            .map(|(name, arc)| (name.clone(), (**arc.load()).clone()))
-            .collect()
+    /// Acquire the write lock. Only one write transaction can exist at a time.
+    pub(crate) fn acquire_write_lock(&self) -> Result<MutexGuard<'_, ()>, StoreError> {
+        self.write_lock
+            .lock()
+            .map_err(|e| StoreError::Storage(format!("write lock poisoned: {e}")))
     }
 
-    /// Swap a column family's data with a new OrdMap.
-    pub(crate) fn swap_cf(&self, name: &str, data: ColumnFamily) {
+    /// Snapshot a single column family (lazy — called on first access).
+    pub(crate) fn snapshot_cf(&self, name: &str) -> Option<ColumnFamily> {
         let cfs = self.cfs.read().unwrap();
-        if let Some(arc) = cfs.get(name) {
-            arc.store(Arc::new(data));
+        let arc_swap = cfs.get(name)?;
+        let arc = arc_swap.load_full();
+        Some((*arc).clone())
+    }
+
+    /// Commit dirty CFs back to the store. The caller must already hold the
+    /// write lock, so no conflict detection is needed.
+    pub(crate) fn commit(&self, dirty: HashMap<String, ColumnFamily>) {
+        let cfs = self.cfs.read().unwrap();
+        for (name, data) in dirty {
+            if let Some(arc_swap) = cfs.get(&name) {
+                arc_swap.store(Arc::new(data));
+            }
         }
-    }
-
-    /// Get a reference to the CF map for checking existence.
-    pub(crate) fn cf_exists(&self, name: &str) -> bool {
-        let cfs = self.cfs.read().unwrap();
-        cfs.contains_key(name)
     }
 }
 
@@ -52,24 +56,12 @@ impl Store for MemoryStore {
     type Txn<'a> = MemoryTransaction<'a>;
 
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, StoreError> {
-        let write_guard = if read_only {
-            None
+        if read_only {
+            Ok(MemoryTransaction::new_read_only(self))
         } else {
-            Some(
-                self.write_lock
-                    .lock()
-                    .map_err(|e| StoreError::Storage(format!("write lock poisoned: {e}")))?,
-            )
-        };
-
-        let snapshot = self.snapshot_cfs();
-
-        Ok(MemoryTransaction::new(
-            self,
-            snapshot,
-            write_guard,
-            read_only,
-        ))
+            let guard = self.acquire_write_lock()?;
+            Ok(MemoryTransaction::new_writable(self, guard))
+        }
     }
 
     fn create_cf(&self, name: &str) -> Result<(), StoreError> {

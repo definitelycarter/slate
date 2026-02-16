@@ -16,65 +16,88 @@ impl<S: Store> Session<S> {
 
     pub fn handle(&self, request: Request) -> Response {
         match request {
-            Request::WriteRecord {
-                datasource_id,
-                record_id,
-                doc,
-            } => self.write(|txn| {
-                txn.write_record(&datasource_id, &record_id, doc)?;
-                Ok(Response::Ok)
+            Request::InsertOne { collection, doc } => self.write(|txn| {
+                let result = txn.insert_one(&collection, doc)?;
+                Ok(Response::Insert(result))
             }),
-            Request::WriteBatch {
-                datasource_id,
-                writes,
-            } => self.write(|txn| {
-                txn.write_batch(&datasource_id, writes)?;
-                Ok(Response::Ok)
+            Request::InsertMany { collection, docs } => self.write(|txn| {
+                let results = txn.insert_many(&collection, docs)?;
+                Ok(Response::Inserts(results))
             }),
-            Request::DeleteRecord {
-                datasource_id,
-                record_id,
-            } => self.write(|txn| {
-                txn.delete_record(&datasource_id, &record_id)?;
-                Ok(Response::Ok)
-            }),
-            Request::GetById {
-                datasource_id,
-                record_id,
-                columns,
-            } => self.read(|txn| {
-                let col_refs: Vec<&str>;
-                let cols = match &columns {
-                    Some(c) => {
-                        col_refs = c.iter().map(|s| s.as_str()).collect();
-                        Some(col_refs.as_slice())
-                    }
-                    None => None,
-                };
-                let record = txn.get_by_id(&datasource_id, &record_id, cols)?;
-                Ok(Response::Record(record))
-            }),
-            Request::Query {
-                datasource_id,
-                query,
-            } => self.read(|txn| {
-                let records = txn.query(&datasource_id, &query)?;
+            Request::Find { collection, query } => self.read(|txn| {
+                let records = txn.find(&collection, &query)?;
                 Ok(Response::Records(records))
             }),
-            Request::SaveDatasource(ds) => self.write(|txn| {
-                txn.save_datasource(&ds)?;
+            Request::FindOne { collection, query } => self.read(|txn| {
+                let record = txn.find_one(&collection, &query)?;
+                Ok(Response::Record(record))
+            }),
+            Request::FindById {
+                collection,
+                id,
+                columns,
+            } => self.read(|txn| {
+                let cols: Option<Vec<&str>> = columns
+                    .as_ref()
+                    .map(|c| c.iter().map(|s| s.as_str()).collect());
+                let record = txn.find_by_id(&collection, &id, cols.as_deref())?;
+                Ok(Response::Record(record))
+            }),
+            Request::UpdateOne {
+                collection,
+                filter,
+                update,
+                upsert,
+            } => self.write(|txn| {
+                let result = txn.update_one(&collection, &filter, update, upsert)?;
+                Ok(Response::Update(result))
+            }),
+            Request::UpdateMany {
+                collection,
+                filter,
+                update,
+            } => self.write(|txn| {
+                let result = txn.update_many(&collection, &filter, update)?;
+                Ok(Response::Update(result))
+            }),
+            Request::ReplaceOne {
+                collection,
+                filter,
+                doc,
+            } => self.write(|txn| {
+                let result = txn.replace_one(&collection, &filter, doc)?;
+                Ok(Response::Update(result))
+            }),
+            Request::DeleteOne { collection, filter } => self.write(|txn| {
+                let result = txn.delete_one(&collection, &filter)?;
+                Ok(Response::Delete(result))
+            }),
+            Request::DeleteMany { collection, filter } => self.write(|txn| {
+                let result = txn.delete_many(&collection, &filter)?;
+                Ok(Response::Delete(result))
+            }),
+            Request::Count { collection, filter } => self.read(|txn| {
+                let count = txn.count(&collection, filter.as_ref())?;
+                Ok(Response::Count(count))
+            }),
+            Request::CreateIndex { collection, field } => self.write(|txn| {
+                txn.create_index(&collection, &field)?;
                 Ok(Response::Ok)
             }),
-            Request::GetDatasource(id) => self.read(|txn| {
-                let ds = txn.get_datasource(&id)?;
-                Ok(Response::Datasource(ds))
+            Request::DropIndex { collection, field } => self.write(|txn| {
+                txn.drop_index(&collection, &field)?;
+                Ok(Response::Ok)
             }),
-            Request::ListDatasources => self.read(|txn| {
-                let list = txn.list_datasources()?;
-                Ok(Response::Datasources(list))
+            Request::ListIndexes { collection } => self.read(|txn| {
+                let indexes = txn.list_indexes(&collection)?;
+                Ok(Response::Indexes(indexes))
             }),
-            Request::DeleteDatasource(id) => self.write(|txn| {
-                txn.delete_datasource(&id)?;
+            Request::ListCollections => self.read(|txn| {
+                let collections = txn.list_collections()?;
+                Ok(Response::Collections(collections))
+            }),
+            Request::DropCollection { collection } => self.write(|txn| {
+                txn.drop_collection(&collection)?;
                 Ok(Response::Ok)
             }),
         }

@@ -1,14 +1,11 @@
 use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort};
 
-use crate::datasource::Datasource;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
-    /// Full scan — yields all record IDs under a prefix.
+    /// Full scan — yields all records in a partition.
     /// `columns` limits materialization to only these top-level keys (None = all).
     Scan {
         partition: String,
-        prefix: String,
         columns: Option<Vec<String>>,
     },
 
@@ -46,39 +43,33 @@ pub enum PlanNode {
     },
 }
 
-/// Build a query plan from a datasource and query.
+/// Build a query plan from a collection partition and its indexed fields.
 ///
 /// The planner analyzes the filter to determine if an index can be used.
 /// For top-level AND groups, it looks for `Eq` conditions on indexed columns
 /// and rewrites them as `IndexScan`, leaving remaining conditions as a
 /// residual `Filter` node.
-pub fn plan(datasource: &Datasource, query: &Query) -> PlanNode {
-    let partition = datasource.partition.clone();
-    let prefix = format!("{}:", datasource.id);
-
+pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNode {
     // Compute the set of top-level keys the scan must materialize.
-    // If projection is specified, we only need: projection ∪ filter ∪ sort columns
-    // (mapped to top-level keys for dot-notation paths).
-    // If no projection, None means materialize everything.
     let scan_columns = compute_scan_columns(query);
 
     // Step 1: Try to extract an indexed Eq condition from the filter
     let (input, residual_filter) = match &query.filter {
-        Some(group) => match try_index_scan(datasource, group, scan_columns.clone()) {
-            Some((index_node, residual)) => (index_node, residual),
-            None => (
-                PlanNode::Scan {
-                    partition: partition.clone(),
-                    prefix,
-                    columns: scan_columns,
-                },
-                Some(group.clone()),
-            ),
-        },
+        Some(group) => {
+            match try_index_scan(partition, indexed_fields, group, scan_columns.clone()) {
+                Some((index_node, residual)) => (index_node, residual),
+                None => (
+                    PlanNode::Scan {
+                        partition: partition.to_string(),
+                        columns: scan_columns,
+                    },
+                    Some(group.clone()),
+                ),
+            }
+        }
         None => (
             PlanNode::Scan {
-                partition: partition.clone(),
-                prefix,
+                partition: partition.to_string(),
                 columns: scan_columns,
             },
             None,
@@ -179,14 +170,9 @@ fn collect_filter_columns(group: &FilterGroup, out: &mut Vec<String>) {
 }
 
 /// Try to extract an indexed Eq condition from a top-level AND group.
-///
-/// Returns `Some((IndexScan node, residual filter))` if an indexed Eq
-/// condition is found. The residual filter contains the remaining conditions.
-///
-/// Only works on top-level AND groups — OR groups can't use a single index
-/// to narrow the scan.
 fn try_index_scan(
-    datasource: &Datasource,
+    partition: &str,
+    indexed_fields: &[String],
     group: &FilterGroup,
     scan_columns: Option<Vec<String>>,
 ) -> Option<(PlanNode, Option<FilterGroup>)> {
@@ -198,7 +184,8 @@ fn try_index_scan(
     let mut index_pos = None;
     for (i, child) in group.children.iter().enumerate() {
         if let FilterNode::Condition(filter) = child {
-            if filter.operator == Operator::Eq && is_indexed(datasource, &filter.field) {
+            if filter.operator == Operator::Eq && indexed_fields.iter().any(|f| f == &filter.field)
+            {
                 index_pos = Some(i);
                 break;
             }
@@ -212,7 +199,7 @@ fn try_index_scan(
     };
 
     let index_node = PlanNode::IndexScan {
-        partition: datasource.partition.clone(),
+        partition: partition.to_string(),
         column: filter.field.clone(),
         value: query_value_to_bson(&filter.value),
         columns: scan_columns,
@@ -239,13 +226,6 @@ fn try_index_scan(
     Some((index_node, residual))
 }
 
-fn is_indexed(datasource: &Datasource, field: &str) -> bool {
-    datasource
-        .fields
-        .iter()
-        .any(|f| f.name == field && f.indexed)
-}
-
 fn query_value_to_bson(qv: &slate_query::QueryValue) -> bson::Bson {
     match qv {
         slate_query::QueryValue::String(s) => bson::Bson::String(s.clone()),
@@ -262,34 +242,8 @@ fn query_value_to_bson(qv: &slate_query::QueryValue) -> bson::Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datasource::{FieldDef, FieldType};
     use bson::Bson;
     use slate_query::{Filter, QueryValue, SortDirection};
-
-    fn test_datasource(indexed_fields: &[&str]) -> Datasource {
-        Datasource {
-            id: "ds1".into(),
-            name: "Test".into(),
-            fields: vec![
-                FieldDef {
-                    name: "name".into(),
-                    field_type: FieldType::String,
-                    indexed: indexed_fields.contains(&"name"),
-                },
-                FieldDef {
-                    name: "status".into(),
-                    field_type: FieldType::String,
-                    indexed: indexed_fields.contains(&"status"),
-                },
-                FieldDef {
-                    name: "score".into(),
-                    field_type: FieldType::Int,
-                    indexed: indexed_fields.contains(&"score"),
-                },
-            ],
-            partition: "p1".into(),
-        }
-    }
 
     fn empty_query() -> Query {
         Query {
@@ -314,14 +268,11 @@ mod tests {
 
     #[test]
     fn plan_no_filter() {
-        let ds = test_datasource(&[]);
-        let q = empty_query();
-        let p = plan(&ds, &q);
+        let p = plan("p1", &[], &empty_query());
         assert_eq!(
             p,
             PlanNode::Scan {
                 partition: "p1".into(),
-                prefix: "ds1:".into(),
                 columns: None,
             }
         );
@@ -329,12 +280,11 @@ mod tests {
 
     #[test]
     fn plan_with_filter_no_index() {
-        let ds = test_datasource(&[]);
         let q = Query {
             filter: Some(eq_filter("status", QueryValue::String("active".into()))),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &[], &q);
         assert!(
             matches!(p, PlanNode::Filter { input, .. } if matches!(*input, PlanNode::Scan { .. }))
         );
@@ -342,13 +292,12 @@ mod tests {
 
     #[test]
     fn plan_with_indexed_eq_filter() {
-        let ds = test_datasource(&["status"]);
+        let indexed = vec!["status".to_string()];
         let q = Query {
             filter: Some(eq_filter("status", QueryValue::String("active".into()))),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
-        // Should be IndexScan with no Filter wrapping
+        let p = plan("p1", &indexed, &q);
         assert_eq!(
             p,
             PlanNode::IndexScan {
@@ -362,7 +311,7 @@ mod tests {
 
     #[test]
     fn plan_indexed_eq_plus_residual() {
-        let ds = test_datasource(&["status"]);
+        let indexed = vec!["status".to_string()];
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -381,8 +330,7 @@ mod tests {
             }),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
-        // Should be Filter(IndexScan) — status consumed by index, score remains as filter
+        let p = plan("p1", &indexed, &q);
         match p {
             PlanNode::Filter { predicate, input } => {
                 assert!(matches!(*input, PlanNode::IndexScan { .. }));
@@ -398,7 +346,6 @@ mod tests {
 
     #[test]
     fn plan_with_sort() {
-        let ds = test_datasource(&[]);
         let q = Query {
             sort: vec![Sort {
                 field: "name".into(),
@@ -406,7 +353,7 @@ mod tests {
             }],
             ..empty_query()
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &[], &q);
         assert!(
             matches!(p, PlanNode::Sort { input, .. } if matches!(*input, PlanNode::Scan { .. }))
         );
@@ -414,7 +361,6 @@ mod tests {
 
     #[test]
     fn plan_with_filter_and_sort() {
-        let ds = test_datasource(&[]);
         let q = Query {
             filter: Some(eq_filter("status", QueryValue::String("active".into()))),
             sort: vec![Sort {
@@ -423,8 +369,7 @@ mod tests {
             }],
             ..empty_query()
         };
-        let p = plan(&ds, &q);
-        // Sort(Filter(Scan))
+        let p = plan("p1", &[], &q);
         match p {
             PlanNode::Sort { input, .. } => {
                 assert!(matches!(*input, PlanNode::Filter { .. }));
@@ -435,13 +380,12 @@ mod tests {
 
     #[test]
     fn plan_with_skip_take() {
-        let ds = test_datasource(&[]);
         let q = Query {
             skip: Some(10),
             take: Some(5),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &[], &q);
         match p {
             PlanNode::Limit {
                 skip, take, input, ..
@@ -456,12 +400,11 @@ mod tests {
 
     #[test]
     fn plan_with_projection() {
-        let ds = test_datasource(&[]);
         let q = Query {
             columns: Some(vec!["name".into(), "status".into()]),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &[], &q);
         match p {
             PlanNode::Projection { columns, input } => {
                 assert_eq!(columns, vec!["name".to_string(), "status".to_string()]);
@@ -473,7 +416,7 @@ mod tests {
 
     #[test]
     fn plan_full_query() {
-        let ds = test_datasource(&["status"]);
+        let indexed = vec!["status".to_string()];
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -498,7 +441,7 @@ mod tests {
             take: Some(5),
             columns: Some(vec!["name".into(), "score".into()]),
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &indexed, &q);
         // Projection(Limit(Sort(Filter(IndexScan))))
         match p {
             PlanNode::Projection { input, .. } => match *input {
@@ -519,7 +462,7 @@ mod tests {
 
     #[test]
     fn plan_or_filter_with_index() {
-        let ds = test_datasource(&["status"]);
+        let indexed = vec!["status".to_string()];
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
@@ -538,7 +481,7 @@ mod tests {
             }),
             ..empty_query()
         };
-        let p = plan(&ds, &q);
+        let p = plan("p1", &indexed, &q);
         // OR at top level can't use index — falls back to Filter(Scan)
         assert!(
             matches!(p, PlanNode::Filter { input, .. } if matches!(*input, PlanNode::Scan { .. }))

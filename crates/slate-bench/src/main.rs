@@ -29,7 +29,7 @@ fn run_embedded<S: Store + Send + Sync + 'static>(
         println!("--- User {user} ---\n");
 
         let db = make_db();
-        scenarios::setup_datasource(&db);
+        scenarios::setup_collection(&db);
 
         // Phase 1: Bulk Insert
         println!("[Phase 1] Bulk Insert");
@@ -130,7 +130,7 @@ fn main() {
         println!("--- TCP User {user} ---\n");
 
         let db = make_rocks_db();
-        scenarios::setup_datasource(&db);
+        scenarios::setup_collection(&db);
 
         // Find a free port
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind");

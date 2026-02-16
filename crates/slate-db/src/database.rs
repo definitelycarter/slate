@@ -1,17 +1,14 @@
-use std::collections::HashMap;
-
 use bson::Bson;
-use slate_query::Query;
+use slate_query::{FilterGroup, Query};
 use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
-use crate::datasource::Datasource;
 use crate::encoding;
 use crate::error::DbError;
 use crate::exec;
 use crate::executor;
 use crate::planner;
-use crate::record;
+use crate::result::{DeleteResult, InsertResult, UpdateResult};
 
 const SYS_CF: &str = "_sys";
 const ID_COLUMN: &str = "_id";
@@ -34,7 +31,6 @@ impl<S: Store> Database<S> {
         let txn = self.store.begin(read_only)?;
         Ok(DatabaseTransaction {
             txn,
-            store: &self.store,
             catalog: &self.catalog,
         })
     }
@@ -42,231 +38,113 @@ impl<S: Store> Database<S> {
 
 pub struct DatabaseTransaction<'db, S: Store + 'db> {
     txn: S::Txn<'db>,
-    store: &'db S,
     catalog: &'db Catalog,
 }
 
 impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
-    // ── Catalog operations ──────────────────────────────────────────
+    // ── Insert operations ───────────────────────────────────────
 
-    pub fn save_datasource(&mut self, datasource: &Datasource) -> Result<(), DbError> {
-        let _ = self.store.create_cf(&datasource.partition);
-        self.catalog.save(&mut self.txn, datasource)
-    }
-
-    pub fn get_datasource(&self, id: &str) -> Result<Option<Datasource>, DbError> {
-        self.catalog.get(&self.txn, id)
-    }
-
-    pub fn list_datasources(&self) -> Result<Vec<Datasource>, DbError> {
-        self.catalog.list(&self.txn)
-    }
-
-    pub fn delete_datasource(&mut self, id: &str) -> Result<(), DbError> {
-        self.catalog.delete(&mut self.txn, id)
-    }
-
-    // ── Datasource lookup helper ────────────────────────────────────
-
-    fn require_datasource(&self, datasource_id: &str) -> Result<Datasource, DbError> {
-        self.catalog
-            .get(&self.txn, datasource_id)?
-            .ok_or_else(|| DbError::DatasourceNotFound(datasource_id.to_string()))
-    }
-
-    /// Build the full record key: {datasource_id}:{record_id}
-    fn full_record_id(datasource_id: &str, record_id: &str) -> String {
-        format!("{datasource_id}:{record_id}")
-    }
-
-    // ── Write operations ────────────────────────────────────────────
-
-    /// Write a document for a record. Uses read-modify-write to merge with existing data.
-    pub fn write_record(
+    /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
+    /// If the document has no `_id`, a UUID is generated.
+    pub fn insert_one(
         &mut self,
-        datasource_id: &str,
-        record_id: &str,
-        doc: bson::Document,
-    ) -> Result<(), DbError> {
-        record::validate_document(&doc)?;
-        let ds = self.require_datasource(datasource_id)?;
-        let full_id = Self::full_record_id(datasource_id, record_id);
-        let key = encoding::record_key(&full_id);
+        collection: &str,
+        mut doc: bson::Document,
+    ) -> Result<InsertResult, DbError> {
+        self.catalog.ensure_collection(&mut self.txn, collection)?;
 
-        // Read existing record for merge (partial writes)
-        let mut existing = match self.txn.get(&ds.partition, &key)? {
-            Some(bytes) => bson::from_slice::<bson::Document>(&bytes)?,
-            None => bson::Document::new(),
-        };
+        // Extract or generate _id
+        let id = extract_or_generate_id(&mut doc);
+        let key = encoding::record_key(&id);
 
-        // Track old indexed values for cleanup
-        let old_indexed: HashMap<String, Bson> = ds
-            .fields
-            .iter()
-            .filter(|f| f.indexed)
-            .filter_map(|f| exec::get_path(&existing, &f.name).map(|v| (f.name.clone(), v.clone())))
-            .collect();
-
-        // Merge new fields
-        for (column, value) in &doc {
-            if column == ID_COLUMN {
-                continue;
-            }
-            existing.insert(column.clone(), value.clone());
+        // Check for duplicate
+        if self.txn.get(collection, &key)?.is_some() {
+            return Err(DbError::DuplicateKey(id));
         }
 
-        // Write raw BSON bytes
-        self.txn
-            .put(&ds.partition, &key, &bson::to_vec(&existing)?)?;
+        // Write document (without _id — it's in the key)
+        self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
         // Index maintenance
-        for field in &ds.fields {
-            if !field.indexed {
-                continue;
-            }
-            let new_value = exec::get_path(&existing, &field.name);
-            let old_value = old_indexed.get(&field.name);
-
-            // Delete old index entry if value changed
-            if let Some(old_val) = old_value {
-                if new_value != Some(old_val) {
-                    let old_idx_key = encoding::index_key(&field.name, old_val, &full_id);
-                    self.txn.delete(&ds.partition, &old_idx_key)?;
-                }
-            }
-
-            // Add new index entry
-            if let Some(new_val) = new_value {
-                let idx_key = encoding::index_key(&field.name, new_val, &full_id);
-                self.txn.put(&ds.partition, &idx_key, &[])?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        for field in &indexed_fields {
+            if let Some(value) = exec::get_path(&doc, field) {
+                let idx_key = encoding::index_key(field, value, &id);
+                self.txn.put(collection, &idx_key, &[])?;
             }
         }
 
-        Ok(())
+        Ok(InsertResult { id })
     }
 
-    /// Write multiple records in a single transaction.
-    pub fn write_batch(
+    /// Insert multiple documents. Fails per-doc on duplicate `_id`.
+    pub fn insert_many(
         &mut self,
-        datasource_id: &str,
-        writes: Vec<(String, bson::Document)>,
-    ) -> Result<(), DbError> {
-        let ds = self.require_datasource(datasource_id)?;
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<Vec<InsertResult>, DbError> {
+        self.catalog.ensure_collection(&mut self.txn, collection)?;
 
-        // Validate all documents first
-        for (_, doc) in &writes {
-            record::validate_document(doc)?;
-        }
+        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let mut results = Vec::with_capacity(docs.len());
 
-        // Batch read existing records
-        let full_ids: Vec<String> = writes
-            .iter()
-            .map(|(id, _)| Self::full_record_id(datasource_id, id))
-            .collect();
-        let keys: Vec<Vec<u8>> = full_ids.iter().map(|id| encoding::record_key(id)).collect();
-        let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-        let existing_records = self.txn.multi_get(&ds.partition, &key_refs)?;
+        for mut doc in docs {
+            let id = extract_or_generate_id(&mut doc);
+            let key = encoding::record_key(&id);
 
-        for (i, (_, doc)) in writes.into_iter().enumerate() {
-            let full_id = &full_ids[i];
-
-            let mut existing = match &existing_records[i] {
-                Some(bytes) => bson::from_slice::<bson::Document>(bytes)?,
-                None => bson::Document::new(),
-            };
-
-            // Track old indexed values for cleanup
-            let old_indexed: HashMap<String, Bson> = ds
-                .fields
-                .iter()
-                .filter(|f| f.indexed)
-                .filter_map(|f| {
-                    exec::get_path(&existing, &f.name).map(|v| (f.name.clone(), v.clone()))
-                })
-                .collect();
-
-            // Merge new fields
-            for (column, value) in &doc {
-                if column == ID_COLUMN {
-                    continue;
-                }
-                existing.insert(column.clone(), value.clone());
+            if self.txn.get(collection, &key)?.is_some() {
+                return Err(DbError::DuplicateKey(id));
             }
 
-            // Write raw BSON bytes
-            self.txn
-                .put(&ds.partition, &keys[i], &bson::to_vec(&existing)?)?;
+            self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
-            // Index maintenance
-            for field in &ds.fields {
-                if !field.indexed {
-                    continue;
-                }
-                let new_value = exec::get_path(&existing, &field.name);
-                let old_value = old_indexed.get(&field.name);
-
-                if let Some(old_val) = old_value {
-                    if new_value != Some(old_val) {
-                        let old_idx_key = encoding::index_key(&field.name, old_val, full_id);
-                        self.txn.delete(&ds.partition, &old_idx_key)?;
-                    }
-                }
-
-                if let Some(new_val) = new_value {
-                    let idx_key = encoding::index_key(&field.name, new_val, full_id);
-                    self.txn.put(&ds.partition, &idx_key, &[])?;
+            for field in &indexed_fields {
+                if let Some(value) = exec::get_path(&doc, field) {
+                    let idx_key = encoding::index_key(field, value, &id);
+                    self.txn.put(collection, &idx_key, &[])?;
                 }
             }
+
+            results.push(InsertResult { id });
         }
 
-        Ok(())
+        Ok(results)
     }
 
-    /// Delete a record and its index entries.
-    pub fn delete_record(&mut self, datasource_id: &str, record_id: &str) -> Result<(), DbError> {
-        let ds = self.require_datasource(datasource_id)?;
-        let full_id = Self::full_record_id(datasource_id, record_id);
-        let key = encoding::record_key(&full_id);
+    // ── Query operations ────────────────────────────────────────
 
-        // Read record to get indexed values for cleanup
-        if let Some(bytes) = self.txn.get(&ds.partition, &key)? {
-            let doc: bson::Document = bson::from_slice(&bytes)?;
-            for field in &ds.fields {
-                if field.indexed {
-                    if let Some(value) = exec::get_path(&doc, &field.name) {
-                        let idx_key = encoding::index_key(&field.name, value, &full_id);
-                        self.txn.delete(&ds.partition, &idx_key)?;
-                    }
-                }
+    /// Find documents matching a query (filter, sort, skip, take, projection).
+    /// Returns an empty result set if the collection doesn't exist.
+    pub fn find(&self, collection: &str, query: &Query) -> Result<Vec<bson::Document>, DbError> {
+        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+        let plan = planner::plan(collection, &indexed_fields, query);
+        match executor::execute(&self.txn, &plan) {
+            Ok(iter) => iter.collect(),
+            Err(DbError::Store(ref e)) if e.to_string().contains("column family not found") => {
+                Ok(vec![])
             }
+            Err(e) => Err(e),
         }
-
-        self.txn.delete(&ds.partition, &key)?;
-        Ok(())
     }
 
-    // ── Read operations ─────────────────────────────────────────────
-
-    /// Get a single record by ID, optionally projecting specific columns.
-    pub fn get_by_id(
+    /// Get a single document by `_id`. Direct key lookup — O(1).
+    pub fn find_by_id(
         &self,
-        datasource_id: &str,
-        record_id: &str,
+        collection: &str,
+        id: &str,
         columns: Option<&[&str]>,
     ) -> Result<Option<bson::Document>, DbError> {
-        let ds = self.require_datasource(datasource_id)?;
-        let full_id = Self::full_record_id(datasource_id, record_id);
-        let key = encoding::record_key(&full_id);
-
-        let bytes = match self.txn.get(&ds.partition, &key)? {
-            Some(b) => b,
-            None => return Ok(None),
+        let key = encoding::record_key(id);
+        let bytes = match self.txn.get(collection, &key) {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(None),
+            Err(ref e) if e.to_string().contains("column family not found") => return Ok(None),
+            Err(e) => return Err(DbError::Store(e)),
         };
 
         let mut doc: bson::Document = bson::from_slice(&bytes)?;
-        doc.insert("_id", record_id);
+        doc.insert("_id", id);
 
-        // Apply projection
         if let Some(wanted) = columns {
             let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
             exec::apply_projection(&mut doc, &cols);
@@ -275,26 +153,319 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         Ok(Some(doc))
     }
 
-    // ── Query ───────────────────────────────────────────────────────
-
-    /// Query records in a datasource.
-    ///
-    /// Builds a plan tree from the query, then executes it lazily:
-    /// Scan/IndexScan → Filter → Sort → Limit → Projection
-    pub fn query(
+    /// Find the first document matching a query.
+    pub fn find_one(
         &self,
-        datasource_id: &str,
+        collection: &str,
         query: &Query,
-    ) -> Result<Vec<bson::Document>, DbError> {
-        let ds = self.require_datasource(datasource_id)?;
-        let ds_prefix = format!("{datasource_id}:");
-
-        let plan = planner::plan(&ds, query);
-        let iter = executor::execute(&self.txn, &plan, &ds_prefix)?;
-        iter.collect()
+    ) -> Result<Option<bson::Document>, DbError> {
+        let mut q = query.clone();
+        q.take = Some(1);
+        let results = self.find(collection, &q)?;
+        Ok(results.into_iter().next())
     }
 
-    // ── Lifecycle ───────────────────────────────────────────────────
+    // ── Update operations ───────────────────────────────────────
+
+    /// Update the first document matching the filter. Merges fields.
+    pub fn update_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        update: bson::Document,
+        upsert: bool,
+    ) -> Result<UpdateResult, DbError> {
+        let query = Query {
+            filter: Some(filter.clone()),
+            sort: vec![],
+            skip: None,
+            take: Some(1),
+            columns: None,
+        };
+        let matches = self.find(collection, &query)?;
+
+        if let Some(matched_doc) = matches.into_iter().next() {
+            let id = matched_doc
+                .get_str(ID_COLUMN)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let modified = self.merge_update(collection, &id, &update)?;
+            Ok(UpdateResult {
+                matched: 1,
+                modified: if modified { 1 } else { 0 },
+                upserted_id: None,
+            })
+        } else if upsert {
+            self.catalog.ensure_collection(&mut self.txn, collection)?;
+            let result = self.insert_one(collection, update)?;
+            Ok(UpdateResult {
+                matched: 0,
+                modified: 0,
+                upserted_id: Some(result.id),
+            })
+        } else {
+            Ok(UpdateResult {
+                matched: 0,
+                modified: 0,
+                upserted_id: None,
+            })
+        }
+    }
+
+    /// Update all documents matching the filter. Merges fields.
+    pub fn update_many(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        update: bson::Document,
+    ) -> Result<UpdateResult, DbError> {
+        let query = Query {
+            filter: Some(filter.clone()),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        let matches = self.find(collection, &query)?;
+        let matched = matches.len() as u64;
+        let mut modified = 0u64;
+
+        for doc in matches {
+            let id = doc
+                .get_str(ID_COLUMN)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if self.merge_update(collection, &id, &update)? {
+                modified += 1;
+            }
+        }
+
+        Ok(UpdateResult {
+            matched,
+            modified,
+            upserted_id: None,
+        })
+    }
+
+    /// Replace the first document matching the filter entirely (no merge).
+    pub fn replace_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        mut replacement: bson::Document,
+    ) -> Result<UpdateResult, DbError> {
+        let query = Query {
+            filter: Some(filter.clone()),
+            sort: vec![],
+            skip: None,
+            take: Some(1),
+            columns: None,
+        };
+        let matches = self.find(collection, &query)?;
+
+        if let Some(matched_doc) = matches.into_iter().next() {
+            let id = matched_doc
+                .get_str(ID_COLUMN)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let key = encoding::record_key(&id);
+            let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+
+            // Delete old index entries
+            self.delete_index_entries(collection, &id, &matched_doc, &indexed_fields)?;
+
+            // Strip _id from replacement if present
+            replacement.remove(ID_COLUMN);
+
+            // Write new document
+            self.txn
+                .put(collection, &key, &bson::to_vec(&replacement)?)?;
+
+            // Insert new index entries
+            for field in &indexed_fields {
+                if let Some(value) = exec::get_path(&replacement, field) {
+                    let idx_key = encoding::index_key(field, value, &id);
+                    self.txn.put(collection, &idx_key, &[])?;
+                }
+            }
+
+            Ok(UpdateResult {
+                matched: 1,
+                modified: 1,
+                upserted_id: None,
+            })
+        } else {
+            Ok(UpdateResult {
+                matched: 0,
+                modified: 0,
+                upserted_id: None,
+            })
+        }
+    }
+
+    // ── Delete operations ───────────────────────────────────────
+
+    /// Delete the first document matching the filter.
+    pub fn delete_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+    ) -> Result<DeleteResult, DbError> {
+        let query = Query {
+            filter: Some(filter.clone()),
+            sort: vec![],
+            skip: None,
+            take: Some(1),
+            columns: None,
+        };
+        let matches = self.find(collection, &query)?;
+
+        if let Some(doc) = matches.into_iter().next() {
+            let id = doc
+                .get_str(ID_COLUMN)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            self.delete_by_id(collection, &id, &doc)?;
+            Ok(DeleteResult { deleted: 1 })
+        } else {
+            Ok(DeleteResult { deleted: 0 })
+        }
+    }
+
+    /// Delete all documents matching the filter.
+    pub fn delete_many(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+    ) -> Result<DeleteResult, DbError> {
+        let query = Query {
+            filter: Some(filter.clone()),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        let matches = self.find(collection, &query)?;
+        let count = matches.len() as u64;
+
+        for doc in matches {
+            let id = doc
+                .get_str(ID_COLUMN)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            self.delete_by_id(collection, &id, &doc)?;
+        }
+
+        Ok(DeleteResult { deleted: count })
+    }
+
+    // ── Count ───────────────────────────────────────────────────
+
+    /// Count documents matching a filter.
+    pub fn count(&self, collection: &str, filter: Option<&FilterGroup>) -> Result<u64, DbError> {
+        let query = Query {
+            filter: filter.cloned(),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        let results = self.find(collection, &query)?;
+        Ok(results.len() as u64)
+    }
+
+    // ── Index operations ────────────────────────────────────────
+
+    /// Create an index on a field and backfill existing records.
+    pub fn create_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
+        self.catalog.ensure_collection(&mut self.txn, collection)?;
+        self.catalog
+            .create_index(&mut self.txn, collection, field)?;
+
+        // Backfill: scan all records and index the field
+        let scan_prefix = encoding::data_scan_prefix("");
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = self
+            .txn
+            .scan_prefix(collection, &scan_prefix)?
+            .filter_map(|r| r.ok().map(|(k, v)| (k.to_vec(), v.to_vec())))
+            .collect();
+
+        for (key, value) in entries {
+            let record_id = match encoding::parse_record_key(&key) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let doc: bson::Document = bson::from_slice(&value)?;
+            if let Some(val) = exec::get_path(&doc, field) {
+                let idx_key = encoding::index_key(field, val, &record_id);
+                self.txn.put(collection, &idx_key, &[])?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Drop an index and remove all its entries.
+    pub fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
+        // Remove all index entries for this field
+        let prefix = encoding::index_scan_field_prefix(field);
+        let keys: Vec<Vec<u8>> = self
+            .txn
+            .scan_prefix(collection, &prefix)?
+            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
+            .collect();
+        for key in keys {
+            self.txn.delete(collection, &key)?;
+        }
+
+        self.catalog.drop_index(&mut self.txn, collection, field)?;
+        Ok(())
+    }
+
+    /// List indexed fields for a collection.
+    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>, DbError> {
+        self.catalog.list_indexes(&self.txn, collection)
+    }
+
+    // ── Collection operations ───────────────────────────────────
+
+    /// List all known collection names.
+    pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
+        self.catalog.list_collections(&self.txn)
+    }
+
+    /// Drop a collection and all its data, indexes, and metadata.
+    pub fn drop_collection(&mut self, collection: &str) -> Result<(), DbError> {
+        // Delete all data keys
+        let data_prefix = encoding::data_scan_prefix("");
+        let data_keys: Vec<Vec<u8>> = self
+            .txn
+            .scan_prefix(collection, &data_prefix)?
+            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
+            .collect();
+        for key in data_keys {
+            self.txn.delete(collection, &key)?;
+        }
+
+        // Delete all index keys
+        let idx_prefix = b"i:".to_vec();
+        let idx_keys: Vec<Vec<u8>> = self
+            .txn
+            .scan_prefix(collection, &idx_prefix)?
+            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
+            .collect();
+        for key in idx_keys {
+            self.txn.delete(collection, &key)?;
+        }
+
+        // Remove catalog metadata
+        self.catalog.drop_collection(&mut self.txn, collection)?;
+
+        Ok(())
+    }
+
+    // ── Lifecycle ───────────────────────────────────────────────
 
     pub fn commit(self) -> Result<(), DbError> {
         self.txn.commit()?;
@@ -304,5 +475,121 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn rollback(self) -> Result<(), DbError> {
         self.txn.rollback()?;
         Ok(())
+    }
+
+    // ── Private helpers ─────────────────────────────────────────
+
+    /// Merge update fields into an existing document by _id.
+    /// Returns true if the document was actually modified.
+    fn merge_update(
+        &mut self,
+        collection: &str,
+        id: &str,
+        update: &bson::Document,
+    ) -> Result<bool, DbError> {
+        let key = encoding::record_key(id);
+        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+
+        let mut existing = match self.txn.get(collection, &key)? {
+            Some(bytes) => bson::from_slice::<bson::Document>(&bytes)?,
+            None => return Ok(false),
+        };
+
+        // Track old indexed values
+        let old_indexed: Vec<(String, Option<Bson>)> = indexed_fields
+            .iter()
+            .map(|f| (f.clone(), exec::get_path(&existing, f).cloned()))
+            .collect();
+
+        // Merge
+        let mut changed = false;
+        for (column, value) in update {
+            if column == ID_COLUMN {
+                continue;
+            }
+            if existing.get(column) != Some(value) {
+                changed = true;
+            }
+            existing.insert(column.clone(), value.clone());
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+
+        // Write
+        self.txn.put(collection, &key, &bson::to_vec(&existing)?)?;
+
+        // Index maintenance
+        for (field, old_val) in &old_indexed {
+            let new_val = exec::get_path(&existing, field).cloned();
+
+            if let Some(old) = old_val {
+                if new_val.as_ref() != Some(old) {
+                    let old_idx_key = encoding::index_key(field, old, id);
+                    self.txn.delete(collection, &old_idx_key)?;
+                }
+            }
+
+            if let Some(new) = &new_val {
+                if old_val.as_ref() != Some(new) {
+                    let idx_key = encoding::index_key(field, new, id);
+                    self.txn.put(collection, &idx_key, &[])?;
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Delete a document by _id, cleaning up its index entries.
+    fn delete_by_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: &bson::Document,
+    ) -> Result<(), DbError> {
+        let key = encoding::record_key(id);
+        let indexed_fields = self.catalog.list_indexes(&self.txn, collection)?;
+
+        // The doc from find() has _id but the stored doc doesn't, so we need
+        // to read the stored doc for accurate index values
+        if let Some(bytes) = self.txn.get(collection, &key)? {
+            let stored: bson::Document = bson::from_slice(&bytes)?;
+            self.delete_index_entries(collection, id, &stored, &indexed_fields)?;
+        } else {
+            // Fallback: use the doc from find() (skip _id field)
+            self.delete_index_entries(collection, id, doc, &indexed_fields)?;
+        }
+
+        self.txn.delete(collection, &key)?;
+        Ok(())
+    }
+
+    /// Delete index entries for a document.
+    fn delete_index_entries(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: &bson::Document,
+        indexed_fields: &[String],
+    ) -> Result<(), DbError> {
+        for field in indexed_fields {
+            if let Some(value) = exec::get_path(doc, field) {
+                let idx_key = encoding::index_key(field, value, id);
+                self.txn.delete(collection, &idx_key)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Extract `_id` from a document, or generate a UUID if not present.
+/// Removes `_id` from the document (it's stored in the key, not the value).
+fn extract_or_generate_id(doc: &mut bson::Document) -> String {
+    match doc.remove(ID_COLUMN) {
+        Some(Bson::String(s)) => s,
+        Some(other) => other.to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
     }
 }

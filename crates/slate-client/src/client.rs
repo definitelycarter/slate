@@ -1,8 +1,8 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
-use slate_db::Datasource;
-use slate_query::Query;
+use slate_db::{DeleteResult, InsertResult, UpdateResult};
+use slate_query::{FilterGroup, Query};
 use slate_server::protocol::{Request, Response};
 
 #[derive(Debug)]
@@ -83,55 +83,18 @@ impl Client {
         }
     }
 
-    // Data operations
+    // ── Insert operations ───────────────────────────────────────
 
-    pub fn write_record(
+    pub fn insert_one(
         &mut self,
-        datasource_id: &str,
-        record_id: &str,
+        collection: &str,
         doc: bson::Document,
-    ) -> Result<(), ClientError> {
-        self.expect_ok(Request::WriteRecord {
-            datasource_id: datasource_id.to_string(),
-            record_id: record_id.to_string(),
+    ) -> Result<InsertResult, ClientError> {
+        match self.request(Request::InsertOne {
+            collection: collection.to_string(),
             doc,
-        })
-    }
-
-    pub fn write_batch(
-        &mut self,
-        datasource_id: &str,
-        writes: Vec<(String, bson::Document)>,
-    ) -> Result<(), ClientError> {
-        self.expect_ok(Request::WriteBatch {
-            datasource_id: datasource_id.to_string(),
-            writes,
-        })
-    }
-
-    pub fn delete_record(
-        &mut self,
-        datasource_id: &str,
-        record_id: &str,
-    ) -> Result<(), ClientError> {
-        self.expect_ok(Request::DeleteRecord {
-            datasource_id: datasource_id.to_string(),
-            record_id: record_id.to_string(),
-        })
-    }
-
-    pub fn get_by_id(
-        &mut self,
-        datasource_id: &str,
-        record_id: &str,
-        columns: Option<&[&str]>,
-    ) -> Result<Option<bson::Document>, ClientError> {
-        match self.request(Request::GetById {
-            datasource_id: datasource_id.to_string(),
-            record_id: record_id.to_string(),
-            columns: columns.map(|c| c.iter().map(|s| s.to_string()).collect()),
         })? {
-            Response::Record(r) => Ok(r),
+            Response::Insert(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
                 "unexpected response: {other:?}"
@@ -139,13 +102,32 @@ impl Client {
         }
     }
 
-    pub fn query(
+    pub fn insert_many(
         &mut self,
-        datasource_id: &str,
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<Vec<InsertResult>, ClientError> {
+        match self.request(Request::InsertMany {
+            collection: collection.to_string(),
+            docs,
+        })? {
+            Response::Inserts(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Query operations ────────────────────────────────────────
+
+    pub fn find(
+        &mut self,
+        collection: &str,
         query: &Query,
     ) -> Result<Vec<bson::Document>, ClientError> {
-        match self.request(Request::Query {
-            datasource_id: datasource_id.to_string(),
+        match self.request(Request::Find {
+            collection: collection.to_string(),
             query: query.clone(),
         })? {
             Response::Records(r) => Ok(r),
@@ -156,15 +138,18 @@ impl Client {
         }
     }
 
-    // Catalog operations
-
-    pub fn save_datasource(&mut self, ds: &Datasource) -> Result<(), ClientError> {
-        self.expect_ok(Request::SaveDatasource(ds.clone()))
-    }
-
-    pub fn get_datasource(&mut self, id: &str) -> Result<Option<Datasource>, ClientError> {
-        match self.request(Request::GetDatasource(id.to_string()))? {
-            Response::Datasource(ds) => Ok(ds),
+    pub fn find_by_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+        columns: Option<&[&str]>,
+    ) -> Result<Option<bson::Document>, ClientError> {
+        match self.request(Request::FindById {
+            collection: collection.to_string(),
+            id: id.to_string(),
+            columns: columns.map(|c| c.iter().map(|s| s.to_string()).collect()),
+        })? {
+            Response::Record(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
                 "unexpected response: {other:?}"
@@ -172,9 +157,16 @@ impl Client {
         }
     }
 
-    pub fn list_datasources(&mut self) -> Result<Vec<Datasource>, ClientError> {
-        match self.request(Request::ListDatasources)? {
-            Response::Datasources(list) => Ok(list),
+    pub fn find_one(
+        &mut self,
+        collection: &str,
+        query: &Query,
+    ) -> Result<Option<bson::Document>, ClientError> {
+        match self.request(Request::FindOne {
+            collection: collection.to_string(),
+            query: query.clone(),
+        })? {
+            Response::Record(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
                 "unexpected response: {other:?}"
@@ -182,7 +174,165 @@ impl Client {
         }
     }
 
-    pub fn delete_datasource(&mut self, id: &str) -> Result<(), ClientError> {
-        self.expect_ok(Request::DeleteDatasource(id.to_string()))
+    // ── Update operations ───────────────────────────────────────
+
+    pub fn update_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        update: bson::Document,
+        upsert: bool,
+    ) -> Result<UpdateResult, ClientError> {
+        match self.request(Request::UpdateOne {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+            update,
+            upsert,
+        })? {
+            Response::Update(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn update_many(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        update: bson::Document,
+    ) -> Result<UpdateResult, ClientError> {
+        match self.request(Request::UpdateMany {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+            update,
+        })? {
+            Response::Update(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn replace_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+        doc: bson::Document,
+    ) -> Result<UpdateResult, ClientError> {
+        match self.request(Request::ReplaceOne {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+            doc,
+        })? {
+            Response::Update(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Delete operations ───────────────────────────────────────
+
+    pub fn delete_one(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+    ) -> Result<DeleteResult, ClientError> {
+        match self.request(Request::DeleteOne {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+        })? {
+            Response::Delete(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn delete_many(
+        &mut self,
+        collection: &str,
+        filter: &FilterGroup,
+    ) -> Result<DeleteResult, ClientError> {
+        match self.request(Request::DeleteMany {
+            collection: collection.to_string(),
+            filter: filter.clone(),
+        })? {
+            Response::Delete(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Count ───────────────────────────────────────────────────
+
+    pub fn count(
+        &mut self,
+        collection: &str,
+        filter: Option<&FilterGroup>,
+    ) -> Result<u64, ClientError> {
+        match self.request(Request::Count {
+            collection: collection.to_string(),
+            filter: filter.cloned(),
+        })? {
+            Response::Count(n) => Ok(n),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Index operations ────────────────────────────────────────
+
+    pub fn create_index(&mut self, collection: &str, field: &str) -> Result<(), ClientError> {
+        self.expect_ok(Request::CreateIndex {
+            collection: collection.to_string(),
+            field: field.to_string(),
+        })
+    }
+
+    pub fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), ClientError> {
+        self.expect_ok(Request::DropIndex {
+            collection: collection.to_string(),
+            field: field.to_string(),
+        })
+    }
+
+    pub fn list_indexes(&mut self, collection: &str) -> Result<Vec<String>, ClientError> {
+        match self.request(Request::ListIndexes {
+            collection: collection.to_string(),
+        })? {
+            Response::Indexes(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Collection operations ───────────────────────────────────
+
+    pub fn list_collections(&mut self) -> Result<Vec<String>, ClientError> {
+        match self.request(Request::ListCollections)? {
+            Response::Collections(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn drop_collection(&mut self, collection: &str) -> Result<(), ClientError> {
+        self.expect_ok(Request::DropCollection {
+            collection: collection.to_string(),
+        })
     }
 }

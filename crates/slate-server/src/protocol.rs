@@ -1,45 +1,86 @@
 use serde::{Deserialize, Serialize};
-use slate_db::Datasource;
-use slate_query::Query;
+use slate_db::{DeleteResult, InsertResult, UpdateResult};
+use slate_query::{FilterGroup, Query};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
-    // Data
-    WriteRecord {
-        datasource_id: String,
-        record_id: String,
+    InsertOne {
+        collection: String,
         doc: bson::Document,
     },
-    WriteBatch {
-        datasource_id: String,
-        writes: Vec<(String, bson::Document)>,
+    InsertMany {
+        collection: String,
+        docs: Vec<bson::Document>,
     },
-    DeleteRecord {
-        datasource_id: String,
-        record_id: String,
-    },
-    GetById {
-        datasource_id: String,
-        record_id: String,
-        columns: Option<Vec<String>>,
-    },
-    Query {
-        datasource_id: String,
+    Find {
+        collection: String,
         query: Query,
     },
-    // Catalog (global)
-    SaveDatasource(Datasource),
-    GetDatasource(String),
-    ListDatasources,
-    DeleteDatasource(String),
+    FindOne {
+        collection: String,
+        query: Query,
+    },
+    FindById {
+        collection: String,
+        id: String,
+        columns: Option<Vec<String>>,
+    },
+    UpdateOne {
+        collection: String,
+        filter: FilterGroup,
+        update: bson::Document,
+        upsert: bool,
+    },
+    UpdateMany {
+        collection: String,
+        filter: FilterGroup,
+        update: bson::Document,
+    },
+    ReplaceOne {
+        collection: String,
+        filter: FilterGroup,
+        doc: bson::Document,
+    },
+    DeleteOne {
+        collection: String,
+        filter: FilterGroup,
+    },
+    DeleteMany {
+        collection: String,
+        filter: FilterGroup,
+    },
+    Count {
+        collection: String,
+        filter: Option<FilterGroup>,
+    },
+    CreateIndex {
+        collection: String,
+        field: String,
+    },
+    DropIndex {
+        collection: String,
+        field: String,
+    },
+    ListIndexes {
+        collection: String,
+    },
+    ListCollections,
+    DropCollection {
+        collection: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Ok,
+    Insert(InsertResult),
+    Inserts(Vec<InsertResult>),
     Record(Option<bson::Document>),
     Records(Vec<bson::Document>),
-    Datasource(Option<Datasource>),
-    Datasources(Vec<Datasource>),
+    Update(UpdateResult),
+    Delete(DeleteResult),
+    Count(u64),
+    Indexes(Vec<String>),
+    Collections(Vec<String>),
     Error(String),
 }

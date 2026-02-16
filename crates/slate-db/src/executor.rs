@@ -14,32 +14,26 @@ type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a
 pub fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     node: &'a PlanNode,
-    ds_prefix: &'a str,
 ) -> Result<DocIter<'a>, DbError> {
-    execute_node(txn, node, ds_prefix)
+    execute_node(txn, node)
 }
 
 fn execute_node<'a, T: Transaction + 'a>(
     txn: &'a T,
     node: &'a PlanNode,
-    ds_prefix: &'a str,
 ) -> Result<DocIter<'a>, DbError> {
     match node {
-        PlanNode::Scan {
-            partition,
-            prefix,
-            columns,
-        } => execute_scan(txn, partition, prefix, ds_prefix, columns.as_deref()),
+        PlanNode::Scan { partition, columns } => execute_scan(txn, partition, columns.as_deref()),
 
         PlanNode::IndexScan {
             partition,
             column,
             value,
             columns,
-        } => execute_index_scan(txn, partition, column, value, ds_prefix, columns.as_deref()),
+        } => execute_index_scan(txn, partition, column, value, columns.as_deref()),
 
         PlanNode::Filter { predicate, input } => {
-            let source = execute_node(txn, input, ds_prefix)?;
+            let source = execute_node(txn, input)?;
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
@@ -52,7 +46,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Sort { sorts, input } => {
-            let source = execute_node(txn, input, ds_prefix)?;
+            let source = execute_node(txn, input)?;
 
             let mut docs: Vec<bson::Document> = source.collect::<Result<Vec<_>, _>>()?;
 
@@ -76,7 +70,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Limit { skip, take, input } => {
-            let source = execute_node(txn, input, ds_prefix)?;
+            let source = execute_node(txn, input)?;
             let iter = source.skip(*skip);
             match take {
                 Some(take) => Ok(Box::new(iter.take(*take))),
@@ -85,7 +79,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Projection { columns, input } => {
-            let source = execute_node(txn, input, ds_prefix)?;
+            let source = execute_node(txn, input)?;
             let cols = columns.clone();
 
             Ok(Box::new(source.map(move |result| {
@@ -119,15 +113,13 @@ fn materialize_doc(
     }
 }
 
-/// Scan all records under a prefix. One key = one record (raw BSON bytes).
+/// Scan all records in a partition. Key format: `d:{_id}`.
 fn execute_scan<'a, T: Transaction + 'a>(
     txn: &'a T,
     partition: &'a str,
-    prefix: &'a str,
-    ds_prefix: &'a str,
     columns: Option<&'a [String]>,
 ) -> Result<DocIter<'a>, DbError> {
-    let scan_prefix = encoding::data_scan_prefix(prefix);
+    let scan_prefix = encoding::data_scan_prefix("");
     let iter = txn.scan_prefix(partition, &scan_prefix)?;
 
     let col_set: Option<HashSet<&str>> =
@@ -136,7 +128,7 @@ fn execute_scan<'a, T: Transaction + 'a>(
     Ok(Box::new(iter.filter_map(move |result| match result {
         Err(e) => Some(Err(DbError::from(e))),
         Ok((key, value)) => {
-            let full_record_id = match encoding::parse_record_key(&key) {
+            let record_id = match encoding::parse_record_key(&key) {
                 Some(id) => id,
                 None => return None,
             };
@@ -151,11 +143,7 @@ fn execute_scan<'a, T: Transaction + 'a>(
                 Err(_) => return None,
             };
 
-            let short_id = full_record_id
-                .strip_prefix(ds_prefix)
-                .unwrap_or(full_record_id);
-
-            doc.insert("_id", short_id);
+            doc.insert("_id", record_id);
 
             Some(Ok(doc))
         }
@@ -168,7 +156,6 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     partition: &'a str,
     column: &'a str,
     value: &'a bson::Bson,
-    ds_prefix: &'a str,
     columns: Option<&'a [String]>,
 ) -> Result<DocIter<'a>, DbError> {
     let prefix = encoding::index_scan_prefix(column, value);
@@ -181,8 +168,8 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     let record_ids: Vec<String> = iter
         .filter_map(|result| match result {
             Ok((key, _)) => {
-                let (_, full_record_id) = encoding::parse_index_key(&key)?;
-                Some(full_record_id.to_string())
+                let (_, record_id) = encoding::parse_index_key(&key)?;
+                Some(record_id.to_string())
             }
             Err(_) => None,
         })
@@ -197,7 +184,7 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     let values = txn.multi_get(partition, &key_refs)?;
 
     let mut docs = Vec::new();
-    for (full_id, value_opt) in record_ids.iter().zip(values) {
+    for (id, value_opt) in record_ids.iter().zip(values) {
         if let Some(bytes) = value_opt {
             let raw = match RawDocumentBuf::from_bytes(bytes.into_vec()) {
                 Ok(r) => r,
@@ -209,8 +196,7 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
                 Err(_) => continue,
             };
 
-            let short_id = full_id.strip_prefix(ds_prefix).unwrap_or(full_id);
-            doc.insert("_id", short_id);
+            doc.insert("_id", id.as_str());
 
             docs.push(doc);
         }

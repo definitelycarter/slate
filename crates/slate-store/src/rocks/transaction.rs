@@ -1,4 +1,4 @@
-use rocksdb::{Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB};
+use rocksdb::{Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options};
 
 use crate::error::StoreError;
 use crate::store::Transaction;
@@ -124,6 +124,17 @@ impl<'db> Transaction for RocksTransaction<'db> {
         self.txn()?
             .delete_cf(&cf_handle, key)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
+        self.check_writable()?;
+        if self.db.cf_handle(name).is_none() {
+            let opts = Options::default();
+            self.db
+                .create_cf(name, &opts)
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+        }
         Ok(())
     }
 

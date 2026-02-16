@@ -104,6 +104,15 @@ pub fn index_scan_prefix(column: &str, value: &bson::Bson) -> Vec<u8> {
     key
 }
 
+/// Build a prefix to scan all index entries for a given column: `i:{column}\x00`
+pub fn index_scan_field_prefix(column: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(INDEX_PREFIX.len() + column.len() + 1);
+    key.extend_from_slice(INDEX_PREFIX);
+    key.extend_from_slice(column.as_bytes());
+    key.push(SEP);
+    key
+}
+
 /// Parse an index key back into (column, record_id).
 ///
 /// Expected format: `i:{column}\x00{value_bytes}\x00{record_id}`

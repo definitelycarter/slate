@@ -6,10 +6,9 @@ use slate_store::StoreError;
 pub enum DbError {
     Store(StoreError),
     NotFound(String),
-    DatasourceNotFound(String),
+    DuplicateKey(String),
     InvalidQuery(String),
     InvalidKey(String),
-    InvalidBson(String),
     Serialization(String),
 }
 
@@ -18,10 +17,9 @@ impl fmt::Display for DbError {
         match self {
             DbError::Store(e) => write!(f, "store error: {e}"),
             DbError::NotFound(id) => write!(f, "not found: {id}"),
-            DbError::DatasourceNotFound(id) => write!(f, "datasource not found: {id}"),
+            DbError::DuplicateKey(id) => write!(f, "duplicate key: {id}"),
             DbError::InvalidQuery(msg) => write!(f, "invalid query: {msg}"),
             DbError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
-            DbError::InvalidBson(msg) => write!(f, "invalid bson: {msg}"),
             DbError::Serialization(msg) => write!(f, "serialization error: {msg}"),
         }
     }
@@ -32,12 +30,6 @@ impl std::error::Error for DbError {}
 impl From<StoreError> for DbError {
     fn from(e: StoreError) -> Self {
         DbError::Store(e)
-    }
-}
-
-impl From<bincode::Error> for DbError {
-    fn from(e: bincode::Error) -> Self {
-        DbError::Serialization(e.to_string())
     }
 }
 

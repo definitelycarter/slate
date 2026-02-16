@@ -5,7 +5,7 @@ use slate_query::*;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
-use crate::scenarios::DS_ID;
+use crate::scenarios::COLLECTION;
 
 const BATCH_SIZE: usize = 10_000;
 const BATCHES: usize = 10;
@@ -29,10 +29,10 @@ pub fn bulk_insert(client: &mut Client, user: usize) -> Vec<BenchResult> {
                         start + BATCH_SIZE
                     ),
                     || {
-                        let writes = datagen::generate_batch(user, start, BATCH_SIZE);
+                        let docs = datagen::generate_batch_docs(user, start, BATCH_SIZE);
                         client
-                            .write_batch(DS_ID, writes)
-                            .expect("write_batch failed");
+                            .insert_many(COLLECTION, docs)
+                            .expect("insert_many failed");
                         BATCH_SIZE
                     },
                 );
@@ -58,7 +58,7 @@ pub fn verify_integrity(client: &mut Client, _user: usize) {
         take: None,
         columns: None,
     };
-    let results = client.query(DS_ID, &query).expect("query failed");
+    let results = client.find(COLLECTION, &query).expect("find failed");
 
     assert!(
         results.len() >= TOTAL_RECORDS,
@@ -86,7 +86,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             take: None,
             columns: None,
         };
-        let r = client.query(DS_ID, &query).expect("query failed");
+        let r = client.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -106,7 +106,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             take: None,
             columns: None,
         };
-        let r = client.query(DS_ID, &query).expect("query failed");
+        let r = client.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -138,7 +138,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             take: None,
             columns: None,
         };
-        let r = client.query(DS_ID, &query).expect("query failed");
+        let r = client.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -158,7 +158,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
             take: None,
             columns: None,
         };
-        let r = client.query(DS_ID, &query).expect("query failed");
+        let r = client.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -183,7 +183,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 take: None,
                 columns: None,
             };
-            let r = client.query(DS_ID, &query).expect("query failed");
+            let r = client.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
@@ -206,7 +206,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 take: Some(200),
                 columns: None,
             };
-            let r = client.query(DS_ID, &query).expect("query failed");
+            let r = client.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
@@ -232,7 +232,7 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 take: Some(200),
                 columns: None,
             };
-            let r = client.query(DS_ID, &query).expect("query failed");
+            let r = client.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
@@ -258,19 +258,19 @@ pub fn query_benchmarks(client: &mut Client, user: usize) -> Vec<BenchResult> {
                 take: Some(50),
                 columns: None,
             };
-            let r = client.query(DS_ID, &query).expect("query failed");
+            let r = client.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
 
     // 9. Point lookups
-    results.push(bench("tcp query: 1000 point lookups (get_by_id)", || {
+    results.push(bench("tcp query: 1000 point lookups (find_by_id)", || {
         let mut found = 0;
         for i in (0..TOTAL_RECORDS).step_by(TOTAL_RECORDS / 1000) {
             let id = datagen::generate_record_id(user, i);
             if client
-                .get_by_id(DS_ID, &id, None)
-                .expect("get_by_id failed")
+                .find_by_id(COLLECTION, &id, None)
+                .expect("find_by_id failed")
                 .is_some()
             {
                 found += 1;
@@ -299,10 +299,10 @@ pub fn concurrency_tests(addr: &str, _user: usize) -> Vec<BenchResult> {
                 let base = TOTAL_RECORDS + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let writes = datagen::generate_batch(99, start, 1000);
+                    let docs = datagen::generate_batch_docs(99, start, 1000);
                     client
-                        .write_batch(DS_ID, writes)
-                        .expect("writer write failed");
+                        .insert_many(COLLECTION, docs)
+                        .expect("writer insert failed");
                 }
             }));
         }
@@ -327,7 +327,7 @@ pub fn concurrency_tests(addr: &str, _user: usize) -> Vec<BenchResult> {
                         take: Some(100),
                         columns: None,
                     };
-                    let _ = client.query(DS_ID, &query).expect("reader query failed");
+                    let _ = client.find(COLLECTION, &query).expect("reader find failed");
                 }
             }));
         }

@@ -1,15 +1,14 @@
 use std::sync::Arc;
 use std::thread;
 
-use slate_db::{Database, Datasource, FieldDef, FieldType};
+use slate_db::Database;
 use slate_query::*;
 use slate_store::Store;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
 
-pub const DS_ID: &str = "bench";
-const PARTITION: &str = "bench_part";
+pub const COLLECTION: &str = "bench";
 
 pub struct BenchConfig {
     pub label: &'static str,
@@ -35,69 +34,11 @@ pub const CONFIG_10K: BenchConfig = BenchConfig {
     batches: 10,
 };
 
-pub fn make_datasource() -> Datasource {
-    Datasource {
-        id: DS_ID.to_string(),
-        name: "Bench".to_string(),
-        fields: vec![
-            FieldDef {
-                name: "name".into(),
-                field_type: FieldType::String,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "status".into(),
-                field_type: FieldType::String,
-
-                indexed: true,
-            },
-            FieldDef {
-                name: "contacts_count".into(),
-                field_type: FieldType::Int,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "product_recommendation1".into(),
-                field_type: FieldType::String,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "product_recommendation2".into(),
-                field_type: FieldType::String,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "product_recommendation3".into(),
-                field_type: FieldType::String,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "last_contacted_at".into(),
-                field_type: FieldType::Date,
-
-                indexed: false,
-            },
-            FieldDef {
-                name: "notes".into(),
-                field_type: FieldType::String,
-
-                indexed: false,
-            },
-        ],
-        partition: PARTITION.to_string(),
-    }
-}
-
-/// Create the datasource in the database (must be called before any data writes).
-pub fn setup_datasource<S: Store>(db: &Database<S>) {
+/// Create an index on `status` for index scan benchmarks.
+pub fn setup_collection<S: Store>(db: &Database<S>) {
     let mut txn = db.begin(false).expect("begin failed");
-    txn.save_datasource(&make_datasource())
-        .expect("save_datasource failed");
+    txn.create_index(COLLECTION, "status")
+        .expect("create_index failed");
     txn.commit().expect("commit failed");
 }
 
@@ -122,9 +63,10 @@ pub fn bulk_insert<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) -
                         start + batch_size
                     ),
                     || {
-                        let writes = datagen::generate_batch(user, start, batch_size);
+                        let docs = datagen::generate_batch_docs(user, start, batch_size);
                         let mut txn = db.begin(false).expect("begin failed");
-                        txn.write_batch(DS_ID, writes).expect("write_batch failed");
+                        txn.insert_many(COLLECTION, docs)
+                            .expect("insert_many failed");
                         txn.commit().expect("commit failed");
                         batch_size
                     },
@@ -153,10 +95,9 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
         take: None,
         columns: None,
     };
-    let results = txn.query(DS_ID, &query).expect("query failed");
+    let results = txn.find(COLLECTION, &query).expect("find failed");
 
-    // Count records for this user (all records in the datasource belong to this user
-    // in per-user benchmarks, or we filter by prefix in multi-user)
+    // Count records for this user
     let user_prefix = format!("user{user}-");
     let user_records: Vec<_> = results
         .iter()
@@ -240,7 +181,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -261,7 +202,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -282,7 +223,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -315,7 +256,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -341,7 +282,7 @@ pub fn query_benchmarks<S: Store>(
                 take: Some(50),
                 columns: None,
             };
-            let r = txn.query(DS_ID, &query).expect("query failed");
+            let r = txn.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
@@ -363,7 +304,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -389,7 +330,7 @@ pub fn query_benchmarks<S: Store>(
                 take: None,
                 columns: None,
             };
-            let r = txn.query(DS_ID, &query).expect("query failed");
+            let r = txn.find(COLLECTION, &query).expect("find failed");
             r.len()
         },
     ));
@@ -411,7 +352,7 @@ pub fn query_benchmarks<S: Store>(
             take: Some(200),
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -435,7 +376,7 @@ pub fn query_benchmarks<S: Store>(
             take: Some(200),
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -456,7 +397,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -477,7 +418,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -498,7 +439,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -526,19 +467,19 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: None,
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
-    // 14. Point lookups (1000 get_by_id calls)
-    results.push(bench("query: 1000 point lookups (get_by_id)", || {
+    // 14. Point lookups (1000 find_by_id calls)
+    results.push(bench("query: 1000 point lookups (find_by_id)", || {
         let txn = db.begin(true).expect("begin failed");
         let mut found = 0;
         for i in (0..total_records).step_by(total_records / 1000) {
             let id = datagen::generate_record_id(_user, i);
             if txn
-                .get_by_id(DS_ID, &id, None)
-                .expect("get_by_id failed")
+                .find_by_id(COLLECTION, &id, None)
+                .expect("find_by_id failed")
                 .is_some()
             {
                 found += 1;
@@ -557,7 +498,7 @@ pub fn query_benchmarks<S: Store>(
             take: None,
             columns: Some(vec!["name".into(), "status".into()]),
         };
-        let r = txn.query(DS_ID, &query).expect("query failed");
+        let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
 
@@ -585,9 +526,10 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
                 let base = total_records + writer_id * 5000;
                 for batch in 0..5 {
                     let start = base + batch * 1000;
-                    let writes = datagen::generate_batch(99, start, 1000);
+                    let docs = datagen::generate_batch_docs(99, start, 1000);
                     let mut txn = db.begin(false).expect("writer begin failed");
-                    txn.write_batch(DS_ID, writes).expect("writer write failed");
+                    txn.insert_many(COLLECTION, docs)
+                        .expect("writer insert failed");
                     txn.commit().expect("writer commit failed");
                 }
             }));
@@ -613,7 +555,7 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
                         take: Some(100),
                         columns: None,
                     };
-                    let _ = txn.query(DS_ID, &query).expect("reader query failed");
+                    let _ = txn.find(COLLECTION, &query).expect("reader find failed");
                 }
             }));
         }
@@ -640,7 +582,7 @@ pub fn verify_post_concurrency<S: Store>(db: &Database<S>, _user: usize, cfg: &B
         take: None,
         columns: None,
     };
-    let results = txn.query(DS_ID, &query).expect("query failed");
+    let results = txn.find(COLLECTION, &query).expect("find failed");
     assert!(
         results.len() >= total_records,
         "expected at least {total_records} records after concurrency, got {}",
