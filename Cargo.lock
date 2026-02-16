@@ -1213,6 +1213,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-lists"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "serde",
+ "slate-client",
+ "slate-db",
+ "slate-query",
+ "slate-server",
+ "slate-store",
+]
+
+[[package]]
 name = "slate-query"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,16 @@
+[package]
+name = "slate-lists"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slate-client = { path = "../slate-client" }
+slate-query = { path = "../slate-query" }
+slate-db = { path = "../slate-db" }
+serde = { version = "1", features = ["derive"] }
+bson = "2"
+
+[dev-dependencies]
+slate-store = { path = "../slate-store", features = ["memory"] }
+slate-server = { path = "../slate-server" }
+bson = "2"
