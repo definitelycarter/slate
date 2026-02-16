@@ -37,17 +37,67 @@ Read-only API served by each tenant's API instance:
 - `GET /v1/lists/{id}` — single list config
 - `GET /v1/lists/{id}/data` — execute query, return records. Lazily backfills from upstream if DB is empty.
 
-### Data Pipeline (needs design)
+### Loader (data pipeline)
 
-The `/data` endpoint triggers upstream fetches when the DB is cold. Upstream sources include Redshift (via pg driver) and Salesforce (via REST API). Key challenges:
+Slate doesn't know about upstream systems. Consumers implement a **loader** — a gRPC service that streams records back when called. Slate's list API checks staleness (via TTL on the datasource) and calls the loader to refresh when needed.
 
-- **Cross-source dependencies** — Salesforce runs first to get account IDs, Redshift uses those as filters
-- **Per-request auth** — Salesforce calls need user-specific credentials passed through from the request
-- **Field mappings** — upstream fields map to datasource fields (e.g. `Contacts__c.totalCount` → `contacts_count`)
-- **Unstructured transforms** — insight values are arbitrary JSON (primitives, arrays, objects) that need coercion into typed fields
-- **Selective fetching** — different tenants pull different subsets of insights from the same upstream tables
+**Datasource CRD config:**
 
-Config-driven approach works for *what* to fetch and *where* to map it. The *how* (ordering, auth, transforms) likely needs pluggable pipeline steps.
+```yaml
+loader:
+  endpoint: grpc://prospect-loader:50051
+  ttl: 3600
+  forwardHeaders:
+    - Authorization
+    - X-SF-Token
+```
+
+**Flow:** `GET /v1/lists/{id}/data` → check staleness → call loader → stream records → `write_batch` → serve response.
+
+Auth context (headers, tokens) is forwarded from the incoming request to the loader via `metadata`. Slate is a passthrough — the consumer's loader handles upstream auth, cross-source dependencies, transforms, etc.
+
+**Protobuf contract:**
+
+```protobuf
+syntax = "proto3";
+package slate.loader;
+
+service Loader {
+  rpc Load(LoadRequest) returns (stream LoadResponse);
+}
+
+message LoadRequest {
+  string datasource_id = 1;
+  map<string, string> metadata = 2;  // forwarded headers, auth context
+}
+
+message LoadResponse {
+  string record_id = 1;
+  map<string, FieldValue> fields = 2;
+}
+
+message FieldValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    double float_value = 3;
+    bool bool_value = 4;
+    int64 date_value = 5;
+    ListValue list_value = 6;
+    MapValue map_value = 7;
+  }
+}
+
+message ListValue {
+  repeated FieldValue values = 1;
+}
+
+message MapValue {
+  map<string, FieldValue> entries = 1;
+}
+```
+
+**Conversion:** `LoadResponse` → `CellWrite` vec → `write_batch`. `FieldValue` oneof maps directly to Slate's `Value` enum. Slate buffers N records from the stream and batch-writes them.
 
 ## Test Coverage
 
