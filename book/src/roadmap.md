@@ -18,6 +18,37 @@ This is less impactful than indexed sort, but it would reduce unnecessary index 
 
 Reject field configs that have both `indexed: true` and `ttl_seconds: Some(...)` at `save_datasource` time. An expired column would leave stale index entries pointing to logically-gone values — either requiring background cleanup or read-time filtering that defeats the purpose of the index. Fail loud on write rather than dealing with it at query time.
 
+## Multi-Tenant Deployment
+
+Each tenant gets an isolated stack (API + DB). Tenant key is an opaque string — consumers map it to their own concepts (business unit, dept, etc). The DB is ephemeral — CRDs are the source of truth, data is backfilled lazily from upstream on first request.
+
+### K8s Architecture
+
+- **Tenant CRD** → tenant operator provisions pods, services, volumes
+- **Datasource CRD** → tenant operator connects via TCP, creates datasource schema
+- **List CRD** → list operator pushes query configs (columns, sort, filters, page size) into tenant DB
+- **Gateway** → routes requests by tenant key header to the correct API service
+
+### Lists API
+
+Read-only API served by each tenant's API instance:
+
+- `GET /v1/lists` — all list configs
+- `GET /v1/lists/{id}` — single list config
+- `GET /v1/lists/{id}/data` — execute query, return records. Lazily backfills from upstream if DB is empty.
+
+### Data Pipeline (needs design)
+
+The `/data` endpoint triggers upstream fetches when the DB is cold. Upstream sources include Redshift (via pg driver) and Salesforce (via REST API). Key challenges:
+
+- **Cross-source dependencies** — Salesforce runs first to get account IDs, Redshift uses those as filters
+- **Per-request auth** — Salesforce calls need user-specific credentials passed through from the request
+- **Field mappings** — upstream fields map to datasource fields (e.g. `Contacts__c.totalCount` → `contacts_count`)
+- **Unstructured transforms** — insight values are arbitrary JSON (primitives, arrays, objects) that need coercion into typed fields
+- **Selective fetching** — different tenants pull different subsets of insights from the same upstream tables
+
+Config-driven approach works for *what* to fetch and *where* to map it. The *how* (ordering, auth, transforms) likely needs pluggable pipeline steps.
+
 ## Test Coverage
 
 ### REST API tests (`slate-api`)
