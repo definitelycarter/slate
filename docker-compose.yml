@@ -5,10 +5,7 @@ services:
       target: server
     ports:
       - "9600:9600"
-    volumes:
-      - slate-data:/data
     environment:
-      SLATE_DATA_DIR: /data
       SLATE_ADDR: 0.0.0.0:9600
 
   api:
@@ -23,6 +20,3 @@ services:
       SLATE_TCP_ADDR: db:9600
       SLATE_API_ADDR: 0.0.0.0:9601
       SLATE_POOL_SIZE: "4"
-
-volumes:
-  slate-data:
