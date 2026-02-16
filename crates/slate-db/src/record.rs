@@ -12,6 +12,7 @@ pub struct Record {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Value {
     String(String),
     Int(i64),
