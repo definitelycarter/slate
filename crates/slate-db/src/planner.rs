@@ -1,15 +1,21 @@
-use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort};
+use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
     /// Full scan — yields all record IDs in a collection.
     Scan { collection: String },
 
-    /// Index lookup — yields record IDs matching a value from the index.
+    /// Index scan — yields record IDs from an index.
+    /// `value: Some(v)` filters to entries matching `v` (Eq lookup).
+    /// `value: None` scans the entire column index (ordered scan).
+    /// `direction` controls iteration order (Asc = forward, Desc = reverse).
+    /// `limit` caps the number of index entries to read (pushed down from Limit).
     IndexScan {
         collection: String,
         column: String,
-        value: bson::Bson,
+        value: Option<bson::Bson>,
+        direction: SortDirection,
+        limit: Option<usize>,
     },
 
     /// Combines ID sets from two child nodes using AND (intersect) or OR (union).
@@ -73,6 +79,10 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
         ),
     };
 
+    // Capture before id_node is consumed — needed for indexed sort optimization in Step 4.
+    let id_is_scan = matches!(id_node, PlanNode::Scan { .. });
+    let has_residual_filter = residual_filter.is_some();
+
     // Step 2: ReadRecord — always present, fetches raw records from IDs
     let node = PlanNode::ReadRecord {
         input: Box::new(id_node),
@@ -88,7 +98,36 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
     };
 
     // Step 4: Sort
-    let node = if !query.sort.is_empty() {
+    //
+    // Optimization: if the query sorts on a single indexed field, has a Limit,
+    // and the ID tier is a Scan (no value-filtered IndexScan), we can replace
+    // Scan with an ordered IndexScan and eliminate the Sort node entirely.
+    // The index already stores keys in sorted byte order.
+    let node = if query.sort.len() == 1
+        && query.take.is_some()
+        && indexed_fields.contains(&query.sort[0].field)
+        && id_is_scan
+    {
+        // When there's no filter between Limit and IndexScan, push the limit
+        // down into IndexScan so it stops the index walk early.
+        // With a filter, we can't predict how many index entries pass the filter,
+        // so the IndexScan must walk the full index.
+        let index_limit = if !has_residual_filter {
+            Some(query.skip.unwrap_or(0) + query.take.unwrap_or(0))
+        } else {
+            None
+        };
+
+        // Replace Scan inside ReadRecord with ordered IndexScan.
+        // Walk up: node is either Filter(ReadRecord(Scan)) or ReadRecord(Scan).
+        replace_scan_with_index_order(
+            node,
+            collection,
+            &query.sort[0].field,
+            query.sort[0].direction,
+            index_limit,
+        )
+    } else if !query.sort.is_empty() {
         PlanNode::Sort {
             sorts: query.sort.clone(),
             input: Box::new(node),
@@ -118,6 +157,37 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
     };
 
     node
+}
+
+/// Replace the Scan node inside a plan subtree with an ordered IndexScan.
+/// Handles both `ReadRecord(Scan)` and `Filter(ReadRecord(Scan))`.
+fn replace_scan_with_index_order(
+    node: PlanNode,
+    collection: &str,
+    sort_field: &str,
+    direction: SortDirection,
+    limit: Option<usize>,
+) -> PlanNode {
+    match node {
+        PlanNode::ReadRecord { input } if matches!(*input, PlanNode::Scan { .. }) => {
+            PlanNode::ReadRecord {
+                input: Box::new(PlanNode::IndexScan {
+                    collection: collection.to_string(),
+                    column: sort_field.to_string(),
+                    value: None,
+                    direction,
+                    limit,
+                }),
+            }
+        }
+        PlanNode::Filter { predicate, input } => PlanNode::Filter {
+            predicate,
+            input: Box::new(replace_scan_with_index_order(
+                *input, collection, sort_field, direction, limit,
+            )),
+        },
+        other => other,
+    }
 }
 
 /// Plan a filter group, returning an ID-tier node and an optional residual predicate.
@@ -204,7 +274,9 @@ fn find_best_and_child(
                     let node = PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: query_value_to_bson(&filter.value),
+                        value: Some(query_value_to_bson(&filter.value)),
+                        direction: SortDirection::Asc,
+                        limit: None,
                     };
                     return Some((node, i));
                 }
@@ -276,7 +348,9 @@ fn try_or_index_merge(
                     id_nodes.push(PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: query_value_to_bson(&filter.value),
+                        value: Some(query_value_to_bson(&filter.value)),
+                        direction: SortDirection::Asc,
+                        limit: None,
                     });
                 } else {
                     // Non-indexed condition in OR — can't use indexes for this OR
@@ -421,7 +495,9 @@ mod tests {
                     PlanNode::IndexScan {
                         collection: "p1".into(),
                         column: "status".into(),
-                        value: Bson::String("active".into()),
+                        value: Some(Bson::String("active".into())),
+                        direction: SortDirection::Asc,
+                        limit: None,
                     }
                 );
             }
@@ -985,6 +1061,195 @@ mod tests {
                 }
             }
             _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    // ── Indexed sort optimization ───────────────────────────────
+
+    #[test]
+    fn plan_indexed_sort_with_limit_eliminates_sort() {
+        // sort: score DESC, take: 5, score is indexed → no Sort node
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            sort: vec![Sort {
+                field: "score".into(),
+                direction: SortDirection::Desc,
+            }],
+            take: Some(5),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Limit(ReadRecord(IndexScan(score, value: None, direction: Desc, limit: 5)))
+        match p {
+            PlanNode::Limit { input, .. } => match *input {
+                PlanNode::ReadRecord { input } => match *input {
+                    PlanNode::IndexScan {
+                        column,
+                        value,
+                        direction,
+                        limit,
+                        ..
+                    } => {
+                        assert_eq!(column, "score");
+                        assert_eq!(value, None);
+                        assert_eq!(direction, SortDirection::Desc);
+                        assert_eq!(limit, Some(5)); // pushed down from take(5)
+                    }
+                    _ => panic!("expected IndexScan"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Limit, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_indexed_sort_asc_with_limit() {
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            sort: vec![Sort {
+                field: "score".into(),
+                direction: SortDirection::Asc,
+            }],
+            take: Some(10),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        match p {
+            PlanNode::Limit { input, .. } => match *input {
+                PlanNode::ReadRecord { input } => match *input {
+                    PlanNode::IndexScan {
+                        direction,
+                        value,
+                        limit,
+                        ..
+                    } => {
+                        assert_eq!(direction, SortDirection::Asc);
+                        assert_eq!(value, None);
+                        assert_eq!(limit, Some(10)); // pushed down from take(10)
+                    }
+                    _ => panic!("expected IndexScan"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Limit, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_indexed_sort_with_filter_and_limit() {
+        // sort: score DESC, take: 5, filter: name > "a" (non-indexed)
+        // score is indexed → Sort eliminated, Filter wraps ReadRecord(IndexScan)
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![gt_condition("name", QueryValue::String("a".into()))],
+            }),
+            sort: vec![Sort {
+                field: "score".into(),
+                direction: SortDirection::Desc,
+            }],
+            take: Some(5),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Limit(Filter(ReadRecord(IndexScan(score, None, Desc, limit: None))))
+        // limit is None because filter prevents pushdown
+        match p {
+            PlanNode::Limit { input, .. } => match *input {
+                PlanNode::Filter { input, .. } => match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::IndexScan {
+                            column,
+                            value,
+                            direction,
+                            limit,
+                            ..
+                        } => {
+                            assert_eq!(column, "score");
+                            assert_eq!(value, None);
+                            assert_eq!(direction, SortDirection::Desc);
+                            assert_eq!(limit, None); // filter prevents pushdown
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                },
+                _ => panic!("expected Filter"),
+            },
+            _ => panic!("expected Limit, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_indexed_sort_no_limit_keeps_sort() {
+        // sort: score DESC, no take → Sort node kept (can't benefit without limit)
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            sort: vec![Sort {
+                field: "score".into(),
+                direction: SortDirection::Desc,
+            }],
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        assert!(matches!(p, PlanNode::Sort { .. }));
+    }
+
+    #[test]
+    fn plan_sort_not_indexed_keeps_sort() {
+        // sort: name DESC, take: 5, name is NOT indexed → Sort node kept
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            sort: vec![Sort {
+                field: "name".into(),
+                direction: SortDirection::Desc,
+            }],
+            take: Some(5),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        assert!(matches!(p, PlanNode::Limit { .. }));
+        match p {
+            PlanNode::Limit { input, .. } => {
+                assert!(matches!(*input, PlanNode::Sort { .. }));
+            }
+            _ => panic!("expected Limit"),
+        }
+    }
+
+    #[test]
+    fn plan_indexed_sort_with_indexed_filter_keeps_sort() {
+        // filter: status = "active" (indexed), sort: score DESC (indexed), take: 5
+        // Filter uses IndexScan(status) — id_node is not Scan, so Sort is kept
+        let indexed = vec!["status".to_string(), "score".to_string()];
+        let q = Query {
+            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            sort: vec![Sort {
+                field: "score".into(),
+                direction: SortDirection::Desc,
+            }],
+            take: Some(5),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Limit(Sort(ReadRecord(IndexScan(status, value: Some("active")))))
+        match p {
+            PlanNode::Limit { input, .. } => match *input {
+                PlanNode::Sort { input, .. } => match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::IndexScan { column, value, .. } => {
+                            assert_eq!(column, "status");
+                            assert!(value.is_some());
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                },
+                _ => panic!("expected Sort"),
+            },
+            _ => panic!("expected Limit, got {:?}", p),
         }
     }
 }

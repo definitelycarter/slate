@@ -149,6 +149,31 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         ))
     }
 
+    fn scan_prefix_rev(
+        &mut self,
+        cf: &str,
+        prefix: &[u8],
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    > {
+        let snap = self
+            .snapshot
+            .as_mut()
+            .ok_or(StoreError::TransactionConsumed)?;
+        snap.ensure(self.store, cf)?;
+        let data = snap.get_cf(cf)?;
+        let prefix_vec = prefix.to_vec();
+        let mut upper = prefix.to_vec();
+        if let Some(last) = upper.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+
+        Ok(Box::new(data.range(prefix_vec..upper).rev().map(
+            |(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
+        )))
+    }
+
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
         self.dirty.insert(cf.to_string());

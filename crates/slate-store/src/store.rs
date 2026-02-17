@@ -38,6 +38,14 @@ pub trait Transaction {
         Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
         StoreError,
     >;
+    fn scan_prefix_rev(
+        &mut self,
+        cf: &str,
+        prefix: &[u8],
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    >;
 
     // Writes
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;

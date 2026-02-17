@@ -135,6 +135,46 @@ fn scan_prefix_broader() {
 }
 
 #[test]
+fn scan_prefix_rev_returns_reverse_order() {
+    let (store, _dir) = temp_store();
+    let mut txn = store.begin(false).unwrap();
+    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
+    txn.put(CF, b"accounts:1:name", b"Alice").unwrap();
+    txn.put(CF, b"accounts:2:email", b"b@test.com").unwrap();
+    txn.put(CF, b"other:1:foo", b"bar").unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = store.begin(true).unwrap();
+    let entries: Vec<_> = txn
+        .scan_prefix_rev(CF, b"accounts:1:")
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    // Reverse order: name before email
+    assert_eq!(&*entries[0].0, b"accounts:1:name");
+    assert_eq!(&*entries[0].1, b"Alice");
+    assert_eq!(&*entries[1].0, b"accounts:1:email");
+    assert_eq!(&*entries[1].1, b"a@test.com");
+}
+
+#[test]
+fn scan_prefix_rev_no_matches() {
+    let (store, _dir) = temp_store();
+    let mut txn = store.begin(false).unwrap();
+    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = store.begin(true).unwrap();
+    let entries: Vec<_> = txn
+        .scan_prefix_rev(CF, b"contacts:")
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(entries.is_empty());
+}
+
+#[test]
 fn read_only_rejects_put() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(true).unwrap();

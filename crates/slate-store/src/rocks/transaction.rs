@@ -106,6 +106,36 @@ impl<'db> Transaction for RocksTransaction<'db> {
         ))
     }
 
+    fn scan_prefix_rev(
+        &mut self,
+        cf: &str,
+        prefix: &[u8],
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    > {
+        let cf_handle = self.cf_handle(cf)?;
+        let prefix_owned = prefix.to_vec();
+        // Seek to the key just past the end of the prefix range
+        let mut upper = prefix.to_vec();
+        if let Some(last) = upper.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        let iter = self
+            .txn()?
+            .iterator_cf(&cf_handle, IteratorMode::From(&upper, Direction::Reverse));
+        Ok(Box::new(
+            iter.take_while(move |item| match item {
+                Ok((key, _)) => key.starts_with(&prefix_owned),
+                Err(_) => true,
+            })
+            .map(|item| {
+                item.map(|(k, v)| (Cow::Owned(k.into_vec()), Cow::Owned(v.into_vec())))
+                    .map_err(|e| StoreError::Storage(e.to_string()))
+            }),
+        ))
+    }
+
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
         let cf_handle = self.cf_handle(cf)?;

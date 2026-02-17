@@ -7,11 +7,11 @@ Queries are executed as a three-tier plan tree. The planner analyzes filter cond
 ```
 Document tier:   Projection (materialize raw → bson::Document)
                    ↑
-                 Limit (skip/take)
+Raw tier:        Limit (skip/take on raw record stream)
                    ↑
                  Sort (lazy field access on raw bytes)
                    ↑
-Raw tier:        Filter (lazy field access on raw bytes)
+                 Filter (lazy field access on raw bytes)
                    ↑
                  ReadRecord (fetch raw BSON bytes)
                    ↑
@@ -361,6 +361,52 @@ Execution flow:
 
 Records that fail the filter at step 3 never reach steps 4-6. Only the final 5 records at step 6 pay the cost of full (selective) deserialization.
 
+## Limit Placement
+
+Limit operates in the raw tier — it's `skip()` + `take()` on the `Cow<[u8]>` iterator, not on materialized documents. Where it sits in the plan tree depends on whether Sort is present.
+
+### Scenario A: Limit with Sort
+
+**Query:** `find({ filter: status = "active", sort: score DESC, take: 200 })`
+
+```
+Projection
+  └── Limit(take: 200)
+        └── Sort(score DESC)
+              └── Filter(status = "active")
+                    └── ReadRecord
+                          └── IndexScan(status = "active")
+```
+
+Limit must stay above Sort — you can't take before sorting. All ~50k matching records enter Sort. Limit takes 200 from the sorted result. Cost: O(n log n) sort on the full set.
+
+### Scenario B: Limit without Sort
+
+**Query:** `find({ filter: status = "active", take: 200 })`
+
+```
+Projection
+  └── Limit(take: 200)
+        └── ReadRecord
+              └── IndexScan(status = "active")
+```
+
+No Sort means Limit sits directly above ReadRecord. The iterator stops after 200 records pass through. Remaining index entries and raw bytes are never touched. Much cheaper than Scenario A.
+
+### Scenario C: Limit without Sort, with Filter
+
+**Query:** `find({ filter: score > 50, take: 200 })`
+
+```
+Projection
+  └── Limit(take: 200)
+        └── Filter(score > 50)
+              └── ReadRecord
+                    └── Scan
+```
+
+Records stream through Filter one at a time. Limit stops after 200 pass. Records that fail the filter don't count toward the limit — the scan continues until 200 qualifying records are found (or the collection is exhausted).
+
 ## Dot-Notation Paths
 
 Filters, sorts, and projections support nested field access via dot notation:
@@ -382,7 +428,8 @@ For projections with dot-notation, the top-level key is included in materializat
 | Scenario | Deserialization cost |
 |----------|---------------------|
 | Record passes filter + included in result | Full (or selective with projection) |
-| Record passes filter + excluded by Limit | Sort key access only (raw bytes) |
+| Record passes filter + excluded by Limit (with sort) | Sort key access only (raw bytes) |
+| Record passes filter + excluded by Limit (no sort) | Zero — never materialized |
 | Record fails filter | Filter field access only (raw bytes) |
 | No filter, no projection | Full deserialization |
 

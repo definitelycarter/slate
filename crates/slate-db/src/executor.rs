@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use bson::RawDocument;
-use slate_query::LogicalOp;
+use slate_query::{LogicalOp, SortDirection};
 use slate_store::Transaction;
 
 use crate::encoding;
@@ -12,6 +12,7 @@ use crate::planner::PlanNode;
 
 type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a>;
 type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Cow<'a, [u8]>), DbError>> + 'a>;
+type IdIter<'a> = Box<dyn Iterator<Item = Result<(String, Option<Cow<'a, [u8]>>), DbError>> + 'a>;
 
 /// Executes a query plan tree, returning a lazy document iterator.
 pub fn execute<'a, T: Transaction + 'a>(
@@ -23,45 +24,56 @@ pub fn execute<'a, T: Transaction + 'a>(
 
 // ── ID tier ─────────────────────────────────────────────────────
 //
-// Nodes below ReadRecord produce record IDs without materializing documents.
+// Nodes below ReadRecord produce record IDs (and optionally raw bytes)
+// as a lazy iterator. Scan carries the data it already has; IndexScan
+// yields None for bytes since index entries don't contain record data.
 
-/// Execute an ID-tier node, returning a list of record IDs.
-fn execute_ids<T: Transaction>(txn: &mut T, node: &PlanNode) -> Result<Vec<String>, DbError> {
+/// Execute an ID-tier node, returning a lazy iterator of (id, maybe_bytes).
+fn execute_id_node<'a, T: Transaction + 'a>(
+    txn: &'a mut T,
+    node: &'a PlanNode,
+) -> Result<IdIter<'a>, DbError> {
     match node {
-        PlanNode::Scan { collection } => execute_scan_ids(txn, collection),
+        PlanNode::Scan { collection } => execute_scan(txn, collection),
 
         PlanNode::IndexScan {
             collection,
             column,
             value,
-        } => execute_index_scan_ids(txn, collection, column, value),
+            direction,
+            limit,
+        } => execute_index_scan(txn, collection, column, value.as_ref(), *direction, *limit),
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
-            let left_ids = execute_ids(txn, lhs)?;
-            let right_ids = execute_ids(txn, rhs)?;
+            // IndexMerge must collect both sides for dedup — stays eager.
+            let left: Vec<String> = execute_id_node(txn, lhs)?
+                .filter_map(|r| r.ok().map(|(id, _)| id))
+                .collect();
+            let right: Vec<String> = execute_id_node(txn, rhs)?
+                .filter_map(|r| r.ok().map(|(id, _)| id))
+                .collect();
 
-            match logical {
+            let ids = match logical {
                 LogicalOp::Or => {
-                    // Union: combine both sets, deduplicate
-                    let mut seen = HashSet::with_capacity(left_ids.len() + right_ids.len());
-                    let mut result = Vec::with_capacity(left_ids.len() + right_ids.len());
-                    for id in left_ids.into_iter().chain(right_ids) {
+                    let mut seen = HashSet::with_capacity(left.len() + right.len());
+                    let mut result = Vec::with_capacity(left.len() + right.len());
+                    for id in left.into_iter().chain(right) {
                         if seen.insert(id.clone()) {
                             result.push(id);
                         }
                     }
-                    Ok(result)
+                    result
                 }
                 LogicalOp::And => {
-                    // Intersect: keep only IDs present in both sets
-                    let right_set: HashSet<String> = right_ids.into_iter().collect();
-                    let result = left_ids
-                        .into_iter()
+                    let right_set: HashSet<String> = right.into_iter().collect();
+                    left.into_iter()
                         .filter(|id| right_set.contains(id))
-                        .collect();
-                    Ok(result)
+                        .collect()
                 }
-            }
+            };
+
+            // After dedup, bytes are unknown — ReadRecord will fetch them.
+            Ok(Box::new(ids.into_iter().map(|id| Ok((id, None)))))
         }
 
         _ => Err(DbError::InvalidQuery(
@@ -70,45 +82,57 @@ fn execute_ids<T: Transaction>(txn: &mut T, node: &PlanNode) -> Result<Vec<Strin
     }
 }
 
-/// Scan all record keys in a collection, returning just the IDs (no deserialization).
-fn execute_scan_ids<T: Transaction>(txn: &mut T, collection: &str) -> Result<Vec<String>, DbError> {
+/// Scan all records lazily, yielding (id, Some(bytes)) — data is kept, not discarded.
+fn execute_scan<'a, T: Transaction + 'a>(
+    txn: &'a mut T,
+    collection: &str,
+) -> Result<IdIter<'a>, DbError> {
     let scan_prefix = encoding::data_scan_prefix("");
     let iter = txn.scan_prefix(collection, &scan_prefix)?;
 
-    let ids: Vec<String> = iter
-        .filter_map(|result| match result {
-            Ok((key, _)) => {
-                let record_id = encoding::parse_record_key(&key)?;
-                Some(record_id.to_string())
-            }
-            Err(_) => None,
-        })
-        .collect();
-
-    Ok(ids)
+    Ok(Box::new(iter.filter_map(|result| match result {
+        Ok((key, value)) => {
+            let record_id = encoding::parse_record_key(&key)?.to_string();
+            Some(Ok((record_id, Some(value))))
+        }
+        Err(e) => Some(Err(DbError::Store(e))),
+    })))
 }
 
-/// Scan an index prefix, returning record IDs that match the column=value.
-fn execute_index_scan_ids<T: Transaction>(
-    txn: &mut T,
+/// Scan an index prefix lazily, yielding (id, None) — index entries have no record data.
+/// `value: Some(v)` scans entries matching a specific value (Eq lookup).
+/// `value: None` scans the entire column index (ordered scan).
+/// `direction` controls forward (Asc) or reverse (Desc) iteration.
+fn execute_index_scan<'a, T: Transaction + 'a>(
+    txn: &'a mut T,
     collection: &str,
     column: &str,
-    value: &bson::Bson,
-) -> Result<Vec<String>, DbError> {
-    let prefix = encoding::index_scan_prefix(column, value);
-    let iter = txn.scan_prefix(collection, &prefix)?;
+    value: Option<&bson::Bson>,
+    direction: SortDirection,
+    limit: Option<usize>,
+) -> Result<IdIter<'a>, DbError> {
+    let prefix = match value {
+        Some(v) => encoding::index_scan_prefix(column, v),
+        None => encoding::index_scan_field_prefix(column),
+    };
+    let iter = match direction {
+        SortDirection::Asc => txn.scan_prefix(collection, &prefix)?,
+        SortDirection::Desc => txn.scan_prefix_rev(collection, &prefix)?,
+    };
 
-    let ids: Vec<String> = iter
-        .filter_map(|result| match result {
-            Ok((key, _)) => {
-                let (_, record_id) = encoding::parse_index_key(&key)?;
-                Some(record_id.to_string())
-            }
-            Err(_) => None,
-        })
-        .collect();
+    let mapped = iter.filter_map(|result| match result {
+        Ok((key, _)) => {
+            let (_, record_id) = encoding::parse_index_key(&key)?;
+            Some(Ok((record_id.to_string(), None)))
+        }
+        Err(e) => Some(Err(DbError::Store(e))),
+    });
 
-    Ok(ids)
+    // When a limit is pushed down from the planner, cap the index walk early.
+    Ok(match limit {
+        Some(n) => Box::new(mapped.take(n)),
+        None => Box::new(mapped),
+    })
 }
 
 // ── Raw tier ────────────────────────────────────────────────────
@@ -179,11 +203,7 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
 
         PlanNode::Limit { skip, take, input } => {
             let source = execute_raw_node(txn, input)?;
-            let iter = source.skip(*skip);
-            match take {
-                Some(take) => Ok(Box::new(iter.take(*take))),
-                None => Ok(Box::new(iter)),
-            }
+            Ok(apply_limit(source, *skip, *take))
         }
 
         _ => Err(DbError::InvalidQuery(
@@ -232,55 +252,52 @@ fn execute_node<'a, T: Transaction + 'a>(
 
 /// ReadRecord: the boundary between ID tier and raw tier.
 ///
-/// For `Scan` inputs, collects (id, raw) tuples in a single pass.
-/// For `IndexScan`/`IndexMerge` inputs, collects IDs first then batch-fetches via `multi_get`.
+/// - Scan: data flows through lazily — bytes are already available from the ID tier.
+/// - IndexScan/IndexMerge: IDs are collected eagerly (releasing the `scan_prefix`
+///   borrow on `txn`), then each record is fetched lazily via `txn.get()`.
+///   The ID collection is cheap (small strings); the expensive record fetch is
+///   what Limit cuts short.
 fn execute_read_record<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     input: &'a PlanNode,
 ) -> Result<RawIter<'a>, DbError> {
-    // Optimization: when the input is a Scan, iterate keys + values together
-    // in a single pass — avoids collecting all IDs then re-reading via multi_get.
-    if let PlanNode::Scan { collection } = input {
-        return execute_scan_raw(txn, collection);
+    if matches!(input, PlanNode::Scan { .. }) {
+        // Scan path: ID tier already carries the data — just unwrap the Option.
+        let source = execute_id_node(txn, input)?;
+        return Ok(Box::new(source.filter_map(|result| match result {
+            Ok((id, Some(bytes))) => Some(Ok((id, bytes))),
+            Ok((_, None)) => None,
+            Err(e) => Some(Err(e)),
+        })));
     }
 
-    // For IndexScan/IndexMerge: collect IDs, then batch-fetch raw bytes
+    // IndexScan/IndexMerge path: collect IDs (releases txn borrow), then fetch lazily.
     let collection = extract_collection(input);
-    let record_ids = execute_ids(txn, input)?;
-
-    let keys: Vec<Vec<u8>> = record_ids
-        .iter()
-        .map(|id| encoding::record_key(id))
+    let ids: Vec<String> = execute_id_node(txn, input)?
+        .filter_map(|r| r.ok().map(|(id, _)| id))
         .collect();
-    let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-    let values = txn.multi_get(&collection, &key_refs)?;
 
-    let mut records = Vec::new();
-    for (id, value_opt) in record_ids.into_iter().zip(values) {
-        if let Some(bytes) = value_opt {
-            records.push((id, bytes));
+    Ok(Box::new(ids.into_iter().filter_map(move |id| {
+        let key = encoding::record_key(&id);
+        match txn.get(&collection, &key) {
+            Ok(Some(bytes)) => Some(Ok((id, Cow::Owned(bytes.into_owned())))),
+            Ok(None) => None, // dangling index entry
+            Err(e) => Some(Err(DbError::Store(e))),
         }
-    }
-
-    Ok(Box::new(records.into_iter().map(Ok)))
+    })))
 }
 
-/// Single-pass scan: lazily iterate data keys, mapping to (id, bytes) tuples.
-/// Records stream one at a time through the pipeline — no buffering.
-fn execute_scan_raw<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    collection: &str,
-) -> Result<RawIter<'a>, DbError> {
-    let scan_prefix = encoding::data_scan_prefix("");
-    let iter = txn.scan_prefix(collection, &scan_prefix)?;
-
-    Ok(Box::new(iter.filter_map(|result| match result {
-        Ok((key, value)) => {
-            let record_id = encoding::parse_record_key(&key)?.to_string();
-            Some(Ok((record_id, value)))
-        }
-        Err(e) => Some(Err(DbError::Store(e))),
-    })))
+/// Generic skip/take over any boxed iterator.
+fn apply_limit<'a, T: 'a>(
+    iter: Box<dyn Iterator<Item = T> + 'a>,
+    skip: usize,
+    take: Option<usize>,
+) -> Box<dyn Iterator<Item = T> + 'a> {
+    let iter = iter.skip(skip);
+    match take {
+        Some(n) => Box::new(iter.take(n)),
+        None => Box::new(iter),
+    }
 }
 
 /// Extract the collection name from an ID-tier node.

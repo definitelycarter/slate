@@ -34,12 +34,12 @@ pub const CONFIG_10K: BenchConfig = BenchConfig {
     batches: 10,
 };
 
-/// Create the collection and an index on `status` for index scan benchmarks.
+/// Create the collection and indexes for benchmarks.
 pub fn setup_collection<S: Store>(db: &Database<S>) {
     let mut txn = db.begin(false).expect("begin failed");
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec!["status".to_string()],
+        indexes: vec!["status".to_string(), "contacts_count".to_string()],
     })
     .expect("create_collection failed");
     txn.commit().expect("commit failed");
@@ -383,7 +383,74 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
-    // 10. IsNull filter on nullable field (~30% null)
+    // 10. Sort by indexed field + take(200) — no filter (indexed sort optimization)
+    results.push(bench(
+        "query: sort contacts_count + take(200) (indexed sort)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: None,
+                sort: vec![Sort {
+                    field: "contacts_count".to_string(),
+                    direction: SortDirection::Desc,
+                }],
+                skip: None,
+                take: Some(200),
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 11. Sort by indexed field + take(200) — with non-indexed filter (indexed sort)
+    results.push(bench(
+        "query: rec1='ProductA' + sort contacts_count + take(200) (indexed sort)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: Some(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![FilterNode::Condition(Filter {
+                        field: "product_recommendation1".to_string(),
+                        operator: Operator::Eq,
+                        value: QueryValue::String("ProductA".to_string()),
+                    })],
+                }),
+                sort: vec![Sort {
+                    field: "contacts_count".to_string(),
+                    direction: SortDirection::Desc,
+                }],
+                skip: None,
+                take: Some(200),
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 12. Sort by indexed field WITHOUT take — baseline comparison (no optimization)
+    results.push(bench(
+        "query: sort contacts_count (no take, no optimization)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: None,
+                sort: vec![Sort {
+                    field: "contacts_count".to_string(),
+                    direction: SortDirection::Desc,
+                }],
+                skip: None,
+                take: None,
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 13. IsNull filter on nullable field (~30% null)
     results.push(bench("query: last_contacted_at is null (~30%)", || {
         let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -404,7 +471,7 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
-    // 11. IsNull filter on nullable field (~50% null)
+    // 14. IsNull filter on nullable field (~50% null)
     results.push(bench("query: notes is null (~50%)", || {
         let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -425,7 +492,7 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
-    // 12. IsNull=false
+    // 15. IsNull=false
     results.push(bench("query: last_contacted_at is not null (~70%)", || {
         let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -446,7 +513,7 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
-    // 13. Combined: status='active' AND notes is null
+    // 16. Combined: status='active' AND notes is null
     results.push(bench("query: status='active' AND notes is null", || {
         let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
@@ -474,7 +541,7 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
-    // 14. Point lookups (1000 find_by_id calls)
+    // 17. Point lookups (1000 find_by_id calls)
     results.push(bench("query: 1000 point lookups (find_by_id)", || {
         let mut txn = db.begin(true).expect("begin failed");
         let mut found = 0;
@@ -491,7 +558,7 @@ pub fn query_benchmarks<S: Store>(
         found
     }));
 
-    // 15. Projection benchmark: fetch 2 of 8 columns
+    // 18. Projection benchmark: fetch 2 of 8 columns
     results.push(bench("query: projection (name, status only)", || {
         let mut txn = db.begin(true).expect("begin failed");
         let query = Query {
