@@ -10,7 +10,7 @@ Storage model: each collection is a RocksDB column family. Records are stored as
 |-------|------|---------|-------|
 | name | String | No | Random name |
 | status | String | **Yes** | Random: "active" or "rejected" (~50/50) |
-| contacts_count | Int | No | Random 0–100 |
+| contacts_count | Int | **Yes** | Random 0–100 |
 | product_recommendation1 | String | No | Random: ProductA / ProductB / ProductC |
 | product_recommendation2 | String | No | Random: ProductX / ProductY / ProductZ |
 | product_recommendation3 | String | No | Random: Widget1 / Widget2 / Widget3 |
@@ -25,27 +25,29 @@ Results from a single collection (10,000 records). Times are consistent across a
 
 | Operation | Time | Per Record |
 |-----------|------|------------|
-| 10 batches of 1,000 records | ~41ms | ~0.0041ms |
+| 10 batches of 1,000 records | ~64ms | ~0.0064ms |
 
 ### Queries
 
 | Query | Time | Records Returned | Notes |
 |-------|------|------------------|-------|
-| Full scan (no filter) | ~13ms | 10,000 | Single key per record |
-| status = 'active' (indexed) | ~8.3ms | ~5,000 | IndexScan → lazy filter |
+| Full scan (no filter) | ~11ms | 10,000 | Single key per record |
+| status = 'active' (indexed) | ~8ms | ~5,000 | IndexScan → lazy filter |
 | product_recommendation1 = 'ProductA' | ~6ms | ~3,300 | Scan + lazy filter, ~67% rejected without deserializing |
-| status + rec1 + rec2 (AND) | ~4.1ms | ~550 | IndexScan + lazy filter, ~89% rejected |
-| status='active' + sort + skip/take(50) | ~7.9ms | 50 | IndexScan → Sort → Limit |
-| status='active' (no sort) | ~8.2ms | ~5,000 | IndexScan, no sort |
+| status + rec1 + rec2 (AND) | ~4ms | ~550 | IndexScan + lazy filter, ~89% rejected |
+| status='active' + sort + skip/take(50) | ~8ms | 50 | IndexScan → Sort → Limit |
+| status='active' (no sort) | ~8ms | ~5,000 | IndexScan, no sort |
 | status='active' + sort contacts_count | ~13ms | ~5,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~3.2ms | 200 | IndexScan, only 200 records materialized |
-| status='active' + sort + take(200) | ~7.8ms | 200 | IndexScan → Sort → Limit |
-| last_contacted_at is null (~30%) | ~5.5ms | ~3,000 | Scan + lazy filter, ~70% rejected |
-| notes is null (~50%) | ~8ms | ~5,000 | Scan + lazy filter |
-| last_contacted_at is not null (~70%) | ~11ms | ~7,000 | Scan + lazy filter |
-| status='active' AND notes is null | ~6.2ms | ~2,500 | IndexScan + lazy filter |
-| 1,000 point lookups (find_by_id) | ~1.7ms | 1,000 | Direct key access |
-| projection (name, status only) | ~7.2ms | 10,000 | Selective materialization at Projection |
+| status='active' + take(200) (no sort) | ~1ms | 200 | Lazy ID tier — Limit stops after 200 |
+| status='active' + sort + take(200) | ~8ms | 200 | IndexScan → Sort → Limit |
+| sort contacts_count + take(200) | ~0.14ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
+| sort contacts_count (no take) | ~21ms | 10,000 | Full sort — no optimization without Limit |
+| last_contacted_at is null (~30%) | ~5ms | ~3,000 | Scan + lazy filter, ~70% rejected |
+| notes is null (~50%) | ~7ms | ~5,000 | Scan + lazy filter |
+| last_contacted_at is not null (~70%) | ~10ms | ~7,000 | Scan + lazy filter |
+| status='active' AND notes is null | ~6ms | ~2,500 | IndexScan + lazy filter |
+| 1,000 point lookups (find_by_id) | ~1.8ms | 1,000 | Direct key access |
+| projection (name, status only) | ~8ms | 10,000 | Selective materialization at Projection |
 
 ## Embedded (RocksStore) — 100k Records
 
@@ -55,36 +57,38 @@ Results from a single collection (100,000 records). Times are consistent across 
 
 | Operation | Time | Per Record |
 |-----------|------|------------|
-| 10 batches of 10,000 records | ~476ms | ~0.0048ms |
+| 10 batches of 10,000 records | ~760ms | ~0.0076ms |
 
 ### Queries
 
 | Query | Time | Records Returned | Notes |
 |-------|------|------------------|-------|
-| Full scan (no filter) | ~123ms | 100,000 | Single key per record |
-| status = 'active' (indexed) | ~86ms | ~50,000 | IndexScan → lazy filter |
-| product_recommendation1 = 'ProductA' | ~60ms | ~33,300 | Scan + lazy filter, ~67% rejected without deserializing |
-| status + rec1 + rec2 (AND) | ~44ms | ~5,500 | IndexScan + lazy filter, ~89% rejected |
-| status='active' + sort + skip/take(50) | ~83ms | 50 | IndexScan → Sort → Limit |
-| status='active' (no sort) | ~85ms | ~50,000 | IndexScan, no sort |
-| status='active' + sort contacts_count | ~140ms | ~50,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~32ms | 200 | IndexScan, only 200 records materialized |
-| status='active' + sort + take(200) | ~83ms | 200 | IndexScan → Sort → Limit |
+| Full scan (no filter) | ~113ms | 100,000 | Single key per record |
+| status = 'active' (indexed) | ~85ms | ~50,000 | IndexScan → lazy filter |
+| product_recommendation1 = 'ProductA' | ~57ms | ~33,000 | Scan + lazy filter, ~67% rejected without deserializing |
+| status + rec1 + rec2 (AND) | ~46ms | ~5,500 | IndexScan + lazy filter, ~89% rejected |
+| status='active' + sort + skip/take(50) | ~88ms | 50 | IndexScan → Sort → Limit |
+| status='active' (no sort) | ~84ms | ~50,000 | IndexScan, no sort |
+| status='active' + sort contacts_count | ~138ms | ~50,000 | IndexScan → Sort |
+| status='active' + take(200) (no sort) | ~7ms | 200 | Lazy ID tier — Limit stops after 200 |
+| status='active' + sort + take(200) | ~87ms | 200 | IndexScan → Sort → Limit |
+| sort contacts_count + take(200) | ~0.17ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
+| sort contacts_count (no take) | ~239ms | 100,000 | Full sort — no optimization without Limit |
 | last_contacted_at is null (~30%) | ~56ms | ~30,000 | Scan + lazy filter, ~70% rejected |
-| notes is null (~50%) | ~80ms | ~50,000 | Scan + lazy filter |
-| last_contacted_at is not null (~70%) | ~110ms | ~70,000 | Scan + lazy filter |
+| notes is null (~50%) | ~76ms | ~50,000 | Scan + lazy filter |
+| last_contacted_at is not null (~70%) | ~103ms | ~70,000 | Scan + lazy filter |
 | status='active' AND notes is null | ~65ms | ~25,000 | IndexScan + lazy filter |
-| 1,000 point lookups (find_by_id) | ~2.4ms | 1,000 | Direct key access |
-| projection (name, status only) | ~82ms | 100,000 | Selective materialization at Projection |
+| 1,000 point lookups (find_by_id) | ~2.5ms | 1,000 | Direct key access |
+| projection (name, status only) | ~76ms | 100,000 | Selective materialization at Projection |
 
 ### Key Observations
 
 - **Zero-copy reads + lazy materialization**: The store trait returns `Cow<'_, [u8]>` — MemoryStore returns borrowed references into its snapshot (zero allocation), RocksDB returns owned bytes. The raw tier constructs `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. Projection is the single materialization point, selectively converting only the requested columns from raw bytes to `bson::Document`. Full materialization uses `RawDocument::try_into()` (direct raw iteration) rather than `bson::from_slice` (serde visitor pattern), avoiding the overhead of extended JSON key matching on every field.
 - **Single key per record**: All columns packed into one value. Reads are a single `get()` or scan iteration — no per-column key overhead.
 - **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). Nested path resolution works directly on `&RawDocument` via `get_document()` chaining.
-- **IndexScan → multi_get**: Index lookups collect record IDs, then batch-fetch raw bytes via `multi_get`. Filter evaluates lazily on the raw bytes.
-- **Sort overhead**: Sort accesses sort keys lazily from raw bytes, but must hold all records in memory via `into_owned()`. Only records that survive the filter pay this cost. This is the dominant cost for sorted queries.
-- **take() without sort**: When no sort is required, `take(N)` benefits dramatically from lazy materialization — only N records are deserialized regardless of how many match the filter. 100k dataset, `take(200)`: ~32ms vs ~82ms with eager deserialization.
+- **Lazy ID tier**: `Scan` yields `(id, bytes)` lazily — data is never discarded and re-fetched. `IndexScan` yields `(id, None)` and `ReadRecord` fetches bytes via `txn.get()`. When Limit is present without Sort, the iterator stops early — `take(200)` on 100k records: ~7ms (RocksDB), ~3ms (MemoryStore).
+- **Indexed sort**: When a query sorts on a single indexed field and has a Limit, the planner eliminates the Sort node entirely and replaces Scan with an ordered IndexScan. The limit is pushed into the IndexScan so it stops after `skip + take` index entries. `sort contacts_count + take(200)` on 100k records: ~0.17ms (RocksDB), ~0.08ms (MemoryStore).
+- **Sort overhead**: When indexed sort doesn't apply, Sort accesses sort keys lazily from raw bytes but must hold all records in memory via `into_owned()`. Only records that survive the filter pay this cost. This is the dominant cost for sorted queries.
 - **Point lookups**: ~1.7ms (10k) to ~2.4ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
 
@@ -102,25 +106,25 @@ Same workload as embedded (100k records), accessed through the TCP server on loc
 
 | Query | Time | Records Returned |
 |-------|------|------------------|
-| Full scan (no filter) | ~245ms | 100,000 |
-| status = 'active' (indexed) | ~147ms | ~50,000 |
-| status + rec1 + rec2 (AND) | ~53ms | ~5,500 |
-| status='active' (no sort) | ~146ms | ~50,000 |
-| status='active' + sort contacts_count | ~205ms | ~50,000 |
-| status='active' + take(200) (no sort) | ~36ms | 200 |
-| status='active' + sort + take(200) | ~88ms | 200 |
-| status='active' + sort + skip/take(50) | ~86ms | 50 |
+| Full scan (no filter) | ~260ms | 100,000 |
+| status = 'active' (indexed) | ~160ms | ~50,000 |
+| status + rec1 + rec2 (AND) | ~56ms | ~5,500 |
+| status='active' (no sort) | ~158ms | ~50,000 |
+| status='active' + sort contacts_count | ~210ms | ~50,000 |
+| status='active' + take(200) (no sort) | ~8ms | 200 |
+| status='active' + sort + take(200) | ~89ms | 200 |
+| status='active' + sort + skip/take(50) | ~90ms | 50 |
 | 1,000 point lookups (find_by_id) | ~40ms | 1,000 |
 
 ### Embedded vs TCP Overhead
 
 | Query | Embedded | TCP | Overhead |
 |-------|----------|-----|----------|
-| Full scan (100k records) | 123ms | 245ms | +99% |
-| IndexScan filter (50k records) | 86ms | 147ms | +71% |
-| IndexScan + narrow (5.5k records) | 44ms | 53ms | +20% |
-| IndexScan + sort + take(200) | 83ms | 88ms | +6% |
-| 1,000 point lookups | 2.4ms | 40ms | Network round-trips |
+| Full scan (100k records) | 113ms | 260ms | +130% |
+| IndexScan filter (50k records) | 85ms | 160ms | +88% |
+| IndexScan + narrow (5.5k records) | 46ms | 56ms | +22% |
+| IndexScan + sort + take(200) | 87ms | 89ms | +2% |
+| 1,000 point lookups | 2.5ms | 40ms | Network round-trips |
 
 **Takeaway**: TCP overhead scales with the number of records serialized over the wire. For paginated queries (sort + take), overhead is modest. Point lookups show the per-request round-trip cost (~0.04ms each).
 
@@ -145,14 +149,15 @@ MessagePack is more compact for structured enum data and handles Rust enums nati
 
 | Query | 10k | 100k | Factor |
 |-------|-----|------|--------|
-| Full scan | 13ms | 123ms | 9.5x |
-| IndexScan (status) | 8.3ms | 86ms | 10.4x |
-| AND filter (3 conditions) | 4.1ms | 44ms | 10.7x |
-| Scan + filter (ProductA) | 6ms | 60ms | 10.0x |
-| Sort (full, ~50%) | 13ms | 140ms | 10.8x |
-| take(200) no sort | 3.2ms | 32ms | 10.0x |
-| 1,000 point lookups | 1.7ms | 2.4ms | 1.4x |
-| Projection (2 cols) | 7.2ms | 82ms | 11.4x |
+| Full scan | 11ms | 113ms | 10.3x |
+| IndexScan (status) | 8ms | 85ms | 10.6x |
+| AND filter (3 conditions) | 4ms | 46ms | 11.5x |
+| Scan + filter (ProductA) | 6ms | 57ms | 9.5x |
+| Sort (full, ~50%) | 13ms | 138ms | 10.6x |
+| take(200) no sort | 1ms | 7ms | 7.0x |
+| sort + take(200) indexed | 0.14ms | 0.17ms | 1.2x |
+| 1,000 point lookups | 1.8ms | 2.5ms | 1.4x |
+| Projection (2 cols) | 8ms | 76ms | 9.5x |
 
 Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size.
 
@@ -173,27 +178,29 @@ Same workload as embedded benchmarks, run against both storage backends. 100k re
 
 | Backend | Time | Per Record |
 |---------|------|------------|
-| RocksStore | ~476ms | ~0.0048ms |
+| RocksStore | ~760ms | ~0.0076ms |
 | MemoryStore | ~212ms | ~0.0021ms |
-| **Speedup** | **2.2x** | |
+| **Speedup** | **3.6x** | |
 
 ### Queries — 100k Records
 
 | Query | RocksStore | MemoryStore | Speedup |
 |-------|-----------|-------------|---------|
-| Full scan (no filter) | 123ms | 112ms | 1.1x |
-| status = 'active' (indexed) | 86ms | 65ms | 1.3x |
-| product_recommendation1 = 'ProductA' | 60ms | 50ms | 1.2x |
-| status + rec1 + rec2 (AND) | 44ms | 24ms | 1.8x |
-| status='active' + sort + skip/take | 83ms | 63ms | 1.3x |
-| status='active' (no sort) | 85ms | 65ms | 1.3x |
-| status='active' + sort | 140ms | 122ms | 1.1x |
-| 1,000 point lookups (find_by_id) | 2.4ms | 1.9ms | 1.3x |
-| projection (name, status only) | 82ms | 60ms | 1.4x |
+| Full scan (no filter) | 113ms | 101ms | 1.1x |
+| status = 'active' (indexed) | 85ms | 60ms | 1.4x |
+| product_recommendation1 = 'ProductA' | 57ms | 46ms | 1.2x |
+| status + rec1 + rec2 (AND) | 46ms | 24ms | 1.9x |
+| status='active' + sort + skip/take | 88ms | 68ms | 1.3x |
+| status='active' (no sort) | 84ms | 60ms | 1.4x |
+| status='active' + sort | 138ms | 120ms | 1.2x |
+| status='active' + take(200) no sort | 7ms | 3ms | 2.3x |
+| sort contacts_count + take(200) | 0.17ms | 0.08ms | 2.1x |
+| 1,000 point lookups (find_by_id) | 2.5ms | 2.0ms | 1.3x |
+| projection (name, status only) | 76ms | 63ms | 1.2x |
 
 ### Key Observations
 
-- **Writes are 2.2x faster** — MemoryStore has no WAL, no fsync, no LSM compaction. Lazy CF snapshots and dirty-only commits minimize overhead further.
+- **Writes are 3.6x faster** — MemoryStore has no WAL, no fsync, no LSM compaction. Lazy CF snapshots and dirty-only commits minimize overhead further. The gap widened with the addition of `contacts_count` as a second index (more index key writes per record).
 - **Indexed queries are 1.3x faster** — index scans hit the store heavily; in-memory B-tree lookups beat RocksDB's block cache. AND filters see up to 1.8x speedup because MemoryStore's zero-copy `Cow::Borrowed` avoids cloning bytes for rejected records.
 - **Full scans are ~equal** — the bottleneck is BSON deserialization, which is identical for both backends. Storage read time is a small fraction.
 - **Concurrent workloads benefit from lock-free reads** — MemoryStore uses `ArcSwap` for atomic snapshot reads, avoiding RocksDB's internal locking overhead.
@@ -227,16 +234,16 @@ The query planner builds a three-tier plan tree:
 Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
 ```
 
-**ID tier** (produces record IDs, no document bytes touched):
-- **Scan**: Iterates all data keys in a collection, yields record IDs.
-- **IndexScan**: Scans index keys for a specific `column=value`, yields matching record IDs.
+**ID tier** (produces record IDs lazily, no document bytes touched):
+- **Scan**: Iterates all data keys, yields `(id, Some(bytes))` — data is kept, not discarded.
+- **IndexScan**: Scans index keys, yields `(id, None)`. Supports `value: Some(v)` for Eq lookups, `value: None` for ordered column scans. `direction` controls forward/reverse. Optional `limit` caps index entries read (pushed down from Limit).
 - **IndexMerge**: Binary combiner with `lhs`/`rhs` children and a `LogicalOp`. `Or` unions ID sets (for OR queries where every branch has an indexed Eq). `And` intersects (supported but not currently emitted).
 
 **Raw tier** (operates on `Cow<[u8]>` bytes + `&RawDocument` views — no deserialization):
-- **ReadRecord**: Fetches raw BSON bytes by ID via `multi_get`. For `Scan` inputs, optimizes into a single-pass iteration. Does **not** deserialize — yields `(id, Cow<[u8]>)` tuples. MemoryStore returns `Cow::Borrowed` (zero-copy from the snapshot), RocksDB returns `Cow::Owned`.
+- **ReadRecord**: The boundary between ID and raw tiers. For `Scan` inputs, data flows through lazily (bytes already available). For `IndexScan`/`IndexMerge`, collects IDs (releasing the scan borrow), then fetches each record lazily via `txn.get()`. Yields `(id, Cow<[u8]>)` tuples. MemoryStore returns `Cow::Borrowed` (zero-copy from the snapshot), RocksDB returns `Cow::Owned`.
 - **Filter**: Constructs a borrowed `&RawDocument` view over the `Cow` bytes (zero allocation) and evaluates predicates by accessing individual fields lazily. Records that fail are never deserialized or cloned. AND/OR short-circuit. Supports dot-notation paths.
-- **Sort**: Calls `into_owned()` only on records that survived the filter, then accesses sort keys lazily via `&RawDocument` views. Sorts in memory.
-- **Limit**: `skip()` + `take()` on the raw record stream.
+- **Sort**: Calls `into_owned()` only on records that survived the filter, then accesses sort keys lazily via `&RawDocument` views. Sorts in memory. Eliminated entirely when the planner detects a single indexed sort field + Limit.
+- **Limit**: Generic `skip()` + `take()` via `apply_limit` on any raw record iterator.
 
 **Document tier** (materialization):
 - **Projection**: Constructs a borrowed `&RawDocument` view and selectively deserializes only the projected columns via `raw.iter()` + column filtering. For dot-notation paths, trims nested documents to only requested sub-paths. When no Projection node exists, full materialization uses `RawDocument::try_into()` — direct raw iteration that converts each `RawBsonRef` to an owned `Bson` value without serde overhead.

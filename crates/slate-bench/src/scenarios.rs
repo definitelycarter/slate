@@ -83,6 +83,7 @@ pub fn bulk_insert<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConfig) -
     );
 
     results.push(total);
+
     results
 }
 
@@ -571,6 +572,86 @@ pub fn query_benchmarks<S: Store>(
         let r = txn.find(COLLECTION, &query).expect("find failed");
         r.len()
     }));
+
+    // 19. Multi-field sort: indexed first field + non-indexed second, with take
+    // contacts_count has ~1000 records per value at 100k — first group should exceed 200
+    results.push(bench(
+        "query: sort [contacts_count DESC, name ASC] + take(200)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: None,
+                sort: vec![
+                    Sort {
+                        field: "contacts_count".to_string(),
+                        direction: SortDirection::Desc,
+                    },
+                    Sort {
+                        field: "name".to_string(),
+                        direction: SortDirection::Asc,
+                    },
+                ],
+                skip: None,
+                take: Some(200),
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 20. Multi-field sort: indexed first field with low cardinality (2 values)
+    // status groups are ~50k each — large group, sub-sort within
+    results.push(bench(
+        "query: sort [status DESC, contacts_count ASC] + take(200)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: None,
+                sort: vec![
+                    Sort {
+                        field: "status".to_string(),
+                        direction: SortDirection::Desc,
+                    },
+                    Sort {
+                        field: "contacts_count".to_string(),
+                        direction: SortDirection::Asc,
+                    },
+                ],
+                skip: None,
+                take: Some(200),
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 21. Multi-field sort: first field NOT indexed — baseline (no optimization possible)
+    results.push(bench(
+        "query: sort [name ASC, contacts_count DESC] + take(200) (not indexed)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: None,
+                sort: vec![
+                    Sort {
+                        field: "name".to_string(),
+                        direction: SortDirection::Asc,
+                    },
+                    Sort {
+                        field: "contacts_count".to_string(),
+                        direction: SortDirection::Desc,
+                    },
+                ],
+                skip: None,
+                take: Some(200),
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
 
     results
 }
