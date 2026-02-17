@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::RangeBounds;
 
 use crate::error::StoreError;
@@ -23,14 +24,20 @@ pub trait Store {
 
 pub trait Transaction {
     // Reads
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError>;
-    fn multi_get(&mut self, cf: &str, keys: &[&[u8]])
-    -> Result<Vec<Option<Box<[u8]>>>, StoreError>;
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError>;
+    fn multi_get(
+        &mut self,
+        cf: &str,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError>;
     fn scan_prefix(
         &mut self,
         cf: &str,
         prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>;
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    >;
 
     // Writes
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;

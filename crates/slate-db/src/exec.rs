@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use bson::raw::RawBsonRef;
-use bson::{Bson, RawDocument, RawDocumentBuf};
+use bson::{Bson, RawDocument};
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, QueryValue};
 
 use crate::error::DbError;
@@ -278,12 +278,12 @@ fn compare_two_values(a: &Bson, b: &Bson) -> Ordering {
 // ── Raw BSON filter matching ────────────────────────────────────
 //
 // These functions mirror the bson::Document-based filter matching above
-// but operate on RawDocumentBuf / RawBsonRef to avoid full deserialization.
+// but operate on RawDocument / RawBsonRef to avoid full deserialization.
 
 /// Walk a dot-separated path through raw BSON bytes.
 /// Returns None if the path is missing, Null, or if `path` is `"_id"` (handled by caller).
 pub(crate) fn raw_get_path<'a>(
-    raw: &'a RawDocumentBuf,
+    raw: &'a RawDocument,
     path: &str,
 ) -> Result<Option<RawBsonRef<'a>>, DbError> {
     if path == "_id" {
@@ -323,7 +323,7 @@ fn raw_get_path_in_doc<'a>(
 }
 
 pub(crate) fn raw_matches_group(
-    raw: &RawDocumentBuf,
+    raw: &RawDocument,
     id: &str,
     group: &FilterGroup,
 ) -> Result<bool, DbError> {
@@ -347,14 +347,14 @@ pub(crate) fn raw_matches_group(
     }
 }
 
-fn raw_matches_node(raw: &RawDocumentBuf, id: &str, node: &FilterNode) -> Result<bool, DbError> {
+fn raw_matches_node(raw: &RawDocument, id: &str, node: &FilterNode) -> Result<bool, DbError> {
     match node {
         FilterNode::Condition(filter) => raw_matches_filter(raw, id, filter),
         FilterNode::Group(group) => raw_matches_group(raw, id, group),
     }
 }
 
-fn raw_matches_filter(raw: &RawDocumentBuf, id: &str, filter: &Filter) -> Result<bool, DbError> {
+fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bool, DbError> {
     // _id is stored externally, not in raw bytes
     if filter.field == "_id" {
         return match filter.operator {
@@ -485,7 +485,7 @@ fn raw_compare_two_values(a: &RawBsonRef, b: &RawBsonRef) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bson::doc;
+    use bson::{RawDocumentBuf, doc};
 
     #[test]
     fn get_path_values_scalar() {

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::MutexGuard;
 
@@ -108,20 +109,20 @@ impl<'a> MemoryTransaction<'a> {
 }
 
 impl<'a> Transaction for MemoryTransaction<'a> {
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError> {
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
         let data = self.ensure_cf(cf)?;
-        Ok(data.get(key).map(|v| v.clone().into_boxed_slice()))
+        Ok(data.get(key).map(|v| Cow::Borrowed(v.as_slice())))
     }
 
     fn multi_get(
         &mut self,
         cf: &str,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Box<[u8]>>>, StoreError> {
+    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError> {
         let data = self.ensure_cf(cf)?;
         Ok(keys
             .iter()
-            .map(|k| data.get(*k).map(|v| v.clone().into_boxed_slice()))
+            .map(|k| data.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
             .collect())
     }
 
@@ -129,8 +130,10 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         &mut self,
         cf: &str,
         prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>
-    {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    > {
         let snap = self
             .snapshot
             .as_mut()
@@ -142,7 +145,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Ok(Box::new(
             data.range(prefix_vec.clone()..)
                 .take_while(move |(k, _)| k.starts_with(&prefix_vec))
-                .map(|(k, v)| Ok((k.clone().into_boxed_slice(), v.clone().into_boxed_slice()))),
+                .map(|(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))),
         ))
     }
 

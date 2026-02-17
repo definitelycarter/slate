@@ -19,7 +19,7 @@ ID tier:         Scan / IndexScan / IndexMerge (produce record IDs)
 ```
 
 **ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — operates on `RawDocumentBuf` (raw BSON bytes), accessing individual fields lazily. No full deserialization.
+**Raw tier** — operates on `Cow<[u8]>` bytes with borrowed `&RawDocument` views, accessing individual fields lazily. No full deserialization. MemoryStore returns `Cow::Borrowed` (zero-copy from its snapshot), RocksDB returns `Cow::Owned`.
 **Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns to `bson::Document`.
 
 ## Query Model
@@ -371,7 +371,7 @@ sort: address.zip ASC
 columns: ["name", "address.city"]
 ```
 
-Path resolution works on raw BSON bytes — `RawDocumentBuf::get_document("address")` retrieves the nested document, then `.get("city")` retrieves the field. No full deserialization needed.
+Path resolution works on raw BSON bytes — `RawDocument::get_document("address")` retrieves the nested document, then `.get("city")` retrieves the field. No full deserialization needed.
 
 For projections with dot-notation, the top-level key is included in materialization (e.g., `address.city` includes the entire `address` object), then `apply_projection` trims nested documents to only the requested sub-paths.
 

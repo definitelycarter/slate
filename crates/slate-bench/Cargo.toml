@@ -3,6 +3,14 @@ name = "slate-bench"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "slate-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "raw-document-bench"
+path = "src/raw_document_bench.rs"
+
 [dependencies]
 slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store", features = ["rocksdb", "memory"] }

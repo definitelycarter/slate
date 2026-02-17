@@ -272,7 +272,7 @@ Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMer
 **Three tiers:**
 
 1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
-2. **Raw tier** — `ReadRecord`, `Filter`, `Sort`, `Limit` operate on raw BSON bytes (`RawDocumentBuf`), accessing individual fields lazily. Records that fail a filter are never deserialized.
+2. **Raw tier** — `ReadRecord`, `Filter`, `Sort`, `Limit` operate on `Cow<[u8]>` bytes with borrowed `&RawDocument` views, accessing individual fields lazily. Records that fail a filter are never cloned or deserialized.
 3. **Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns from raw bytes to `bson::Document`.
 
 **Key properties:**

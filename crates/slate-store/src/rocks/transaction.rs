@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,20 +54,20 @@ impl<'db> RocksTransaction<'db> {
 }
 
 impl<'db> Transaction for RocksTransaction<'db> {
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError> {
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
         let cf_handle = self.cf_handle(cf)?;
         let data = self
             .txn()?
             .get_cf(&cf_handle, key)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
-        Ok(data.map(|v| v.into_boxed_slice()))
+        Ok(data.map(|v| Cow::Owned(v)))
     }
 
     fn multi_get(
         &mut self,
         cf: &str,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Box<[u8]>>>, StoreError> {
+    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError> {
         let cf_handle = self.cf_handle(cf)?;
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf_handle, *k)).collect();
@@ -74,7 +75,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
         results
             .into_iter()
             .map(|r| {
-                r.map(|opt| opt.map(|v| v.into_boxed_slice()))
+                r.map(|opt| opt.map(|v| Cow::Owned(v)))
                     .map_err(|e| StoreError::Storage(e.to_string()))
             })
             .collect()
@@ -84,8 +85,10 @@ impl<'db> Transaction for RocksTransaction<'db> {
         &mut self,
         cf: &str,
         prefix: &[u8],
-    ) -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>
-    {
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        StoreError,
+    > {
         let cf_handle = self.cf_handle(cf)?;
         let prefix_owned = prefix.to_vec();
         let iter = self
@@ -97,7 +100,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
                 Err(_) => true,
             })
             .map(|item| {
-                item.map(|(k, v)| (k, v))
+                item.map(|(k, v)| (Cow::Owned(k.into_vec()), Cow::Owned(v.into_vec())))
                     .map_err(|e| StoreError::Storage(e.to_string()))
             }),
         ))

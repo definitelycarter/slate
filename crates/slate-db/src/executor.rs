@@ -1,6 +1,7 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
-use bson::RawDocumentBuf;
+use bson::RawDocument;
 use slate_query::LogicalOp;
 use slate_store::Transaction;
 
@@ -10,7 +11,7 @@ use crate::exec;
 use crate::planner::PlanNode;
 
 type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a>;
-type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, RawDocumentBuf), DbError>> + 'a>;
+type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Cow<'a, [u8]>), DbError>> + 'a>;
 
 /// Executes a query plan tree, returning a lazy document iterator.
 pub fn execute<'a, T: Transaction + 'a>(
@@ -127,27 +128,35 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
-                Ok((id, raw)) => match exec::raw_matches_group(&raw, &id, predicate) {
-                    Ok(true) => Some(Ok((id, raw))),
-                    Ok(false) => None,
-                    Err(e) => Some(Err(e)),
-                },
+                Ok((id, cow)) => {
+                    let raw = RawDocument::from_bytes(&cow).ok()?;
+                    match exec::raw_matches_group(raw, &id, predicate) {
+                        Ok(true) => Some(Ok((id, cow))),
+                        Ok(false) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                }
             })))
         }
 
         PlanNode::Sort { sorts, input } => {
             let source = execute_raw_node(txn, input)?;
 
-            let mut records: Vec<(String, RawDocumentBuf)> =
-                source.collect::<Result<Vec<_>, _>>()?;
+            let mut records: Vec<(String, Vec<u8>)> = source
+                .map(|r| r.map(|(id, cow)| (id, cow.into_owned())))
+                .collect::<Result<Vec<_>, _>>()?;
 
-            records.sort_by(|(a_id, a_raw), (b_id, b_raw)| {
+            records.sort_by(|(a_id, a_bytes), (b_id, b_bytes)| {
                 for sort in sorts {
                     let ord = if sort.field == "_id" {
                         a_id.cmp(b_id)
                     } else {
-                        let a_val = exec::raw_get_path(a_raw, &sort.field).ok().flatten();
-                        let b_val = exec::raw_get_path(b_raw, &sort.field).ok().flatten();
+                        let a_raw = RawDocument::from_bytes(a_bytes).ok();
+                        let b_raw = RawDocument::from_bytes(b_bytes).ok();
+                        let a_val =
+                            a_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
+                        let b_val =
+                            b_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
                         exec::raw_compare_field_values(a_val, b_val)
                     };
                     let ord = match sort.direction {
@@ -161,7 +170,11 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                 std::cmp::Ordering::Equal
             });
 
-            Ok(Box::new(records.into_iter().map(Ok)))
+            Ok(Box::new(
+                records
+                    .into_iter()
+                    .map(|(id, bytes)| Ok((id, Cow::Owned(bytes)))),
+            ))
         }
 
         PlanNode::Limit { skip, take, input } => {
@@ -194,8 +207,9 @@ fn execute_node<'a, T: Transaction + 'a>(
             let cols = columns.clone();
 
             Ok(Box::new(source.map(move |result| {
-                let (id, raw) = result?;
-                let mut doc = materialize_for_projection(&raw, &cols)?;
+                let (id, cow) = result?;
+                let raw = RawDocument::from_bytes(&cow)?;
+                let mut doc = materialize_for_projection(raw, &cols)?;
                 doc.insert("_id", id.as_str());
                 exec::apply_projection(&mut doc, &cols);
                 Ok(doc)
@@ -206,8 +220,9 @@ fn execute_node<'a, T: Transaction + 'a>(
         _ => {
             let source = execute_raw_node(txn, node)?;
             Ok(Box::new(source.map(|result| {
-                let (id, raw) = result?;
-                let mut doc = raw.to_document()?;
+                let (id, cow) = result?;
+                let raw = RawDocument::from_bytes(&cow)?;
+                let mut doc: bson::Document = raw.try_into()?;
                 doc.insert("_id", id.as_str());
                 Ok(doc)
             })))
@@ -243,18 +258,14 @@ fn execute_read_record<'a, T: Transaction + 'a>(
     let mut records = Vec::new();
     for (id, value_opt) in record_ids.into_iter().zip(values) {
         if let Some(bytes) = value_opt {
-            let raw = match RawDocumentBuf::from_bytes(bytes.into_vec()) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            records.push((id, raw));
+            records.push((id, bytes));
         }
     }
 
     Ok(Box::new(records.into_iter().map(Ok)))
 }
 
-/// Single-pass scan: lazily iterate data keys, mapping to (id, raw) tuples.
+/// Single-pass scan: lazily iterate data keys, mapping to (id, bytes) tuples.
 /// Records stream one at a time through the pipeline — no buffering.
 fn execute_scan_raw<'a, T: Transaction + 'a>(
     txn: &'a mut T,
@@ -266,8 +277,7 @@ fn execute_scan_raw<'a, T: Transaction + 'a>(
     Ok(Box::new(iter.filter_map(|result| match result {
         Ok((key, value)) => {
             let record_id = encoding::parse_record_key(&key)?.to_string();
-            let raw = RawDocumentBuf::from_bytes(value.into_vec()).ok()?;
-            Some(Ok((record_id, raw)))
+            Some(Ok((record_id, value)))
         }
         Err(e) => Some(Err(DbError::Store(e))),
     })))
@@ -286,7 +296,7 @@ fn extract_collection(node: &PlanNode) -> String {
 /// Selectively materialize a raw document for projection.
 /// Only deserializes top-level keys that are in the projection set.
 fn materialize_for_projection(
-    raw: &RawDocumentBuf,
+    raw: &RawDocument,
     columns: &[String],
 ) -> Result<bson::Document, DbError> {
     let top_keys: HashSet<&str> = columns
