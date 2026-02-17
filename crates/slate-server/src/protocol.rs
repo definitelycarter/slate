@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use slate_db::{DeleteResult, InsertResult, UpdateResult};
+use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
 use slate_query::{FilterGroup, Query};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,6 +63,9 @@ pub enum Request {
     },
     ListIndexes {
         collection: String,
+    },
+    CreateCollection {
+        config: CollectionConfig,
     },
     ListCollections,
     DropCollection {

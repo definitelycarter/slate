@@ -1,5 +1,5 @@
 use bson::doc;
-use slate_db::Database;
+use slate_db::{CollectionConfig, Database};
 use slate_query::{
     Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, QueryValue, Sort, SortDirection,
 };
@@ -35,8 +35,19 @@ fn eq_filter(field: &str, value: QueryValue) -> FilterGroup {
     }
 }
 
+fn create_collection(db: &Database<RocksStore>, name: &str) {
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: name.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.commit().unwrap();
+}
+
 /// Insert 5 seed records.
 fn seed_records(db: &Database<RocksStore>) {
+    create_collection(db, COLLECTION);
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
         COLLECTION,
@@ -57,6 +68,7 @@ fn seed_records(db: &Database<RocksStore>) {
 #[test]
 fn insert_one_and_find_one() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     let result = txn
@@ -85,6 +97,7 @@ fn insert_one_and_find_one() {
 #[test]
 fn insert_one_duplicate_id_fails() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "acct-1", "name": "Acme" })
@@ -98,6 +111,7 @@ fn insert_one_duplicate_id_fails() {
 #[test]
 fn insert_one_auto_generated_id() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     let result = txn
@@ -118,6 +132,7 @@ fn insert_one_auto_generated_id() {
 #[test]
 fn insert_many_batch() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     let results = txn
@@ -195,6 +210,7 @@ fn find_gt_filter() {
 #[test]
 fn find_isnull_filter() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "acct-x", "name": "NoStatus" })
@@ -424,6 +440,7 @@ fn find_projection_includes_sort_columns() {
 #[test]
 fn update_one_merge() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -466,6 +483,7 @@ fn update_one_no_match() {
 #[test]
 fn update_one_upsert() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", QueryValue::String("new-doc".into()));
@@ -518,6 +536,7 @@ fn update_many_multiple() {
 #[test]
 fn replace_one_full_replacement() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -550,6 +569,7 @@ fn replace_one_full_replacement() {
 #[test]
 fn delete_one_removes_record() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -614,6 +634,7 @@ fn count_with_filter() {
 #[test]
 fn create_and_use_index() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
@@ -650,6 +671,7 @@ fn create_and_use_index() {
 #[test]
 fn drop_index() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.create_index(COLLECTION, "status").unwrap();
@@ -673,6 +695,8 @@ fn drop_index() {
 #[test]
 fn list_collections() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "contacts");
+    create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
@@ -690,6 +714,7 @@ fn list_collections() {
 #[test]
 fn drop_collection() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "a-1", "name": "Acme" })
@@ -712,6 +737,8 @@ fn drop_collection() {
 #[test]
 fn collection_isolation() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "contacts");
+    create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
@@ -735,6 +762,7 @@ fn collection_isolation() {
 #[test]
 fn index_maintained_on_insert() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     // Create index first, then insert
     let mut txn = db.begin(false).unwrap();
@@ -768,6 +796,7 @@ fn index_maintained_on_insert() {
 #[test]
 fn index_maintained_on_update() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.create_index(COLLECTION, "status").unwrap();
@@ -812,6 +841,7 @@ fn index_maintained_on_update() {
 #[test]
 fn index_maintained_on_delete() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     txn.create_index(COLLECTION, "status").unwrap();
@@ -845,6 +875,7 @@ fn index_maintained_on_delete() {
 #[test]
 fn nested_doc_write_and_read() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -876,6 +907,7 @@ fn nested_doc_write_and_read() {
 #[test]
 fn dot_notation_filter_eq() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
@@ -913,6 +945,7 @@ fn dot_notation_filter_eq() {
 #[test]
 fn dot_notation_sort() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
@@ -947,6 +980,7 @@ fn dot_notation_sort() {
 #[test]
 fn dot_notation_projection() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -985,6 +1019,7 @@ fn dot_notation_projection() {
 #[test]
 fn dot_notation_projection_multiple_subfields() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -1026,6 +1061,7 @@ fn dot_notation_projection_multiple_subfields() {
 #[test]
 fn dot_notation_isnull_missing_parent() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "nested");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -1060,6 +1096,7 @@ fn dot_notation_isnull_missing_parent() {
 #[test]
 fn dot_notation_deep_nesting() {
     let (db, _dir) = temp_db();
+    create_collection(&db, "deep");
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
@@ -1157,4 +1194,602 @@ fn find_by_id_with_projection() {
     assert_eq!(doc.get_str("status").unwrap(), "active");
     assert!(!doc.contains_key("revenue"));
     assert!(!doc.contains_key("active"));
+}
+
+// ── Multi-key and nested path index tests ───────────────────────
+
+#[test]
+fn index_on_nested_path() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "nested_idx".to_string(),
+        indexes: vec!["address.city".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "nested_idx",
+        vec![
+            doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
+            doc! { "_id": "r2", "name": "Bob", "address": { "city": "Denver", "state": "CO" } },
+            doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Index scan on address.city
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter(
+            "address.city",
+            QueryValue::String("Austin".into()),
+        )),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("nested_idx", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Alice", "Charlie"]);
+}
+
+#[test]
+fn index_on_array_of_scalars() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "tags_idx".to_string(),
+        indexes: vec!["tags.[]".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "tags_idx",
+        vec![
+            doc! { "_id": "r1", "name": "Post A", "tags": ["rust", "db"] },
+            doc! { "_id": "r2", "name": "Post B", "tags": ["go", "api"] },
+            doc! { "_id": "r3", "name": "Post C", "tags": ["rust", "api"] },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Query for tag "rust" via index
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_idx", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Post A", "Post C"]);
+
+    // Query for tag "api" via index
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("api".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_idx", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Post B", "Post C"]);
+}
+
+#[test]
+fn index_on_array_of_objects() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "items_idx".to_string(),
+        indexes: vec!["items.[].sku".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "items_idx",
+        vec![
+            doc! { "_id": "order-1", "items": [{ "sku": "A1", "qty": 2 }, { "sku": "B2", "qty": 1 }] },
+            doc! { "_id": "order-2", "items": [{ "sku": "C3", "qty": 5 }] },
+            doc! { "_id": "order-3", "items": [{ "sku": "A1", "qty": 1 }, { "sku": "C3", "qty": 3 }] },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Query for sku "A1"
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("items.[].sku", QueryValue::String("A1".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("items_idx", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut ids: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("_id").unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["order-1", "order-3"]);
+
+    // Query for sku "C3"
+    let query = Query {
+        filter: Some(eq_filter("items.[].sku", QueryValue::String("C3".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("items_idx", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut ids: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("_id").unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["order-2", "order-3"]);
+}
+
+#[test]
+fn multikey_index_maintained_on_update() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "tags_upd".to_string(),
+        indexes: vec!["tags.[]".to_string()],
+    })
+    .unwrap();
+    txn.insert_one("tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Update tags
+    let mut txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    txn.update_one("tags_upd", &filter, doc! { "tags": ["go", "api"] }, false)
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Old tags should not match
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_upd", &query).unwrap();
+    assert_eq!(results.len(), 0);
+
+    // New tags should match
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("go".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_upd", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "r1");
+}
+
+#[test]
+fn multikey_index_maintained_on_delete() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "tags_del".to_string(),
+        indexes: vec!["tags.[]".to_string()],
+    })
+    .unwrap();
+    txn.insert_one("tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Delete
+    let mut txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    txn.delete_one("tags_del", &filter).unwrap();
+    txn.commit().unwrap();
+
+    // Index entries should be cleaned up
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_del", &query).unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn multikey_index_backfill() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, "backfill");
+
+    // Insert data first, then create the index
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        "backfill",
+        vec![
+            doc! { "_id": "r1", "tags": ["rust", "db"] },
+            doc! { "_id": "r2", "tags": ["go", "api"] },
+            doc! { "_id": "r3", "tags": ["rust", "api"] },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Now create the index — should backfill
+    let mut txn = db.begin(false).unwrap();
+    txn.create_index("backfill", "tags.[]").unwrap();
+    txn.commit().unwrap();
+
+    // Verify backfill worked
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("backfill", &query).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut ids: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("_id").unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["r1", "r3"]);
+}
+
+#[test]
+fn multikey_index_replace_one() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "tags_rep".to_string(),
+        indexes: vec!["tags.[]".to_string()],
+    })
+    .unwrap();
+    txn.insert_one("tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Replace entirely
+    let mut txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    txn.replace_one("tags_rep", &filter, doc! { "tags": ["python", "ml"] })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Old tags gone
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    assert_eq!(txn.find("tags_rep", &query).unwrap().len(), 0);
+
+    // New tags present
+    let query = Query {
+        filter: Some(eq_filter("tags.[]", QueryValue::String("python".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("tags_rep", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "r1");
+}
+
+#[test]
+fn create_collection_with_indexes() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "configured".to_string(),
+        indexes: vec!["status".to_string(), "tags.[]".to_string()],
+    })
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Verify indexes were created
+    let mut txn = db.begin(true).unwrap();
+    let mut indexes = txn.list_indexes("configured").unwrap();
+    indexes.sort();
+    assert_eq!(indexes, vec!["status", "tags.[]"]);
+}
+
+#[test]
+fn create_collection_idempotent() {
+    let (db, _dir) = temp_db();
+
+    // Create once
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "idem".to_string(),
+        indexes: vec!["status".to_string()],
+    })
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Insert data
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one("idem", doc! { "_id": "r1", "status": "active" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Create again — should be a no-op, data preserved
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "idem".to_string(),
+        indexes: vec!["status".to_string()],
+    })
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("idem", &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+// ── OR / AND index integration tests ────────────────────────────
+
+fn eq_condition(field: &str, value: QueryValue) -> FilterNode {
+    FilterNode::Condition(Filter {
+        field: field.into(),
+        operator: Operator::Eq,
+        value,
+    })
+}
+
+fn gt_condition(field: &str, value: QueryValue) -> FilterNode {
+    FilterNode::Condition(Filter {
+        field: field.into(),
+        operator: Operator::Gt,
+        value,
+    })
+}
+
+/// Create a collection with indexes and seed data for OR/AND tests.
+fn seed_or_test_data(db: &Database<RocksStore>) {
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "orders".to_string(),
+        indexes: vec!["user_id".to_string(), "status".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "orders",
+        vec![
+            doc! { "_id": "o1", "user_id": "abc", "status": "active", "score": 80, "name": "Order 1" },
+            doc! { "_id": "o2", "user_id": "xyz", "status": "archived", "score": 30, "name": "Order 2" },
+            doc! { "_id": "o3", "user_id": "abc", "status": "archived", "score": 90, "name": "Order 3" },
+            doc! { "_id": "o4", "user_id": "xyz", "status": "active", "score": 20, "name": "Order 4" },
+            doc! { "_id": "o5", "user_id": "abc", "status": "active", "score": 10, "name": "Order 5" },
+            doc! { "_id": "o6", "user_id": "def", "status": "pending", "score": 60, "name": "Order 6" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+fn sorted_ids(docs: &[bson::Document]) -> Vec<String> {
+    let mut ids: Vec<String> = docs
+        .iter()
+        .map(|d| d.get_str("_id").unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn find_with_or_indexed() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // user_id = "abc" OR status = "active"
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                eq_condition("user_id", QueryValue::String("abc".into())),
+                eq_condition("status", QueryValue::String("active".into())),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // abc: o1, o3, o5. active: o1, o4, o5. Union: o1, o3, o4, o5
+    assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o4", "o5"]);
+}
+
+#[test]
+fn find_with_or_same_field() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // status = "active" OR status = "archived"
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                eq_condition("status", QueryValue::String("active".into())),
+                eq_condition("status", QueryValue::String("archived".into())),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // active: o1, o4, o5. archived: o2, o3. Union: o1, o2, o3, o4, o5
+    assert_eq!(sorted_ids(&results), vec!["o1", "o2", "o3", "o4", "o5"]);
+}
+
+#[test]
+fn find_with_or_fallback_scan() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // user_id = "abc" OR score > 50 (score not indexed → full scan)
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                eq_condition("user_id", QueryValue::String("abc".into())),
+                gt_condition("score", QueryValue::Int(50)),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // abc: o1, o3, o5. score > 50: o1(80), o3(90), o6(60). Union: o1, o3, o5, o6
+    assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o5", "o6"]);
+}
+
+#[test]
+fn find_with_and_priority() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // user_id = "abc" AND status = "active"
+    // user_id has higher priority — planner should use it for IndexScan
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![
+                eq_condition("status", QueryValue::String("active".into())),
+                eq_condition("user_id", QueryValue::String("abc".into())),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // abc AND active: o1, o5
+    assert_eq!(sorted_ids(&results), vec!["o1", "o5"]);
+}
+
+#[test]
+fn find_with_nested_and_or() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                FilterNode::Group(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![
+                        eq_condition("user_id", QueryValue::String("abc".into())),
+                        eq_condition("status", QueryValue::String("active".into())),
+                    ],
+                }),
+                FilterNode::Group(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![
+                        eq_condition("user_id", QueryValue::String("xyz".into())),
+                        eq_condition("status", QueryValue::String("archived".into())),
+                    ],
+                }),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // (abc AND active): o1, o5. (xyz AND archived): o2. Union: o1, o2, o5
+    assert_eq!(sorted_ids(&results), vec!["o1", "o2", "o5"]);
+}
+
+#[test]
+fn find_with_or_three_values() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                eq_condition("user_id", QueryValue::String("abc".into())),
+                eq_condition("user_id", QueryValue::String("xyz".into())),
+                eq_condition("user_id", QueryValue::String("def".into())),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // All users — all 6 records
+    assert_eq!(
+        sorted_ids(&results),
+        vec!["o1", "o2", "o3", "o4", "o5", "o6"]
+    );
+}
+
+#[test]
+fn find_with_or_partial_index_per_branch() {
+    let (db, _dir) = temp_db();
+    seed_or_test_data(&db);
+
+    // (user_id = "abc" AND score > 50) OR status = "pending"
+    // Each OR branch has one indexed Eq — IndexMerge(Or), full recheck
+    let q = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::Or,
+            children: vec![
+                FilterNode::Group(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![
+                        eq_condition("user_id", QueryValue::String("abc".into())),
+                        gt_condition("score", QueryValue::Int(50)),
+                    ],
+                }),
+                eq_condition("status", QueryValue::String("pending".into())),
+            ],
+        }),
+        ..no_filter_query()
+    };
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find("orders", &q).unwrap();
+    // (abc AND score > 50): o1(80), o3(90). pending: o6. Union: o1, o3, o6
+    assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o6"]);
 }

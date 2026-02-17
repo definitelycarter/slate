@@ -6,14 +6,15 @@ A document database built in Rust. Schema-flexible BSON documents on top of Rock
 
 ```
 slate/
-  ├── slate-store        → Store/Transaction traits, MemoryStore + RocksDB backends
-  ├── slate-query        → Query model: filters, operators, sorting (pure data structures)
-  ├── slate-db           → Database layer: collections, indexes, query execution (Volcano/iterator)
-  ├── slate-server       → TCP server with MessagePack wire protocol, thread-per-connection
-  ├── slate-client       → TCP client with connection pool
-  ├── slate-api          → API layer (planned)
-  ├── slate-bench        → Database-level benchmark suite (embedded, multi-user)
-  └── slate-store-bench  → Store-level benchmark suite (raw read/write throughput)
+  ├── slate-store          → Store/Transaction traits, MemoryStore + RocksDB backends
+  ├── slate-query          → Query model: filters, operators, sorting (pure data structures)
+  ├── slate-db             → Database layer: collections, indexes, query planner + executor
+  ├── slate-server         → TCP server with MessagePack wire protocol, thread-per-connection
+  ├── slate-client         → TCP client with connection pool
+  ├── slate-lists          → List service, config types, HTTP handler, loader trait
+  ├── slate-lists-knative  → Knative adapter for slate-lists
+  ├── slate-bench          → Database-level benchmark suite (embedded + TCP, both backends)
+  └── slate-store-bench    → Store-level benchmark suite (raw read/write throughput)
 ```
 
 ## Quick Start

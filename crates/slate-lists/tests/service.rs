@@ -5,7 +5,7 @@ use std::thread;
 
 use bson::doc;
 use slate_client::{Client, ClientPool};
-use slate_db::Database;
+use slate_db::{CollectionConfig, Database};
 use slate_lists::*;
 use slate_query::*;
 use slate_server::Server;
@@ -92,6 +92,12 @@ fn start_server() -> String {
 fn seed_data(addr: &str) {
     let mut client = Client::connect(addr).unwrap();
     client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
+    client
         .insert_many(
             COLLECTION,
             vec![
@@ -110,6 +116,7 @@ fn test_config() -> ListConfig {
         id: "list-1".into(),
         title: "Active Accounts".into(),
         collection: COLLECTION.into(),
+        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -146,6 +153,7 @@ fn no_filter_config() -> ListConfig {
         id: "list-2".into(),
         title: "All Accounts".into(),
         collection: COLLECTION.into(),
+        indexes: vec![],
         filters: None,
         columns: vec![
             Column {
@@ -336,6 +344,13 @@ fn get_list_data_empty_collection() {
 fn loader_streams_documents_into_empty_collection() {
     let addr = start_server();
     // No seed data — collection is empty, loader should fire
+    let mut client = Client::connect(&addr).unwrap();
+    client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
 
     let pool = ClientPool::new(&addr, 2).unwrap();
     let service = ListService::new(pool, FakeLoader);
@@ -353,6 +368,13 @@ fn loader_streams_documents_into_empty_collection() {
 #[test]
 fn loader_with_list_filters() {
     let addr = start_server();
+    let mut client = Client::connect(&addr).unwrap();
+    client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
 
     let pool = ClientPool::new(&addr, 2).unwrap();
     let service = ListService::new(pool, FakeLoader);
@@ -370,6 +392,13 @@ fn loader_with_list_filters() {
 #[test]
 fn loader_with_user_filters_and_sort() {
     let addr = start_server();
+    let mut client = Client::connect(&addr).unwrap();
+    client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
 
     let pool = ClientPool::new(&addr, 2).unwrap();
     let service = ListService::new(pool, FakeLoader);
@@ -423,6 +452,13 @@ fn loader_not_called_when_data_exists() {
 #[test]
 fn loader_called_once_across_multiple_requests() {
     let addr = start_server();
+    let mut client = Client::connect(&addr).unwrap();
+    client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
 
     let loader = CountingLoader::new();
     let pool = ClientPool::new(&addr, 2).unwrap();
@@ -459,6 +495,7 @@ fn get_list_data_no_matches() {
         id: "list-x".into(),
         title: "Archived".into(),
         collection: COLLECTION.into(),
+        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {

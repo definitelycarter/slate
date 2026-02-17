@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use slate_db::Database;
+use slate_db::{CollectionConfig, Database};
 use slate_query::*;
 use slate_store::Store;
 
@@ -34,11 +34,14 @@ pub const CONFIG_10K: BenchConfig = BenchConfig {
     batches: 10,
 };
 
-/// Create an index on `status` for index scan benchmarks.
+/// Create the collection and an index on `status` for index scan benchmarks.
 pub fn setup_collection<S: Store>(db: &Database<S>) {
     let mut txn = db.begin(false).expect("begin failed");
-    txn.create_index(COLLECTION, "status")
-        .expect("create_index failed");
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec!["status".to_string()],
+    })
+    .expect("create_collection failed");
     txn.commit().expect("commit failed");
 }
 

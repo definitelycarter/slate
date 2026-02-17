@@ -3,6 +3,7 @@ use slate_query::{FilterGroup, Query};
 use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
+use crate::collection::CollectionConfig;
 use crate::encoding;
 use crate::error::DbError;
 use crate::exec;
@@ -51,7 +52,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         mut doc: bson::Document,
     ) -> Result<InsertResult, DbError> {
-        self.catalog.ensure_collection(&mut self.txn, collection)?;
+        self.require_collection(collection)?;
 
         // Extract or generate _id
         let id = extract_or_generate_id(&mut doc);
@@ -67,12 +68,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
         // Index maintenance
         let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
-        for field in &indexed_fields {
-            if let Some(value) = exec::get_path(&doc, field) {
-                let idx_key = encoding::index_key(field, value, &id);
-                self.txn.put(collection, &idx_key, &[])?;
-            }
-        }
+        self.write_index_entries(collection, &id, &doc, &indexed_fields)?;
 
         Ok(InsertResult { id })
     }
@@ -83,7 +79,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         docs: Vec<bson::Document>,
     ) -> Result<Vec<InsertResult>, DbError> {
-        self.catalog.ensure_collection(&mut self.txn, collection)?;
+        self.require_collection(collection)?;
 
         let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         let mut results = Vec::with_capacity(docs.len());
@@ -98,12 +94,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
             self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
-            for field in &indexed_fields {
-                if let Some(value) = exec::get_path(&doc, field) {
-                    let idx_key = encoding::index_key(field, value, &id);
-                    self.txn.put(collection, &idx_key, &[])?;
-                }
-            }
+            self.write_index_entries(collection, &id, &doc, &indexed_fields)?;
 
             results.push(InsertResult { id });
         }
@@ -200,7 +191,6 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 upserted_id: None,
             })
         } else if upsert {
-            self.catalog.ensure_collection(&mut self.txn, collection)?;
             let result = self.insert_one(collection, update)?;
             Ok(UpdateResult {
                 matched: 0,
@@ -287,12 +277,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 .put(collection, &key, &bson::to_vec(&replacement)?)?;
 
             // Insert new index entries
-            for field in &indexed_fields {
-                if let Some(value) = exec::get_path(&replacement, field) {
-                    let idx_key = encoding::index_key(field, value, &id);
-                    self.txn.put(collection, &idx_key, &[])?;
-                }
-            }
+            self.write_index_entries(collection, &id, &replacement, &indexed_fields)?;
 
             Ok(UpdateResult {
                 matched: 1,
@@ -387,7 +372,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Create an index on a field and backfill existing records.
     pub fn create_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
-        self.catalog.ensure_collection(&mut self.txn, collection)?;
+        self.require_collection(collection)?;
         self.catalog
             .create_index(&mut self.txn, collection, field)?;
 
@@ -405,7 +390,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 None => continue,
             };
             let doc: bson::Document = bson::from_slice(&value)?;
-            if let Some(val) = exec::get_path(&doc, field) {
+            for val in exec::get_path_values(&doc, field) {
                 let idx_key = encoding::index_key(field, val, &record_id);
                 self.txn.put(collection, &idx_key, &[])?;
             }
@@ -485,7 +470,36 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         Ok(())
     }
 
+    // ── Collection management ───────────────────────────────────
+
+    /// Create a collection with the given config and ensure its indexes exist.
+    /// Idempotent — if the collection already exists, this is a no-op.
+    pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
+        self.catalog.create_collection(&mut self.txn, config)?;
+        self.ensure_indexes(config)?;
+        Ok(())
+    }
+
+    /// Ensure all indexes declared in the config exist, creating any that are missing.
+    pub fn ensure_indexes(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
+        let existing = self.catalog.list_indexes(&mut self.txn, &config.name)?;
+        for field in &config.indexes {
+            if !existing.contains(field) {
+                self.create_index(&config.name, field)?;
+            }
+        }
+        Ok(())
+    }
+
     // ── Private helpers ─────────────────────────────────────────
+
+    /// Verify a collection exists, returning CollectionNotFound if not.
+    fn require_collection(&mut self, collection: &str) -> Result<(), DbError> {
+        if !self.catalog.collection_exists(&mut self.txn, collection)? {
+            return Err(DbError::CollectionNotFound(collection.to_string()));
+        }
+        Ok(())
+    }
 
     /// Merge update fields into an existing document by _id.
     /// Returns true if the document was actually modified.
@@ -503,10 +517,16 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             None => return Ok(false),
         };
 
-        // Track old indexed values
-        let old_indexed: Vec<(String, Option<Bson>)> = indexed_fields
+        // Track old indexed values (multi-key aware)
+        let old_indexed: Vec<(String, Vec<Bson>)> = indexed_fields
             .iter()
-            .map(|f| (f.clone(), exec::get_path(&existing, f).cloned()))
+            .map(|f| {
+                let values = exec::get_path_values(&existing, f)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                (f.clone(), values)
+            })
             .collect();
 
         // Merge
@@ -528,20 +548,20 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         // Write
         self.txn.put(collection, &key, &bson::to_vec(&existing)?)?;
 
-        // Index maintenance
-        for (field, old_val) in &old_indexed {
-            let new_val = exec::get_path(&existing, field).cloned();
+        // Index maintenance: diff old vs new value sets
+        for (field, old_values) in &old_indexed {
+            let new_values: Vec<&Bson> = exec::get_path_values(&existing, field);
 
-            if let Some(old) = old_val {
-                if new_val.as_ref() != Some(old) {
-                    let old_idx_key = encoding::index_key(field, old, id);
-                    self.txn.delete(collection, &old_idx_key)?;
+            for old_val in old_values {
+                if !new_values.contains(&old_val) {
+                    let idx_key = encoding::index_key(field, old_val, id);
+                    self.txn.delete(collection, &idx_key)?;
                 }
             }
 
-            if let Some(new) = &new_val {
-                if old_val.as_ref() != Some(new) {
-                    let idx_key = encoding::index_key(field, new, id);
+            for new_val in &new_values {
+                if !old_values.contains(new_val) {
+                    let idx_key = encoding::index_key(field, new_val, id);
                     self.txn.put(collection, &idx_key, &[])?;
                 }
             }
@@ -574,7 +594,24 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         Ok(())
     }
 
-    /// Delete index entries for a document.
+    /// Write index entries for a document. Handles multi-key paths.
+    fn write_index_entries(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: &bson::Document,
+        indexed_fields: &[String],
+    ) -> Result<(), DbError> {
+        for field in indexed_fields {
+            for value in exec::get_path_values(doc, field) {
+                let idx_key = encoding::index_key(field, value, id);
+                self.txn.put(collection, &idx_key, &[])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete index entries for a document. Handles multi-key paths.
     fn delete_index_entries(
         &mut self,
         collection: &str,
@@ -583,7 +620,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         indexed_fields: &[String],
     ) -> Result<(), DbError> {
         for field in indexed_fields {
-            if let Some(value) = exec::get_path(doc, field) {
+            for value in exec::get_path_values(doc, field) {
                 let idx_key = encoding::index_key(field, value, id);
                 self.txn.delete(collection, &idx_key)?;
             }

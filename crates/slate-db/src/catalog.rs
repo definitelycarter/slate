@@ -1,5 +1,6 @@
 use slate_store::Transaction;
 
+use crate::collection::CollectionConfig;
 use crate::error::DbError;
 
 const SYS_CF: &str = "_sys";
@@ -32,18 +33,51 @@ pub struct Catalog;
 impl Catalog {
     // ── Collections ─────────────────────────────────────────────
 
-    /// Ensure a collection exists: create its column family and write a marker.
-    pub fn ensure_collection<T: Transaction>(
+    /// Create a collection with the given config. Idempotent — if the collection
+    /// already exists, this is a no-op.
+    pub fn create_collection<T: Transaction>(
+        &self,
+        txn: &mut T,
+        config: &CollectionConfig,
+    ) -> Result<(), DbError> {
+        let key = col_key(&config.name);
+        if txn.get(SYS_CF, &key)?.is_none() {
+            txn.create_cf(&config.name)?;
+            let value = bson::to_vec(config)?;
+            txn.put(SYS_CF, &key, &value)?;
+        }
+        Ok(())
+    }
+
+    /// Check if a collection exists.
+    pub fn collection_exists<T: Transaction>(
         &self,
         txn: &mut T,
         name: &str,
-    ) -> Result<(), DbError> {
-        let key = col_key(name);
-        if txn.get(SYS_CF, &key)?.is_none() {
-            txn.create_cf(name)?;
-            txn.put(SYS_CF, &key, &[])?;
+    ) -> Result<bool, DbError> {
+        Ok(txn.get(SYS_CF, &col_key(name))?.is_some())
+    }
+
+    /// Read back the stored config for a collection.
+    pub fn get_collection_config<T: Transaction>(
+        &self,
+        txn: &mut T,
+        name: &str,
+    ) -> Result<Option<CollectionConfig>, DbError> {
+        match txn.get(SYS_CF, &col_key(name))? {
+            Some(bytes) if bytes.is_empty() => {
+                // Legacy marker (no config stored) — synthesize a default
+                Ok(Some(CollectionConfig {
+                    name: name.to_string(),
+                    indexes: vec![],
+                }))
+            }
+            Some(bytes) => {
+                let config: CollectionConfig = bson::from_slice(&bytes)?;
+                Ok(Some(config))
+            }
+            None => Ok(None),
         }
-        Ok(())
     }
 
     pub fn list_collections<T: Transaction>(&self, txn: &mut T) -> Result<Vec<String>, DbError> {

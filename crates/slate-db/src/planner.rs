@@ -2,22 +2,28 @@ use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
-    /// Full scan — yields all records in a partition.
-    /// `columns` limits materialization to only these top-level keys (None = all).
-    Scan {
-        partition: String,
-        columns: Option<Vec<String>>,
-    },
+    /// Full scan — yields record IDs in a partition.
+    Scan { partition: String },
 
     /// Index lookup — yields record IDs matching a value from the index.
     IndexScan {
         partition: String,
         column: String,
         value: bson::Bson,
-        columns: Option<Vec<String>>,
     },
 
-    /// Read filter columns per record, evaluate predicate, skip non-matching.
+    /// Combines ID sets from two child nodes using AND (intersect) or OR (union).
+    IndexMerge {
+        logical: LogicalOp,
+        lhs: Box<PlanNode>,
+        rhs: Box<PlanNode>,
+    },
+
+    /// Fetch raw records by ID. The boundary between the ID tier (below)
+    /// and the document tier (above). Yields raw BSON bytes, not materialized documents.
+    ReadRecord { input: Box<PlanNode> },
+
+    /// Evaluate predicate against documents, skip non-matching.
     Filter {
         predicate: FilterGroup,
         input: Box<PlanNode>,
@@ -36,7 +42,7 @@ pub enum PlanNode {
         input: Box<PlanNode>,
     },
 
-    /// Read remaining columns, strip unneeded.
+    /// Strip unneeded columns.
     Projection {
         columns: Vec<String>,
         input: Box<PlanNode>,
@@ -45,47 +51,43 @@ pub enum PlanNode {
 
 /// Build a query plan from a collection partition and its indexed fields.
 ///
-/// The planner analyzes the filter to determine if an index can be used.
-/// For top-level AND groups, it looks for `Eq` conditions on indexed columns
-/// and rewrites them as `IndexScan`, leaving remaining conditions as a
-/// residual `Filter` node.
+/// The planner splits the filter into two tiers:
+/// - **ID tier** (below ReadRecord): IndexScan, IndexMerge, Scan — produce record IDs
+/// - **Document tier** (above ReadRecord): Filter — evaluates predicates on materialized documents
+///
+/// For AND groups, the highest-priority indexed Eq condition (per `indexed_fields` order)
+/// becomes an IndexScan. For OR groups, if every branch has an indexed Eq, they combine
+/// into an IndexMerge(Or). Otherwise the OR falls back to Scan.
 pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNode {
-    // Compute the set of top-level keys the scan must materialize.
-    let scan_columns = compute_scan_columns(query);
-
-    // Step 1: Try to extract an indexed Eq condition from the filter
-    let (input, residual_filter) = match &query.filter {
+    // Step 1: Plan the filter — split into ID-tier node + residual document-tier predicate
+    let (id_node, residual_filter) = match &query.filter {
         Some(group) => {
-            match try_index_scan(partition, indexed_fields, group, scan_columns.clone()) {
-                Some((index_node, residual)) => (index_node, residual),
-                None => (
-                    PlanNode::Scan {
-                        partition: partition.to_string(),
-                        columns: scan_columns,
-                    },
-                    Some(group.clone()),
-                ),
-            }
+            let (node, residual) = plan_filter(partition, indexed_fields, group);
+            (node, residual)
         }
         None => (
             PlanNode::Scan {
                 partition: partition.to_string(),
-                columns: scan_columns,
             },
             None,
         ),
     };
 
-    // Step 2: Wrap with residual filter if any conditions remain
+    // Step 2: ReadRecord — always present, fetches raw records from IDs
+    let node = PlanNode::ReadRecord {
+        input: Box::new(id_node),
+    };
+
+    // Step 3: Wrap with residual filter if any conditions remain
     let node = match residual_filter {
         Some(group) if !group.children.is_empty() => PlanNode::Filter {
             predicate: group,
-            input: Box::new(input),
+            input: Box::new(node),
         },
-        _ => input,
+        _ => node,
     };
 
-    // Step 3: Sort
+    // Step 4: Sort
     let node = if !query.sort.is_empty() {
         PlanNode::Sort {
             sorts: query.sort.clone(),
@@ -95,7 +97,7 @@ pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNo
         node
     };
 
-    // Step 4: Limit
+    // Step 5: Limit
     let node = if query.skip.is_some() || query.take.is_some() {
         PlanNode::Limit {
             skip: query.skip.unwrap_or(0),
@@ -106,7 +108,7 @@ pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNo
         node
     };
 
-    // Step 5: Projection
+    // Step 6: Projection
     let node = match &query.columns {
         Some(cols) => PlanNode::Projection {
             columns: cols.clone(),
@@ -118,112 +120,205 @@ pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNo
     node
 }
 
-/// Compute the top-level keys that scan nodes must materialize.
-/// Returns None if no projection is specified (materialize everything).
-fn compute_scan_columns(query: &Query) -> Option<Vec<String>> {
-    let proj = query.columns.as_ref()?;
-
-    let mut keys: Vec<String> = Vec::new();
-
-    // Projection columns (top-level key for dot paths)
-    for col in proj {
-        let top = top_level_key(col);
-        if !keys.contains(&top.to_string()) {
-            keys.push(top.to_string());
-        }
-    }
-
-    // Filter columns
-    if let Some(group) = &query.filter {
-        collect_filter_columns(group, &mut keys);
-    }
-
-    // Sort columns
-    for sort in &query.sort {
-        let top = top_level_key(&sort.field);
-        if !keys.contains(&top.to_string()) {
-            keys.push(top.to_string());
-        }
-    }
-
-    Some(keys)
-}
-
-/// Extract top-level key from a potentially dotted path.
-fn top_level_key(path: &str) -> &str {
-    path.split('.').next().unwrap_or(path)
-}
-
-/// Collect all field names referenced in a filter group (as top-level keys).
-fn collect_filter_columns(group: &FilterGroup, out: &mut Vec<String>) {
-    for child in &group.children {
-        match child {
-            FilterNode::Condition(filter) => {
-                let top = top_level_key(&filter.field).to_string();
-                if !out.contains(&top) {
-                    out.push(top);
-                }
-            }
-            FilterNode::Group(sub) => collect_filter_columns(sub, out),
-        }
-    }
-}
-
-/// Try to extract an indexed Eq condition from a top-level AND group.
-fn try_index_scan(
+/// Plan a filter group, returning an ID-tier node and an optional residual predicate.
+///
+/// The residual predicate contains conditions that couldn't be pushed into the ID tier
+/// and must be evaluated against materialized documents.
+fn plan_filter(
     partition: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
-    scan_columns: Option<Vec<String>>,
-) -> Option<(PlanNode, Option<FilterGroup>)> {
-    if group.logical != LogicalOp::And {
-        return None;
+) -> (PlanNode, Option<FilterGroup>) {
+    match group.logical {
+        LogicalOp::And => plan_and_group(partition, indexed_fields, group),
+        LogicalOp::Or => plan_or_group(partition, indexed_fields, group),
     }
+}
 
-    // Find the first Eq condition on an indexed column
-    let mut index_pos = None;
-    for (i, child) in group.children.iter().enumerate() {
-        if let FilterNode::Condition(filter) = child {
-            if filter.operator == Operator::Eq && indexed_fields.iter().any(|f| f == &filter.field)
-            {
-                index_pos = Some(i);
-                break;
+/// Plan an AND group.
+///
+/// Strategy: iterate indexed_fields in priority order, pick the first Eq condition
+/// that matches. If an AND child is a fully-indexable OR group, it can also be
+/// selected. All non-selected children become residual filter.
+fn plan_and_group(
+    partition: &str,
+    indexed_fields: &[String],
+    group: &FilterGroup,
+) -> (PlanNode, Option<FilterGroup>) {
+    // Try to find the best ID-tier node from the AND children.
+    // First, check for direct Eq conditions on indexed fields (in priority order).
+    // Then, check for fully-indexable OR sub-groups.
+    let best = find_best_and_child(partition, indexed_fields, group);
+
+    match best {
+        Some((id_node, consumed_index)) => {
+            // Build residual: all children except the consumed one
+            let remaining: Vec<FilterNode> = group
+                .children
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != consumed_index)
+                .map(|(_, c)| c.clone())
+                .collect();
+
+            let residual = if remaining.is_empty() {
+                None
+            } else {
+                Some(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: remaining,
+                })
+            };
+
+            (id_node, residual)
+        }
+        None => {
+            // No indexed condition found — full scan, entire group is residual
+            (
+                PlanNode::Scan {
+                    partition: partition.to_string(),
+                },
+                Some(group.clone()),
+            )
+        }
+    }
+}
+
+/// Find the best AND child to push into the ID tier.
+///
+/// Iterates indexed_fields in priority order. For each field, checks:
+/// 1. Is there a direct Eq condition on this field? → IndexScan
+/// 2. Is there a fully-indexable OR sub-group that uses this field? → IndexMerge(Or)
+///
+/// Returns the ID-tier node and the index of the consumed child.
+fn find_best_and_child(
+    partition: &str,
+    indexed_fields: &[String],
+    group: &FilterGroup,
+) -> Option<(PlanNode, usize)> {
+    // Priority pass: iterate indexed fields in order, find first matching Eq condition
+    for field in indexed_fields {
+        for (i, child) in group.children.iter().enumerate() {
+            if let FilterNode::Condition(filter) = child {
+                if filter.operator == Operator::Eq && &filter.field == field {
+                    let node = PlanNode::IndexScan {
+                        partition: partition.to_string(),
+                        column: filter.field.clone(),
+                        value: query_value_to_bson(&filter.value),
+                    };
+                    return Some((node, i));
+                }
             }
         }
     }
 
-    let pos = index_pos?;
-    let filter = match &group.children[pos] {
-        FilterNode::Condition(f) => f,
-        _ => unreachable!(),
-    };
+    // Second pass: check for fully-indexable OR sub-groups
+    for (i, child) in group.children.iter().enumerate() {
+        if let FilterNode::Group(sub_group) = child {
+            if sub_group.logical == LogicalOp::Or {
+                if let Some(id_node) = try_or_index_merge(partition, indexed_fields, sub_group) {
+                    return Some((id_node, i));
+                }
+            }
+        }
+    }
 
-    let index_node = PlanNode::IndexScan {
-        partition: partition.to_string(),
-        column: filter.field.clone(),
-        value: query_value_to_bson(&filter.value),
-        columns: scan_columns,
-    };
+    None
+}
 
-    // Build residual: all children except the one we consumed
-    let remaining: Vec<FilterNode> = group
-        .children
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != pos)
-        .map(|(_, c)| c.clone())
-        .collect();
+/// Plan an OR group.
+///
+/// Strategy: for each child, try to produce an IndexScan (or recurse for nested groups).
+/// If every child produces an ID-tier node, combine with IndexMerge(Or).
+/// If any child has zero indexed conditions, fall back to Scan with full predicate.
+///
+/// The full original OR group always becomes the residual filter (recheck),
+/// because each IndexScan branch may over-fetch.
+fn plan_or_group(
+    partition: &str,
+    indexed_fields: &[String],
+    group: &FilterGroup,
+) -> (PlanNode, Option<FilterGroup>) {
+    match try_or_index_merge(partition, indexed_fields, group) {
+        Some(id_node) => {
+            // All branches indexed — use IndexMerge(Or), full group is residual recheck
+            (id_node, Some(group.clone()))
+        }
+        None => {
+            // Can't fully index the OR — fall back to Scan
+            (
+                PlanNode::Scan {
+                    partition: partition.to_string(),
+                },
+                Some(group.clone()),
+            )
+        }
+    }
+}
 
-    let residual = if remaining.is_empty() {
-        None
-    } else {
-        Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: remaining,
-        })
-    };
+/// Try to build an IndexMerge(Or) from an OR group.
+///
+/// Returns Some(id_node) if every child can produce an ID-tier node.
+/// Returns None if any child has zero indexed conditions.
+fn try_or_index_merge(
+    partition: &str,
+    indexed_fields: &[String],
+    group: &FilterGroup,
+) -> Option<PlanNode> {
+    let mut id_nodes: Vec<PlanNode> = Vec::new();
 
-    Some((index_node, residual))
+    for child in &group.children {
+        match child {
+            FilterNode::Condition(filter) => {
+                if filter.operator == Operator::Eq
+                    && indexed_fields.iter().any(|f| f == &filter.field)
+                {
+                    id_nodes.push(PlanNode::IndexScan {
+                        partition: partition.to_string(),
+                        column: filter.field.clone(),
+                        value: query_value_to_bson(&filter.value),
+                    });
+                } else {
+                    // Non-indexed condition in OR — can't use indexes for this OR
+                    return None;
+                }
+            }
+            FilterNode::Group(sub_group) => {
+                // Recurse: try to get an ID-tier node from the nested group
+                let (id_node, _residual) = plan_filter(partition, indexed_fields, sub_group);
+                match &id_node {
+                    PlanNode::Scan { .. } => {
+                        // Nested group fell back to scan — can't use indexes for this OR
+                        return None;
+                    }
+                    _ => {
+                        id_nodes.push(id_node);
+                    }
+                }
+            }
+        }
+    }
+
+    if id_nodes.is_empty() {
+        return None;
+    }
+
+    if id_nodes.len() == 1 {
+        return Some(id_nodes.into_iter().next().unwrap());
+    }
+
+    // Fold into a binary tree of IndexMerge(Or)
+    let mut iter = id_nodes.into_iter();
+    let mut result = iter.next().unwrap();
+    for node in iter {
+        result = PlanNode::IndexMerge {
+            logical: LogicalOp::Or,
+            lhs: Box::new(result),
+            rhs: Box::new(node),
+        };
+    }
+
+    Some(result)
 }
 
 fn query_value_to_bson(qv: &slate_query::QueryValue) -> bson::Bson {
@@ -266,16 +361,33 @@ mod tests {
         }
     }
 
+    fn eq_condition(field: &str, value: QueryValue) -> FilterNode {
+        FilterNode::Condition(Filter {
+            field: field.into(),
+            operator: Operator::Eq,
+            value,
+        })
+    }
+
+    fn gt_condition(field: &str, value: QueryValue) -> FilterNode {
+        FilterNode::Condition(Filter {
+            field: field.into(),
+            operator: Operator::Gt,
+            value,
+        })
+    }
+
+    // ── Existing tests updated for ReadRecord ───────────────────
+
     #[test]
     fn plan_no_filter() {
         let p = plan("p1", &[], &empty_query());
-        assert_eq!(
+        assert!(matches!(
             p,
-            PlanNode::Scan {
-                partition: "p1".into(),
-                columns: None,
-            }
-        );
+            PlanNode::ReadRecord {
+                input,
+            } if matches!(*input, PlanNode::Scan { .. })
+        ));
     }
 
     #[test]
@@ -285,9 +397,12 @@ mod tests {
             ..empty_query()
         };
         let p = plan("p1", &[], &q);
-        assert!(
-            matches!(p, PlanNode::Filter { input, .. } if matches!(*input, PlanNode::Scan { .. }))
-        );
+        match p {
+            PlanNode::Filter { input, .. } => {
+                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+            }
+            _ => panic!("expected Filter, got {:?}", p),
+        }
     }
 
     #[test]
@@ -298,15 +413,20 @@ mod tests {
             ..empty_query()
         };
         let p = plan("p1", &indexed, &q);
-        assert_eq!(
-            p,
-            PlanNode::IndexScan {
-                partition: "p1".into(),
-                column: "status".into(),
-                value: Bson::String("active".into()),
-                columns: None,
+        // ReadRecord(IndexScan) — no residual filter since only condition is indexed
+        match p {
+            PlanNode::ReadRecord { input, .. } => {
+                assert_eq!(
+                    *input,
+                    PlanNode::IndexScan {
+                        partition: "p1".into(),
+                        column: "status".into(),
+                        value: Bson::String("active".into()),
+                    }
+                );
             }
-        );
+            _ => panic!("expected ReadRecord, got {:?}", p),
+        }
     }
 
     #[test]
@@ -316,31 +436,29 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("active".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "score".into(),
-                        operator: Operator::Gt,
-                        value: QueryValue::Int(50),
-                    }),
+                    eq_condition("status", QueryValue::String("active".into())),
+                    gt_condition("score", QueryValue::Int(50)),
                 ],
             }),
             ..empty_query()
         };
         let p = plan("p1", &indexed, &q);
+        // Filter(score > 50, ReadRecord(IndexScan(status)))
         match p {
             PlanNode::Filter { predicate, input } => {
-                assert!(matches!(*input, PlanNode::IndexScan { .. }));
                 assert_eq!(predicate.children.len(), 1);
                 match &predicate.children[0] {
                     FilterNode::Condition(f) => assert_eq!(f.field, "score"),
                     _ => panic!("expected condition"),
                 }
+                match *input {
+                    PlanNode::ReadRecord { input, .. } => {
+                        assert!(matches!(*input, PlanNode::IndexScan { .. }));
+                    }
+                    _ => panic!("expected ReadRecord"),
+                }
             }
-            _ => panic!("expected Filter node, got {:?}", p),
+            _ => panic!("expected Filter, got {:?}", p),
         }
     }
 
@@ -354,9 +472,12 @@ mod tests {
             ..empty_query()
         };
         let p = plan("p1", &[], &q);
-        assert!(
-            matches!(p, PlanNode::Sort { input, .. } if matches!(*input, PlanNode::Scan { .. }))
-        );
+        match p {
+            PlanNode::Sort { input, .. } => {
+                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+            }
+            _ => panic!("expected Sort, got {:?}", p),
+        }
     }
 
     #[test]
@@ -374,7 +495,7 @@ mod tests {
             PlanNode::Sort { input, .. } => {
                 assert!(matches!(*input, PlanNode::Filter { .. }));
             }
-            _ => panic!("expected Sort node"),
+            _ => panic!("expected Sort, got {:?}", p),
         }
     }
 
@@ -387,14 +508,12 @@ mod tests {
         };
         let p = plan("p1", &[], &q);
         match p {
-            PlanNode::Limit {
-                skip, take, input, ..
-            } => {
+            PlanNode::Limit { skip, take, input } => {
                 assert_eq!(skip, 10);
                 assert_eq!(take, Some(5));
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
             }
-            _ => panic!("expected Limit node"),
+            _ => panic!("expected Limit, got {:?}", p),
         }
     }
 
@@ -408,9 +527,9 @@ mod tests {
         match p {
             PlanNode::Projection { columns, input } => {
                 assert_eq!(columns, vec!["name".to_string(), "status".to_string()]);
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
             }
-            _ => panic!("expected Projection node"),
+            _ => panic!("expected Projection, got {:?}", p),
         }
     }
 
@@ -421,16 +540,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("active".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "score".into(),
-                        operator: Operator::Gt,
-                        value: QueryValue::Int(50),
-                    }),
+                    eq_condition("status", QueryValue::String("active".into())),
+                    gt_condition("score", QueryValue::Int(50)),
                 ],
             }),
             sort: vec![Sort {
@@ -442,14 +553,17 @@ mod tests {
             columns: Some(vec!["name".into(), "score".into()]),
         };
         let p = plan("p1", &indexed, &q);
-        // Projection(Limit(Sort(Filter(IndexScan))))
+        // Projection(Limit(Sort(Filter(ReadRecord(IndexScan)))))
         match p {
             PlanNode::Projection { input, .. } => match *input {
                 PlanNode::Limit { input, .. } => match *input {
                     PlanNode::Sort { input, .. } => match *input {
-                        PlanNode::Filter { input, .. } => {
-                            assert!(matches!(*input, PlanNode::IndexScan { .. }));
-                        }
+                        PlanNode::Filter { input, .. } => match *input {
+                            PlanNode::ReadRecord { input, .. } => {
+                                assert!(matches!(*input, PlanNode::IndexScan { .. }));
+                            }
+                            _ => panic!("expected ReadRecord"),
+                        },
                         _ => panic!("expected Filter"),
                     },
                     _ => panic!("expected Sort"),
@@ -460,31 +574,417 @@ mod tests {
         }
     }
 
+    // ── AND priority selection ───────────────────────────────────
+
     #[test]
-    fn plan_or_filter_with_index() {
+    fn plan_and_priority_selection() {
+        // indexed_fields order: user_id first, status second
+        // Filter has status first, user_id second — planner should pick user_id
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    eq_condition("status", QueryValue::String("active".into())),
+                    eq_condition("user_id", QueryValue::String("abc".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(status = "active", ReadRecord(IndexScan(user_id = "abc")))
+        match p {
+            PlanNode::Filter { predicate, input } => {
+                match &predicate.children[0] {
+                    FilterNode::Condition(f) => assert_eq!(f.field, "status"),
+                    _ => panic!("expected status condition in residual"),
+                }
+                match *input {
+                    PlanNode::ReadRecord { input, .. } => match *input {
+                        PlanNode::IndexScan { column, .. } => {
+                            assert_eq!(column, "user_id");
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    // ── OR with indexes ─────────────────────────────────────────
+
+    #[test]
+    fn plan_or_both_indexed() {
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    eq_condition("user_id", QueryValue::String("abc".into())),
+                    eq_condition("status", QueryValue::String("active".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(recheck, ReadRecord(IndexMerge(Or, IndexScan, IndexScan)))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => match *input {
+                    PlanNode::IndexMerge { logical, lhs, rhs } => {
+                        assert_eq!(logical, LogicalOp::Or);
+                        assert!(matches!(*lhs, PlanNode::IndexScan { .. }));
+                        assert!(matches!(*rhs, PlanNode::IndexScan { .. }));
+                    }
+                    _ => panic!("expected IndexMerge"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_one_not_indexed() {
         let indexed = vec!["status".to_string()];
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
                 children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("active".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "name".into(),
-                        operator: Operator::Eq,
-                        value: QueryValue::String("test".into()),
+                    eq_condition("status", QueryValue::String("active".into())),
+                    eq_condition("name", QueryValue::String("test".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // name is not indexed — OR falls back to Filter(ReadRecord(Scan))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => {
+                    assert!(matches!(*input, PlanNode::Scan { .. }));
+                }
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_same_field() {
+        let indexed = vec!["status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    eq_condition("status", QueryValue::String("active".into())),
+                    eq_condition("status", QueryValue::String("archived".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(recheck, ReadRecord(IndexMerge(Or, IndexScan, IndexScan)))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => match *input {
+                    PlanNode::IndexMerge { logical, .. } => {
+                        assert_eq!(logical, LogicalOp::Or);
+                    }
+                    _ => panic!("expected IndexMerge"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_three_values() {
+        let indexed = vec!["user_id".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    eq_condition("user_id", QueryValue::Int(1)),
+                    eq_condition("user_id", QueryValue::Int(2)),
+                    eq_condition("user_id", QueryValue::Int(3)),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(recheck, ReadRecord(IndexMerge(Or, IndexMerge(Or, IndexScan, IndexScan), IndexScan)))
+        // Left-associative fold: ((1 Or 2) Or 3)
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => match *input {
+                    PlanNode::IndexMerge { logical, lhs, rhs } => {
+                        assert_eq!(logical, LogicalOp::Or);
+                        // lhs is a nested IndexMerge
+                        assert!(matches!(*lhs, PlanNode::IndexMerge { .. }));
+                        assert!(matches!(*rhs, PlanNode::IndexScan { .. }));
+                    }
+                    _ => panic!("expected IndexMerge"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    // ── Nested AND/OR ───────────────────────────────────────────
+
+    #[test]
+    fn plan_and_with_nested_or_indexed() {
+        // user_id = "abc" AND (status = "active" OR status = "archived")
+        // Planner picks user_id (higher priority), OR becomes residual
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    eq_condition("user_id", QueryValue::String("abc".into())),
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::Or,
+                        children: vec![
+                            eq_condition("status", QueryValue::String("active".into())),
+                            eq_condition("status", QueryValue::String("archived".into())),
+                        ],
                     }),
                 ],
             }),
             ..empty_query()
         };
         let p = plan("p1", &indexed, &q);
-        // OR at top level can't use index — falls back to Filter(Scan)
-        assert!(
-            matches!(p, PlanNode::Filter { input, .. } if matches!(*input, PlanNode::Scan { .. }))
-        );
+        // Filter(status OR, ReadRecord(IndexScan(user_id)))
+        match p {
+            PlanNode::Filter { predicate, input } => {
+                assert_eq!(predicate.children.len(), 1);
+                match &predicate.children[0] {
+                    FilterNode::Group(g) => assert_eq!(g.logical, LogicalOp::Or),
+                    _ => panic!("expected OR group in residual"),
+                }
+                match *input {
+                    PlanNode::ReadRecord { input, .. } => match *input {
+                        PlanNode::IndexScan { column, .. } => {
+                            assert_eq!(column, "user_id");
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_with_nested_ands() {
+        // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "pending")
+        // Each AND branch picks one index, wrapped in IndexMerge(Or)
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::And,
+                        children: vec![
+                            eq_condition("user_id", QueryValue::String("abc".into())),
+                            eq_condition("status", QueryValue::String("active".into())),
+                        ],
+                    }),
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::And,
+                        children: vec![
+                            eq_condition("user_id", QueryValue::String("xyz".into())),
+                            eq_condition("status", QueryValue::String("pending".into())),
+                        ],
+                    }),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(recheck, ReadRecord(IndexMerge(Or, IndexScan(user_id=abc), IndexScan(user_id=xyz))))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => match *input {
+                    PlanNode::IndexMerge { logical, lhs, rhs } => {
+                        assert_eq!(logical, LogicalOp::Or);
+                        match *lhs {
+                            PlanNode::IndexScan { column, .. } => {
+                                assert_eq!(column, "user_id");
+                            }
+                            _ => panic!("expected IndexScan for lhs"),
+                        }
+                        match *rhs {
+                            PlanNode::IndexScan { column, .. } => {
+                                assert_eq!(column, "user_id");
+                            }
+                            _ => panic!("expected IndexScan for rhs"),
+                        }
+                    }
+                    _ => panic!("expected IndexMerge"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_partial_index_per_branch() {
+        // (user_id = "abc" AND score > 50) OR status = "active"
+        // Each OR branch has one indexed Eq — IndexMerge(Or), full predicate as recheck
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::And,
+                        children: vec![
+                            eq_condition("user_id", QueryValue::String("abc".into())),
+                            gt_condition("score", QueryValue::Int(50)),
+                        ],
+                    }),
+                    eq_condition("status", QueryValue::String("active".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(recheck, ReadRecord(IndexMerge(Or, IndexScan(user_id), IndexScan(status))))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => match *input {
+                    PlanNode::IndexMerge { logical, lhs, rhs } => {
+                        assert_eq!(logical, LogicalOp::Or);
+                        match *lhs {
+                            PlanNode::IndexScan { column, .. } => {
+                                assert_eq!(column, "user_id");
+                            }
+                            _ => panic!("expected IndexScan for lhs"),
+                        }
+                        match *rhs {
+                            PlanNode::IndexScan { column, .. } => {
+                                assert_eq!(column, "status");
+                            }
+                            _ => panic!("expected IndexScan for rhs"),
+                        }
+                    }
+                    _ => panic!("expected IndexMerge"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_or_unindexed_branch_fallback() {
+        // (user_id = "abc" OR status = "active") OR (count > 5 OR name = "foo")
+        // Second OR branch has zero indexed conditions — entire OR falls back to Scan
+        let indexed = vec!["user_id".to_string(), "status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::Or,
+                children: vec![
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::Or,
+                        children: vec![
+                            eq_condition("user_id", QueryValue::String("abc".into())),
+                            eq_condition("status", QueryValue::String("active".into())),
+                        ],
+                    }),
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::Or,
+                        children: vec![
+                            gt_condition("count", QueryValue::Int(5)),
+                            eq_condition("name", QueryValue::String("foo".into())),
+                        ],
+                    }),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Falls back to Filter(ReadRecord(Scan))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => {
+                    assert!(matches!(*input, PlanNode::Scan { .. }));
+                }
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_fully_unindexed() {
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![gt_condition("score", QueryValue::Int(50))],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &[], &q);
+        // Filter(ReadRecord(Scan))
+        match p {
+            PlanNode::Filter { input, .. } => match *input {
+                PlanNode::ReadRecord { input, .. } => {
+                    assert!(matches!(*input, PlanNode::Scan { .. }));
+                }
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Filter, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_and_selects_or_subgroup_when_no_direct_eq() {
+        // No direct Eq on indexed fields, but an OR sub-group is fully indexable
+        // (status = "active" OR status = "archived") AND score > 50
+        let indexed = vec!["status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    FilterNode::Group(FilterGroup {
+                        logical: LogicalOp::Or,
+                        children: vec![
+                            eq_condition("status", QueryValue::String("active".into())),
+                            eq_condition("status", QueryValue::String("archived".into())),
+                        ],
+                    }),
+                    gt_condition("score", QueryValue::Int(50)),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", &indexed, &q);
+        // Filter(score > 50, ReadRecord(IndexMerge(Or, IndexScan, IndexScan)))
+        match p {
+            PlanNode::Filter { predicate, input } => {
+                assert_eq!(predicate.children.len(), 1);
+                match &predicate.children[0] {
+                    FilterNode::Condition(f) => assert_eq!(f.field, "score"),
+                    _ => panic!("expected score condition"),
+                }
+                match *input {
+                    PlanNode::ReadRecord { input, .. } => {
+                        assert!(matches!(*input, PlanNode::IndexMerge { .. }));
+                    }
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Filter, got {:?}", p),
+        }
     }
 }

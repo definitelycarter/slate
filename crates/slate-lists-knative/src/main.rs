@@ -90,6 +90,12 @@ async fn main() {
     });
 
     let service = ListService::new(pool, NoopLoader);
+
+    service.ensure_collection(&config).unwrap_or_else(|e| {
+        eprintln!("failed to ensure collection: {e}");
+        std::process::exit(1);
+    });
+
     let handler = Arc::new(ListHttp::new(config, service));
 
     let bind_addr = format!("0.0.0.0:{port}");

@@ -92,6 +92,10 @@ impl<S: Store> Session<S> {
                 let indexes = txn.list_indexes(&collection)?;
                 Ok(Response::Indexes(indexes))
             }),
+            Request::CreateCollection { config } => self.write(|txn| {
+                txn.create_collection(&config)?;
+                Ok(Response::Ok)
+            }),
             Request::ListCollections => self.read(|txn| {
                 let collections = txn.list_collections()?;
                 Ok(Response::Collections(collections))

@@ -6,6 +6,7 @@ use slate_store::StoreError;
 pub enum DbError {
     Store(StoreError),
     NotFound(String),
+    CollectionNotFound(String),
     DuplicateKey(String),
     InvalidQuery(String),
     InvalidKey(String),
@@ -17,6 +18,7 @@ impl fmt::Display for DbError {
         match self {
             DbError::Store(e) => write!(f, "store error: {e}"),
             DbError::NotFound(id) => write!(f, "not found: {id}"),
+            DbError::CollectionNotFound(name) => write!(f, "collection not found: {name}"),
             DbError::DuplicateKey(id) => write!(f, "duplicate key: {id}"),
             DbError::InvalidQuery(msg) => write!(f, "invalid query: {msg}"),
             DbError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),

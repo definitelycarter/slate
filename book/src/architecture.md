@@ -2,35 +2,36 @@
 
 ## Overview
 
-A three-tiered system with a dynamic storage engine, a database layer with query execution, a REST API, and native + web frontends sharing a common WASM engine.
+A three-tiered system with a dynamic storage engine, a database layer with query execution, a TCP interface, and native + web frontends sharing a common WASM engine.
 
 ```
 rust core (lib crate)
   └── wasm-bindgen → WASM module
         ├── SwiftUI app (embedded WASM runtime)
         ├── Web app (browser WASM runtime)
-        └── REST API (cloud deployment, native Rust)
+        └── TCP server (cloud deployment, native Rust)
 ```
 
 ## Crate Structure
 
 ```
 slate/
-  ├── slate-store        → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
-  ├── slate-query        → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  ├── slate-db           → Database, Catalog, query execution, depends on slate-store + slate-query
-  ├── slate-server       → TCP server, MessagePack wire protocol, thread-per-connection
-  ├── slate-client       → TCP client, connection pool (crossbeam channel)
-  ├── slate-lists        → List service, config types, HTTP handler, loader trait
-  ├── slate-bench        → DB-level benchmark suite (embedded + TCP, both backends)
-  └── slate-store-bench  → Store-level stress test (500k records, race conditions, data integrity)
+  ├── slate-store          → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
+  ├── slate-query          → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
+  ├── slate-db             → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-server         → TCP server, MessagePack wire protocol, thread-per-connection
+  ├── slate-client         → TCP client, connection pool (crossbeam channel)
+  ├── slate-lists          → List service, config types, HTTP handler, loader trait
+  ├── slate-lists-knative  → Knative adapter for slate-lists
+  ├── slate-bench          → DB-level benchmark suite (embedded + TCP, both backends)
+  └── slate-store-bench    → Store-level stress test (500k records, race conditions, data integrity)
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
 
 ### Overview
 
-The store is a dumb, schema-unaware key-value storage layer. It stores and retrieves raw bytes within column-family-scoped transactions. It knows nothing about records, datasources, users, schemas, or query optimization — those are higher-level concerns handled by `slate-db`.
+The store is a dumb, schema-unaware key-value storage layer. It stores and retrieves raw bytes within column-family-scoped transactions. It knows nothing about records, collections, or query optimization — those are higher-level concerns handled by `slate-db`.
 
 ### Store Trait
 
@@ -163,7 +164,7 @@ pub enum QueryValue {
 
 ### Overview
 
-The database layer sits on top of `slate-store` and `slate-query`. It provides datasource catalog management, query execution, and document storage. Records are stored as raw BSON bytes (`bson::to_vec` of a `bson::Document`), with no intermediate type system — the `bson::Document` is the record.
+The database layer sits on top of `slate-store` and `slate-query`. It provides collection management, query execution, and document storage. Records are stored as raw BSON bytes (`bson::to_vec` of a `bson::Document`), with no intermediate type system — the `bson::Document` is the record.
 
 ### Document Model
 
@@ -182,97 +183,110 @@ let doc = doc! {
 };
 ```
 
-Writes use a read-modify-write pattern — the new document is merged with the existing record so that unspecified fields are preserved. Each record is stored as a single key-value pair (`d:{partition}:{record_id}` → raw BSON bytes).
+Each record is stored as a single key-value pair (`d:{record_id}` → raw BSON bytes) within the collection's column family. `_id` is stored in the key, not in the BSON value.
+
+### Collections
+
+A collection is a named group of documents backed by its own column family. Collections are managed through a `Catalog` that stores metadata in the `_sys` column family.
+
+```rust
+pub struct CollectionConfig {
+    pub name: String,
+    pub indexes: Vec<String>,  // field names to index
+}
+```
+
+Indexes are maintained automatically on writes. Each indexed field gets entries in the format `i:{field}:{value}:{record_id}` for O(1) lookups by field value.
 
 ### Database and Transactions
 
-The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All catalog and data operations go through the transaction:
+The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
 let db = Database::new(store);
 
+// Create a collection with indexes
 let mut txn = db.begin(false)?;
-txn.save_datasource(&datasource)?;
-txn.write_record("ds1", "rec-1", doc! {
+txn.create_collection(&CollectionConfig {
+    name: "users".into(),
+    indexes: vec!["status".into()],
+})?;
+
+// Insert
+let result = txn.insert_one("users", doc! {
     "name": "Alice",
     "status": "active",
-})?;
-txn.write_batch("ds1", vec![
-    ("rec-2".into(), doc! { "name": "Bob" }),
+})?;  // result.id = auto-generated UUID (or use _id in doc)
+
+txn.insert_many("users", vec![
+    doc! { "_id": "bob", "name": "Bob" },
+    doc! { "_id": "carol", "name": "Carol" },
 ])?;
-txn.delete_record("ds1", "rec-1")?;
+
+// Query
+let results = txn.find("users", &query)?;               // -> Vec<Document>
+let one = txn.find_one("users", &query)?;                // -> Option<Document>
+let record = txn.find_by_id("users", "bob", None)?;      // -> Option<Document>
+let record = txn.find_by_id("users", "bob",
+    Some(&["name"]))?;                                    // with projection
+
+// Update (merge — preserves unspecified fields)
+txn.update_one("users", &filter,
+    doc! { "status": "archived" }, false)?;               // -> UpdateResult
+txn.update_many("users", &filter,
+    doc! { "status": "archived" })?;
+
+// Replace (full document swap)
+txn.replace_one("users", &filter,
+    doc! { "name": "Alice", "status": "inactive" })?;
+
+// Delete
+txn.delete_one("users", &filter)?;                       // -> DeleteResult
+txn.delete_many("users", &filter)?;
+
+// Count
+let n = txn.count("users", Some(&filter))?;              // -> u64
+
+// Index management
+txn.create_index("users", "email")?;  // backfills existing records
+txn.drop_index("users", "email")?;
+txn.list_indexes("users")?;           // -> Vec<String>
+
+// Collection management
+txn.list_collections()?;              // -> Vec<String>
+txn.drop_collection("users")?;        // removes data, indexes, metadata
+
 txn.commit()?;
-
-let txn = db.begin(true)?;
-let record = txn.get_by_id("ds1", "rec-1", None)?;           // all columns
-let record = txn.get_by_id("ds1", "rec-1", Some(&["name"]))?; // projection
-let results = txn.query("ds1", &query)?;
 ```
 
-### Datasource Catalog
+### Query Execution
 
-The `Catalog` is a unit struct owned by `Database`. It stores datasource definitions in the `_sys` column family with a `__ds__:` key prefix. Catalog methods take a transaction reference.
+Query execution uses a three-tier plan tree with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
 
-```rust
-pub struct Datasource {
-    pub id: String,
-    pub name: String,
-    pub fields: Vec<FieldDef>,
-    pub partition: String,  // column family name for this datasource's data
-}
-
-pub struct FieldDef {
-    pub name: String,
-    pub field_type: FieldType,
-    pub indexed: bool,  // maintain index on writes
-}
-
-pub enum FieldType {
-    String, Int, Float, Bool, Date,
-    List(Box<FieldType>),
-    Map(Vec<FieldDef>),
-}
-```
-
-Each datasource gets its own column family (`partition`). The catalog itself lives in the shared `_sys` column family.
-
-### Query Execution (Planner + Volcano Iterator)
-
-Query execution has two phases: planning and execution.
-
-**Planning** builds a tree of `PlanNode`s:
+**Planning** builds a pipeline:
 
 ```
-Projection (optional column selection)
-  → Limit (skip/take)
-    → Sort (collects if needed)
-      → Filter (streaming residual filters)
-        → Scan { columns } or IndexScan { columns } (base operation)
+Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMerge / Scan
 ```
 
-**Column pushdown:** The planner computes the set of required columns (union of projection + filter + sort fields, mapped to top-level keys for dot-notation paths) and passes them to the Scan/IndexScan node. When present, only those fields are materialized from `RawDocumentBuf`; otherwise full document deserialization.
+**Three tiers:**
 
-**Index optimization:** For top-level AND groups, the planner looks for `Eq` conditions on indexed columns and rewrites them as `IndexScan` nodes. The consumed condition is removed from the filter, and remaining conditions become a residual `Filter` node. OR groups cannot use indexes and always fall back to full scan.
+1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
+2. **Raw tier** — `ReadRecord`, `Filter`, `Sort`, `Limit` operate on raw BSON bytes (`RawDocumentBuf`), accessing individual fields lazily. Records that fail a filter are never deserialized.
+3. **Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns from raw bytes to `bson::Document`.
 
-**Execution** is lazy/streaming where possible:
-- `Scan` / `IndexScan` yield records one at a time, with selective materialization from `RawDocumentBuf`
-- `Filter` passes through matching records (streaming). Supports dot-notation paths (e.g. `"address.city"`) via `get_path()`
-- `Sort` materializes the filtered set (necessary for ordering). Supports dot-notation sort keys
-- `Limit` applies skip/take (streaming)
-- `Projection` strips unneeded columns. For dot-notation paths, trims nested documents to only requested sub-paths (e.g. `"address.city"` returns `{ "address": { "city": "Austin" } }`)
+**Key properties:**
 
-Key properties:
-- **Selective materialization** — scan nodes only deserialize the fields needed for the query, not the entire document
-- **Dot-notation field access** — filters, sorts, and projections support paths like `"address.city"` for nested document traversal
-- **Filters are pushed down** — applied during scan, not after collecting all records
-- **Index pushdown** — indexed `Eq` conditions narrow the scan to matching keys
-- **Errors propagate** — scan and deserialization errors are not silently swallowed
+- **Lazy materialization** — 30-80% improvement on filtered queries. Rejected records never pay deserialization cost.
+- **Priority-based index selection** — `CollectionConfig.indexes` order determines which index is preferred for AND groups.
+- **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
+- **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 
 ## TCP Interface (`slate-server` + `slate-client`)
 
 ### Overview
 
-Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization (rmp-serde) with length-prefixed framing. MessagePack was chosen over BSON for the wire because it's more compact for structured enum data — benchmarks showed BSON wire format 32-76% slower for bulk transfers (see Benchmarks). This enables architectures where the REST API (or other consumers) run as separate services.
+Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization (rmp-serde) with length-prefixed framing. MessagePack was chosen over BSON for the wire because it's more compact for structured enum data — benchmarks showed BSON wire format 32-76% slower for bulk transfers (see Benchmarks).
 
 ```
 ┌──────────────┐       TCP (MessagePack)      ┌──────────────────┐
@@ -290,25 +304,43 @@ Messages are length-prefixed: a 4-byte big-endian length followed by a MessagePa
 
 ```rust
 enum Request {
-    // Data (all scoped to a datasource)
-    WriteRecord { datasource_id: String, record_id: String, doc: bson::Document },
-    WriteBatch { datasource_id: String, writes: Vec<(String, bson::Document)> },
-    DeleteRecord { datasource_id: String, record_id: String },
-    GetById { datasource_id: String, record_id: String, columns: Option<Vec<String>> },
-    Query { datasource_id: String, query: Query },
-    // Catalog (global)
-    SaveDatasource(Datasource),
-    GetDatasource(String),
-    ListDatasources,
-    DeleteDatasource(String),
+    // Insert
+    InsertOne { collection: String, doc: bson::Document },
+    InsertMany { collection: String, docs: Vec<bson::Document> },
+    // Query
+    Find { collection: String, query: Query },
+    FindOne { collection: String, query: Query },
+    FindById { collection: String, id: String, columns: Option<Vec<String>> },
+    // Update
+    UpdateOne { collection: String, filter: FilterGroup, update: bson::Document, upsert: bool },
+    UpdateMany { collection: String, filter: FilterGroup, update: bson::Document },
+    ReplaceOne { collection: String, filter: FilterGroup, doc: bson::Document },
+    // Delete
+    DeleteOne { collection: String, filter: FilterGroup },
+    DeleteMany { collection: String, filter: FilterGroup },
+    // Count
+    Count { collection: String, filter: Option<FilterGroup> },
+    // Index management
+    CreateIndex { collection: String, field: String },
+    DropIndex { collection: String, field: String },
+    ListIndexes { collection: String },
+    // Collection management
+    CreateCollection { config: CollectionConfig },
+    ListCollections,
+    DropCollection { collection: String },
 }
 
 enum Response {
     Ok,
+    Insert(InsertResult),
+    Inserts(Vec<InsertResult>),
     Record(Option<bson::Document>),
     Records(Vec<bson::Document>),
-    Datasource(Option<Datasource>),
-    Datasources(Vec<Datasource>),
+    Update(UpdateResult),
+    Delete(DeleteResult),
+    Count(u64),
+    Indexes(Vec<String>),
+    Collections(Vec<String>),
     Error(String),
 }
 ```
@@ -324,24 +356,42 @@ server.serve(); // blocks, listens for connections
 
 ### Client
 
-The client opens a TCP connection and provides methods that mirror the database API. All data operations are scoped to a datasource.
+The client opens a TCP connection and provides methods that mirror the database API. All operations are scoped to a collection.
 
 ```rust
 let mut client = Client::connect("127.0.0.1:9600")?;
 
-// Data operations (scoped to datasource)
-client.write_record("ds1", "rec-1", doc! { "name": "Alice", "status": "active" })?;
-client.write_batch("ds1", vec![("rec-2".into(), doc! { "name": "Bob" })])?;
-client.get_by_id("ds1", "rec-1", None)?;          // -> Option<bson::Document>
-client.get_by_id("ds1", "rec-1", Some(&["name"]))?; // with projection
-client.delete_record("ds1", "rec-1")?;
-client.query("ds1", &query)?;                      // -> Vec<bson::Document>
+// Insert
+client.insert_one("users", doc! { "name": "Alice", "status": "active" })?;
+client.insert_many("users", vec![doc! { "name": "Bob" }])?;
 
-// Catalog operations
-client.save_datasource(&ds)?;
-client.get_datasource("ds1")?;    // -> Option<Datasource>
-client.list_datasources()?;       // -> Vec<Datasource>
-client.delete_datasource("ds1")?;
+// Query
+client.find("users", &query)?;                         // -> Vec<Document>
+client.find_one("users", &query)?;                     // -> Option<Document>
+client.find_by_id("users", "rec-1", None)?;            // -> Option<Document>
+client.find_by_id("users", "rec-1", Some(&["name"]))?; // with projection
+
+// Update
+client.update_one("users", &filter, doc! { "status": "archived" }, false)?;
+client.update_many("users", &filter, doc! { "status": "archived" })?;
+client.replace_one("users", &filter, doc! { "name": "Alice" })?;
+
+// Delete
+client.delete_one("users", &filter)?;
+client.delete_many("users", &filter)?;
+
+// Count
+client.count("users", Some(&filter))?;
+
+// Index management
+client.create_index("users", "email")?;
+client.drop_index("users", "email")?;
+client.list_indexes("users")?;
+
+// Collection management
+client.create_collection(&config)?;
+client.list_collections()?;
+client.drop_collection("users")?;
 ```
 
 ### Connection Pool
@@ -352,7 +402,7 @@ client.delete_datasource("ds1")?;
 let pool = ClientPool::new("127.0.0.1:9600", 10)?; // 10 connections
 
 let mut client = pool.get()?; // blocks if all in use
-client.query(&query)?;
+client.find("users", &query)?;
 // returns to pool on drop
 ```
 
@@ -373,7 +423,8 @@ pub struct ListConfig {
     pub id: String,
     pub title: String,
     pub collection: String,
-    pub filters: Option<FilterGroup>,  // default list-level filters
+    pub indexes: Vec<String>,
+    pub filters: Option<FilterGroup>,
     pub columns: Vec<Column>,
 }
 
@@ -384,6 +435,8 @@ pub struct Column {
     pub pinned: bool,        // sticky column
 }
 ```
+
+`ListConfig` can produce a `CollectionConfig` via `collection_config()` for collection setup.
 
 ### ListService
 
@@ -525,5 +578,5 @@ The Rust core compiles to a WASM module via `wasm-bindgen`. Both frontends consu
 
 ### Cloud API
 
-- The REST API can also be deployed as a cloud service.
+- The TCP server can also be deployed as a cloud service.
 - Runs native Rust (no WASM overhead on the server side).

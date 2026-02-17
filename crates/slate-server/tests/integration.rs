@@ -3,7 +3,7 @@ use std::thread;
 
 use bson::doc;
 use slate_client::Client;
-use slate_db::Database;
+use slate_db::{CollectionConfig, Database};
 use slate_query::*;
 use slate_server::Server;
 use slate_store::RocksStore;
@@ -29,10 +29,20 @@ fn start_server() -> (String, tempfile::TempDir) {
     (addr, dir)
 }
 
+fn ensure_collection(client: &mut Client, name: &str) {
+    client
+        .create_collection(&CollectionConfig {
+            name: name.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
+}
+
 #[test]
 fn insert_and_find_one() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     client
         .insert_one(
@@ -89,6 +99,7 @@ fn find_one_not_found() {
 fn insert_many_and_find() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     client
         .insert_many(
@@ -135,6 +146,7 @@ fn insert_many_and_find() {
 fn delete_one() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     client
         .insert_one(
@@ -169,6 +181,8 @@ fn delete_one() {
 fn collection_operations() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, "contacts");
+    ensure_collection(&mut client, "accounts");
 
     // Insert into two collections
     client
@@ -193,6 +207,7 @@ fn collection_operations() {
 fn find_with_sort_and_pagination() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     let mut docs = Vec::new();
     for i in 0..20 {
@@ -226,6 +241,7 @@ fn find_with_sort_and_pagination() {
 fn index_operations() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     // Create index
     client.create_index(COLLECTION, "status").unwrap();
@@ -244,6 +260,7 @@ fn index_operations() {
 fn update_one_merge() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     client
         .insert_one(

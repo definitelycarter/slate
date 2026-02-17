@@ -4,7 +4,7 @@ use std::thread;
 use ::http::{Method, Request, StatusCode};
 use bson::doc;
 use slate_client::{Client, ClientPool};
-use slate_db::Database;
+use slate_db::{CollectionConfig, Database};
 use slate_lists::*;
 use slate_query::*;
 use slate_server::Server;
@@ -32,6 +32,12 @@ fn start_server() -> String {
 fn seed_data(addr: &str) {
     let mut client = Client::connect(addr).unwrap();
     client
+        .create_collection(&CollectionConfig {
+            name: COLLECTION.to_string(),
+            indexes: vec![],
+        })
+        .unwrap();
+    client
         .insert_many(
             COLLECTION,
             vec![
@@ -50,6 +56,7 @@ fn active_config() -> ListConfig {
         id: "active-accounts".into(),
         title: "Active Accounts".into(),
         collection: COLLECTION.into(),
+        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -86,6 +93,7 @@ fn all_config() -> ListConfig {
         id: "all-accounts".into(),
         title: "All Accounts".into(),
         collection: COLLECTION.into(),
+        indexes: vec![],
         filters: None,
         columns: vec![
             Column {

@@ -1,7 +1,7 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
-use slate_db::{DeleteResult, InsertResult, UpdateResult};
+use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
 use slate_query::{FilterGroup, Query};
 use slate_server::protocol::{Request, Response};
 
@@ -319,6 +319,12 @@ impl Client {
     }
 
     // ── Collection operations ───────────────────────────────────
+
+    pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), ClientError> {
+        self.expect_ok(Request::CreateCollection {
+            config: config.clone(),
+        })
+    }
 
     pub fn list_collections(&mut self) -> Result<Vec<String>, ClientError> {
         match self.request(Request::ListCollections)? {

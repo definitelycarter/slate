@@ -2,7 +2,7 @@
 
 Snapshot from `slate-bench` — run on Apple Silicon (M-series) in release mode. Each record has 8 fields (6 required, 2 nullable). Two dataset sizes: 10k and 100k records per user, 3 users each.
 
-Storage model: each collection is a RocksDB column family. Records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a plan tree (Scan/IndexScan → Filter → Sort → Limit → Projection) with selective materialization — the planner computes the required columns (projection + filter + sort) and scan nodes read only those top-level fields from `RawDocumentBuf`, avoiding full document deserialization when a projection is specified.
+Storage model: each collection is a RocksDB column family. Records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a three-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` fetches raw BSON bytes by ID but does **not** deserialize them. The **raw tier** (Filter, Sort, Limit) operates on `RawDocumentBuf` — accessing individual fields lazily without full deserialization. Records that fail a filter are never deserialized. Finally, **Projection** is the single materialization point where `RawDocumentBuf` → `bson::Document`, selectively deserializing only the requested columns. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
 
 ## Record Schema
 
@@ -32,20 +32,20 @@ Results from a single user partition (10,000 records). Times are consistent acro
 | Query | Time | Records Returned | Notes |
 |-------|------|------------------|-------|
 | Full scan (no filter) | ~11ms | 10,000 | Single key per record |
-| status = 'active' (indexed) | ~8ms | ~5,000 | IndexScan → multi_get |
-| product_recommendation1 = 'ProductA' | ~10.5ms | ~3,300 | Full scan + Filter |
-| status + rec1 + rec2 (AND) | ~8ms | ~550 | IndexScan + filter short-circuit |
-| status='active' + sort + skip/take(50) | ~9.5ms | 50 | IndexScan → Sort → Limit |
-| status='active' (no sort) | ~7.5ms | ~5,000 | IndexScan, no sort |
-| status='active' + sort contacts_count | ~9.5ms | ~5,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~7.5ms | 200 | IndexScan + early stop |
-| status='active' + sort + take(200) | ~9.5ms | 200 | IndexScan → Sort → Limit |
-| last_contacted_at is null (~30%) | ~10.5ms | ~3,000 | Full scan + Filter |
-| notes is null (~50%) | ~11ms | ~5,000 | Full scan + Filter |
-| last_contacted_at is not null (~70%) | ~11ms | ~7,000 | Full scan + Filter |
-| status='active' AND notes is null | ~8ms | ~2,500 | IndexScan on status, Filter on notes |
+| status = 'active' (indexed) | ~8ms | ~5,000 | IndexScan → lazy filter |
+| product_recommendation1 = 'ProductA' | ~5.8ms | ~3,300 | Scan + lazy filter, ~67% rejected without deserializing |
+| status + rec1 + rec2 (AND) | ~4.4ms | ~550 | IndexScan + lazy filter, ~89% rejected |
+| status='active' + sort + skip/take(50) | ~8.5ms | 50 | IndexScan → Sort → Limit |
+| status='active' (no sort) | ~7.9ms | ~5,000 | IndexScan, no sort |
+| status='active' + sort contacts_count | ~12.6ms | ~5,000 | IndexScan → Sort |
+| status='active' + take(200) (no sort) | ~3.5ms | 200 | IndexScan, only 200 records materialized |
+| status='active' + sort + take(200) | ~8.7ms | 200 | IndexScan → Sort → Limit |
+| last_contacted_at is null (~30%) | ~5.7ms | ~3,000 | Scan + lazy filter, ~70% rejected |
+| notes is null (~50%) | ~7.4ms | ~5,000 | Scan + lazy filter |
+| last_contacted_at is not null (~70%) | ~10ms | ~7,000 | Scan + lazy filter |
+| status='active' AND notes is null | ~6.2ms | ~2,500 | IndexScan + lazy filter |
 | 1,000 point lookups (find_by_id) | ~1.8ms | 1,000 | Direct key access |
-| projection (name, status only) | ~7.5ms | 10,000 | Selective RawDocumentBuf read → Projection |
+| projection (name, status only) | ~8ms | 10,000 | Selective materialization at Projection |
 
 ## Embedded (RocksStore) — 100k Records
 
@@ -61,30 +61,31 @@ Results from a single user partition (100,000 records). Times are consistent acr
 
 | Query | Time | Records Returned | Notes |
 |-------|------|------------------|-------|
-| Full scan (no filter) | ~115ms | 100,000 | Single key per record |
-| status = 'active' (indexed) | ~86ms | ~50,000 | IndexScan → multi_get |
-| product_recommendation1 = 'ProductA' | ~109ms | ~33,300 | Full scan + Filter |
-| status + rec1 + rec2 (AND) | ~86ms | ~5,500 | IndexScan + filter short-circuit |
-| status='active' + sort + skip/take(50) | ~119ms | 50 | IndexScan → Sort → Limit |
-| status='active' (no sort) | ~83ms | ~50,000 | IndexScan, no sort |
-| status='active' + sort contacts_count | ~121ms | ~50,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~83ms | 200 | IndexScan + early stop |
-| status='active' + sort + take(200) | ~120ms | 200 | IndexScan → Sort → Limit |
-| last_contacted_at is null (~30%) | ~107ms | ~30,000 | Full scan + Filter |
-| notes is null (~50%) | ~111ms | ~50,000 | Full scan + Filter |
-| last_contacted_at is not null (~70%) | ~115ms | ~70,000 | Full scan + Filter |
-| status='active' AND notes is null | ~86ms | ~25,000 | IndexScan on status, Filter on notes |
-| 1,000 point lookups (find_by_id) | ~2.5ms | 1,000 | Direct key access |
-| projection (name, status only) | ~74ms | 100,000 | Selective RawDocumentBuf read → Projection |
+| Full scan (no filter) | ~107ms | 100,000 | Single key per record |
+| status = 'active' (indexed) | ~63ms | ~50,000 | IndexScan → lazy filter |
+| product_recommendation1 = 'ProductA' | ~51ms | ~33,300 | Scan + lazy filter, ~67% rejected without deserializing |
+| status + rec1 + rec2 (AND) | ~27ms | ~5,500 | IndexScan + lazy filter, ~89% rejected |
+| status='active' + sort + skip/take(50) | ~67ms | 50 | IndexScan → Sort → Limit |
+| status='active' (no sort) | ~62ms | ~50,000 | IndexScan, no sort |
+| status='active' + sort contacts_count | ~118ms | ~50,000 | IndexScan → Sort |
+| status='active' + take(200) (no sort) | ~15ms | 200 | IndexScan, only 200 records materialized |
+| status='active' + sort + take(200) | ~68ms | 200 | IndexScan → Sort → Limit |
+| last_contacted_at is null (~30%) | ~50ms | ~30,000 | Scan + lazy filter, ~70% rejected |
+| notes is null (~50%) | ~70ms | ~50,000 | Scan + lazy filter |
+| last_contacted_at is not null (~70%) | ~97ms | ~70,000 | Scan + lazy filter |
+| status='active' AND notes is null | ~45ms | ~25,000 | IndexScan + lazy filter |
+| 1,000 point lookups (find_by_id) | ~2.1ms | 1,000 | Direct key access |
+| projection (name, status only) | ~67ms | 100,000 | Selective materialization at Projection |
 
 ### Key Observations
 
+- **Lazy materialization**: `ReadRecord` fetches raw BSON bytes but does not deserialize them. Filter and Sort access individual fields via `RawDocumentBuf::get()` — a linear scan of the byte buffer that returns typed references without allocation. Records that fail a filter are never deserialized. Projection is the single materialization point, selectively converting only the requested columns from raw bytes to `bson::Document`. This yields 30–80% improvements on filtered queries compared to eager deserialization.
 - **Single key per record**: All columns packed into one value. Reads are a single `get()` or scan iteration — no per-column key overhead.
-- **Selective materialization**: When a projection is specified, the planner computes the required columns (projection + filter + sort) and scan nodes read only those top-level fields from `RawDocumentBuf`. This avoids full document deserialization and yields a ~40% improvement on projection queries compared to eager materialization.
-- **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). The scan materializes top-level keys; nested trimming happens in the Projection node.
-- **IndexScan → multi_get**: Index lookups collect record IDs, then batch-fetch full records via `multi_get`.
-- **Sort overhead**: Sort materializes the entire filtered set (~50k records) and sorts in memory. This is the dominant cost for sorted queries.
-- **Point lookups**: ~1.8ms (10k) to ~2.5ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
+- **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). Nested path resolution works directly on `RawDocumentBuf` via `get_document()` chaining.
+- **IndexScan → multi_get**: Index lookups collect record IDs, then batch-fetch raw bytes via `multi_get`. Filter evaluates lazily on the raw bytes.
+- **Sort overhead**: Sort accesses sort keys lazily from raw bytes, but must hold all records in memory. This is the dominant cost for sorted queries.
+- **take() without sort**: When no sort is required, `take(N)` benefits dramatically from lazy materialization — only N records are deserialized regardless of how many match the filter. 100k dataset, `take(200)`: ~15ms vs ~83ms with eager deserialization.
+- **Point lookups**: ~1.8ms (10k) to ~2.1ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
 
 ## TCP (MessagePack over Localhost)
@@ -144,14 +145,16 @@ MessagePack is more compact for structured enum data and handles Rust enums nati
 
 | Query | 10k | 100k | Factor |
 |-------|-----|------|--------|
-| Full scan | 11ms | 115ms | 10.5x |
-| IndexScan (status) | 8ms | 86ms | 10.8x |
-| AND filter (3 conditions) | 8ms | 86ms | 10.8x |
-| Sort (full, ~50%) | 9.5ms | 121ms | 12.7x |
-| 1,000 point lookups | 1.8ms | 2.5ms | 1.4x |
-| Projection (2 cols) | 7.5ms | 74ms | 9.9x |
+| Full scan | 11ms | 107ms | 9.7x |
+| IndexScan (status) | 8ms | 63ms | 7.9x |
+| AND filter (3 conditions) | 4.4ms | 27ms | 6.1x |
+| Scan + filter (ProductA) | 5.8ms | 51ms | 8.8x |
+| Sort (full, ~50%) | 12.6ms | 118ms | 9.4x |
+| take(200) no sort | 3.5ms | 15ms | 4.3x |
+| 1,000 point lookups | 1.8ms | 2.1ms | 1.2x |
+| Projection (2 cols) | 8ms | 67ms | 8.4x |
 
-Scan-heavy queries scale ~10x for 10x data — near-linear. Sort remains slightly super-linear due to in-memory materialization costs. Point lookups are nearly constant regardless of dataset size.
+Scan-heavy queries scale ~10x for 10x data — near-linear. Highly selective queries (AND filter, take without sort) scale sub-linearly thanks to lazy materialization — the cost is proportional to records that pass the filter, not total records scanned. Point lookups are nearly constant regardless of dataset size.
 
 ## Concurrency
 
@@ -214,21 +217,30 @@ Raw key-value performance at 500k records with 10 KB values (~4.7 GB total data)
 
 **Integrity checks passed:** rollback, snapshot isolation, delete_range, concurrent stress (4 readers + 1 writer).
 
-The 6-7x raw read speedup narrows to 1.1-1.3x at the DB level because DB queries pay for BSON deserialization and filter evaluation on every record — costs that dominate the storage read time.
+The 6-7x raw read speedup narrows to 1.1-1.3x at the DB level because DB queries pay for raw BSON field access and filter evaluation on every record — costs that dominate the storage read time. With lazy materialization, only records that pass the filter are fully deserialized.
 
 ## Query Planner
 
-The query planner builds a plan tree from the query and indexed fields list:
+The query planner builds a three-tier plan tree:
 
 ```
-Projection(Limit(Sort(Filter(Scan { columns }))))
+Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
 ```
 
-- **Scan / IndexScan**: Accept an optional `columns` list computed by the planner (union of projection + filter + sort columns, mapped to top-level keys). When present, only those fields are materialized from `RawDocumentBuf`; otherwise full document deserialization.
-- **IndexScan**: Used when the filter has an `Eq` condition on an indexed field in a top-level AND group. Collects matching record IDs from index keys, batch-fetches records via `multi_get`.
-- **Filter**: Eager evaluation on materialized records. AND/OR short-circuit on conditions. Supports dot-notation paths (e.g. `"address.city"`) via `get_path()`.
-- **Sort**: Materializes all records, sorts in memory. Supports dot-notation sort keys.
-- **Limit**: `skip()` + `take()` on the record stream.
-- **Projection**: Strips unneeded columns. For dot-notation paths (e.g. `"address.city"`), trims nested documents to only requested sub-paths.
+**ID tier** (produces record IDs, no document bytes touched):
+- **Scan**: Iterates all data keys in a partition, yields record IDs.
+- **IndexScan**: Scans index keys for a specific `column=value`, yields matching record IDs.
+- **IndexMerge**: Binary combiner with `lhs`/`rhs` children and a `LogicalOp`. `Or` unions ID sets (for OR queries where every branch has an indexed Eq). `And` intersects (supported but not currently emitted).
+
+**Raw tier** (operates on `RawDocumentBuf` — no deserialization):
+- **ReadRecord**: Fetches raw BSON bytes by ID via `multi_get`. For `Scan` inputs, optimizes into a single-pass iteration. Does **not** deserialize — yields `(id, RawDocumentBuf)` tuples.
+- **Filter**: Evaluates predicates by accessing individual fields lazily via `RawDocumentBuf::get()`. Records that fail are never deserialized. AND/OR short-circuit. Supports dot-notation paths.
+- **Sort**: Accesses sort keys lazily from raw bytes, sorts in memory.
+- **Limit**: `skip()` + `take()` on the raw record stream.
+
+**Document tier** (materialization):
+- **Projection**: The single point where `RawDocumentBuf` → `bson::Document`. Selectively deserializes only the projected columns via `raw.iter()` + column filtering. For dot-notation paths, trims nested documents to only requested sub-paths. When no Projection node exists, full `to_document()` is used as a fallback.
+
+**Index selection**: For AND groups, the planner picks the highest-priority indexed field (ordered by `CollectionConfig.indexes`) with an `Eq` condition. For OR groups, if every branch has at least one indexed `Eq`, the planner builds an `IndexMerge(Or)` tree with a residual `Filter` for recheck; if any branch lacks an indexed condition, the entire OR falls back to `Scan`.
 
 Index keys use the format `i:{field}\x00{value_bytes}\x00{_id}` and are maintained on insert/update/delete for indexed fields.
