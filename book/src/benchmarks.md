@@ -61,21 +61,21 @@ Results from a single user partition (100,000 records). Times are consistent acr
 
 | Query | Time | Records Returned | Notes |
 |-------|------|------------------|-------|
-| Full scan (no filter) | ~107ms | 100,000 | Single key per record |
-| status = 'active' (indexed) | ~63ms | ~50,000 | IndexScan → lazy filter |
-| product_recommendation1 = 'ProductA' | ~51ms | ~33,300 | Scan + lazy filter, ~67% rejected without deserializing |
-| status + rec1 + rec2 (AND) | ~27ms | ~5,500 | IndexScan + lazy filter, ~89% rejected |
-| status='active' + sort + skip/take(50) | ~67ms | 50 | IndexScan → Sort → Limit |
-| status='active' (no sort) | ~62ms | ~50,000 | IndexScan, no sort |
-| status='active' + sort contacts_count | ~118ms | ~50,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~15ms | 200 | IndexScan, only 200 records materialized |
-| status='active' + sort + take(200) | ~68ms | 200 | IndexScan → Sort → Limit |
-| last_contacted_at is null (~30%) | ~50ms | ~30,000 | Scan + lazy filter, ~70% rejected |
-| notes is null (~50%) | ~70ms | ~50,000 | Scan + lazy filter |
-| last_contacted_at is not null (~70%) | ~97ms | ~70,000 | Scan + lazy filter |
-| status='active' AND notes is null | ~45ms | ~25,000 | IndexScan + lazy filter |
-| 1,000 point lookups (find_by_id) | ~2.1ms | 1,000 | Direct key access |
-| projection (name, status only) | ~67ms | 100,000 | Selective materialization at Projection |
+| Full scan (no filter) | ~111ms | 100,000 | Single key per record |
+| status = 'active' (indexed) | ~79ms | ~50,000 | IndexScan → lazy filter |
+| product_recommendation1 = 'ProductA' | ~55ms | ~33,300 | Scan + lazy filter, ~67% rejected without deserializing |
+| status + rec1 + rec2 (AND) | ~44ms | ~5,500 | IndexScan + lazy filter, ~89% rejected |
+| status='active' + sort + skip/take(50) | ~86ms | 50 | IndexScan → Sort → Limit |
+| status='active' (no sort) | ~77ms | ~50,000 | IndexScan, no sort |
+| status='active' + sort contacts_count | ~132ms | ~50,000 | IndexScan → Sort |
+| status='active' + take(200) (no sort) | ~33ms | 200 | IndexScan, only 200 records materialized |
+| status='active' + sort + take(200) | ~86ms | 200 | IndexScan → Sort → Limit |
+| last_contacted_at is null (~30%) | ~53ms | ~30,000 | Scan + lazy filter, ~70% rejected |
+| notes is null (~50%) | ~72ms | ~50,000 | Scan + lazy filter |
+| last_contacted_at is not null (~70%) | ~98ms | ~70,000 | Scan + lazy filter |
+| status='active' AND notes is null | ~61ms | ~25,000 | IndexScan + lazy filter |
+| 1,000 point lookups (find_by_id) | ~2.4ms | 1,000 | Direct key access |
+| projection (name, status only) | ~82ms | 100,000 | Selective materialization at Projection |
 
 ### Key Observations
 
@@ -84,8 +84,8 @@ Results from a single user partition (100,000 records). Times are consistent acr
 - **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). Nested path resolution works directly on `RawDocumentBuf` via `get_document()` chaining.
 - **IndexScan → multi_get**: Index lookups collect record IDs, then batch-fetch raw bytes via `multi_get`. Filter evaluates lazily on the raw bytes.
 - **Sort overhead**: Sort accesses sort keys lazily from raw bytes, but must hold all records in memory. This is the dominant cost for sorted queries.
-- **take() without sort**: When no sort is required, `take(N)` benefits dramatically from lazy materialization — only N records are deserialized regardless of how many match the filter. 100k dataset, `take(200)`: ~15ms vs ~83ms with eager deserialization.
-- **Point lookups**: ~1.8ms (10k) to ~2.1ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
+- **take() without sort**: When no sort is required, `take(N)` benefits dramatically from lazy materialization — only N records are deserialized regardless of how many match the filter. 100k dataset, `take(200)`: ~33ms vs ~82ms with eager deserialization.
+- **Point lookups**: ~1.7ms (10k) to ~2.4ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
 
 ## TCP (MessagePack over Localhost)
@@ -96,31 +96,31 @@ Same workload as embedded (100k records), accessed through the TCP server on loc
 
 | Operation | Time | Per Record |
 |-----------|------|------------|
-| 10 batches of 10,000 records | ~643ms | ~0.0064ms |
+| 10 batches of 10,000 records | ~625ms | ~0.0063ms |
 
 ### Queries
 
 | Query | Time | Records Returned |
 |-------|------|------------------|
-| Full scan (no filter) | ~259ms | 100,000 |
-| status = 'active' (indexed) | ~156ms | ~50,000 |
-| status + rec1 + rec2 (AND) | ~108ms | ~5,500 |
-| status='active' (no sort) | ~155ms | ~50,000 |
-| status='active' + sort contacts_count | ~206ms | ~50,000 |
-| status='active' + take(200) (no sort) | ~99ms | 200 |
-| status='active' + sort + take(200) | ~144ms | 200 |
-| status='active' + sort + skip/take(50) | ~146ms | 50 |
-| 1,000 point lookups (find_by_id) | ~38ms | 1,000 |
+| Full scan (no filter) | ~255ms | 100,000 |
+| status = 'active' (indexed) | ~154ms | ~50,000 |
+| status + rec1 + rec2 (AND) | ~55ms | ~5,500 |
+| status='active' (no sort) | ~152ms | ~50,000 |
+| status='active' + sort contacts_count | ~209ms | ~50,000 |
+| status='active' + take(200) (no sort) | ~36ms | 200 |
+| status='active' + sort + take(200) | ~87ms | 200 |
+| status='active' + sort + skip/take(50) | ~85ms | 50 |
+| 1,000 point lookups (find_by_id) | ~40ms | 1,000 |
 
 ### Embedded vs TCP Overhead
 
 | Query | Embedded | TCP | Overhead |
 |-------|----------|-----|----------|
-| Full scan (100k records) | 115ms | 259ms | +125% |
-| IndexScan filter (50k records) | 86ms | 156ms | +81% |
-| IndexScan + narrow (5.5k records) | 86ms | 108ms | +26% |
-| IndexScan + sort + take(200) | 120ms | 144ms | +20% |
-| 1,000 point lookups | 2.5ms | 38ms | Network round-trips |
+| Full scan (100k records) | 111ms | 255ms | +130% |
+| IndexScan filter (50k records) | 79ms | 154ms | +95% |
+| IndexScan + narrow (5.5k records) | 44ms | 55ms | +25% |
+| IndexScan + sort + take(200) | 86ms | 87ms | +1% |
+| 1,000 point lookups | 2.4ms | 40ms | Network round-trips |
 
 **Takeaway**: TCP overhead scales with the number of records serialized over the wire. For paginated queries (sort + take), overhead is modest. Point lookups show the per-request round-trip cost (~0.04ms each).
 
@@ -145,16 +145,16 @@ MessagePack is more compact for structured enum data and handles Rust enums nati
 
 | Query | 10k | 100k | Factor |
 |-------|-----|------|--------|
-| Full scan | 11ms | 107ms | 9.7x |
-| IndexScan (status) | 8ms | 63ms | 7.9x |
-| AND filter (3 conditions) | 4.4ms | 27ms | 6.1x |
-| Scan + filter (ProductA) | 5.8ms | 51ms | 8.8x |
-| Sort (full, ~50%) | 12.6ms | 118ms | 9.4x |
-| take(200) no sort | 3.5ms | 15ms | 4.3x |
-| 1,000 point lookups | 1.8ms | 2.1ms | 1.2x |
-| Projection (2 cols) | 8ms | 67ms | 8.4x |
+| Full scan | 11ms | 111ms | 10.1x |
+| IndexScan (status) | 8ms | 79ms | 9.9x |
+| AND filter (3 conditions) | 4.1ms | 44ms | 10.7x |
+| Scan + filter (ProductA) | 5.6ms | 55ms | 9.8x |
+| Sort (full, ~50%) | 11.8ms | 132ms | 11.2x |
+| take(200) no sort | 3.1ms | 33ms | 10.6x |
+| 1,000 point lookups | 1.7ms | 2.4ms | 1.4x |
+| Projection (2 cols) | 7.6ms | 82ms | 10.8x |
 
-Scan-heavy queries scale ~10x for 10x data — near-linear. Highly selective queries (AND filter, take without sort) scale sub-linearly thanks to lazy materialization — the cost is proportional to records that pass the filter, not total records scanned. Point lookups are nearly constant regardless of dataset size.
+Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size.
 
 ## Concurrency
 
@@ -173,23 +173,23 @@ Same workload as embedded benchmarks, run against both storage backends. 100k re
 
 | Backend | Time | Per Record |
 |---------|------|------------|
-| RocksStore | ~490ms | ~0.0049ms |
-| MemoryStore | ~221ms | ~0.0022ms |
+| RocksStore | ~477ms | ~0.0048ms |
+| MemoryStore | ~213ms | ~0.0021ms |
 | **Speedup** | **2.2x** | |
 
 ### Queries — 100k Records
 
 | Query | RocksStore | MemoryStore | Speedup |
 |-------|-----------|-------------|---------|
-| Full scan (no filter) | 115ms | 110ms | 1.0x |
-| status = 'active' (indexed) | 86ms | 65ms | 1.3x |
-| product_recommendation1 = 'ProductA' | 109ms | 102ms | 1.1x |
-| status + rec1 + rec2 (AND) | 86ms | 66ms | 1.3x |
-| status='active' + sort + skip/take | 119ms | 104ms | 1.1x |
-| status='active' (no sort) | 83ms | 65ms | 1.3x |
-| status='active' + sort | 121ms | 105ms | 1.2x |
-| 1,000 point lookups (find_by_id) | 2.5ms | 2.0ms | 1.2x |
-| projection (name, status only) | 74ms | 66ms | 1.1x |
+| Full scan (no filter) | 111ms | 101ms | 1.1x |
+| status = 'active' (indexed) | 79ms | 61ms | 1.3x |
+| product_recommendation1 = 'ProductA' | 55ms | 49ms | 1.1x |
+| status + rec1 + rec2 (AND) | 44ms | 26ms | 1.7x |
+| status='active' + sort + skip/take | 86ms | 63ms | 1.4x |
+| status='active' (no sort) | 77ms | 59ms | 1.3x |
+| status='active' + sort | 132ms | 114ms | 1.2x |
+| 1,000 point lookups (find_by_id) | 2.4ms | 2.1ms | 1.1x |
+| projection (name, status only) | 82ms | 64ms | 1.3x |
 
 ### Key Observations
 

@@ -254,7 +254,8 @@ fn execute_read_record<'a, T: Transaction + 'a>(
     Ok(Box::new(records.into_iter().map(Ok)))
 }
 
-/// Single-pass scan: iterate data keys and collect (id, raw) tuples.
+/// Single-pass scan: lazily iterate data keys, mapping to (id, raw) tuples.
+/// No collection — records stream one at a time through the pipeline.
 fn execute_scan_raw<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     partition: &str,
@@ -262,21 +263,14 @@ fn execute_scan_raw<'a, T: Transaction + 'a>(
     let scan_prefix = encoding::data_scan_prefix("");
     let iter = txn.scan_prefix(partition, &scan_prefix)?;
 
-    let mut records = Vec::new();
-    for result in iter {
-        let (key, value) = result?;
-        let record_id = match encoding::parse_record_key(&key) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-        let raw = match RawDocumentBuf::from_bytes(value.into_vec()) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        records.push((record_id, raw));
-    }
-
-    Ok(Box::new(records.into_iter().map(Ok)))
+    Ok(Box::new(iter.filter_map(|result| match result {
+        Ok((key, value)) => {
+            let record_id = encoding::parse_record_key(&key)?.to_string();
+            let raw = RawDocumentBuf::from_bytes(value.into_vec()).ok()?;
+            Some(Ok((record_id, raw)))
+        }
+        Err(e) => Some(Err(DbError::Store(e))),
+    })))
 }
 
 /// Extract the partition name from an ID-tier node.
