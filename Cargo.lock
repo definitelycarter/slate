@@ -1228,6 +1228,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-lists-knative"
+version = "0.1.0"
+dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde_json",
+ "slate-client",
+ "slate-db",
+ "slate-lists",
+ "slate-server",
+ "slate-store",
+ "tokio",
+]
+
+[[package]]
 name = "slate-query"
 version = "0.1.0"
 dependencies = [
