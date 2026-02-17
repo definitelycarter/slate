@@ -27,13 +27,13 @@ pub fn execute<'a, T: Transaction + 'a>(
 /// Execute an ID-tier node, returning a list of record IDs.
 fn execute_ids<T: Transaction>(txn: &mut T, node: &PlanNode) -> Result<Vec<String>, DbError> {
     match node {
-        PlanNode::Scan { partition } => execute_scan_ids(txn, partition),
+        PlanNode::Scan { collection } => execute_scan_ids(txn, collection),
 
         PlanNode::IndexScan {
-            partition,
+            collection,
             column,
             value,
-        } => execute_index_scan_ids(txn, partition, column, value),
+        } => execute_index_scan_ids(txn, collection, column, value),
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
             let left_ids = execute_ids(txn, lhs)?;
@@ -69,10 +69,10 @@ fn execute_ids<T: Transaction>(txn: &mut T, node: &PlanNode) -> Result<Vec<Strin
     }
 }
 
-/// Scan all record keys in a partition, returning just the IDs (no deserialization).
-fn execute_scan_ids<T: Transaction>(txn: &mut T, partition: &str) -> Result<Vec<String>, DbError> {
+/// Scan all record keys in a collection, returning just the IDs (no deserialization).
+fn execute_scan_ids<T: Transaction>(txn: &mut T, collection: &str) -> Result<Vec<String>, DbError> {
     let scan_prefix = encoding::data_scan_prefix("");
-    let iter = txn.scan_prefix(partition, &scan_prefix)?;
+    let iter = txn.scan_prefix(collection, &scan_prefix)?;
 
     let ids: Vec<String> = iter
         .filter_map(|result| match result {
@@ -90,12 +90,12 @@ fn execute_scan_ids<T: Transaction>(txn: &mut T, partition: &str) -> Result<Vec<
 /// Scan an index prefix, returning record IDs that match the column=value.
 fn execute_index_scan_ids<T: Transaction>(
     txn: &mut T,
-    partition: &str,
+    collection: &str,
     column: &str,
     value: &bson::Bson,
 ) -> Result<Vec<String>, DbError> {
     let prefix = encoding::index_scan_prefix(column, value);
-    let iter = txn.scan_prefix(partition, &prefix)?;
+    let iter = txn.scan_prefix(collection, &prefix)?;
 
     let ids: Vec<String> = iter
         .filter_map(|result| match result {
@@ -225,12 +225,12 @@ fn execute_read_record<'a, T: Transaction + 'a>(
 ) -> Result<RawIter<'a>, DbError> {
     // Optimization: when the input is a Scan, iterate keys + values together
     // in a single pass — avoids collecting all IDs then re-reading via multi_get.
-    if let PlanNode::Scan { partition } = input {
-        return execute_scan_raw(txn, partition);
+    if let PlanNode::Scan { collection } = input {
+        return execute_scan_raw(txn, collection);
     }
 
     // For IndexScan/IndexMerge: collect IDs, then batch-fetch raw bytes
-    let partition = extract_partition(input);
+    let collection = extract_collection(input);
     let record_ids = execute_ids(txn, input)?;
 
     let keys: Vec<Vec<u8>> = record_ids
@@ -238,7 +238,7 @@ fn execute_read_record<'a, T: Transaction + 'a>(
         .map(|id| encoding::record_key(id))
         .collect();
     let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-    let values = txn.multi_get(&partition, &key_refs)?;
+    let values = txn.multi_get(&collection, &key_refs)?;
 
     let mut records = Vec::new();
     for (id, value_opt) in record_ids.into_iter().zip(values) {
@@ -255,13 +255,13 @@ fn execute_read_record<'a, T: Transaction + 'a>(
 }
 
 /// Single-pass scan: lazily iterate data keys, mapping to (id, raw) tuples.
-/// No collection — records stream one at a time through the pipeline.
+/// Records stream one at a time through the pipeline — no buffering.
 fn execute_scan_raw<'a, T: Transaction + 'a>(
     txn: &'a mut T,
-    partition: &str,
+    collection: &str,
 ) -> Result<RawIter<'a>, DbError> {
     let scan_prefix = encoding::data_scan_prefix("");
-    let iter = txn.scan_prefix(partition, &scan_prefix)?;
+    let iter = txn.scan_prefix(collection, &scan_prefix)?;
 
     Ok(Box::new(iter.filter_map(|result| match result {
         Ok((key, value)) => {
@@ -273,12 +273,12 @@ fn execute_scan_raw<'a, T: Transaction + 'a>(
     })))
 }
 
-/// Extract the partition name from an ID-tier node.
-fn extract_partition(node: &PlanNode) -> String {
+/// Extract the collection name from an ID-tier node.
+fn extract_collection(node: &PlanNode) -> String {
     match node {
-        PlanNode::Scan { partition } => partition.clone(),
-        PlanNode::IndexScan { partition, .. } => partition.clone(),
-        PlanNode::IndexMerge { lhs, .. } => extract_partition(lhs),
+        PlanNode::Scan { collection } => collection.clone(),
+        PlanNode::IndexScan { collection, .. } => collection.clone(),
+        PlanNode::IndexMerge { lhs, .. } => extract_collection(lhs),
         _ => String::new(),
     }
 }

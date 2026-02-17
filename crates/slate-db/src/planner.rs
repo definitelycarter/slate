@@ -2,12 +2,12 @@ use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
-    /// Full scan — yields record IDs in a partition.
-    Scan { partition: String },
+    /// Full scan — yields all record IDs in a collection.
+    Scan { collection: String },
 
     /// Index lookup — yields record IDs matching a value from the index.
     IndexScan {
-        partition: String,
+        collection: String,
         column: String,
         value: bson::Bson,
     },
@@ -49,7 +49,7 @@ pub enum PlanNode {
     },
 }
 
-/// Build a query plan from a collection partition and its indexed fields.
+/// Build a query plan from a collection name and its indexed fields.
 ///
 /// The planner splits the filter into two tiers:
 /// - **ID tier** (below ReadRecord): IndexScan, IndexMerge, Scan — produce record IDs
@@ -58,16 +58,16 @@ pub enum PlanNode {
 /// For AND groups, the highest-priority indexed Eq condition (per `indexed_fields` order)
 /// becomes an IndexScan. For OR groups, if every branch has an indexed Eq, they combine
 /// into an IndexMerge(Or). Otherwise the OR falls back to Scan.
-pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNode {
+pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanNode {
     // Step 1: Plan the filter — split into ID-tier node + residual document-tier predicate
     let (id_node, residual_filter) = match &query.filter {
         Some(group) => {
-            let (node, residual) = plan_filter(partition, indexed_fields, group);
+            let (node, residual) = plan_filter(collection, indexed_fields, group);
             (node, residual)
         }
         None => (
             PlanNode::Scan {
-                partition: partition.to_string(),
+                collection: collection.to_string(),
             },
             None,
         ),
@@ -125,13 +125,13 @@ pub fn plan(partition: &str, indexed_fields: &[String], query: &Query) -> PlanNo
 /// The residual predicate contains conditions that couldn't be pushed into the ID tier
 /// and must be evaluated against materialized documents.
 fn plan_filter(
-    partition: &str,
+    collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
 ) -> (PlanNode, Option<FilterGroup>) {
     match group.logical {
-        LogicalOp::And => plan_and_group(partition, indexed_fields, group),
-        LogicalOp::Or => plan_or_group(partition, indexed_fields, group),
+        LogicalOp::And => plan_and_group(collection, indexed_fields, group),
+        LogicalOp::Or => plan_or_group(collection, indexed_fields, group),
     }
 }
 
@@ -141,14 +141,14 @@ fn plan_filter(
 /// that matches. If an AND child is a fully-indexable OR group, it can also be
 /// selected. All non-selected children become residual filter.
 fn plan_and_group(
-    partition: &str,
+    collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
 ) -> (PlanNode, Option<FilterGroup>) {
     // Try to find the best ID-tier node from the AND children.
     // First, check for direct Eq conditions on indexed fields (in priority order).
     // Then, check for fully-indexable OR sub-groups.
-    let best = find_best_and_child(partition, indexed_fields, group);
+    let best = find_best_and_child(collection, indexed_fields, group);
 
     match best {
         Some((id_node, consumed_index)) => {
@@ -176,7 +176,7 @@ fn plan_and_group(
             // No indexed condition found — full scan, entire group is residual
             (
                 PlanNode::Scan {
-                    partition: partition.to_string(),
+                    collection: collection.to_string(),
                 },
                 Some(group.clone()),
             )
@@ -192,7 +192,7 @@ fn plan_and_group(
 ///
 /// Returns the ID-tier node and the index of the consumed child.
 fn find_best_and_child(
-    partition: &str,
+    collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
 ) -> Option<(PlanNode, usize)> {
@@ -202,7 +202,7 @@ fn find_best_and_child(
             if let FilterNode::Condition(filter) = child {
                 if filter.operator == Operator::Eq && &filter.field == field {
                     let node = PlanNode::IndexScan {
-                        partition: partition.to_string(),
+                        collection: collection.to_string(),
                         column: filter.field.clone(),
                         value: query_value_to_bson(&filter.value),
                     };
@@ -216,7 +216,7 @@ fn find_best_and_child(
     for (i, child) in group.children.iter().enumerate() {
         if let FilterNode::Group(sub_group) = child {
             if sub_group.logical == LogicalOp::Or {
-                if let Some(id_node) = try_or_index_merge(partition, indexed_fields, sub_group) {
+                if let Some(id_node) = try_or_index_merge(collection, indexed_fields, sub_group) {
                     return Some((id_node, i));
                 }
             }
@@ -235,11 +235,11 @@ fn find_best_and_child(
 /// The full original OR group always becomes the residual filter (recheck),
 /// because each IndexScan branch may over-fetch.
 fn plan_or_group(
-    partition: &str,
+    collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
 ) -> (PlanNode, Option<FilterGroup>) {
-    match try_or_index_merge(partition, indexed_fields, group) {
+    match try_or_index_merge(collection, indexed_fields, group) {
         Some(id_node) => {
             // All branches indexed — use IndexMerge(Or), full group is residual recheck
             (id_node, Some(group.clone()))
@@ -248,7 +248,7 @@ fn plan_or_group(
             // Can't fully index the OR — fall back to Scan
             (
                 PlanNode::Scan {
-                    partition: partition.to_string(),
+                    collection: collection.to_string(),
                 },
                 Some(group.clone()),
             )
@@ -261,7 +261,7 @@ fn plan_or_group(
 /// Returns Some(id_node) if every child can produce an ID-tier node.
 /// Returns None if any child has zero indexed conditions.
 fn try_or_index_merge(
-    partition: &str,
+    collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
 ) -> Option<PlanNode> {
@@ -274,7 +274,7 @@ fn try_or_index_merge(
                     && indexed_fields.iter().any(|f| f == &filter.field)
                 {
                     id_nodes.push(PlanNode::IndexScan {
-                        partition: partition.to_string(),
+                        collection: collection.to_string(),
                         column: filter.field.clone(),
                         value: query_value_to_bson(&filter.value),
                     });
@@ -285,7 +285,7 @@ fn try_or_index_merge(
             }
             FilterNode::Group(sub_group) => {
                 // Recurse: try to get an ID-tier node from the nested group
-                let (id_node, _residual) = plan_filter(partition, indexed_fields, sub_group);
+                let (id_node, _residual) = plan_filter(collection, indexed_fields, sub_group);
                 match &id_node {
                     PlanNode::Scan { .. } => {
                         // Nested group fell back to scan — can't use indexes for this OR
@@ -419,7 +419,7 @@ mod tests {
                 assert_eq!(
                     *input,
                     PlanNode::IndexScan {
-                        partition: "p1".into(),
+                        collection: "p1".into(),
                         column: "status".into(),
                         value: Bson::String("active".into()),
                     }

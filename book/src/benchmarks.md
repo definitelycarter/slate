@@ -19,7 +19,7 @@ Storage model: each collection is a RocksDB column family. Records are stored as
 
 ## Embedded (RocksStore) — 10k Records
 
-Results from a single user partition (10,000 records). Times are consistent across all 3 users.
+Results from a single collection (10,000 records). Times are consistent across all 3 users.
 
 ### Bulk Insert
 
@@ -49,7 +49,7 @@ Results from a single user partition (10,000 records). Times are consistent acro
 
 ## Embedded (RocksStore) — 100k Records
 
-Results from a single user partition (100,000 records). Times are consistent across all 3 users.
+Results from a single collection (100,000 records). Times are consistent across all 3 users.
 
 ### Bulk Insert
 
@@ -228,7 +228,7 @@ Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
 ```
 
 **ID tier** (produces record IDs, no document bytes touched):
-- **Scan**: Iterates all data keys in a partition, yields record IDs.
+- **Scan**: Iterates all data keys in a collection, yields record IDs.
 - **IndexScan**: Scans index keys for a specific `column=value`, yields matching record IDs.
 - **IndexMerge**: Binary combiner with `lhs`/`rhs` children and a `LogicalOp`. `Or` unions ID sets (for OR queries where every branch has an indexed Eq). `And` intersects (supported but not currently emitted).
 
