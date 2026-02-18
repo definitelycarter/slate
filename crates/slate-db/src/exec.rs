@@ -264,12 +264,32 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
 
 fn raw_values_eq(store_val: &RawBsonRef, query_val: &QueryValue) -> bool {
     match (store_val, query_val) {
+        // ── Direct type matches ─────────────────────────────────
         (RawBsonRef::String(a), QueryValue::String(b)) => *a == b.as_str(),
         (RawBsonRef::Int32(a), QueryValue::Int(b)) => (*a as i64) == *b,
         (RawBsonRef::Int64(a), QueryValue::Int(b)) => *a == *b,
         (RawBsonRef::Double(a), QueryValue::Float(b)) => *a == *b,
         (RawBsonRef::Boolean(a), QueryValue::Bool(b)) => *a == *b,
         (RawBsonRef::DateTime(a), QueryValue::Date(b)) => a.timestamp_millis() == (*b * 1000),
+
+        // ── Cross-type coercion: QueryValue::String → BSON type ─
+        (RawBsonRef::Int32(a), QueryValue::String(s)) => {
+            s.parse::<i64>().is_ok_and(|b| (*a as i64) == b)
+        }
+        (RawBsonRef::Int64(a), QueryValue::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Double(a), QueryValue::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Boolean(a), QueryValue::String(s)) => match s.as_str() {
+            "true" => *a,
+            "false" => !*a,
+            _ => false,
+        },
+        (RawBsonRef::DateTime(a), QueryValue::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+            .is_ok_and(|dt| a.timestamp_millis() == dt.timestamp_millis()),
+
+        // ── Cross-type coercion: QueryValue::Int → DateTime (epoch seconds) ─
+        (RawBsonRef::DateTime(a), QueryValue::Int(b)) => a.timestamp_millis() == (*b * 1000),
+
+        // ── Incompatible types: silent exclusion ────────────────
         _ => false,
     }
 }
@@ -280,18 +300,41 @@ fn raw_compare_values(
     predicate: fn(Ordering) -> bool,
 ) -> Result<bool, DbError> {
     match field_value {
-        Some(store_val) => match (store_val, query_val) {
-            (RawBsonRef::Int32(a), QueryValue::Int(b)) => Ok(predicate((*a as i64).cmp(b))),
-            (RawBsonRef::Int64(a), QueryValue::Int(b)) => Ok(predicate(a.cmp(b))),
+        Some(store_val) => Ok(match (store_val, query_val) {
+            // ── Direct type matches ─────────────────────────────
+            (RawBsonRef::Int32(a), QueryValue::Int(b)) => predicate((*a as i64).cmp(b)),
+            (RawBsonRef::Int64(a), QueryValue::Int(b)) => predicate(a.cmp(b)),
             (RawBsonRef::Double(a), QueryValue::Float(b)) => {
-                Ok(predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal)))
+                predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
             }
             (RawBsonRef::DateTime(a), QueryValue::Date(b)) => {
-                Ok(predicate(a.timestamp_millis().cmp(&(*b * 1000))))
+                predicate(a.timestamp_millis().cmp(&(*b * 1000)))
             }
-            (RawBsonRef::String(a), QueryValue::String(b)) => Ok(predicate((*a).cmp(b.as_str()))),
-            _ => Ok(false),
-        },
+            (RawBsonRef::String(a), QueryValue::String(b)) => predicate((*a).cmp(b.as_str())),
+
+            // ── Cross-type coercion: QueryValue::String → BSON type ─
+            (RawBsonRef::Int32(a), QueryValue::String(s)) => s
+                .parse::<i64>()
+                .is_ok_and(|b| predicate((*a as i64).cmp(&b))),
+            (RawBsonRef::Int64(a), QueryValue::String(s)) => {
+                s.parse::<i64>().is_ok_and(|b| predicate(a.cmp(&b)))
+            }
+            (RawBsonRef::Double(a), QueryValue::String(s)) => s
+                .parse::<f64>()
+                .is_ok_and(|b| predicate(a.partial_cmp(&b).unwrap_or(Ordering::Equal))),
+            (RawBsonRef::DateTime(a), QueryValue::String(s)) => {
+                bson::DateTime::parse_rfc3339_str(s)
+                    .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis())))
+            }
+
+            // ── Cross-type coercion: QueryValue::Int → DateTime (epoch seconds) ─
+            (RawBsonRef::DateTime(a), QueryValue::Int(b)) => {
+                predicate(a.timestamp_millis().cmp(&(*b * 1000)))
+            }
+
+            // ── Incompatible types: silent exclusion ────────────
+            _ => false,
+        }),
         None => Ok(false),
     }
 }
@@ -585,5 +628,435 @@ mod tests {
             raw_compare_field_values(Some(RawBsonRef::Int32(10)), Some(RawBsonRef::Int64(10))),
             Ordering::Equal
         );
+    }
+
+    // ── Cross-type coercion: eq ─────────────────────────────────
+
+    #[test]
+    fn coerce_string_to_int32_eq() {
+        let raw = make_raw(&doc! { "score": 50_i32 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("50".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_int64_eq() {
+        let raw = make_raw(&doc! { "score": 50_i64 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("50".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_double_eq() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let filter = Filter {
+            field: "price".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("19.99".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_bool_eq() {
+        let raw = make_raw(&doc! { "active": true });
+        let filter = Filter {
+            field: "active".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("true".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+
+        let filter_false = Filter {
+            field: "active".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("false".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter_false).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_datetime_eq() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-01-15T00:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "created_at": dt });
+        let filter = Filter {
+            field: "created_at".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("2024-01-15T00:00:00Z".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_int_to_datetime_eq() {
+        let dt = bson::DateTime::from_millis(1705276800 * 1000);
+        let raw = make_raw(&doc! { "created_at": dt });
+        let filter = Filter {
+            field: "created_at".into(),
+            operator: Operator::Eq,
+            value: QueryValue::Int(1705276800),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    // ── Cross-type coercion: comparisons ────────────────────────
+
+    #[test]
+    fn coerce_string_to_int_gt() {
+        let raw = make_raw(&doc! { "score": 80_i64 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("50".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+
+        let filter_not = Filter {
+            field: "score".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("100".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_double_lte() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let filter = Filter {
+            field: "price".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("19.99".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+
+        let filter_not = Filter {
+            field: "price".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("19.98".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_datetime_gte() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "updated_at": dt });
+        let filter = Filter {
+            field: "updated_at".into(),
+            operator: Operator::Gte,
+            value: QueryValue::String("2024-01-01T00:00:00Z".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+
+        let filter_not = Filter {
+            field: "updated_at".into(),
+            operator: Operator::Gte,
+            value: QueryValue::String("2025-01-01T00:00:00Z".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_int_to_datetime_lt() {
+        let dt = bson::DateTime::from_millis(1705276800 * 1000);
+        let raw = make_raw(&doc! { "created_at": dt });
+        // epoch seconds after the stored date
+        let filter = Filter {
+            field: "created_at".into(),
+            operator: Operator::Lt,
+            value: QueryValue::Int(1705276800 + 86400),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    // ── Cross-type coercion: full operator coverage ────────────
+
+    #[test]
+    fn coerce_string_to_int_gte() {
+        let raw = make_raw(&doc! { "score": 80_i64 });
+        let f = |op| Filter {
+            field: "score".into(),
+            operator: op,
+            value: QueryValue::String("80".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f(Operator::Gte)).unwrap());
+        let f_above = Filter {
+            field: "score".into(),
+            operator: Operator::Gte,
+            value: QueryValue::String("81".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_above).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_int_lt() {
+        let raw = make_raw(&doc! { "score": 80_i64 });
+        let f = Filter {
+            field: "score".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("100".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "score".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("80".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_int_lte() {
+        let raw = make_raw(&doc! { "score": 80_i64 });
+        let f = Filter {
+            field: "score".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("80".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "score".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("79".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_double_gt() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let f = Filter {
+            field: "price".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("19.98".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "price".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("19.99".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_double_gte() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let f = Filter {
+            field: "price".into(),
+            operator: Operator::Gte,
+            value: QueryValue::String("19.99".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "price".into(),
+            operator: Operator::Gte,
+            value: QueryValue::String("20.00".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_double_lt() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let f = Filter {
+            field: "price".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("20.00".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "price".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("19.99".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_datetime_gt() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("2024-06-15T11:00:00Z".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_datetime_lt() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("2024-06-15T13:00:00Z".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Lt,
+            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_string_to_datetime_lte() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Lte,
+            value: QueryValue::String("2024-06-15T11:00:00Z".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_int_to_datetime_gt() {
+        let dt = bson::DateTime::from_millis(1705276800 * 1000);
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Gt,
+            value: QueryValue::Int(1705276800 - 1),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Gt,
+            value: QueryValue::Int(1705276800),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_int_to_datetime_gte() {
+        let dt = bson::DateTime::from_millis(1705276800 * 1000);
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Gte,
+            value: QueryValue::Int(1705276800),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Gte,
+            value: QueryValue::Int(1705276800 + 1),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    #[test]
+    fn coerce_int_to_datetime_lte() {
+        let dt = bson::DateTime::from_millis(1705276800 * 1000);
+        let raw = make_raw(&doc! { "ts": dt });
+        let f = Filter {
+            field: "ts".into(),
+            operator: Operator::Lte,
+            value: QueryValue::Int(1705276800),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        let f_not = Filter {
+            field: "ts".into(),
+            operator: Operator::Lte,
+            value: QueryValue::Int(1705276800 - 1),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+    }
+
+    // ── Silent exclusion on failed coercion ─────────────────────
+
+    #[test]
+    fn coerce_invalid_string_to_int_excludes() {
+        let raw = make_raw(&doc! { "score": 50_i32 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("not_a_number".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_invalid_string_to_double_excludes() {
+        let raw = make_raw(&doc! { "price": 19.99 });
+        let filter = Filter {
+            field: "price".into(),
+            operator: Operator::Gt,
+            value: QueryValue::String("abc".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_invalid_string_to_bool_excludes() {
+        let raw = make_raw(&doc! { "active": true });
+        let filter = Filter {
+            field: "active".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("yes".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_invalid_string_to_datetime_excludes() {
+        let dt = bson::DateTime::parse_rfc3339_str("2024-01-15T00:00:00Z").unwrap();
+        let raw = make_raw(&doc! { "created_at": dt });
+        let filter = Filter {
+            field: "created_at".into(),
+            operator: Operator::Eq,
+            value: QueryValue::String("not-a-date".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    // ── Incompatible types: silent exclusion ────────────────────
+
+    #[test]
+    fn incompatible_bool_vs_int_excludes() {
+        let raw = make_raw(&doc! { "flag": true });
+        let filter = Filter {
+            field: "flag".into(),
+            operator: Operator::Eq,
+            value: QueryValue::Int(1),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn incompatible_string_vs_float_excludes() {
+        let raw = make_raw(&doc! { "name": "hello" });
+        let filter = Filter {
+            field: "name".into(),
+            operator: Operator::Eq,
+            value: QueryValue::Float(1.0),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
 }
