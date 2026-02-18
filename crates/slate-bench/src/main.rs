@@ -1,7 +1,11 @@
+mod alloc;
 mod datagen;
 mod report;
 mod scenarios;
 mod tcp_scenarios;
+
+#[global_allocator]
+static ALLOC: alloc::TrackingAllocator = alloc::TrackingAllocator;
 
 use std::net::TcpListener;
 use std::sync::Arc;
