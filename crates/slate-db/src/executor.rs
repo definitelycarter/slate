@@ -201,6 +201,105 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
             ))
         }
 
+        PlanNode::IndexedSort {
+            sorts,
+            needed,
+            input,
+        } => {
+            // Group-buffered sort: input is ordered by sorts[0] from IndexScan.
+            // Buffer complete groups, sub-sort within groups by sorts[1..], stop early.
+            let source = execute_raw_node(txn, input)?;
+            let primary_field = &sorts[0].field;
+            let needed = *needed;
+
+            // Collect records into groups by primary sort field value.
+            // Each group = all records with the same value for sorts[0].
+            let mut groups: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+            let mut current_group: Vec<(String, Vec<u8>)> = Vec::new();
+            let mut current_value: Option<bson::Bson> = None;
+            let mut total_from_complete_groups: usize = 0;
+
+            for result in source {
+                let (id, cow) = result?;
+                let bytes = cow.into_owned();
+
+                // Extract primary sort field value for group boundary detection.
+                let raw = RawDocument::from_bytes(&bytes)?;
+                let val = exec::raw_get_path(raw, primary_field)?;
+                let val_owned: bson::Bson = match val {
+                    Some(v) => v.try_into().unwrap_or(bson::Bson::Null),
+                    None => bson::Bson::Null,
+                };
+
+                let same_group = match &current_value {
+                    Some(prev) => *prev == val_owned,
+                    None => false,
+                };
+
+                if same_group {
+                    current_group.push((id, bytes));
+                } else {
+                    // New group boundary.
+                    if !current_group.is_empty() {
+                        total_from_complete_groups += current_group.len();
+                        groups.push(std::mem::take(&mut current_group));
+
+                        // If we already have enough from complete groups, stop.
+                        if total_from_complete_groups >= needed {
+                            break;
+                        }
+                    }
+                    current_value = Some(val_owned);
+                    current_group.push((id, bytes));
+                }
+            }
+
+            // Don't forget the last group (may be incomplete if we didn't break).
+            if !current_group.is_empty() {
+                groups.push(current_group);
+            }
+
+            // Sub-sort within each group by sorts[1..].
+            let sub_sorts = &sorts[1..];
+            if !sub_sorts.is_empty() {
+                for group in &mut groups {
+                    group.sort_by(|(a_id, a_bytes), (b_id, b_bytes)| {
+                        for sort in sub_sorts {
+                            let ord = if sort.field == "_id" {
+                                a_id.cmp(b_id)
+                            } else {
+                                let a_raw = RawDocument::from_bytes(a_bytes).ok();
+                                let b_raw = RawDocument::from_bytes(b_bytes).ok();
+                                let a_val = a_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                let b_val = b_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                exec::raw_compare_field_values(a_val, b_val)
+                            };
+                            let ord = match sort.direction {
+                                SortDirection::Asc => ord,
+                                SortDirection::Desc => ord.reverse(),
+                            };
+                            if ord != std::cmp::Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+                }
+            }
+
+            // Flatten groups into a single iterator.
+            let records: Vec<(String, Vec<u8>)> = groups.into_iter().flatten().collect();
+            Ok(Box::new(
+                records
+                    .into_iter()
+                    .map(|(id, bytes)| Ok((id, Cow::Owned(bytes)))),
+            ))
+        }
+
         PlanNode::Limit { skip, take, input } => {
             let source = execute_raw_node(txn, input)?;
             Ok(apply_limit(source, *skip, *take))
