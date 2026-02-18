@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -73,13 +74,17 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
         });
 
         let shutdown = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new((Mutex::new(()), Condvar::new()));
         let sweep_inner = Arc::clone(&inner);
         let sweep_flag = Arc::clone(&shutdown);
+        let sweep_notify = Arc::clone(&notify);
         let interval_secs = config.ttl_sweep_interval_secs;
         let handle = thread::spawn(move || {
             let interval = Duration::from_secs(interval_secs);
             loop {
-                thread::sleep(interval);
+                let (lock, cvar) = &*sweep_notify;
+                let guard = lock.lock().unwrap();
+                let _ = cvar.wait_timeout(guard, interval).unwrap();
                 if sweep_flag.load(Ordering::Relaxed) {
                     break;
                 }
@@ -103,6 +108,7 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
             inner,
             ttl_handle: Some(TtlHandle {
                 shutdown,
+                notify,
                 handle: Some(handle),
             }),
         }
@@ -164,12 +170,14 @@ fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Res
 
 struct TtlHandle {
     shutdown: Arc<AtomicBool>,
+    notify: Arc<(Mutex<()>, Condvar)>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl TtlHandle {
     fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        self.notify.1.notify_one();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
