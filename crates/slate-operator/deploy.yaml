@@ -77,6 +77,6 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: SLATE_SERVER_IMAGE
-              value: slate-server:411db1
+              value: slate-server:d04239
             - name: RUST_LOG
               value: info
