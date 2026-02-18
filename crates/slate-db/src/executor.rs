@@ -206,9 +206,8 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
         PlanNode::Sort { sorts, input } => {
             let source = execute_raw_node(txn, input)?;
 
-            let mut records: Vec<(String, Vec<u8>)> = source
-                .map(|r| r.map(|(id, cow)| (id, cow.into_owned())))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut records: Vec<(String, Cow<'a, [u8]>)> =
+                source.collect::<Result<Vec<_>, _>>()?;
 
             records.sort_by(|(a_id, a_bytes), (b_id, b_bytes)| {
                 for sort in sorts {
@@ -234,11 +233,7 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                 std::cmp::Ordering::Equal
             });
 
-            Ok(Box::new(
-                records
-                    .into_iter()
-                    .map(|(id, bytes)| Ok((id, Cow::Owned(bytes)))),
-            ))
+            Ok(Box::new(records.into_iter().map(|(id, cow)| Ok((id, cow)))))
         }
 
         PlanNode::Limit { skip, take, input } => {
