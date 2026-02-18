@@ -14,7 +14,6 @@ pub trait Loader: Send + Sync {
     fn load(
         &self,
         collection: &str,
-        key: &str,
         metadata: &HashMap<String, String>,
     ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError>;
 }
@@ -26,7 +25,6 @@ impl Loader for NoopLoader {
     fn load(
         &self,
         _collection: &str,
-        _key: &str,
         _metadata: &HashMap<String, String>,
     ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError> {
         Ok(Box::new(std::iter::empty()))

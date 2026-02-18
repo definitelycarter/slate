@@ -10,7 +10,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use slate_client::ClientPool;
-use slate_lists::{ListConfig, ListHttp, ListService, NoopLoader};
+use slate_lists::{ListConfig, ListHttp, NoopLoader};
 use tokio::signal::unix::{SignalKind, signal};
 
 fn load_config() -> ListConfig {
@@ -70,8 +70,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let service = ListService::new(pool, NoopLoader);
-    let handler = Arc::new(ListHttp::new(config, service));
+    let handler = Arc::new(ListHttp::new(config, pool, NoopLoader));
 
     let bind_addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr)

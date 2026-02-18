@@ -112,8 +112,7 @@ fn all_config() -> ListConfig {
 
 fn build_handler(addr: &str, config: ListConfig) -> ListHttp<NoopLoader> {
     let pool = ClientPool::new(addr, 2).unwrap();
-    let service = ListService::new(pool, NoopLoader);
-    ListHttp::new(config, service)
+    ListHttp::new(config, pool, NoopLoader)
 }
 
 // ── GET /config ─────────────────────────────────────────────────
@@ -149,7 +148,6 @@ fn get_data_returns_records() {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/data")
-        .header("x-list-key", "user-1")
         .body(Vec::new())
         .unwrap();
 
@@ -183,7 +181,6 @@ fn get_data_with_filters() {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/data")
-        .header("x-list-key", "user-1")
         .body(serde_json::to_vec(&request_body).unwrap())
         .unwrap();
 
@@ -209,7 +206,6 @@ fn get_data_with_pagination() {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/data")
-        .header("x-list-key", "user-1")
         .body(serde_json::to_vec(&request_body).unwrap())
         .unwrap();
 

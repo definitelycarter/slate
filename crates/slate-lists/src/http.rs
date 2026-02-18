@@ -1,20 +1,33 @@
 use std::collections::HashMap;
 
 use http::{Method, Request, Response, StatusCode};
+use slate_client::ClientPool;
+use slate_query::{FilterGroup, FilterNode, LogicalOp, Query};
 
 use crate::config::ListConfig;
+use crate::error::ListError;
 use crate::loader::Loader;
-use crate::request::ListRequest;
-use crate::service::ListService;
+use crate::request::{ListRequest, ListResponse};
 
 pub struct ListHttp<L: Loader> {
     config: ListConfig,
-    service: ListService<L>,
+    pool: ClientPool,
+    loader: L,
 }
 
 impl<L: Loader> ListHttp<L> {
-    pub fn new(config: ListConfig, service: ListService<L>) -> Self {
-        Self { config, service }
+    const BATCH_SIZE: usize = 1000;
+
+    pub fn new(config: ListConfig, pool: ClientPool, loader: L) -> Self {
+        Self {
+            config,
+            pool,
+            loader,
+        }
+    }
+
+    pub fn loader(&self) -> &L {
+        &self.loader
     }
 
     pub fn handle(&self, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -36,12 +49,6 @@ impl<L: Loader> ListHttp<L> {
     }
 
     fn get_data(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let key = req
-            .headers()
-            .get("x-list-key")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
         let metadata = extract_metadata(req);
 
         let list_request: ListRequest = if req.body().is_empty() {
@@ -53,16 +60,97 @@ impl<L: Loader> ListHttp<L> {
             }
         };
 
-        match self
-            .service
-            .get_list_data(&self.config, key, &list_request, &metadata)
-        {
+        match self.get_list_data(&list_request, &metadata) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
             },
             Err(e) => error_response(e.status_code(), &e.to_string()),
         }
+    }
+
+    fn get_list_data(
+        &self,
+        request: &ListRequest,
+        metadata: &HashMap<String, String>,
+    ) -> Result<ListResponse, ListError> {
+        let collection = &self.config.collection;
+
+        // Load data if collection is empty
+        let count = self.pool.get()?.count(collection, None)?;
+        if count == 0 {
+            let docs_iter = self.loader.load(collection, metadata)?;
+            self.batch_insert(collection, docs_iter)?;
+        }
+
+        // Merge list default filters with user filters
+        let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
+
+        // Build projection from column fields
+        let columns: Vec<String> = self
+            .config
+            .columns
+            .iter()
+            .map(|c| c.field.clone())
+            .collect();
+
+        // Get total count with merged filters (before skip/take)
+        let total = self.pool.get()?.count(collection, merged.as_ref())?;
+
+        // Execute query
+        let query = Query {
+            filter: merged,
+            sort: request.sort.clone(),
+            skip: request.skip,
+            take: request.take,
+            columns: Some(columns),
+        };
+        let records = self.pool.get()?.find(collection, &query)?;
+
+        Ok(ListResponse { records, total })
+    }
+
+    fn batch_insert(
+        &self,
+        collection: &str,
+        docs: Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>,
+    ) -> Result<(), ListError> {
+        let mut batch = Vec::with_capacity(Self::BATCH_SIZE);
+        for doc_result in docs {
+            batch.push(doc_result?);
+            if batch.len() >= Self::BATCH_SIZE {
+                self.pool
+                    .get()?
+                    .insert_many(collection, std::mem::take(&mut batch))?;
+                batch.reserve(Self::BATCH_SIZE);
+            }
+        }
+        if !batch.is_empty() {
+            self.pool.get()?.insert_many(collection, batch)?;
+        }
+        Ok(())
+    }
+}
+
+/// Merge two optional filter groups under a top-level AND.
+///
+/// - Both None → None
+/// - One present → that one
+/// - Both present → AND(list_filters, user_filters)
+pub fn merge_filters(
+    list_filters: Option<&FilterGroup>,
+    user_filters: Option<&FilterGroup>,
+) -> Option<FilterGroup> {
+    match (list_filters, user_filters) {
+        (None, None) => None,
+        (Some(f), None) | (None, Some(f)) => Some(f.clone()),
+        (Some(list), Some(user)) => Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![
+                FilterNode::Group(list.clone()),
+                FilterNode::Group(user.clone()),
+            ],
+        }),
     }
 }
 
