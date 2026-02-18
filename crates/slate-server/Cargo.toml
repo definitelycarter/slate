@@ -14,6 +14,7 @@ slate-query = { path = "../slate-query" }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 bson = "2"
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

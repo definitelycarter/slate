@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: slate-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: slate-operator
+  namespace: slate-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: slate-operator
+rules:
+  # CRDs
+  - apiGroups: ["slate.io"]
+    resources: ["servers", "collections"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["slate.io"]
+    resources: ["servers/status", "collections/status"]
+    verbs: ["get", "patch"]
+  # Owned resources created by the server reconciler
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Controller-runtime needs events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: slate-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: slate-operator
+subjects:
+  - kind: ServiceAccount
+    name: slate-operator
+    namespace: slate-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slate-operator
+  namespace: slate-system
+  labels:
+    app.kubernetes.io/name: slate-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: slate-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: slate-operator
+    spec:
+      serviceAccountName: slate-operator
+      containers:
+        - name: operator
+          image: slate-operator:v11
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SLATE_SERVER_IMAGE
+              value: slate-server:v2
+            - name: RUST_LOG
+              value: info
