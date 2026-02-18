@@ -13,7 +13,7 @@ use kube::{Api, Client, Resource, ResourceExt};
 use tracing::info;
 
 use crate::Error;
-use crate::crd::{Server, ServerPhase, StoreType};
+use crate::crd::{Server, ServerPhase, ServerStatus, StoreType};
 
 pub const SLATE_PORT: i32 = 9600;
 
@@ -265,11 +265,11 @@ async fn patch_server_status(
         "apiVersion": "slate.io/v1",
         "kind": "Server",
         "metadata": { "name": name },
-        "status": {
-            "phase": phase,
-            "ready_generation": ready_generation,
-            "message": message,
-        }
+        "status": ServerStatus {
+            phase: Some(phase.clone()),
+            ready_generation: Some(ready_generation),
+            message: if message.is_empty() { None } else { Some(message.into()) },
+        },
     });
     server_api
         .patch_status(

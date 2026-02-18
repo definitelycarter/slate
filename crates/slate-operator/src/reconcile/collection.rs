@@ -9,7 +9,7 @@ use slate_db::CollectionConfig;
 use tracing::info;
 
 use crate::Error;
-use crate::crd::{Collection, Server, ServerPhase};
+use crate::crd::{Collection, CollectionStatus, Server, ServerPhase};
 use crate::reconcile::server::SLATE_PORT;
 
 pub struct Context {
@@ -137,23 +137,37 @@ pub async fn reconcile(col: Arc<Collection>, ctx: Arc<Context>) -> Result<Action
     }
 
     // Update Collection status with the server generation we just reconciled against.
-    let col_api: Api<Collection> = Api::namespaced(ctx.client.clone(), &ns);
+    patch_collection_status(&ctx.client, &name, &ns, server_ready_gen, &server_addr).await?;
+
+    info!(name, ns, server = %server_ref, generation = server_ready_gen, "collection status updated");
+    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+}
+
+async fn patch_collection_status(
+    client: &Client,
+    name: &str,
+    ns: &str,
+    server_generation: i64,
+    server_address: &str,
+) -> Result<(), Error> {
+    let col_api: Api<Collection> = Api::namespaced(client.clone(), ns);
     let status = serde_json::json!({
         "apiVersion": "slate.io/v1",
         "kind": "Collection",
         "metadata": { "name": name },
-        "status": { "server_generation": server_ready_gen }
+        "status": CollectionStatus {
+            server_generation: Some(server_generation),
+            server_address: Some(server_address.into()),
+        },
     });
     col_api
         .patch_status(
-            &name,
+            name,
             &PatchParams::apply("slate-operator"),
             &Patch::Merge(&status),
         )
         .await?;
-
-    info!(name, ns, server = %server_ref, generation = server_ready_gen, "collection status updated");
-    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+    Ok(())
 }
 
 pub fn error_policy(col: Arc<Collection>, error: &Error, _ctx: Arc<Context>) -> Action {

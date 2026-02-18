@@ -33,3 +33,28 @@ spec:
   server: main-db
   indexes:
     - stage
+---
+apiVersion: slate.io/v1
+kind: ListView
+metadata:
+  name: active-accounts
+  namespace: acme
+spec:
+  collectionRef: accounts
+  title: Active Accounts
+  columns:
+    - header: Name
+      field: name
+      dataType: string
+      width: 200
+      pinned: true
+    - header: Status
+      field: status
+      dataType: string
+      width: 100
+      pinned: false
+    - header: Score
+      field: score
+      dataType: int
+      width: 80
+      pinned: false
