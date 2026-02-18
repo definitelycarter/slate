@@ -42,6 +42,9 @@ Results from a single collection (10,000 records). Times are consistent across a
 | status='active' + sort + take(200) | ~8ms | 200 | IndexScan → Sort → Limit |
 | sort contacts_count + take(200) | ~0.14ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
 | sort contacts_count (no take) | ~21ms | 10,000 | Full sort — no optimization without Limit |
+| sort [contacts_count DESC, name ASC] + take(200) | ~6ms | 200 | IndexedSort — group-buffer ~1 group, sub-sort |
+| sort [status DESC, contacts_count ASC] + take(200) | ~12ms | 200 | IndexedSort — low cardinality, large group |
+| sort [name ASC, contacts_count DESC] + take(200) | ~2.3ms | 200 | Not indexed — full Sort, Limit stops early |
 | last_contacted_at is null (~30%) | ~5ms | ~3,000 | Scan + lazy filter, ~70% rejected |
 | notes is null (~50%) | ~7ms | ~5,000 | Scan + lazy filter |
 | last_contacted_at is not null (~70%) | ~10ms | ~7,000 | Scan + lazy filter |
@@ -74,6 +77,9 @@ Results from a single collection (100,000 records). Times are consistent across 
 | status='active' + sort + take(200) | ~87ms | 200 | IndexScan → Sort → Limit |
 | sort contacts_count + take(200) | ~0.17ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
 | sort contacts_count (no take) | ~239ms | 100,000 | Full sort — no optimization without Limit |
+| sort [contacts_count DESC, name ASC] + take(200) | ~72ms | 200 | IndexedSort — group-buffer ~1k records, sub-sort |
+| sort [status DESC, contacts_count ASC] + take(200) | ~130ms | 200 | IndexedSort — low cardinality (~50k/group) |
+| sort [name ASC, contacts_count DESC] + take(200) | ~22ms | 200 | Not indexed — full Sort, Limit stops early |
 | last_contacted_at is null (~30%) | ~56ms | ~30,000 | Scan + lazy filter, ~70% rejected |
 | notes is null (~50%) | ~76ms | ~50,000 | Scan + lazy filter |
 | last_contacted_at is not null (~70%) | ~103ms | ~70,000 | Scan + lazy filter |
@@ -87,7 +93,8 @@ Results from a single collection (100,000 records). Times are consistent across 
 - **Single key per record**: All columns packed into one value. Reads are a single `get()` or scan iteration — no per-column key overhead.
 - **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). Nested path resolution works directly on `&RawDocument` via `get_document()` chaining.
 - **Lazy ID tier**: `Scan` yields `(id, bytes)` lazily — data is never discarded and re-fetched. `IndexScan` yields `(id, None)` and `ReadRecord` fetches bytes via `txn.get()`. When Limit is present without Sort, the iterator stops early — `take(200)` on 100k records: ~7ms (RocksDB), ~3ms (MemoryStore).
-- **Indexed sort**: When a query sorts on a single indexed field and has a Limit, the planner eliminates the Sort node entirely and replaces Scan with an ordered IndexScan. The limit is pushed into the IndexScan so it stops after `skip + take` index entries. `sort contacts_count + take(200)` on 100k records: ~0.17ms (RocksDB), ~0.08ms (MemoryStore).
+- **Indexed sort (single field)**: When a query sorts on a single indexed field and has a Limit, the planner eliminates the Sort node entirely and replaces Scan with an ordered IndexScan. The limit is pushed into the IndexScan so it stops after `skip + take` index entries. `sort contacts_count + take(200)` on 100k records: ~0.17ms (RocksDB), ~0.08ms (MemoryStore).
+- **Indexed sort (multi-field)**: When `sort[0]` is indexed and a Limit is present, the planner uses an `IndexedSort` node with group-buffering. Records arrive ordered by the first sort field from IndexScan. The executor buffers complete groups (all records with the same value for `sort[0]`), sub-sorts within groups by the remaining sort fields, and stops once enough complete groups cover `skip + take`. High-cardinality first field (`contacts_count`, ~1k/group): ~72ms RocksDB, ~23ms MemoryStore — **74-91% faster** than full Sort (~276ms / ~266ms). Low-cardinality (`status`, ~50k/group): ~130ms / ~80ms — **38-61% faster**.
 - **Sort overhead**: When indexed sort doesn't apply, Sort accesses sort keys lazily from raw bytes but must hold all records in memory via `into_owned()`. Only records that survive the filter pay this cost. This is the dominant cost for sorted queries.
 - **Point lookups**: ~1.7ms (10k) to ~2.4ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
@@ -156,6 +163,8 @@ MessagePack is more compact for structured enum data and handles Rust enums nati
 | Sort (full, ~50%) | 13ms | 138ms | 10.6x |
 | take(200) no sort | 1ms | 7ms | 7.0x |
 | sort + take(200) indexed | 0.14ms | 0.17ms | 1.2x |
+| sort [high card, name] + take(200) | 6ms | 72ms | 12x |
+| sort [low card, count] + take(200) | 12ms | 130ms | 10.8x |
 | 1,000 point lookups | 1.8ms | 2.5ms | 1.4x |
 | Projection (2 cols) | 8ms | 76ms | 9.5x |
 
@@ -195,6 +204,8 @@ Same workload as embedded benchmarks, run against both storage backends. 100k re
 | status='active' + sort | 138ms | 120ms | 1.2x |
 | status='active' + take(200) no sort | 7ms | 3ms | 2.3x |
 | sort contacts_count + take(200) | 0.17ms | 0.08ms | 2.1x |
+| sort [contacts_count, name] + take(200) | 72ms | 23ms | 3.1x |
+| sort [status, contacts_count] + take(200) | 130ms | 80ms | 1.6x |
 | 1,000 point lookups (find_by_id) | 2.5ms | 2.0ms | 1.3x |
 | projection (name, status only) | 76ms | 63ms | 1.2x |
 
@@ -231,7 +242,7 @@ The 6-7x raw read speedup narrows to 1.1-1.3x at the DB level because DB queries
 The query planner builds a three-tier plan tree:
 
 ```
-Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
+Projection(Limit(Sort | IndexedSort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
 ```
 
 **ID tier** (produces record IDs lazily, no document bytes touched):
@@ -243,6 +254,7 @@ Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
 - **ReadRecord**: The boundary between ID and raw tiers. For `Scan` inputs, data flows through lazily (bytes already available). For `IndexScan`/`IndexMerge`, collects IDs (releasing the scan borrow), then fetches each record lazily via `txn.get()`. Yields `(id, Cow<[u8]>)` tuples. MemoryStore returns `Cow::Borrowed` (zero-copy from the snapshot), RocksDB returns `Cow::Owned`.
 - **Filter**: Constructs a borrowed `&RawDocument` view over the `Cow` bytes (zero allocation) and evaluates predicates by accessing individual fields lazily. Records that fail are never deserialized or cloned. AND/OR short-circuit. Supports dot-notation paths.
 - **Sort**: Calls `into_owned()` only on records that survived the filter, then accesses sort keys lazily via `&RawDocument` views. Sorts in memory. Eliminated entirely when the planner detects a single indexed sort field + Limit.
+- **IndexedSort**: Group-buffered sort for multi-field sort queries where `sort[0]` is indexed. Input arrives ordered by the first sort field from IndexScan. Buffers complete groups (all records with the same `sort[0]` value), sub-sorts within groups by `sorts[1..]`, stops after accumulating `skip + take` records from complete groups. Falls back to Sort when `sort[0]` is not indexed, no Limit, or an indexed filter already uses the ID tier.
 - **Limit**: Generic `skip()` + `take()` via `apply_limit` on any raw record iterator.
 
 **Document tier** (materialization):
