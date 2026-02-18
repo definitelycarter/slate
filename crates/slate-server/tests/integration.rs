@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 use std::thread;
 
-use bson::doc;
+use bson::{Bson, doc};
 use slate_client::Client;
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::*;
@@ -57,7 +57,7 @@ fn insert_and_find_one() {
             children: vec![FilterNode::Condition(Filter {
                 field: "_id".into(),
                 operator: Operator::Eq,
-                value: QueryValue::String("acct-1".into()),
+                value: Bson::String("acct-1".into()),
             })],
         }),
         sort: vec![],
@@ -83,7 +83,7 @@ fn find_one_not_found() {
             children: vec![FilterNode::Condition(Filter {
                 field: "_id".into(),
                 operator: Operator::Eq,
-                value: QueryValue::String("nonexistent".into()),
+                value: Bson::String("nonexistent".into()),
             })],
         }),
         sort: vec![],
@@ -130,7 +130,7 @@ fn insert_many_and_find() {
             children: vec![FilterNode::Condition(Filter {
                 field: "status".to_string(),
                 operator: Operator::Eq,
-                value: QueryValue::String("active".to_string()),
+                value: Bson::String("active".to_string()),
             })],
         }),
         sort: vec![],
@@ -160,7 +160,7 @@ fn delete_one() {
         children: vec![FilterNode::Condition(Filter {
             field: "_id".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("acct-1".into()),
+            value: Bson::String("acct-1".into()),
         })],
     };
     let result = client.delete_one(COLLECTION, &filter).unwrap();
@@ -274,7 +274,7 @@ fn update_one_merge() {
         children: vec![FilterNode::Condition(Filter {
             field: "_id".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("acct-1".into()),
+            value: Bson::String("acct-1".into()),
         })],
     };
     let result = client

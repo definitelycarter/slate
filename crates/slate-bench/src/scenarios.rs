@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::thread;
 
+use bson::Bson;
 use slate_db::{CollectionConfig, Database};
 use slate_query::*;
 use slate_store::Store;
@@ -198,7 +199,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "status".to_string(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".to_string()),
+                    value: Bson::String("active".to_string()),
                 })],
             }),
             sort: vec![],
@@ -219,7 +220,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "product_recommendation1".to_string(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("ProductA".to_string()),
+                    value: Bson::String("ProductA".to_string()),
                 })],
             }),
             sort: vec![],
@@ -241,17 +242,17 @@ pub fn query_benchmarks<S: Store>(
                     FilterNode::Condition(Filter {
                         field: "status".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
+                        value: Bson::String("active".to_string()),
                     }),
                     FilterNode::Condition(Filter {
                         field: "product_recommendation1".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("ProductA".to_string()),
+                        value: Bson::String("ProductA".to_string()),
                     }),
                     FilterNode::Condition(Filter {
                         field: "product_recommendation2".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("ProductX".to_string()),
+                        value: Bson::String("ProductX".to_string()),
                     }),
                 ],
             }),
@@ -275,7 +276,7 @@ pub fn query_benchmarks<S: Store>(
                     children: vec![FilterNode::Condition(Filter {
                         field: "status".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
+                        value: Bson::String("active".to_string()),
                     })],
                 }),
                 sort: vec![Sort {
@@ -300,7 +301,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "status".to_string(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".to_string()),
+                    value: Bson::String("active".to_string()),
                 })],
             }),
             sort: vec![],
@@ -323,7 +324,7 @@ pub fn query_benchmarks<S: Store>(
                     children: vec![FilterNode::Condition(Filter {
                         field: "status".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
+                        value: Bson::String("active".to_string()),
                     })],
                 }),
                 sort: vec![Sort {
@@ -348,7 +349,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "status".to_string(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".to_string()),
+                    value: Bson::String("active".to_string()),
                 })],
             }),
             sort: vec![],
@@ -369,7 +370,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "status".to_string(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".to_string()),
+                    value: Bson::String("active".to_string()),
                 })],
             }),
             sort: vec![Sort {
@@ -415,7 +416,7 @@ pub fn query_benchmarks<S: Store>(
                     children: vec![FilterNode::Condition(Filter {
                         field: "product_recommendation1".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("ProductA".to_string()),
+                        value: Bson::String("ProductA".to_string()),
                     })],
                 }),
                 sort: vec![Sort {
@@ -460,7 +461,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "last_contacted_at".to_string(),
                     operator: Operator::IsNull,
-                    value: QueryValue::Bool(true),
+                    value: Bson::Boolean(true),
                 })],
             }),
             sort: vec![],
@@ -481,7 +482,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "notes".to_string(),
                     operator: Operator::IsNull,
-                    value: QueryValue::Bool(true),
+                    value: Bson::Boolean(true),
                 })],
             }),
             sort: vec![],
@@ -502,7 +503,7 @@ pub fn query_benchmarks<S: Store>(
                 children: vec![FilterNode::Condition(Filter {
                     field: "last_contacted_at".to_string(),
                     operator: Operator::IsNull,
-                    value: QueryValue::Bool(false),
+                    value: Bson::Boolean(false),
                 })],
             }),
             sort: vec![],
@@ -524,12 +525,12 @@ pub fn query_benchmarks<S: Store>(
                     FilterNode::Condition(Filter {
                         field: "status".to_string(),
                         operator: Operator::Eq,
-                        value: QueryValue::String("active".to_string()),
+                        value: Bson::String("active".to_string()),
                     }),
                     FilterNode::Condition(Filter {
                         field: "notes".to_string(),
                         operator: Operator::IsNull,
-                        value: QueryValue::Bool(true),
+                        value: Bson::Boolean(true),
                     }),
                 ],
             }),
@@ -698,7 +699,7 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
                             children: vec![FilterNode::Condition(Filter {
                                 field: "status".to_string(),
                                 operator: Operator::Eq,
-                                value: QueryValue::String("active".to_string()),
+                                value: Bson::String("active".to_string()),
                             })],
                         }),
                         sort: vec![],

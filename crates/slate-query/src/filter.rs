@@ -1,13 +1,13 @@
+use bson::Bson;
 use serde::{Deserialize, Serialize};
 
 use crate::operator::Operator;
-use crate::value::QueryValue;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Filter {
     pub field: String,
     pub operator: Operator,
-    pub value: QueryValue,
+    pub value: Bson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

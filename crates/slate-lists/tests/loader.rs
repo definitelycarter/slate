@@ -3,7 +3,7 @@ use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use bson::doc;
+use bson::{Bson, doc};
 use slate_client::{Client, ClientPool};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_lists::*;
@@ -129,7 +129,7 @@ fn active_config() -> ListConfig {
             children: vec![FilterNode::Condition(Filter {
                 field: "status".into(),
                 operator: Operator::Eq,
-                value: QueryValue::String("active".into()),
+                value: Bson::String("active".into()),
             })],
         }),
         columns: vec![
@@ -242,7 +242,7 @@ fn loader_with_user_filters_and_sort() {
                 "condition": {
                     "field": "revenue",
                     "operator": "gt",
-                    "value": { "float": 50000.0 }
+                    "value": 50000.0
                 }
             }]
         },

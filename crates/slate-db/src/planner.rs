@@ -305,7 +305,7 @@ fn find_best_and_child(
                     let node = PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: Some(query_value_to_bson(&filter.value)),
+                        value: Some(filter.value.clone()),
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
@@ -380,7 +380,7 @@ fn try_or_index_merge(
                     id_nodes.push(PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: Some(query_value_to_bson(&filter.value)),
+                        value: Some(filter.value.clone()),
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
@@ -428,24 +428,11 @@ fn try_or_index_merge(
     Some(result)
 }
 
-fn query_value_to_bson(qv: &slate_query::QueryValue) -> bson::Bson {
-    match qv {
-        slate_query::QueryValue::String(s) => bson::Bson::String(s.clone()),
-        slate_query::QueryValue::Int(i) => bson::Bson::Int64(*i),
-        slate_query::QueryValue::Float(f) => bson::Bson::Double(*f),
-        slate_query::QueryValue::Bool(b) => bson::Bson::Boolean(*b),
-        slate_query::QueryValue::Date(d) => {
-            bson::Bson::DateTime(bson::DateTime::from_millis(*d * 1000))
-        }
-        slate_query::QueryValue::Null => bson::Bson::Null,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bson::Bson;
-    use slate_query::{Filter, QueryValue, SortDirection};
+    use slate_query::{Filter, SortDirection};
 
     fn empty_query() -> Query {
         Query {
@@ -457,7 +444,7 @@ mod tests {
         }
     }
 
-    fn eq_filter(field: &str, value: QueryValue) -> FilterGroup {
+    fn eq_filter(field: &str, value: Bson) -> FilterGroup {
         FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -468,7 +455,7 @@ mod tests {
         }
     }
 
-    fn eq_condition(field: &str, value: QueryValue) -> FilterNode {
+    fn eq_condition(field: &str, value: Bson) -> FilterNode {
         FilterNode::Condition(Filter {
             field: field.into(),
             operator: Operator::Eq,
@@ -476,7 +463,7 @@ mod tests {
         })
     }
 
-    fn gt_condition(field: &str, value: QueryValue) -> FilterNode {
+    fn gt_condition(field: &str, value: Bson) -> FilterNode {
         FilterNode::Condition(Filter {
             field: field.into(),
             operator: Operator::Gt,
@@ -500,7 +487,7 @@ mod tests {
     #[test]
     fn plan_with_filter_no_index() {
         let q = Query {
-            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            filter: Some(eq_filter("status", Bson::String("active".into()))),
             ..empty_query()
         };
         let p = plan("p1", &[], &q);
@@ -516,7 +503,7 @@ mod tests {
     fn plan_with_indexed_eq_filter() {
         let indexed = vec!["status".to_string()];
         let q = Query {
-            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            filter: Some(eq_filter("status", Bson::String("active".into()))),
             ..empty_query()
         };
         let p = plan("p1", &indexed, &q);
@@ -546,8 +533,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    eq_condition("status", QueryValue::String("active".into())),
-                    gt_condition("score", QueryValue::Int(50)),
+                    eq_condition("status", Bson::String("active".into())),
+                    gt_condition("score", Bson::Int64(50)),
                 ],
             }),
             ..empty_query()
@@ -593,7 +580,7 @@ mod tests {
     #[test]
     fn plan_with_filter_and_sort() {
         let q = Query {
-            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            filter: Some(eq_filter("status", Bson::String("active".into()))),
             sort: vec![Sort {
                 field: "name".into(),
                 direction: SortDirection::Asc,
@@ -650,8 +637,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    eq_condition("status", QueryValue::String("active".into())),
-                    gt_condition("score", QueryValue::Int(50)),
+                    eq_condition("status", Bson::String("active".into())),
+                    gt_condition("score", Bson::Int64(50)),
                 ],
             }),
             sort: vec![Sort {
@@ -695,8 +682,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    eq_condition("status", QueryValue::String("active".into())),
-                    eq_condition("user_id", QueryValue::String("abc".into())),
+                    eq_condition("status", Bson::String("active".into())),
+                    eq_condition("user_id", Bson::String("abc".into())),
                 ],
             }),
             ..empty_query()
@@ -732,8 +719,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
                 children: vec![
-                    eq_condition("user_id", QueryValue::String("abc".into())),
-                    eq_condition("status", QueryValue::String("active".into())),
+                    eq_condition("user_id", Bson::String("abc".into())),
+                    eq_condition("status", Bson::String("active".into())),
                 ],
             }),
             ..empty_query()
@@ -763,8 +750,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
                 children: vec![
-                    eq_condition("status", QueryValue::String("active".into())),
-                    eq_condition("name", QueryValue::String("test".into())),
+                    eq_condition("status", Bson::String("active".into())),
+                    eq_condition("name", Bson::String("test".into())),
                 ],
             }),
             ..empty_query()
@@ -789,8 +776,8 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
                 children: vec![
-                    eq_condition("status", QueryValue::String("active".into())),
-                    eq_condition("status", QueryValue::String("archived".into())),
+                    eq_condition("status", Bson::String("active".into())),
+                    eq_condition("status", Bson::String("archived".into())),
                 ],
             }),
             ..empty_query()
@@ -818,9 +805,9 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::Or,
                 children: vec![
-                    eq_condition("user_id", QueryValue::Int(1)),
-                    eq_condition("user_id", QueryValue::Int(2)),
-                    eq_condition("user_id", QueryValue::Int(3)),
+                    eq_condition("user_id", Bson::Int64(1)),
+                    eq_condition("user_id", Bson::Int64(2)),
+                    eq_condition("user_id", Bson::Int64(3)),
                 ],
             }),
             ..empty_query()
@@ -856,12 +843,12 @@ mod tests {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
                 children: vec![
-                    eq_condition("user_id", QueryValue::String("abc".into())),
+                    eq_condition("user_id", Bson::String("abc".into())),
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::Or,
                         children: vec![
-                            eq_condition("status", QueryValue::String("active".into())),
-                            eq_condition("status", QueryValue::String("archived".into())),
+                            eq_condition("status", Bson::String("active".into())),
+                            eq_condition("status", Bson::String("archived".into())),
                         ],
                     }),
                 ],
@@ -903,15 +890,15 @@ mod tests {
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::And,
                         children: vec![
-                            eq_condition("user_id", QueryValue::String("abc".into())),
-                            eq_condition("status", QueryValue::String("active".into())),
+                            eq_condition("user_id", Bson::String("abc".into())),
+                            eq_condition("status", Bson::String("active".into())),
                         ],
                     }),
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::And,
                         children: vec![
-                            eq_condition("user_id", QueryValue::String("xyz".into())),
-                            eq_condition("status", QueryValue::String("pending".into())),
+                            eq_condition("user_id", Bson::String("xyz".into())),
+                            eq_condition("status", Bson::String("pending".into())),
                         ],
                     }),
                 ],
@@ -958,11 +945,11 @@ mod tests {
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::And,
                         children: vec![
-                            eq_condition("user_id", QueryValue::String("abc".into())),
-                            gt_condition("score", QueryValue::Int(50)),
+                            eq_condition("user_id", Bson::String("abc".into())),
+                            gt_condition("score", Bson::Int64(50)),
                         ],
                     }),
-                    eq_condition("status", QueryValue::String("active".into())),
+                    eq_condition("status", Bson::String("active".into())),
                 ],
             }),
             ..empty_query()
@@ -1007,15 +994,15 @@ mod tests {
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::Or,
                         children: vec![
-                            eq_condition("user_id", QueryValue::String("abc".into())),
-                            eq_condition("status", QueryValue::String("active".into())),
+                            eq_condition("user_id", Bson::String("abc".into())),
+                            eq_condition("status", Bson::String("active".into())),
                         ],
                     }),
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::Or,
                         children: vec![
-                            gt_condition("count", QueryValue::Int(5)),
-                            eq_condition("name", QueryValue::String("foo".into())),
+                            gt_condition("count", Bson::Int64(5)),
+                            eq_condition("name", Bson::String("foo".into())),
                         ],
                     }),
                 ],
@@ -1040,7 +1027,7 @@ mod tests {
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
-                children: vec![gt_condition("score", QueryValue::Int(50))],
+                children: vec![gt_condition("score", Bson::Int64(50))],
             }),
             ..empty_query()
         };
@@ -1069,11 +1056,11 @@ mod tests {
                     FilterNode::Group(FilterGroup {
                         logical: LogicalOp::Or,
                         children: vec![
-                            eq_condition("status", QueryValue::String("active".into())),
-                            eq_condition("status", QueryValue::String("archived".into())),
+                            eq_condition("status", Bson::String("active".into())),
+                            eq_condition("status", Bson::String("archived".into())),
                         ],
                     }),
-                    gt_condition("score", QueryValue::Int(50)),
+                    gt_condition("score", Bson::Int64(50)),
                 ],
             }),
             ..empty_query()
@@ -1178,7 +1165,7 @@ mod tests {
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
-                children: vec![gt_condition("name", QueryValue::String("a".into()))],
+                children: vec![gt_condition("name", Bson::String("a".into()))],
             }),
             sort: vec![Sort {
                 field: "score".into(),
@@ -1259,7 +1246,7 @@ mod tests {
         // Filter uses IndexScan(status) — id_node is not Scan, so Sort is kept
         let indexed = vec!["status".to_string(), "score".to_string()];
         let q = Query {
-            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            filter: Some(eq_filter("status", Bson::String("active".into()))),
             sort: vec![Sort {
                 field: "score".into(),
                 direction: SortDirection::Desc,
@@ -1443,7 +1430,7 @@ mod tests {
         let q = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
-                children: vec![gt_condition("age", QueryValue::Int(18))],
+                children: vec![gt_condition("age", Bson::Int64(18))],
             }),
             sort: vec![
                 Sort {
@@ -1495,7 +1482,7 @@ mod tests {
         // → can't use indexed sort, falls back to Sort
         let indexed = vec!["status".to_string(), "score".to_string()];
         let q = Query {
-            filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+            filter: Some(eq_filter("status", Bson::String("active".into()))),
             sort: vec![
                 Sort {
                     field: "score".into(),

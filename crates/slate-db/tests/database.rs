@@ -1,7 +1,7 @@
-use bson::doc;
+use bson::{Bson, doc};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::{
-    Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, QueryValue, Sort, SortDirection,
+    Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
 };
 use slate_store::RocksStore;
 
@@ -24,7 +24,7 @@ fn no_filter_query() -> Query {
     }
 }
 
-fn eq_filter(field: &str, value: QueryValue) -> FilterGroup {
+fn eq_filter(field: &str, value: Bson) -> FilterGroup {
     FilterGroup {
         logical: LogicalOp::And,
         children: vec![FilterNode::Condition(Filter {
@@ -82,7 +82,7 @@ fn insert_one_and_find_one() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("_id", QueryValue::String("acct-1".into()))),
+        filter: Some(eq_filter("_id", Bson::String("acct-1".into()))),
         sort: vec![],
         skip: None,
         take: Some(1),
@@ -173,7 +173,7 @@ fn find_eq_filter() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -195,7 +195,7 @@ fn find_gt_filter() {
             children: vec![FilterNode::Condition(Filter {
                 field: "revenue".into(),
                 operator: Operator::Gt,
-                value: QueryValue::Float(80000.0),
+                value: Bson::Double(80000.0),
             })],
         }),
         sort: vec![],
@@ -229,7 +229,7 @@ fn find_isnull_filter() {
             children: vec![FilterNode::Condition(Filter {
                 field: "status".into(),
                 operator: Operator::IsNull,
-                value: QueryValue::Bool(true),
+                value: Bson::Boolean(true),
             })],
         }),
         sort: vec![],
@@ -255,12 +255,12 @@ fn find_or_filter() {
                 FilterNode::Condition(Filter {
                     field: "status".into(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("snoozed".into()),
+                    value: Bson::String("snoozed".into()),
                 }),
                 FilterNode::Condition(Filter {
                     field: "status".into(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("rejected".into()),
+                    value: Bson::String("rejected".into()),
                 }),
             ],
         }),
@@ -349,7 +349,7 @@ fn find_filter_sort_paginate() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![Sort {
             field: "revenue".into(),
             direction: SortDirection::Desc,
@@ -395,7 +395,7 @@ fn find_projection_includes_filter_columns() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -451,7 +451,7 @@ fn update_one_merge() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("acct-1".into()));
+    let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
         .update_one(COLLECTION, &filter, doc! { "status": "rejected" }, false)
         .unwrap();
@@ -471,7 +471,7 @@ fn update_one_no_match() {
     let (db, _dir) = temp_db();
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("nonexistent".into()));
+    let filter = eq_filter("_id", Bson::String("nonexistent".into()));
     let result = txn
         .update_one(COLLECTION, &filter, doc! { "status": "active" }, false)
         .unwrap();
@@ -486,7 +486,7 @@ fn update_one_upsert() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("new-doc".into()));
+    let filter = eq_filter("_id", Bson::String("new-doc".into()));
     let result = txn
         .update_one(
             COLLECTION,
@@ -511,7 +511,7 @@ fn update_many_multiple() {
     seed_records(&db);
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("status", QueryValue::String("active".into()));
+    let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
         .update_many(COLLECTION, &filter, doc! { "status": "archived" })
         .unwrap();
@@ -521,7 +521,7 @@ fn update_many_multiple() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("archived".into()))),
+        filter: Some(eq_filter("status", Bson::String("archived".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -547,7 +547,7 @@ fn replace_one_full_replacement() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("acct-1".into()));
+    let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
         .replace_one(COLLECTION, &filter, doc! { "name": "New Corp" })
         .unwrap();
@@ -580,7 +580,7 @@ fn delete_one_removes_record() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("acct-1".into()));
+    let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn.delete_one(COLLECTION, &filter).unwrap();
     assert_eq!(result.deleted, 1);
     txn.commit().unwrap();
@@ -596,7 +596,7 @@ fn delete_many_removes_matching() {
     seed_records(&db);
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("status", QueryValue::String("active".into()));
+    let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn.delete_many(COLLECTION, &filter).unwrap();
     assert_eq!(result.deleted, 3);
     txn.commit().unwrap();
@@ -624,7 +624,7 @@ fn count_with_filter() {
     seed_records(&db);
 
     let mut txn = db.begin(true).unwrap();
-    let filter = eq_filter("status", QueryValue::String("active".into()));
+    let filter = eq_filter("status", Bson::String("active".into()));
     let count = txn.count(COLLECTION, Some(&filter)).unwrap();
     assert_eq!(count, 3);
 }
@@ -652,7 +652,7 @@ fn create_and_use_index() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -782,7 +782,7 @@ fn index_maintained_on_insert() {
     // Index scan should work
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -809,7 +809,7 @@ fn index_maintained_on_update() {
 
     // Update the indexed field
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(COLLECTION, &filter, doc! { "status": "rejected" }, false)
         .unwrap();
     txn.commit().unwrap();
@@ -817,7 +817,7 @@ fn index_maintained_on_update() {
     // Old index value should not match
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -828,7 +828,7 @@ fn index_maintained_on_update() {
 
     // New index value should match
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("rejected".into()))),
+        filter: Some(eq_filter("status", Bson::String("rejected".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -853,14 +853,14 @@ fn index_maintained_on_delete() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.delete_one(COLLECTION, &filter).unwrap();
     txn.commit().unwrap();
 
     // Index should be empty
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -923,10 +923,7 @@ fn dot_notation_filter_eq() {
 
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter(
-            "address.city",
-            QueryValue::String("Austin".into()),
-        )),
+        filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1080,7 +1077,7 @@ fn dot_notation_isnull_missing_parent() {
             children: vec![FilterNode::Condition(Filter {
                 field: "address.city".into(),
                 operator: Operator::IsNull,
-                value: QueryValue::Bool(true),
+                value: Bson::Boolean(true),
             })],
         }),
         sort: vec![],
@@ -1110,7 +1107,7 @@ fn dot_notation_deep_nesting() {
     let query = Query {
         filter: Some(eq_filter(
             "data.level1.level2.value",
-            QueryValue::String("found".into()),
+            Bson::String("found".into()),
         )),
         sort: vec![],
         skip: None,
@@ -1221,10 +1218,7 @@ fn index_on_nested_path() {
     // Index scan on address.city
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter(
-            "address.city",
-            QueryValue::String("Austin".into()),
-        )),
+        filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1263,7 +1257,7 @@ fn index_on_array_of_scalars() {
     // Query for tag "rust" via index
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1280,7 +1274,7 @@ fn index_on_array_of_scalars() {
 
     // Query for tag "api" via index
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("api".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("api".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1319,7 +1313,7 @@ fn index_on_array_of_objects() {
     // Query for sku "A1"
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("items.[].sku", QueryValue::String("A1".into()))),
+        filter: Some(eq_filter("items.[].sku", Bson::String("A1".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1336,7 +1330,7 @@ fn index_on_array_of_objects() {
 
     // Query for sku "C3"
     let query = Query {
-        filter: Some(eq_filter("items.[].sku", QueryValue::String("C3".into()))),
+        filter: Some(eq_filter("items.[].sku", Bson::String("C3".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1367,7 +1361,7 @@ fn multikey_index_maintained_on_update() {
 
     // Update tags
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one("tags_upd", &filter, doc! { "tags": ["go", "api"] }, false)
         .unwrap();
     txn.commit().unwrap();
@@ -1375,7 +1369,7 @@ fn multikey_index_maintained_on_update() {
     // Old tags should not match
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1386,7 +1380,7 @@ fn multikey_index_maintained_on_update() {
 
     // New tags should match
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("go".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("go".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1412,14 +1406,14 @@ fn multikey_index_maintained_on_delete() {
 
     // Delete
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.delete_one("tags_del", &filter).unwrap();
     txn.commit().unwrap();
 
     // Index entries should be cleaned up
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1455,7 +1449,7 @@ fn multikey_index_backfill() {
     // Verify backfill worked
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1486,7 +1480,7 @@ fn multikey_index_replace_one() {
 
     // Replace entirely
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("r1".into()));
+    let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.replace_one("tags_rep", &filter, doc! { "tags": ["python", "ml"] })
         .unwrap();
     txn.commit().unwrap();
@@ -1494,7 +1488,7 @@ fn multikey_index_replace_one() {
     // Old tags gone
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("rust".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1504,7 +1498,7 @@ fn multikey_index_replace_one() {
 
     // New tags present
     let query = Query {
-        filter: Some(eq_filter("tags.[]", QueryValue::String("python".into()))),
+        filter: Some(eq_filter("tags.[]", Bson::String("python".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1568,7 +1562,7 @@ fn create_collection_idempotent() {
 
 // ── OR / AND index integration tests ────────────────────────────
 
-fn eq_condition(field: &str, value: QueryValue) -> FilterNode {
+fn eq_condition(field: &str, value: Bson) -> FilterNode {
     FilterNode::Condition(Filter {
         field: field.into(),
         operator: Operator::Eq,
@@ -1576,7 +1570,7 @@ fn eq_condition(field: &str, value: QueryValue) -> FilterNode {
     })
 }
 
-fn gt_condition(field: &str, value: QueryValue) -> FilterNode {
+fn gt_condition(field: &str, value: Bson) -> FilterNode {
     FilterNode::Condition(Filter {
         field: field.into(),
         operator: Operator::Gt,
@@ -1626,8 +1620,8 @@ fn find_with_or_indexed() {
         filter: Some(FilterGroup {
             logical: LogicalOp::Or,
             children: vec![
-                eq_condition("user_id", QueryValue::String("abc".into())),
-                eq_condition("status", QueryValue::String("active".into())),
+                eq_condition("user_id", Bson::String("abc".into())),
+                eq_condition("status", Bson::String("active".into())),
             ],
         }),
         ..no_filter_query()
@@ -1648,8 +1642,8 @@ fn find_with_or_same_field() {
         filter: Some(FilterGroup {
             logical: LogicalOp::Or,
             children: vec![
-                eq_condition("status", QueryValue::String("active".into())),
-                eq_condition("status", QueryValue::String("archived".into())),
+                eq_condition("status", Bson::String("active".into())),
+                eq_condition("status", Bson::String("archived".into())),
             ],
         }),
         ..no_filter_query()
@@ -1670,8 +1664,8 @@ fn find_with_or_fallback_scan() {
         filter: Some(FilterGroup {
             logical: LogicalOp::Or,
             children: vec![
-                eq_condition("user_id", QueryValue::String("abc".into())),
-                gt_condition("score", QueryValue::Int(50)),
+                eq_condition("user_id", Bson::String("abc".into())),
+                gt_condition("score", Bson::Int64(50)),
             ],
         }),
         ..no_filter_query()
@@ -1693,8 +1687,8 @@ fn find_with_and_priority() {
         filter: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![
-                eq_condition("status", QueryValue::String("active".into())),
-                eq_condition("user_id", QueryValue::String("abc".into())),
+                eq_condition("status", Bson::String("active".into())),
+                eq_condition("user_id", Bson::String("abc".into())),
             ],
         }),
         ..no_filter_query()
@@ -1718,15 +1712,15 @@ fn find_with_nested_and_or() {
                 FilterNode::Group(FilterGroup {
                     logical: LogicalOp::And,
                     children: vec![
-                        eq_condition("user_id", QueryValue::String("abc".into())),
-                        eq_condition("status", QueryValue::String("active".into())),
+                        eq_condition("user_id", Bson::String("abc".into())),
+                        eq_condition("status", Bson::String("active".into())),
                     ],
                 }),
                 FilterNode::Group(FilterGroup {
                     logical: LogicalOp::And,
                     children: vec![
-                        eq_condition("user_id", QueryValue::String("xyz".into())),
-                        eq_condition("status", QueryValue::String("archived".into())),
+                        eq_condition("user_id", Bson::String("xyz".into())),
+                        eq_condition("status", Bson::String("archived".into())),
                     ],
                 }),
             ],
@@ -1749,9 +1743,9 @@ fn find_with_or_three_values() {
         filter: Some(FilterGroup {
             logical: LogicalOp::Or,
             children: vec![
-                eq_condition("user_id", QueryValue::String("abc".into())),
-                eq_condition("user_id", QueryValue::String("xyz".into())),
-                eq_condition("user_id", QueryValue::String("def".into())),
+                eq_condition("user_id", Bson::String("abc".into())),
+                eq_condition("user_id", Bson::String("xyz".into())),
+                eq_condition("user_id", Bson::String("def".into())),
             ],
         }),
         ..no_filter_query()
@@ -1779,11 +1773,11 @@ fn find_with_or_partial_index_per_branch() {
                 FilterNode::Group(FilterGroup {
                     logical: LogicalOp::And,
                     children: vec![
-                        eq_condition("user_id", QueryValue::String("abc".into())),
-                        gt_condition("score", QueryValue::Int(50)),
+                        eq_condition("user_id", Bson::String("abc".into())),
+                        gt_condition("score", Bson::Int64(50)),
                     ],
                 }),
-                eq_condition("status", QueryValue::String("pending".into())),
+                eq_condition("status", Bson::String("pending".into())),
             ],
         }),
         ..no_filter_query()
@@ -1956,7 +1950,7 @@ fn ttl_purge_cleans_user_indexes() {
     // Index should only have one entry for "active" (doc "b")
     let mut txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
         skip: None,
         take: None,
@@ -1983,7 +1977,7 @@ fn ttl_index_maintained_on_update() {
 
     // Update ttl to the past
     let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", QueryValue::String("a".into()));
+    let filter = eq_filter("_id", Bson::String("a".into()));
     txn.update_one(COLLECTION, &filter, doc! { "ttl": past_ttl() }, false)
         .unwrap();
     txn.commit().unwrap();

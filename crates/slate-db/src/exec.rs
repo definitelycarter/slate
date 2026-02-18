@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
-use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, QueryValue};
+use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator};
 
 use crate::error::DbError;
 
@@ -205,12 +205,12 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
     if filter.field == "_id" {
         return match filter.operator {
             Operator::Eq => match &filter.value {
-                QueryValue::String(s) => Ok(id == s.as_str()),
+                Bson::String(s) => Ok(id == s.as_str()),
                 _ => Ok(false),
             },
             Operator::IsNull => match &filter.value {
-                QueryValue::Bool(true) => Ok(false),
-                QueryValue::Bool(false) => Ok(true),
+                Bson::Boolean(true) => Ok(false),
+                Bson::Boolean(false) => Ok(true),
                 _ => Ok(false),
             },
             _ => Ok(false),
@@ -221,8 +221,8 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
 
     match filter.operator {
         Operator::IsNull => match &filter.value {
-            QueryValue::Bool(true) => Ok(field_value.is_none()),
-            QueryValue::Bool(false) => Ok(field_value.is_some()),
+            Bson::Boolean(true) => Ok(field_value.is_none()),
+            Bson::Boolean(false) => Ok(field_value.is_some()),
             _ => Ok(field_value.is_none()),
         },
         Operator::Eq => match field_value {
@@ -230,19 +230,19 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
             None => Ok(false),
         },
         Operator::IContains => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), QueryValue::String(needle)) => {
+            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
                 Ok(haystack.to_lowercase().contains(&needle.to_lowercase()))
             }
             _ => Ok(false),
         },
         Operator::IStartsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), QueryValue::String(needle)) => {
+            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
                 Ok(haystack.to_lowercase().starts_with(&needle.to_lowercase()))
             }
             _ => Ok(false),
         },
         Operator::IEndsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), QueryValue::String(needle)) => {
+            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
                 Ok(haystack.to_lowercase().ends_with(&needle.to_lowercase()))
             }
             _ => Ok(false),
@@ -262,32 +262,35 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
     }
 }
 
-fn raw_values_eq(store_val: &RawBsonRef, query_val: &QueryValue) -> bool {
+fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
     match (store_val, query_val) {
         // ── Direct type matches ─────────────────────────────────
-        (RawBsonRef::String(a), QueryValue::String(b)) => *a == b.as_str(),
-        (RawBsonRef::Int32(a), QueryValue::Int(b)) => (*a as i64) == *b,
-        (RawBsonRef::Int64(a), QueryValue::Int(b)) => *a == *b,
-        (RawBsonRef::Double(a), QueryValue::Float(b)) => *a == *b,
-        (RawBsonRef::Boolean(a), QueryValue::Bool(b)) => *a == *b,
-        (RawBsonRef::DateTime(a), QueryValue::Date(b)) => a.timestamp_millis() == (*b * 1000),
-
-        // ── Cross-type coercion: QueryValue::String → BSON type ─
-        (RawBsonRef::Int32(a), QueryValue::String(s)) => {
-            s.parse::<i64>().is_ok_and(|b| (*a as i64) == b)
+        (RawBsonRef::String(a), Bson::String(b)) => *a == b.as_str(),
+        (RawBsonRef::Int32(a), Bson::Int32(b)) => *a == *b,
+        (RawBsonRef::Int32(a), Bson::Int64(b)) => (*a as i64) == *b,
+        (RawBsonRef::Int64(a), Bson::Int64(b)) => *a == *b,
+        (RawBsonRef::Int64(a), Bson::Int32(b)) => *a == (*b as i64),
+        (RawBsonRef::Double(a), Bson::Double(b)) => *a == *b,
+        (RawBsonRef::Boolean(a), Bson::Boolean(b)) => *a == *b,
+        (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
+            a.timestamp_millis() == b.timestamp_millis()
         }
-        (RawBsonRef::Int64(a), QueryValue::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Double(a), QueryValue::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Boolean(a), QueryValue::String(s)) => match s.as_str() {
+
+        // ── Cross-type coercion: Bson::String → stored type ─────
+        (RawBsonRef::Int32(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| (*a as i64) == b),
+        (RawBsonRef::Int64(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Double(a), Bson::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Boolean(a), Bson::String(s)) => match s.as_str() {
             "true" => *a,
             "false" => !*a,
             _ => false,
         },
-        (RawBsonRef::DateTime(a), QueryValue::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+        (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
             .is_ok_and(|dt| a.timestamp_millis() == dt.timestamp_millis()),
 
-        // ── Cross-type coercion: QueryValue::Int → DateTime (epoch seconds) ─
-        (RawBsonRef::DateTime(a), QueryValue::Int(b)) => a.timestamp_millis() == (*b * 1000),
+        // ── Cross-type coercion: Bson::Int → DateTime (epoch seconds) ─
+        (RawBsonRef::DateTime(a), Bson::Int64(b)) => a.timestamp_millis() == (*b * 1000),
+        (RawBsonRef::DateTime(a), Bson::Int32(b)) => a.timestamp_millis() == (*b as i64 * 1000),
 
         // ── Incompatible types: silent exclusion ────────────────
         _ => false,
@@ -296,40 +299,43 @@ fn raw_values_eq(store_val: &RawBsonRef, query_val: &QueryValue) -> bool {
 
 fn raw_compare_values(
     field_value: Option<&RawBsonRef>,
-    query_val: &QueryValue,
+    query_val: &Bson,
     predicate: fn(Ordering) -> bool,
 ) -> Result<bool, DbError> {
     match field_value {
         Some(store_val) => Ok(match (store_val, query_val) {
             // ── Direct type matches ─────────────────────────────
-            (RawBsonRef::Int32(a), QueryValue::Int(b)) => predicate((*a as i64).cmp(b)),
-            (RawBsonRef::Int64(a), QueryValue::Int(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Double(a), QueryValue::Float(b)) => {
+            (RawBsonRef::Int32(a), Bson::Int32(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int32(a), Bson::Int64(b)) => predicate((*a as i64).cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int64(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int32(b)) => predicate(a.cmp(&(*b as i64))),
+            (RawBsonRef::Double(a), Bson::Double(b)) => {
                 predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::DateTime(a), QueryValue::Date(b)) => {
-                predicate(a.timestamp_millis().cmp(&(*b * 1000)))
+            (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
+                predicate(a.timestamp_millis().cmp(&b.timestamp_millis()))
             }
-            (RawBsonRef::String(a), QueryValue::String(b)) => predicate((*a).cmp(b.as_str())),
+            (RawBsonRef::String(a), Bson::String(b)) => predicate((*a).cmp(b.as_str())),
 
-            // ── Cross-type coercion: QueryValue::String → BSON type ─
-            (RawBsonRef::Int32(a), QueryValue::String(s)) => s
+            // ── Cross-type coercion: Bson::String → stored type ─
+            (RawBsonRef::Int32(a), Bson::String(s)) => s
                 .parse::<i64>()
                 .is_ok_and(|b| predicate((*a as i64).cmp(&b))),
-            (RawBsonRef::Int64(a), QueryValue::String(s)) => {
+            (RawBsonRef::Int64(a), Bson::String(s)) => {
                 s.parse::<i64>().is_ok_and(|b| predicate(a.cmp(&b)))
             }
-            (RawBsonRef::Double(a), QueryValue::String(s)) => s
+            (RawBsonRef::Double(a), Bson::String(s)) => s
                 .parse::<f64>()
                 .is_ok_and(|b| predicate(a.partial_cmp(&b).unwrap_or(Ordering::Equal))),
-            (RawBsonRef::DateTime(a), QueryValue::String(s)) => {
-                bson::DateTime::parse_rfc3339_str(s)
-                    .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis())))
-            }
+            (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+                .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis()))),
 
-            // ── Cross-type coercion: QueryValue::Int → DateTime (epoch seconds) ─
-            (RawBsonRef::DateTime(a), QueryValue::Int(b)) => {
+            // ── Cross-type coercion: Bson::Int → DateTime (epoch seconds) ─
+            (RawBsonRef::DateTime(a), Bson::Int64(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b * 1000)))
+            }
+            (RawBsonRef::DateTime(a), Bson::Int32(b)) => {
+                predicate(a.timestamp_millis().cmp(&(*b as i64 * 1000)))
             }
 
             // ── Incompatible types: silent exclusion ────────────
@@ -508,12 +514,12 @@ mod tests {
                 FilterNode::Condition(Filter {
                     field: "status".into(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".into()),
+                    value: Bson::String("active".into()),
                 }),
                 FilterNode::Condition(Filter {
                     field: "score".into(),
                     operator: Operator::Gt,
-                    value: QueryValue::Int(50),
+                    value: Bson::Int64(50),
                 }),
             ],
         };
@@ -529,12 +535,12 @@ mod tests {
                 FilterNode::Condition(Filter {
                     field: "status".into(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".into()),
+                    value: Bson::String("active".into()),
                 }),
                 FilterNode::Condition(Filter {
                     field: "score".into(),
                     operator: Operator::Gt,
-                    value: QueryValue::Int(50),
+                    value: Bson::Int64(50),
                 }),
             ],
         };
@@ -550,12 +556,12 @@ mod tests {
                 FilterNode::Condition(Filter {
                     field: "status".into(),
                     operator: Operator::Eq,
-                    value: QueryValue::String("active".into()),
+                    value: Bson::String("active".into()),
                 }),
                 FilterNode::Condition(Filter {
                     field: "score".into(),
                     operator: Operator::Gt,
-                    value: QueryValue::Int(50),
+                    value: Bson::Int64(50),
                 }),
             ],
         };
@@ -568,7 +574,7 @@ mod tests {
         let filter = Filter {
             field: "_id".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("abc123".into()),
+            value: Bson::String("abc123".into()),
         };
         assert!(raw_matches_filter(&raw, "abc123", &filter).unwrap());
         assert!(!raw_matches_filter(&raw, "xyz", &filter).unwrap());
@@ -580,14 +586,14 @@ mod tests {
         let filter = Filter {
             field: "missing".into(),
             operator: Operator::IsNull,
-            value: QueryValue::Bool(true),
+            value: Bson::Boolean(true),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
 
         let filter_not_null = Filter {
             field: "name".into(),
             operator: Operator::IsNull,
-            value: QueryValue::Bool(true),
+            value: Bson::Boolean(true),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter_not_null).unwrap());
     }
@@ -598,7 +604,7 @@ mod tests {
         let filter = Filter {
             field: "name".into(),
             operator: Operator::IContains,
-            value: QueryValue::String("hello".into()),
+            value: Bson::String("hello".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -638,7 +644,7 @@ mod tests {
         let filter = Filter {
             field: "score".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("50".into()),
+            value: Bson::String("50".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -649,7 +655,7 @@ mod tests {
         let filter = Filter {
             field: "score".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("50".into()),
+            value: Bson::String("50".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -660,7 +666,7 @@ mod tests {
         let filter = Filter {
             field: "price".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("19.99".into()),
+            value: Bson::String("19.99".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -671,14 +677,14 @@ mod tests {
         let filter = Filter {
             field: "active".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("true".into()),
+            value: Bson::String("true".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
 
         let filter_false = Filter {
             field: "active".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("false".into()),
+            value: Bson::String("false".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter_false).unwrap());
     }
@@ -690,7 +696,7 @@ mod tests {
         let filter = Filter {
             field: "created_at".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("2024-01-15T00:00:00Z".into()),
+            value: Bson::String("2024-01-15T00:00:00Z".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -702,7 +708,7 @@ mod tests {
         let filter = Filter {
             field: "created_at".into(),
             operator: Operator::Eq,
-            value: QueryValue::Int(1705276800),
+            value: Bson::Int64(1705276800),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -715,14 +721,14 @@ mod tests {
         let filter = Filter {
             field: "score".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("50".into()),
+            value: Bson::String("50".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
 
         let filter_not = Filter {
             field: "score".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("100".into()),
+            value: Bson::String("100".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
     }
@@ -733,14 +739,14 @@ mod tests {
         let filter = Filter {
             field: "price".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("19.99".into()),
+            value: Bson::String("19.99".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
 
         let filter_not = Filter {
             field: "price".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("19.98".into()),
+            value: Bson::String("19.98".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
     }
@@ -752,14 +758,14 @@ mod tests {
         let filter = Filter {
             field: "updated_at".into(),
             operator: Operator::Gte,
-            value: QueryValue::String("2024-01-01T00:00:00Z".into()),
+            value: Bson::String("2024-01-01T00:00:00Z".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
 
         let filter_not = Filter {
             field: "updated_at".into(),
             operator: Operator::Gte,
-            value: QueryValue::String("2025-01-01T00:00:00Z".into()),
+            value: Bson::String("2025-01-01T00:00:00Z".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
     }
@@ -772,7 +778,7 @@ mod tests {
         let filter = Filter {
             field: "created_at".into(),
             operator: Operator::Lt,
-            value: QueryValue::Int(1705276800 + 86400),
+            value: Bson::Int64(1705276800 + 86400),
         };
         assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -785,13 +791,13 @@ mod tests {
         let f = |op| Filter {
             field: "score".into(),
             operator: op,
-            value: QueryValue::String("80".into()),
+            value: Bson::String("80".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f(Operator::Gte)).unwrap());
         let f_above = Filter {
             field: "score".into(),
             operator: Operator::Gte,
-            value: QueryValue::String("81".into()),
+            value: Bson::String("81".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_above).unwrap());
     }
@@ -802,13 +808,13 @@ mod tests {
         let f = Filter {
             field: "score".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("100".into()),
+            value: Bson::String("100".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "score".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("80".into()),
+            value: Bson::String("80".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -819,13 +825,13 @@ mod tests {
         let f = Filter {
             field: "score".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("80".into()),
+            value: Bson::String("80".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "score".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("79".into()),
+            value: Bson::String("79".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -836,13 +842,13 @@ mod tests {
         let f = Filter {
             field: "price".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("19.98".into()),
+            value: Bson::String("19.98".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("19.99".into()),
+            value: Bson::String("19.99".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -853,13 +859,13 @@ mod tests {
         let f = Filter {
             field: "price".into(),
             operator: Operator::Gte,
-            value: QueryValue::String("19.99".into()),
+            value: Bson::String("19.99".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Gte,
-            value: QueryValue::String("20.00".into()),
+            value: Bson::String("20.00".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -870,13 +876,13 @@ mod tests {
         let f = Filter {
             field: "price".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("20.00".into()),
+            value: Bson::String("20.00".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("19.99".into()),
+            value: Bson::String("19.99".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -888,13 +894,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("2024-06-15T11:00:00Z".into()),
+            value: Bson::String("2024-06-15T11:00:00Z".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+            value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -906,13 +912,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("2024-06-15T13:00:00Z".into()),
+            value: Bson::String("2024-06-15T13:00:00Z".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lt,
-            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+            value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -924,13 +930,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("2024-06-15T12:00:00Z".into()),
+            value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
-            value: QueryValue::String("2024-06-15T11:00:00Z".into()),
+            value: Bson::String("2024-06-15T11:00:00Z".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -942,13 +948,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
-            value: QueryValue::Int(1705276800 - 1),
+            value: Bson::Int64(1705276800 - 1),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
-            value: QueryValue::Int(1705276800),
+            value: Bson::Int64(1705276800),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -960,13 +966,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Gte,
-            value: QueryValue::Int(1705276800),
+            value: Bson::Int64(1705276800),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gte,
-            value: QueryValue::Int(1705276800 + 1),
+            value: Bson::Int64(1705276800 + 1),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -978,13 +984,13 @@ mod tests {
         let f = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
-            value: QueryValue::Int(1705276800),
+            value: Bson::Int64(1705276800),
         };
         assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
-            value: QueryValue::Int(1705276800 - 1),
+            value: Bson::Int64(1705276800 - 1),
         };
         assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
     }
@@ -997,7 +1003,7 @@ mod tests {
         let filter = Filter {
             field: "score".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("not_a_number".into()),
+            value: Bson::String("not_a_number".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -1008,7 +1014,7 @@ mod tests {
         let filter = Filter {
             field: "price".into(),
             operator: Operator::Gt,
-            value: QueryValue::String("abc".into()),
+            value: Bson::String("abc".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -1019,7 +1025,7 @@ mod tests {
         let filter = Filter {
             field: "active".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("yes".into()),
+            value: Bson::String("yes".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -1031,7 +1037,7 @@ mod tests {
         let filter = Filter {
             field: "created_at".into(),
             operator: Operator::Eq,
-            value: QueryValue::String("not-a-date".into()),
+            value: Bson::String("not-a-date".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -1044,7 +1050,7 @@ mod tests {
         let filter = Filter {
             field: "flag".into(),
             operator: Operator::Eq,
-            value: QueryValue::Int(1),
+            value: Bson::Int64(1),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
@@ -1055,7 +1061,7 @@ mod tests {
         let filter = Filter {
             field: "name".into(),
             operator: Operator::Eq,
-            value: QueryValue::Float(1.0),
+            value: Bson::Double(1.0),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
