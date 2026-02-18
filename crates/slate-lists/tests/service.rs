@@ -116,7 +116,6 @@ fn test_config() -> ListConfig {
         id: "list-1".into(),
         title: "Active Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -153,7 +152,6 @@ fn no_filter_config() -> ListConfig {
         id: "list-2".into(),
         title: "All Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: None,
         columns: vec![
             Column {
@@ -495,7 +493,6 @@ fn get_list_data_no_matches() {
         id: "list-x".into(),
         title: "Archived".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {

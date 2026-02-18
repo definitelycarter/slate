@@ -56,7 +56,6 @@ fn active_config() -> ListConfig {
         id: "active-accounts".into(),
         title: "Active Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -93,7 +92,6 @@ fn all_config() -> ListConfig {
         id: "all-accounts".into(),
         title: "All Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: None,
         columns: vec![
             Column {
@@ -115,7 +113,6 @@ fn all_config() -> ListConfig {
 fn build_handler(addr: &str, config: ListConfig) -> ListHttp<NoopLoader> {
     let pool = ClientPool::new(addr, 2).unwrap();
     let service = ListService::new(pool, NoopLoader);
-    service.ensure_collection(&config).unwrap();
     ListHttp::new(config, service)
 }
 

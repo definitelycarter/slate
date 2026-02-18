@@ -56,7 +56,6 @@ fn active_config() -> ListConfig {
         id: "active-accounts".into(),
         title: "Active Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: Some(FilterGroup {
             logical: LogicalOp::And,
             children: vec![FilterNode::Condition(Filter {
@@ -93,7 +92,6 @@ fn all_config() -> ListConfig {
         id: "all-accounts".into(),
         title: "All Accounts".into(),
         collection: COLLECTION.into(),
-        indexes: vec![],
         filters: None,
         columns: vec![
             Column {

@@ -58,3 +58,47 @@ spec:
       dataType: int
       width: 80
       pinned: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: active-accounts-list
+  namespace: acme
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: active-accounts-list
+  template:
+    metadata:
+      labels:
+        app: active-accounts-list
+    spec:
+      containers:
+        - name: slate-lists
+          image: slate-lists:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SLATE_SERVER_ADDR
+              valueFrom:
+                configMapKeyRef:
+                  name: active-accounts-list
+                  key: SLATE_SERVER_ADDR
+            - name: SLATE_COLLECTION
+              valueFrom:
+                configMapKeyRef:
+                  name: active-accounts-list
+                  key: SLATE_COLLECTION
+          volumeMounts:
+            - name: list-config
+              mountPath: /etc/slate
+              readOnly: true
+      volumes:
+        - name: list-config
+          configMap:
+            name: active-accounts-list
+            items:
+              - key: list.json
+                path: list.json

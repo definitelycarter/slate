@@ -6,13 +6,13 @@ edition = "2024"
 [dependencies]
 slate-client = { path = "../slate-client" }
 slate-query = { path = "../slate-query" }
-slate-db = { path = "../slate-db" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bson = "2"
 http = "1"
 
 [dev-dependencies]
+slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store", features = ["memory"] }
 slate-server = { path = "../slate-server" }
 bson = "2"

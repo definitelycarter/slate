@@ -24,13 +24,6 @@ impl<L: Loader> ListService<L> {
         &self.loader
     }
 
-    pub fn ensure_collection(&self, config: &ListConfig) -> Result<(), ListError> {
-        self.pool
-            .get()?
-            .create_collection(&config.collection_config())?;
-        Ok(())
-    }
-
     fn batch_insert(
         &self,
         collection: &str,
