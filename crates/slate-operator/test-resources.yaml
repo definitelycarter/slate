@@ -42,6 +42,8 @@ metadata:
 spec:
   collectionRef: accounts
   title: Active Accounts
+  loader:
+    url: "http://fake-loader.acme.svc.cluster.local:8081"
   columns:
     - header: Name
       field: name
@@ -59,6 +61,42 @@ spec:
       width: 80
       pinned: false
 ---
+# ── Fake Loader ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-loader
+  namespace: acme
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-loader
+  template:
+    metadata:
+      labels:
+        app: fake-loader
+    spec:
+      containers:
+        - name: fake-loader
+          image: slate-loader-fake:14f2c9
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8081
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-loader
+  namespace: acme
+spec:
+  selector:
+    app: fake-loader
+  ports:
+    - port: 8081
+      targetPort: 8081
+---
+# ── Lists Service ────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -76,7 +114,7 @@ spec:
     spec:
       containers:
         - name: slate-lists
-          image: slate-lists:latest
+          image: slate-lists:14f2c9
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -102,3 +140,15 @@ spec:
             items:
               - key: list.json
                 path: list.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: active-accounts-list
+  namespace: acme
+spec:
+  selector:
+    app: active-accounts-list
+  ports:
+    - port: 8080
+      targetPort: 8080

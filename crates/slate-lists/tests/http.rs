@@ -84,6 +84,7 @@ fn active_config() -> ListConfig {
                 pinned: false,
             },
         ],
+        loader: None,
     }
 }
 
@@ -107,6 +108,7 @@ fn all_config() -> ListConfig {
                 pinned: false,
             },
         ],
+        loader: None,
     }
 }
 

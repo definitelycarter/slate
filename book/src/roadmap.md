@@ -59,6 +59,23 @@ loader:
 - **Datasource CRD** → configures loader endpoint, TTL, forwarded headers
 - **Gateway API / Kourier** → routes `/lists/{id}/*` to correct Knative Service
 
+## Cross-Type Numeric Coercion
+
+Stored `Double` values don't match against `Bson::Int64` or `Bson::Int32` filter values (and vice versa). A frontend sending `{"value": 100000}` (JSON integer → `Bson::Int64`) won't match a stored `Double(100000.0)`. Add coercion arms to `raw_values_eq` and `raw_compare_values`:
+
+- `(RawBsonRef::Double, Bson::Int64)` — cast int to f64 and compare
+- `(RawBsonRef::Double, Bson::Int32)` — cast int to f64 and compare
+- `(RawBsonRef::Int64, Bson::Double)` — cast int to f64 and compare
+- `(RawBsonRef::Int32, Bson::Double)` — cast int to f64 and compare
+
+## Array Element Matching
+
+Filtering on array fields (e.g. `triggers.items eq "renewal_due"`) currently returns no results because `RawBsonRef::Array` falls through to the default `false` arm. Add implicit element-wise matching (like MongoDB's behavior without `$elemMatch`):
+
+- `(RawBsonRef::Array(arr), query_val)` — iterate array elements, return true if *any* element satisfies the comparison
+- Applies to `raw_values_eq` (eq) and `raw_compare_values` (gt, gte, lt, lte)
+- Sorting on array fields should remain unsupported (no meaningful scalar ordering)
+
 ## Staleness / TTL
 
 Currently the loader fires when `count == 0`. Add TTL-based staleness:

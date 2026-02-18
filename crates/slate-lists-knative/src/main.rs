@@ -10,7 +10,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use slate_client::ClientPool;
-use slate_lists::{ListConfig, ListHttp, NoopLoader};
+use slate_lists::{HttpLoader, ListConfig, ListHttp, Loader, NoopLoader};
 use tokio::signal::unix::{SignalKind, signal};
 
 fn load_config() -> ListConfig {
@@ -30,7 +30,7 @@ fn load_config() -> ListConfig {
 
 async fn handle(
     req: Request<Incoming>,
-    handler: Arc<ListHttp<NoopLoader>>,
+    handler: Arc<ListHttp<Box<dyn Loader>>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let (parts, body) = req.into_parts();
     let body_bytes = body.collect().await.unwrap().to_bytes().to_vec();
@@ -70,7 +70,18 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let handler = Arc::new(ListHttp::new(config, pool, NoopLoader));
+    let loader: Box<dyn Loader> = match &config.loader {
+        Some(lc) => {
+            eprintln!("loader: http streaming from {}", lc.url);
+            Box::new(HttpLoader::new(lc.url.clone()))
+        }
+        None => {
+            eprintln!("loader: none (data must be pre-populated)");
+            Box::new(NoopLoader)
+        }
+    };
+
+    let handler = Arc::new(ListHttp::new(config, pool, loader));
 
     let bind_addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&bind_addr)

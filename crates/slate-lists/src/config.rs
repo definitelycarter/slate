@@ -8,6 +8,13 @@ pub struct ListConfig {
     pub collection: String,
     pub filters: Option<FilterGroup>,
     pub columns: Vec<Column>,
+    #[serde(default)]
+    pub loader: Option<LoaderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoaderConfig {
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

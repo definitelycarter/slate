@@ -109,12 +109,19 @@ pub async fn reconcile(list: Arc<ListView>, ctx: Arc<Context>) -> Result<Action,
         })
         .collect();
 
+    let loader = list
+        .spec
+        .loader
+        .as_ref()
+        .map(|l| serde_json::json!({ "url": l.url }));
+
     let list_config = serde_json::json!({
         "id": name,
         "title": list.spec.title,
         "collection": col_ref,
         "filters": null,
         "columns": columns,
+        "loader": loader,
     });
 
     let list_config_json =

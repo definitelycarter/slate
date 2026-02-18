@@ -121,6 +121,17 @@ pub struct ListViewSpec {
 
     /// Column definitions for the list view.
     pub columns: Vec<ListColumn>,
+
+    /// Optional loader configuration. If present, the list service will
+    /// stream NDJSON from this URL to populate the collection on first request.
+    #[serde(default)]
+    pub loader: Option<ListLoader>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+pub struct ListLoader {
+    /// URL to fetch NDJSON data from.
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
