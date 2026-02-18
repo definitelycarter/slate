@@ -6,11 +6,16 @@ edition = "2024"
 [dependencies]
 slate-lists = { path = "../slate-lists" }
 slate-client = { path = "../slate-client" }
-slate-db = { path = "../slate-db" }
-slate-store = { path = "../slate-store", features = ["memory"] }
-slate-server = { path = "../slate-server" }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-graceful", "http1"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
+
+[dev-dependencies]
+slate-server = { path = "../slate-server" }
+slate-store = { path = "../slate-store", features = ["memory"] }
+slate-db = { path = "../slate-db" }
+slate-query = { path = "../slate-query" }
+bson = "2"
+http = "1"

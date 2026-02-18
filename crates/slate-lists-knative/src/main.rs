@@ -1,7 +1,5 @@
-use std::net::TcpListener;
 use std::pin::pin;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
@@ -12,10 +10,7 @@ use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use hyper_util::server::graceful::GracefulShutdown;
 use slate_client::ClientPool;
-use slate_db::Database;
 use slate_lists::{ListConfig, ListHttp, ListService, NoopLoader};
-use slate_server::Server;
-use slate_store::MemoryStore;
 use tokio::signal::unix::{SignalKind, signal};
 
 fn load_config() -> ListConfig {
@@ -31,23 +26,6 @@ fn load_config() -> ListConfig {
         eprintln!("failed to parse config from {path}: {e}");
         std::process::exit(1);
     })
-}
-
-fn start_tcp_server() -> String {
-    let store = MemoryStore::new();
-    let db = Database::new(store);
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    drop(listener);
-
-    let server = Server::new(db, &addr);
-    thread::spawn(move || {
-        server.serve().expect("tcp server failed");
-    });
-
-    thread::sleep(Duration::from_millis(50));
-    addr
 }
 
 async fn handle(
@@ -79,12 +57,15 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4);
 
+    let server_addr = std::env::var("SLATE_SERVER_ADDR").unwrap_or_else(|_| {
+        eprintln!("SLATE_SERVER_ADDR is required");
+        std::process::exit(1);
+    });
+
     eprintln!("loading list: {} ({})", config.title, config.id);
+    eprintln!("connecting to slate-server at {server_addr}");
 
-    let tcp_addr = start_tcp_server();
-    eprintln!("in-process tcp server on {tcp_addr}");
-
-    let pool = ClientPool::new(&tcp_addr, pool_size).unwrap_or_else(|e| {
+    let pool = ClientPool::new(&server_addr, pool_size).unwrap_or_else(|e| {
         eprintln!("failed to create client pool: {e}");
         std::process::exit(1);
     });

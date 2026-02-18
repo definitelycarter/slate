@@ -1231,6 +1231,8 @@ dependencies = [
 name = "slate-lists-knative"
 version = "0.1.0"
 dependencies = [
+ "bson",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -1238,6 +1240,7 @@ dependencies = [
  "slate-client",
  "slate-db",
  "slate-lists",
+ "slate-query",
  "slate-server",
  "slate-store",
  "tokio",
