@@ -10,12 +10,15 @@ pub enum PlanNode {
     /// `value: None` scans the entire column index (ordered scan).
     /// `direction` controls iteration order (Asc = forward, Desc = reverse).
     /// `limit` caps the number of index entries to read (pushed down from Limit).
+    /// `complete_groups: true` reads past the limit to finish the last value group,
+    /// ensuring complete groups for downstream sub-sorting by secondary fields.
     IndexScan {
         collection: String,
         column: String,
         value: Option<bson::Bson>,
         direction: SortDirection,
         limit: Option<usize>,
+        complete_groups: bool,
     },
 
     /// Combines ID sets from two child nodes using AND (intersect) or OR (union).
@@ -38,15 +41,6 @@ pub enum PlanNode {
     /// Materialize + sort.
     Sort {
         sorts: Vec<Sort>,
-        input: Box<PlanNode>,
-    },
-
-    /// Group-buffered sort: input is ordered by `sorts[0]` from an IndexScan.
-    /// Buffers complete groups (same value for `sorts[0]`), sub-sorts by `sorts[1..]`.
-    /// Stops after `needed` records from complete groups (skip + take).
-    IndexedSort {
-        sorts: Vec<Sort>,
-        needed: usize,
         input: Box<PlanNode>,
     },
 
@@ -112,15 +106,16 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
     // Scan (no value-filtered IndexScan), we replace Scan with an ordered IndexScan.
     //
     // Single-field sort: eliminate Sort entirely — index provides full ordering.
-    // Multi-field sort: use IndexedSort with group-buffering — index provides
-    //   primary ordering, sub-sort within groups by remaining fields.
+    //   Limit pushdown into IndexScan stops the walk early.
+    // Multi-field sort: IndexScan with complete_groups=true provides primary ordering
+    //   and finishes the last value group. Sort handles sub-sorting by remaining fields.
     let can_use_indexed_sort = !query.sort.is_empty()
         && query.take.is_some()
         && indexed_fields.contains(&query.sort[0].field)
         && id_is_scan;
 
     let node = if can_use_indexed_sort && query.sort.len() == 1 {
-        // Single-field: limit pushdown when no filter.
+        // Single-field: limit pushdown when no filter, exact cutoff is fine.
         let index_limit = if !has_residual_filter {
             Some(query.skip.unwrap_or(0) + query.take.unwrap_or(0))
         } else {
@@ -133,21 +128,27 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
             &query.sort[0].field,
             query.sort[0].direction,
             index_limit,
+            false, // no sub-sort needed
         )
     } else if can_use_indexed_sort {
-        // Multi-field: IndexedSort with group-buffering.
-        // No limit pushdown into IndexScan — we don't know group sizes upfront.
-        let needed = query.skip.unwrap_or(0) + query.take.unwrap_or(0);
+        // Multi-field: push limit into IndexScan with complete_groups=true.
+        // IndexScan reads skip+take entries then finishes the last value group.
+        // Sort handles sub-sorting by sorts[1..] on the reduced record set.
+        let index_limit = if !has_residual_filter {
+            Some(query.skip.unwrap_or(0) + query.take.unwrap_or(0))
+        } else {
+            None
+        };
         let node = replace_scan_with_index_order(
             node,
             collection,
             &query.sort[0].field,
             query.sort[0].direction,
-            None, // no limit pushdown — group-buffering handles early termination
+            index_limit,
+            true, // finish last value group for correct sub-sorting
         );
-        PlanNode::IndexedSort {
+        PlanNode::Sort {
             sorts: query.sort.clone(),
-            needed,
             input: Box::new(node),
         }
     } else if !query.sort.is_empty() {
@@ -190,6 +191,7 @@ fn replace_scan_with_index_order(
     sort_field: &str,
     direction: SortDirection,
     limit: Option<usize>,
+    complete_groups: bool,
 ) -> PlanNode {
     match node {
         PlanNode::ReadRecord { input } if matches!(*input, PlanNode::Scan { .. }) => {
@@ -200,13 +202,19 @@ fn replace_scan_with_index_order(
                     value: None,
                     direction,
                     limit,
+                    complete_groups,
                 }),
             }
         }
         PlanNode::Filter { predicate, input } => PlanNode::Filter {
             predicate,
             input: Box::new(replace_scan_with_index_order(
-                *input, collection, sort_field, direction, limit,
+                *input,
+                collection,
+                sort_field,
+                direction,
+                limit,
+                complete_groups,
             )),
         },
         other => other,
@@ -300,6 +308,7 @@ fn find_best_and_child(
                         value: Some(query_value_to_bson(&filter.value)),
                         direction: SortDirection::Asc,
                         limit: None,
+                        complete_groups: false,
                     };
                     return Some((node, i));
                 }
@@ -374,6 +383,7 @@ fn try_or_index_merge(
                         value: Some(query_value_to_bson(&filter.value)),
                         direction: SortDirection::Asc,
                         limit: None,
+                        complete_groups: false,
                     });
                 } else {
                     // Non-indexed condition in OR — can't use indexes for this OR
@@ -521,6 +531,7 @@ mod tests {
                         value: Some(Bson::String("active".into())),
                         direction: SortDirection::Asc,
                         limit: None,
+                        complete_groups: false,
                     }
                 );
             }
@@ -1281,7 +1292,7 @@ mod tests {
     #[test]
     fn plan_multi_sort_indexed_first_uses_indexed_sort() {
         // sort: [score DESC, name ASC], take: 200, score is indexed
-        // → Limit(IndexedSort(ReadRecord(IndexScan(score, None, Desc))))
+        // → Limit(Sort(ReadRecord(IndexScan(score, None, Desc, limit: 200, complete_groups: true))))
         let indexed = vec!["score".to_string()];
         let q = Query {
             sort: vec![
@@ -1300,16 +1311,11 @@ mod tests {
         let p = plan("p1", &indexed, &q);
         match p {
             PlanNode::Limit { input, .. } => match *input {
-                PlanNode::IndexedSort {
-                    sorts,
-                    needed,
-                    input,
-                } => {
+                PlanNode::Sort { sorts, input } => {
                     assert_eq!(sorts.len(), 2);
                     assert_eq!(sorts[0].field, "score");
                     assert_eq!(sorts[0].direction, SortDirection::Desc);
                     assert_eq!(sorts[1].field, "name");
-                    assert_eq!(needed, 200);
                     match *input {
                         PlanNode::ReadRecord { input } => match *input {
                             PlanNode::IndexScan {
@@ -1317,19 +1323,21 @@ mod tests {
                                 value,
                                 direction,
                                 limit,
+                                complete_groups,
                                 ..
                             } => {
                                 assert_eq!(column, "score");
                                 assert_eq!(value, None);
                                 assert_eq!(direction, SortDirection::Desc);
-                                assert_eq!(limit, None); // no limit pushdown for multi-field
+                                assert_eq!(limit, Some(200));
+                                assert!(complete_groups);
                             }
                             _ => panic!("expected IndexScan"),
                         },
                         _ => panic!("expected ReadRecord"),
                     }
                 }
-                _ => panic!("expected IndexedSort"),
+                _ => panic!("expected Sort"),
             },
             _ => panic!("expected Limit, got {:?}", p),
         }
@@ -1338,7 +1346,7 @@ mod tests {
     #[test]
     fn plan_multi_sort_indexed_first_with_skip() {
         // sort: [score DESC, name ASC], skip: 50, take: 200
-        // → needed = 250
+        // → IndexScan limit = 250 (skip + take), complete_groups: true
         let indexed = vec!["score".to_string()];
         let q = Query {
             sort: vec![
@@ -1358,10 +1366,21 @@ mod tests {
         let p = plan("p1", &indexed, &q);
         match p {
             PlanNode::Limit { input, .. } => match *input {
-                PlanNode::IndexedSort { needed, .. } => {
-                    assert_eq!(needed, 250);
-                }
-                _ => panic!("expected IndexedSort"),
+                PlanNode::Sort { input, .. } => match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::IndexScan {
+                            limit,
+                            complete_groups,
+                            ..
+                        } => {
+                            assert_eq!(limit, Some(250));
+                            assert!(complete_groups);
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                },
+                _ => panic!("expected Sort"),
             },
             _ => panic!("expected Limit, got {:?}", p),
         }
@@ -1370,7 +1389,7 @@ mod tests {
     #[test]
     fn plan_multi_sort_first_not_indexed_keeps_sort() {
         // sort: [name ASC, score DESC], take: 200, score is indexed but name is not
-        // → Limit(Sort(...)) — can't use IndexedSort
+        // → Limit(Sort(...)) — can't use indexed sort
         let indexed = vec!["score".to_string()];
         let q = Query {
             sort: vec![
@@ -1419,7 +1438,7 @@ mod tests {
     #[test]
     fn plan_multi_sort_with_filter_uses_indexed_sort() {
         // sort: [score DESC, name ASC], take: 200, filter: age > 18 (non-indexed)
-        // score indexed, id_is_scan → IndexedSort with Filter
+        // score indexed, id_is_scan → Sort wrapping Filter with IndexScan(complete_groups)
         let indexed = vec!["score".to_string()];
         let q = Query {
             filter: Some(FilterGroup {
@@ -1440,14 +1459,22 @@ mod tests {
             ..empty_query()
         };
         let p = plan("p1", &indexed, &q);
-        // Limit(IndexedSort(Filter(ReadRecord(IndexScan(score, None, Desc)))))
+        // Limit(Sort(Filter(ReadRecord(IndexScan(score, None, Desc, limit: None, complete_groups: true)))))
+        // limit is None because filter prevents pushdown
         match p {
             PlanNode::Limit { input, .. } => match *input {
-                PlanNode::IndexedSort { input, .. } => match *input {
+                PlanNode::Sort { input, .. } => match *input {
                     PlanNode::Filter { input, .. } => match *input {
                         PlanNode::ReadRecord { input } => match *input {
-                            PlanNode::IndexScan { column, .. } => {
+                            PlanNode::IndexScan {
+                                column,
+                                limit,
+                                complete_groups,
+                                ..
+                            } => {
                                 assert_eq!(column, "score");
+                                assert_eq!(limit, None); // filter prevents pushdown
+                                assert!(complete_groups);
                             }
                             _ => panic!("expected IndexScan"),
                         },
@@ -1455,7 +1482,7 @@ mod tests {
                     },
                     _ => panic!("expected Filter"),
                 },
-                _ => panic!("expected IndexedSort"),
+                _ => panic!("expected Sort"),
             },
             _ => panic!("expected Limit, got {:?}", p),
         }
@@ -1465,7 +1492,7 @@ mod tests {
     fn plan_multi_sort_with_indexed_filter_keeps_sort() {
         // filter: status = "active" (indexed) → id_node is IndexScan, not Scan
         // sort: [score DESC, name ASC], take: 200
-        // → can't use IndexedSort, falls back to Sort
+        // → can't use indexed sort, falls back to Sort
         let indexed = vec!["status".to_string(), "score".to_string()];
         let q = Query {
             filter: Some(eq_filter("status", QueryValue::String("active".into()))),

@@ -113,6 +113,22 @@ pub fn index_scan_field_prefix(column: &str) -> Vec<u8> {
     key
 }
 
+/// Extract the value prefix from an index key: `i:{column}\x00{value_bytes}\x00`.
+/// Two index keys with the same field value share this prefix.
+/// Returns the byte slice up to and including the second separator.
+pub fn index_key_value_prefix(key: &[u8]) -> Option<&[u8]> {
+    if !key.starts_with(INDEX_PREFIX) {
+        return None;
+    }
+    let rest = &key[INDEX_PREFIX.len()..];
+    let first_sep = rest.iter().position(|&b| b == SEP)?;
+    let after_first = &rest[first_sep + 1..];
+    let second_sep = after_first.iter().position(|&b| b == SEP)?;
+    // Include everything up to and including the second separator
+    let prefix_len = INDEX_PREFIX.len() + first_sep + 1 + second_sep + 1;
+    Some(&key[..prefix_len])
+}
+
 /// Parse an index key back into (column, record_id).
 ///
 /// Expected format: `i:{column}\x00{value_bytes}\x00{record_id}`

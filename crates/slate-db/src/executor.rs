@@ -42,7 +42,16 @@ fn execute_id_node<'a, T: Transaction + 'a>(
             value,
             direction,
             limit,
-        } => execute_index_scan(txn, collection, column, value.as_ref(), *direction, *limit),
+            complete_groups,
+        } => execute_index_scan(
+            txn,
+            collection,
+            column,
+            value.as_ref(),
+            *direction,
+            *limit,
+            *complete_groups,
+        ),
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
             // IndexMerge must collect both sides for dedup — stays eager.
@@ -99,10 +108,9 @@ fn execute_scan<'a, T: Transaction + 'a>(
     })))
 }
 
-/// Scan an index prefix lazily, yielding (id, None) — index entries have no record data.
-/// `value: Some(v)` scans entries matching a specific value (Eq lookup).
-/// `value: None` scans the entire column index (ordered scan).
-/// `direction` controls forward (Asc) or reverse (Desc) iteration.
+/// Scan an index prefix, yielding (id, None).
+/// When `complete_groups` is true and limit is set, reads past the limit
+/// to finish the last value group for correct downstream sub-sorting.
 fn execute_index_scan<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     collection: &str,
@@ -110,29 +118,61 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     value: Option<&bson::Bson>,
     direction: SortDirection,
     limit: Option<usize>,
+    complete_groups: bool,
 ) -> Result<IdIter<'a>, DbError> {
+    // Some(v): `i:{column}\x00{value_bytes}\x00` — entries matching exact value (Eq filter)
+    // None:    `i:{column}\x00`               — all entries for column (ordered scan)
     let prefix = match value {
         Some(v) => encoding::index_scan_prefix(column, v),
         None => encoding::index_scan_field_prefix(column),
     };
+
     let iter = match direction {
         SortDirection::Asc => txn.scan_prefix(collection, &prefix)?,
         SortDirection::Desc => txn.scan_prefix_rev(collection, &prefix)?,
     };
 
-    let mapped = iter.filter_map(|result| match result {
+    let mut count = 0usize;
+    let mut boundary_prefix: Option<Vec<u8>> = None;
+    let mut done = false;
+
+    let mapped = iter.filter_map(move |result| match result {
         Ok((key, _)) => {
+            if done {
+                return None;
+            }
+
+            // Past the limit — check if the value group changed.
+            if let Some(n) = limit {
+                if count >= n {
+                    if complete_groups {
+                        let val_prefix = encoding::index_key_value_prefix(&key);
+                        let changed = match (&boundary_prefix, val_prefix) {
+                            (Some(prev), Some(cur)) => prev.as_slice() != cur,
+                            _ => false,
+                        };
+                        if changed {
+                            done = true;
+                            return None;
+                        }
+                        if boundary_prefix.is_none() {
+                            boundary_prefix = val_prefix.map(|p| p.to_vec());
+                        }
+                    } else {
+                        done = true;
+                        return None;
+                    }
+                }
+            }
+
             let (_, record_id) = encoding::parse_index_key(&key)?;
+            count += 1;
             Some(Ok((record_id.to_string(), None)))
         }
         Err(e) => Some(Err(DbError::Store(e))),
     });
 
-    // When a limit is pushed down from the planner, cap the index walk early.
-    Ok(match limit {
-        Some(n) => Box::new(mapped.take(n)),
-        None => Box::new(mapped),
-    })
+    Ok(Box::new(mapped))
 }
 
 // ── Raw tier ────────────────────────────────────────────────────
@@ -194,105 +234,6 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                 std::cmp::Ordering::Equal
             });
 
-            Ok(Box::new(
-                records
-                    .into_iter()
-                    .map(|(id, bytes)| Ok((id, Cow::Owned(bytes)))),
-            ))
-        }
-
-        PlanNode::IndexedSort {
-            sorts,
-            needed,
-            input,
-        } => {
-            // Group-buffered sort: input is ordered by sorts[0] from IndexScan.
-            // Buffer complete groups, sub-sort within groups by sorts[1..], stop early.
-            let source = execute_raw_node(txn, input)?;
-            let primary_field = &sorts[0].field;
-            let needed = *needed;
-
-            // Collect records into groups by primary sort field value.
-            // Each group = all records with the same value for sorts[0].
-            let mut groups: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
-            let mut current_group: Vec<(String, Vec<u8>)> = Vec::new();
-            let mut current_value: Option<bson::Bson> = None;
-            let mut total_from_complete_groups: usize = 0;
-
-            for result in source {
-                let (id, cow) = result?;
-                let bytes = cow.into_owned();
-
-                // Extract primary sort field value for group boundary detection.
-                let raw = RawDocument::from_bytes(&bytes)?;
-                let val = exec::raw_get_path(raw, primary_field)?;
-                let val_owned: bson::Bson = match val {
-                    Some(v) => v.try_into().unwrap_or(bson::Bson::Null),
-                    None => bson::Bson::Null,
-                };
-
-                let same_group = match &current_value {
-                    Some(prev) => *prev == val_owned,
-                    None => false,
-                };
-
-                if same_group {
-                    current_group.push((id, bytes));
-                } else {
-                    // New group boundary.
-                    if !current_group.is_empty() {
-                        total_from_complete_groups += current_group.len();
-                        groups.push(std::mem::take(&mut current_group));
-
-                        // If we already have enough from complete groups, stop.
-                        if total_from_complete_groups >= needed {
-                            break;
-                        }
-                    }
-                    current_value = Some(val_owned);
-                    current_group.push((id, bytes));
-                }
-            }
-
-            // Don't forget the last group (may be incomplete if we didn't break).
-            if !current_group.is_empty() {
-                groups.push(current_group);
-            }
-
-            // Sub-sort within each group by sorts[1..].
-            let sub_sorts = &sorts[1..];
-            if !sub_sorts.is_empty() {
-                for group in &mut groups {
-                    group.sort_by(|(a_id, a_bytes), (b_id, b_bytes)| {
-                        for sort in sub_sorts {
-                            let ord = if sort.field == "_id" {
-                                a_id.cmp(b_id)
-                            } else {
-                                let a_raw = RawDocument::from_bytes(a_bytes).ok();
-                                let b_raw = RawDocument::from_bytes(b_bytes).ok();
-                                let a_val = a_raw.and_then(|r| {
-                                    exec::raw_get_path(r, &sort.field).ok().flatten()
-                                });
-                                let b_val = b_raw.and_then(|r| {
-                                    exec::raw_get_path(r, &sort.field).ok().flatten()
-                                });
-                                exec::raw_compare_field_values(a_val, b_val)
-                            };
-                            let ord = match sort.direction {
-                                SortDirection::Asc => ord,
-                                SortDirection::Desc => ord.reverse(),
-                            };
-                            if ord != std::cmp::Ordering::Equal {
-                                return ord;
-                            }
-                        }
-                        std::cmp::Ordering::Equal
-                    });
-                }
-            }
-
-            // Flatten groups into a single iterator.
-            let records: Vec<(String, Vec<u8>)> = groups.into_iter().flatten().collect();
             Ok(Box::new(
                 records
                     .into_iter()
