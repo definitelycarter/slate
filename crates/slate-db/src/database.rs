@@ -381,8 +381,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let entries: Vec<(Vec<u8>, Vec<u8>)> = self
             .txn
             .scan_prefix(collection, &scan_prefix)?
-            .filter_map(|r| r.ok().map(|(k, v)| (k.to_vec(), v.to_vec())))
-            .collect();
+            .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())))
+            .collect::<Result<_, _>>()
+            .map_err(DbError::Store)?;
 
         for (key, value) in entries {
             let record_id = match encoding::parse_record_key(&key) {
@@ -406,8 +407,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let keys: Vec<Vec<u8>> = self
             .txn
             .scan_prefix(collection, &prefix)?
-            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
-            .collect();
+            .map(|r| r.map(|(k, _)| k.to_vec()))
+            .collect::<Result<_, _>>()
+            .map_err(DbError::Store)?;
         for key in keys {
             self.txn.delete(collection, &key)?;
         }
@@ -435,8 +437,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let data_keys: Vec<Vec<u8>> = self
             .txn
             .scan_prefix(collection, &data_prefix)?
-            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
-            .collect();
+            .map(|r| r.map(|(k, _)| k.to_vec()))
+            .collect::<Result<_, _>>()
+            .map_err(DbError::Store)?;
         for key in data_keys {
             self.txn.delete(collection, &key)?;
         }
@@ -446,8 +449,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let idx_keys: Vec<Vec<u8>> = self
             .txn
             .scan_prefix(collection, &idx_prefix)?
-            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
-            .collect();
+            .map(|r| r.map(|(k, _)| k.to_vec()))
+            .collect::<Result<_, _>>()
+            .map_err(DbError::Store)?;
         for key in idx_keys {
             self.txn.delete(collection, &key)?;
         }

@@ -80,8 +80,9 @@ impl Catalog {
         let prefix = idx_collection_prefix(name);
         let keys: Vec<Vec<u8>> = txn
             .scan_prefix(SYS_CF, &prefix)?
-            .filter_map(|r| r.ok().map(|(k, _)| k.to_vec()))
-            .collect();
+            .map(|r| r.map(|(k, _)| k.to_vec()))
+            .collect::<Result<_, _>>()
+            .map_err(DbError::Store)?;
         for key in keys {
             txn.delete(SYS_CF, &key)?;
         }

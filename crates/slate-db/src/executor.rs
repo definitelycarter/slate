@@ -56,11 +56,11 @@ fn execute_id_node<'a, T: Transaction + 'a>(
         PlanNode::IndexMerge { logical, lhs, rhs } => {
             // IndexMerge must collect both sides for dedup — stays eager.
             let left: Vec<String> = execute_id_node(txn, lhs)?
-                .filter_map(|r| r.ok().map(|(id, _)| id))
-                .collect();
+                .map(|r| r.map(|(id, _)| id))
+                .collect::<Result<_, _>>()?;
             let right: Vec<String> = execute_id_node(txn, rhs)?
-                .filter_map(|r| r.ok().map(|(id, _)| id))
-                .collect();
+                .map(|r| r.map(|(id, _)| id))
+                .collect::<Result<_, _>>()?;
 
             let ids = match logical {
                 LogicalOp::Or => {
@@ -193,7 +193,10 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
                 Ok((id, cow)) => {
-                    let raw = RawDocument::from_bytes(&cow).ok()?;
+                    let raw = match RawDocument::from_bytes(&cow) {
+                        Ok(r) => r,
+                        Err(e) => return Some(Err(DbError::from(e))),
+                    };
                     match exec::raw_matches_group(raw, &id, predicate) {
                         Ok(true) => Some(Ok((id, cow))),
                         Ok(false) => None,
@@ -309,8 +312,8 @@ fn execute_read_record<'a, T: Transaction + 'a>(
     // IndexScan/IndexMerge path: collect IDs (releases txn borrow), then fetch lazily.
     let collection = extract_collection(input);
     let ids: Vec<String> = execute_id_node(txn, input)?
-        .filter_map(|r| r.ok().map(|(id, _)| id))
-        .collect();
+        .map(|r| r.map(|(id, _)| id))
+        .collect::<Result<_, _>>()?;
 
     Ok(Box::new(ids.into_iter().filter_map(move |id| {
         let key = encoding::record_key(&id);
