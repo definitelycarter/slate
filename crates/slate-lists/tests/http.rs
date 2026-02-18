@@ -4,7 +4,7 @@ use std::thread;
 use ::http::{Method, Request, StatusCode};
 use bson::doc;
 use slate_client::{Client, ClientPool};
-use slate_db::{CollectionConfig, Database};
+use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_lists::*;
 use slate_query::*;
 use slate_server::Server;
@@ -14,13 +14,13 @@ const COLLECTION: &str = "accounts";
 
 fn start_server() -> String {
     let store = MemoryStore::new();
-    let db = Database::new(store);
+    let db = Database::open(store, DatabaseConfig::default());
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     drop(listener);
 
-    let server = Server::new(db, &addr);
+    let mut server = Server::new(db, &addr);
     thread::spawn(move || {
         server.serve().unwrap();
     });

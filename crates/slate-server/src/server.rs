@@ -26,9 +26,14 @@ impl<S: Store + Send + Sync + 'static> Server<S> {
         }
     }
 
-    pub fn serve(&self) -> Result<(), std::io::Error> {
+    pub fn serve(&mut self) -> Result<(), std::io::Error> {
         let listener = TcpListener::bind(&self.addr)?;
         eprintln!("slate-server listening on {}", self.addr);
+
+        // Write readiness probe file — K8s exec probe checks for this
+        let ready_path = std::env::var("SLATE_READY_FILE").unwrap_or_else(|_| "/tmp/ready".into());
+        std::fs::write(&ready_path, b"")?;
+        eprintln!("readiness file written: {ready_path}");
 
         let shutdown = Arc::new(AtomicBool::new(false));
         flag::register(SIGTERM, Arc::clone(&shutdown))?;
@@ -74,6 +79,11 @@ impl<S: Store + Send + Sync + 'static> Server<S> {
         // Wait for all handlers to finish.
         for handle in handles {
             let _ = handle.join();
+        }
+
+        // All connections are closed — Arc refcount is back to 1.
+        if let Some(db) = Arc::get_mut(&mut self.db) {
+            db.shutdown();
         }
 
         eprintln!("shutdown complete");

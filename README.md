@@ -39,11 +39,11 @@ cargo run --release -p slate-store-bench
 
 ```rust
 use bson::doc;
-use slate_db::Database;
+use slate_db::{Database, DatabaseConfig};
 use slate_store::RocksStore;
 
 let store = RocksStore::open("/tmp/slate-data")?;
-let db = Database::new(store);
+let db = Database::open(store, DatabaseConfig::default());
 
 // Insert
 let mut txn = db.begin(false)?;

@@ -203,7 +203,7 @@ Indexes are maintained automatically on writes. Each indexed field gets entries 
 The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
-let db = Database::new(store);
+let db = Database::open(store, DatabaseConfig::default());
 
 // Create a collection with indexes
 let mut txn = db.begin(false)?;

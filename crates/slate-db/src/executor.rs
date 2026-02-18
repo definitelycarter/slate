@@ -134,45 +134,48 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
 
     let mut count = 0usize;
     let mut boundary_prefix: Option<Vec<u8>> = None;
-    let mut done = false;
+    let mut ids: Vec<Result<(String, Option<Cow<'a, [u8]>>), DbError>> = Vec::new();
 
-    let mapped = iter.filter_map(move |result| match result {
-        Ok((key, _)) => {
-            if done {
-                return None;
-            }
-
-            // Past the limit — check if the value group changed.
-            if let Some(n) = limit {
-                if count >= n {
-                    if complete_groups {
-                        let val_prefix = encoding::index_key_value_prefix(&key);
-                        let changed = match (&boundary_prefix, val_prefix) {
-                            (Some(prev), Some(cur)) => prev.as_slice() != cur,
-                            _ => false,
-                        };
-                        if changed {
-                            done = true;
-                            return None;
+    for result in iter {
+        match result {
+            Ok((key, _)) => {
+                // Past the limit — check if we should stop.
+                if let Some(n) = limit {
+                    if count >= n {
+                        if complete_groups {
+                            let val_prefix = encoding::index_key_value_prefix(&key);
+                            let changed = match (&boundary_prefix, val_prefix) {
+                                (Some(prev), Some(cur)) => prev.as_slice() != cur,
+                                _ => false,
+                            };
+                            if changed {
+                                break;
+                            }
+                            if boundary_prefix.is_none() {
+                                boundary_prefix = val_prefix.map(|p| p.to_vec());
+                            }
+                        } else {
+                            break;
                         }
-                        if boundary_prefix.is_none() {
-                            boundary_prefix = val_prefix.map(|p| p.to_vec());
-                        }
-                    } else {
-                        done = true;
-                        return None;
                     }
                 }
+
+                match encoding::parse_index_key(&key) {
+                    Some((_, record_id)) => {
+                        count += 1;
+                        ids.push(Ok((record_id.to_string(), None)));
+                    }
+                    None => continue,
+                }
             }
-
-            let (_, record_id) = encoding::parse_index_key(&key)?;
-            count += 1;
-            Some(Ok((record_id.to_string(), None)))
+            Err(e) => {
+                ids.push(Err(DbError::Store(e)));
+                break;
+            }
         }
-        Err(e) => Some(Err(DbError::Store(e))),
-    });
+    }
 
-    Ok(Box::new(mapped))
+    Ok(Box::new(ids.into_iter()))
 }
 
 // ── Raw tier ────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Instant;
 
 use slate_client::Client;
-use slate_db::Database;
+use slate_db::{Database, DatabaseConfig};
 use slate_server::Server;
 use slate_store::{MemoryStore, RocksStore, Store};
 
@@ -79,11 +79,11 @@ fn make_rocks_db() -> Database<RocksStore> {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let store = RocksStore::open(dir.path()).expect("failed to open store");
     std::mem::forget(dir);
-    Database::new(store)
+    Database::open(store, DatabaseConfig::default())
 }
 
 fn make_memory_db() -> Database<MemoryStore> {
-    Database::new(MemoryStore::new())
+    Database::open(MemoryStore::new(), DatabaseConfig::default())
 }
 
 fn main() {
@@ -144,7 +144,7 @@ fn main() {
             .to_string();
         drop(listener);
 
-        let server = Server::new(db, &addr);
+        let mut server = Server::new(db, &addr);
         thread::spawn(move || {
             server.serve().expect("server failed");
         });

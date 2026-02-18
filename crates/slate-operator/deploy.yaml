@@ -69,10 +69,10 @@ spec:
       serviceAccountName: slate-operator
       containers:
         - name: operator
-          image: slate-operator:v11
+          image: slate-operator:74302b
           imagePullPolicy: IfNotPresent
           env:
             - name: SLATE_SERVER_IMAGE
-              value: slate-server:v2
+              value: slate-server:74302b
             - name: RUST_LOG
               value: info

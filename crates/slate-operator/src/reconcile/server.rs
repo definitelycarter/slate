@@ -3,15 +3,14 @@ use std::sync::Arc;
 
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, PodSpec, PodTemplateSpec, Service, ServicePort, ServiceSpec,
+    Container, ContainerPort, EnvVar, ExecAction, PodSpec, PodTemplateSpec, Probe, Service,
+    ServicePort, ServiceSpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::{ObjectMeta, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Api, Client, Resource, ResourceExt};
 use tracing::info;
-
-use slate_client::Client as SlateClient;
 
 use crate::Error;
 use crate::crd::{Server, ServerPhase, StoreType};
@@ -119,6 +118,18 @@ pub async fn reconcile(server: Arc<Server>, ctx: Arc<Context>) -> Result<Action,
                         env: Some(env),
                         resources,
                         image_pull_policy: Some("IfNotPresent".into()),
+                        readiness_probe: Some(Probe {
+                            exec: Some(ExecAction {
+                                command: Some(vec![
+                                    "test".into(),
+                                    "-f".into(),
+                                    "/tmp/ready".into(),
+                                ]),
+                            }),
+                            initial_delay_seconds: Some(1),
+                            period_seconds: Some(5),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -227,53 +238,18 @@ pub async fn reconcile(server: Arc<Server>, ctx: Arc<Context>) -> Result<Action,
         return Ok(Action::requeue(std::time::Duration::from_secs(5)));
     }
 
-    // Deployment is rolled out. If generation hasn't changed, we're already Ready.
+    // Deployment is rolled out and pods are ready (readiness probe passed).
+    // If generation hasn't changed, we're already Ready.
     if current_ready_gen == generation && current_phase == Some(&ServerPhase::Ready) {
         info!(name, ns, "server reconciled");
         return Ok(Action::requeue(std::time::Duration::from_secs(300)));
     }
 
-    // Probe the server to verify it's actually accepting connections.
-    let server_addr = format!("{name}.{ns}.svc.cluster.local:{SLATE_PORT}");
-    match SlateClient::connect(&server_addr) {
-        Ok(mut client) => match client.list_collections() {
-            Ok(_) => {
-                info!(name, ns, generation, "probe succeeded, phase -> Ready");
-                patch_server_status(&ctx.client, &name, &ns, &ServerPhase::Ready, generation, "")
-                    .await?;
-                info!(name, ns, "server reconciled");
-                Ok(Action::requeue(std::time::Duration::from_secs(300)))
-            }
-            Err(e) => {
-                let msg = format!("probe failed: {e}");
-                info!(name, ns, %msg, "phase -> Error");
-                patch_server_status(
-                    &ctx.client,
-                    &name,
-                    &ns,
-                    &ServerPhase::Error,
-                    current_ready_gen,
-                    &msg,
-                )
-                .await?;
-                Ok(Action::requeue(std::time::Duration::from_secs(5)))
-            }
-        },
-        Err(e) => {
-            let msg = format!("connection failed: {e}");
-            info!(name, ns, %msg, "phase -> Error");
-            patch_server_status(
-                &ctx.client,
-                &name,
-                &ns,
-                &ServerPhase::Error,
-                current_ready_gen,
-                &msg,
-            )
-            .await?;
-            Ok(Action::requeue(std::time::Duration::from_secs(5)))
-        }
-    }
+    // Pods are ready (K8s readiness probe confirms the server is listening).
+    info!(name, ns, generation, "deployment ready, phase -> Ready");
+    patch_server_status(&ctx.client, &name, &ns, &ServerPhase::Ready, generation, "").await?;
+    info!(name, ns, "server reconciled");
+    Ok(Action::requeue(std::time::Duration::from_secs(300)))
 }
 
 async fn patch_server_status(
@@ -336,7 +312,11 @@ fn deployment_matches(existing: &Deployment, desired: &Deployment) -> bool {
     }
 
     for (e, d) in ex_c.iter().zip(de_c.iter()) {
-        if e.image != d.image || e.env != d.env || e.resources != d.resources {
+        if e.image != d.image
+            || e.env != d.env
+            || e.resources != d.resources
+            || e.readiness_probe != d.readiness_probe
+        {
             return false;
         }
     }

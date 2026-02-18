@@ -1,3 +1,8 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
 use bson::Bson;
 use slate_query::{FilterGroup, Query};
 use slate_store::{Store, Transaction};
@@ -14,26 +19,166 @@ use crate::result::{DeleteResult, InsertResult, UpdateResult};
 const SYS_CF: &str = "_sys";
 const ID_COLUMN: &str = "_id";
 
-pub struct Database<S: Store> {
+pub struct DatabaseConfig {
+    /// Interval in seconds between TTL sweep runs.
+    pub ttl_sweep_interval_secs: u64,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            ttl_sweep_interval_secs: 10,
+        }
+    }
+}
+
+struct StoreInner<S: Store> {
     store: S,
     catalog: Catalog,
 }
 
-impl<S: Store> Database<S> {
-    pub fn new(store: S) -> Self {
-        let _ = store.create_cf(SYS_CF);
-        Self {
-            store,
-            catalog: Catalog,
-        }
-    }
+pub struct Database<S: Store> {
+    inner: Arc<StoreInner<S>>,
+    ttl_handle: Option<TtlHandle>,
+}
 
+impl<S: Store> Database<S> {
     pub fn begin(&self, read_only: bool) -> Result<DatabaseTransaction<'_, S>, DbError> {
-        let txn = self.store.begin(read_only)?;
+        let txn = self.inner.store.begin(read_only)?;
         Ok(DatabaseTransaction {
             txn,
-            catalog: &self.catalog,
+            catalog: &self.inner.catalog,
         })
+    }
+
+    /// Purge expired documents from a collection.
+    pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
+        purge_expired_inner(&self.inner, collection)
+    }
+
+    /// Gracefully stop background tasks.
+    pub fn shutdown(&mut self) {
+        if let Some(mut handle) = self.ttl_handle.take() {
+            handle.stop();
+        }
+    }
+}
+
+impl<S: Store + Send + Sync + 'static> Database<S> {
+    pub fn open(store: S, config: DatabaseConfig) -> Self {
+        let _ = store.create_cf(SYS_CF);
+        let inner = Arc::new(StoreInner {
+            store,
+            catalog: Catalog,
+        });
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sweep_inner = Arc::clone(&inner);
+        let sweep_flag = Arc::clone(&shutdown);
+        let interval_secs = config.ttl_sweep_interval_secs;
+        let handle = thread::spawn(move || {
+            let interval = Duration::from_secs(interval_secs);
+            loop {
+                thread::sleep(interval);
+                if sweep_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                let collections = match sweep_inner.store.begin(true) {
+                    Ok(mut txn) => match Catalog.list_collections(&mut txn) {
+                        Ok(c) => {
+                            let _ = txn.rollback();
+                            c
+                        }
+                        Err(_) => continue,
+                    },
+                    Err(_) => continue,
+                };
+                for col in &collections {
+                    let _ = purge_expired_inner(&sweep_inner, col);
+                }
+            }
+        });
+
+        Self {
+            inner,
+            ttl_handle: Some(TtlHandle {
+                shutdown,
+                handle: Some(handle),
+            }),
+        }
+    }
+}
+
+/// Standalone purge function that works with Arc<StoreInner> for the sweep thread.
+fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Result<u64, DbError> {
+    let mut txn = inner.store.begin(false).map_err(DbError::Store)?;
+    let now_bytes = encoding::encode_datetime_millis(bson::DateTime::now().timestamp_millis());
+
+    let prefix = encoding::index_scan_field_prefix("ttl");
+    let val_start = prefix.len();
+    let val_end = val_start + 8;
+    let id_start = val_end + 1;
+
+    let mut entries: Vec<(Vec<u8>, String)> = Vec::new();
+    for result in txn
+        .scan_prefix(collection, &prefix)
+        .map_err(DbError::Store)?
+    {
+        let (key, _) = result.map_err(DbError::Store)?;
+        if key.len() < id_start {
+            continue;
+        }
+        let value_bytes = &key[val_start..val_end];
+        if value_bytes >= now_bytes.as_slice() {
+            break;
+        }
+        let record_id = match std::str::from_utf8(&key[id_start..]) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        entries.push((key.to_vec(), record_id.to_string()));
+    }
+
+    let mut deleted = 0u64;
+    let indexed_fields = inner.catalog.list_indexes(&mut txn, collection)?;
+
+    for (ttl_key, record_id) in &entries {
+        let data_key = encoding::record_key(record_id);
+        if let Some(bytes) = txn.get(collection, &data_key).map_err(DbError::Store)? {
+            let doc: bson::Document = bson::from_slice(&bytes)?;
+            for field in &indexed_fields {
+                for value in exec::get_path_values(&doc, field) {
+                    let idx_key = encoding::index_key(field, value, record_id);
+                    txn.delete(collection, &idx_key).map_err(DbError::Store)?;
+                }
+            }
+            txn.delete(collection, &data_key).map_err(DbError::Store)?;
+        }
+        txn.delete(collection, ttl_key).map_err(DbError::Store)?;
+        deleted += 1;
+    }
+
+    txn.commit().map_err(DbError::Store)?;
+    Ok(deleted)
+}
+
+struct TtlHandle {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl TtlHandle {
+    fn stop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for TtlHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -69,6 +214,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         // Index maintenance
         let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         self.write_index_entries(collection, &id, &doc, &indexed_fields)?;
+        self.write_ttl_index_entry(collection, &id, &doc)?;
 
         Ok(InsertResult { id })
     }
@@ -95,6 +241,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
             self.write_index_entries(collection, &id, &doc, &indexed_fields)?;
+            self.write_ttl_index_entry(collection, &id, &doc)?;
 
             results.push(InsertResult { id });
         }
@@ -268,6 +415,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
             // Delete old index entries
             self.delete_index_entries(collection, &id, &matched_doc, &indexed_fields)?;
+            self.delete_ttl_index_entry(collection, &id, &matched_doc)?;
 
             // Strip _id from replacement if present
             replacement.remove(ID_COLUMN);
@@ -278,6 +426,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
             // Insert new index entries
             self.write_index_entries(collection, &id, &replacement, &indexed_fields)?;
+            self.write_ttl_index_entry(collection, &id, &replacement)?;
 
             Ok(UpdateResult {
                 matched: 1,
@@ -521,6 +670,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             None => return Ok(false),
         };
 
+        // Track old TTL value before merge
+        let old_ttl = existing.get("ttl").cloned();
+
         // Track old indexed values (multi-key aware)
         let old_indexed: Vec<(String, Vec<Bson>)> = indexed_fields
             .iter()
@@ -571,6 +723,19 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             }
         }
 
+        // TTL index maintenance: diff old vs new ttl value
+        let new_ttl = existing.get("ttl").cloned();
+        if old_ttl != new_ttl {
+            if let Some(Bson::DateTime(dt)) = &old_ttl {
+                let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
+                self.txn.delete(collection, &idx_key)?;
+            }
+            if let Some(Bson::DateTime(dt)) = &new_ttl {
+                let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
+                self.txn.put(collection, &idx_key, &[])?;
+            }
+        }
+
         Ok(true)
     }
 
@@ -589,9 +754,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         if let Some(bytes) = self.txn.get(collection, &key)? {
             let stored: bson::Document = bson::from_slice(&bytes)?;
             self.delete_index_entries(collection, id, &stored, &indexed_fields)?;
+            self.delete_ttl_index_entry(collection, id, &stored)?;
         } else {
             // Fallback: use the doc from find() (skip _id field)
             self.delete_index_entries(collection, id, doc, &indexed_fields)?;
+            self.delete_ttl_index_entry(collection, id, doc)?;
         }
 
         self.txn.delete(collection, &key)?;
@@ -628,6 +795,34 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 let idx_key = encoding::index_key(field, value, id);
                 self.txn.delete(collection, &idx_key)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Write a TTL index entry if the document has a `ttl` DateTime field.
+    fn write_ttl_index_entry(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: &bson::Document,
+    ) -> Result<(), DbError> {
+        if let Some(Bson::DateTime(dt)) = doc.get("ttl") {
+            let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
+            self.txn.put(collection, &idx_key, &[])?;
+        }
+        Ok(())
+    }
+
+    /// Delete a TTL index entry if the document has a `ttl` DateTime field.
+    fn delete_ttl_index_entry(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: &bson::Document,
+    ) -> Result<(), DbError> {
+        if let Some(Bson::DateTime(dt)) = doc.get("ttl") {
+            let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
+            self.txn.delete(collection, &idx_key)?;
         }
         Ok(())
     }

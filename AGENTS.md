@@ -12,6 +12,10 @@ cargo build
 cargo test
 ```
 
+### Operator Testing (Local Kubernetes)
+
+See [crates/slate-operator/TESTING.md](crates/slate-operator/TESTING.md) for the full build, deploy, and validation workflow.
+
 ### Formatting
 
 ```bash

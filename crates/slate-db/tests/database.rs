@@ -1,5 +1,5 @@
 use bson::doc;
-use slate_db::{CollectionConfig, Database};
+use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::{
     Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, QueryValue, Sort, SortDirection,
 };
@@ -10,7 +10,7 @@ const COLLECTION: &str = "accounts";
 fn temp_db() -> (Database<RocksStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = RocksStore::open(dir.path()).unwrap();
-    let db = Database::new(store);
+    let db = Database::open(store, DatabaseConfig::default());
     (db, dir)
 }
 
@@ -1792,4 +1792,234 @@ fn find_with_or_partial_index_per_branch() {
     let results = txn.find("orders", &q).unwrap();
     // (abc AND score > 50): o1(80), o3(90). pending: o6. Union: o1, o3, o6
     assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o6"]);
+}
+
+// ── TTL tests ───────────────────────────────────────────────────
+
+fn past_ttl() -> bson::DateTime {
+    bson::DateTime::from_millis(
+        bson::DateTime::now().timestamp_millis() - 60_000, // 1 minute ago
+    )
+}
+
+fn future_ttl() -> bson::DateTime {
+    bson::DateTime::from_millis(
+        bson::DateTime::now().timestamp_millis() + 600_000, // 10 minutes from now
+    )
+}
+
+#[test]
+fn ttl_expired_docs_visible_before_purge() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
+            doc! { "_id": "b", "name": "Fresh", "ttl": future_ttl() },
+            doc! { "_id": "c", "name": "Permanent" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Expired docs are visible until purge runs
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 3);
+
+    let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
+    assert!(result.is_some());
+
+    let count = txn.count(COLLECTION, None).unwrap();
+    assert_eq!(count, 3);
+}
+
+#[test]
+fn ttl_purge_makes_expired_docs_invisible() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
+            doc! { "_id": "b", "name": "Fresh", "ttl": future_ttl() },
+            doc! { "_id": "c", "name": "Permanent" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Purge removes expired docs
+    let deleted = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(deleted, 1);
+
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Fresh", "Permanent"]);
+
+    let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
+    assert!(result.is_none());
+
+    let count = txn.count(COLLECTION, None).unwrap();
+    assert_eq!(count, 2);
+}
+
+// ── TTL purge tests ─────────────────────────────────────────────
+
+#[test]
+fn ttl_purge_deletes_expired_docs() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
+            doc! { "_id": "b", "name": "Fresh", "ttl": future_ttl() },
+            doc! { "_id": "c", "name": "Permanent" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let purged = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(purged, 1);
+
+    // Expired doc is physically gone
+    let mut txn = db.begin(true).unwrap();
+    // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
+    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 2);
+    let mut names: Vec<_> = results
+        .iter()
+        .map(|r| r.get_str("name").unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["Fresh", "Permanent"]);
+}
+
+#[test]
+fn ttl_purge_skips_unexpired_docs() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "name": "Fresh", "ttl": future_ttl() },
+            doc! { "_id": "b", "name": "Permanent" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let purged = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(purged, 0);
+}
+
+#[test]
+fn ttl_purge_cleans_user_indexes() {
+    let (db, _dir) = temp_db();
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "purge_idx".to_string(),
+        indexes: vec!["status".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "purge_idx",
+        vec![
+            doc! { "_id": "a", "status": "active", "ttl": past_ttl() },
+            doc! { "_id": "b", "status": "active", "ttl": future_ttl() },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let purged = db.purge_expired("purge_idx").unwrap();
+    assert_eq!(purged, 1);
+
+    // Index should only have one entry for "active" (doc "b")
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("status", QueryValue::String("active".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("purge_idx", &query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "b");
+}
+
+#[test]
+fn ttl_index_maintained_on_update() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let old_ttl = future_ttl();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "a", "name": "Doc", "ttl": old_ttl },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Update ttl to the past
+    let mut txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", QueryValue::String("a".into()));
+    txn.update_one(COLLECTION, &filter, doc! { "ttl": past_ttl() }, false)
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Purge should now delete the doc
+    let purged = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(purged, 1);
+
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn ttl_purge_multiple_expired() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "ttl": bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis() - 120_000) },
+            doc! { "_id": "b", "ttl": bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis() - 60_000) },
+            doc! { "_id": "c", "ttl": bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis() - 1_000) },
+            doc! { "_id": "d", "ttl": future_ttl() },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let purged = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(purged, 3);
+
+    let mut txn = db.begin(true).unwrap();
+    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].get_str("_id").unwrap(), "d");
 }

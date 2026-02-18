@@ -152,6 +152,13 @@ pub fn parse_index_key(key: &[u8]) -> Option<(&str, &str)> {
     Some((column, record_id))
 }
 
+/// Encode a DateTime's millisecond timestamp into sortable bytes.
+/// Same encoding as `encode_value` for `Bson::DateTime`.
+pub fn encode_datetime_millis(millis: i64) -> [u8; 8] {
+    let unsigned = (millis as u64) ^ (1u64 << 63);
+    unsigned.to_be_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

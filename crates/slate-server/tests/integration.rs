@@ -3,7 +3,7 @@ use std::thread;
 
 use bson::doc;
 use slate_client::Client;
-use slate_db::{CollectionConfig, Database};
+use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::*;
 use slate_server::Server;
 use slate_store::RocksStore;
@@ -13,13 +13,13 @@ const COLLECTION: &str = "accounts";
 fn start_server() -> (String, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = RocksStore::open(dir.path()).unwrap();
-    let db = Database::new(store);
+    let db = Database::open(store, DatabaseConfig::default());
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     drop(listener);
 
-    let server = Server::new(db, &addr);
+    let mut server = Server::new(db, &addr);
     thread::spawn(move || {
         server.serve().unwrap();
     });
