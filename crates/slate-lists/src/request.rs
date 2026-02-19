@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use slate_query::{FilterGroup, Sort};
+use slate_query::{FilterGroup, Sort, SortDirection};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListRequest {
@@ -14,4 +14,16 @@ pub struct ListRequest {
 pub struct ListResponse {
     pub records: Vec<bson::Document>,
     pub total: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistinctRequest {
+    pub field: String,
+    pub filters: Option<FilterGroup>,
+    pub sort: Option<SortDirection>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DistinctResponse {
+    pub values: Vec<bson::Bson>,
 }

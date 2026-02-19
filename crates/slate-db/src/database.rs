@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use bson::Bson;
-use slate_query::{FilterGroup, Query};
+use slate_query::{DistinctQuery, FilterGroup, Query};
 use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
@@ -523,6 +523,23 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         };
         let results = self.find(collection, &query)?;
         Ok(results.len() as u64)
+    }
+
+    /// Return distinct values for a field, with optional filter and sort.
+    pub fn distinct(
+        &mut self,
+        collection: &str,
+        query: &DistinctQuery,
+    ) -> Result<Vec<Bson>, DbError> {
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let plan = planner::plan_distinct(collection, &indexed_fields, query);
+        match executor::execute_distinct(&mut self.txn, &plan) {
+            Ok(values) => Ok(values),
+            Err(DbError::Store(ref e)) if e.to_string().contains("column family not found") => {
+                Ok(vec![])
+            }
+            Err(e) => Err(e),
+        }
     }
 
     // ── Index operations ────────────────────────────────────────

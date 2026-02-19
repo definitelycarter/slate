@@ -104,6 +104,10 @@ impl<S: Store> Session<S> {
                 txn.drop_collection(&collection)?;
                 Ok(Response::Ok)
             }),
+            Request::Distinct { collection, query } => self.read(|txn| {
+                let values = txn.distinct(&collection, &query)?;
+                Ok(Response::Values(values))
+            }),
         }
     }
 

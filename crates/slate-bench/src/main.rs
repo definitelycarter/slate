@@ -58,6 +58,15 @@ fn run_embedded<S: Store + Send + Sync + 'static>(
         all_results.extend(query_results);
         println!();
 
+        // Phase 3b: Distinct Benchmarks
+        println!("[Phase 3b] Distinct Benchmarks");
+        let distinct_results = scenarios::distinct_benchmarks(&db, user, cfg);
+        for r in &distinct_results {
+            r.print();
+        }
+        all_results.extend(distinct_results);
+        println!();
+
         // Phase 4: Concurrency
         println!("[Phase 4] Concurrency Tests");
         let db_arc = Arc::new(db);

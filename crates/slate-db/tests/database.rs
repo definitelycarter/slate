@@ -1,7 +1,7 @@
 use bson::{Bson, doc};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::{
-    Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
+    DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
 };
 use slate_store::RocksStore;
 
@@ -2016,4 +2016,317 @@ fn ttl_purge_multiple_expired() {
     let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "d");
+}
+
+// ── Distinct tests ──────────────────────────────────────────────
+
+#[test]
+fn distinct_scalar_field() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "active" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "inactive" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "active" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&Bson::String("active".into())));
+    assert!(values.contains(&Bson::String("inactive".into())));
+}
+
+#[test]
+fn distinct_nested_path() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "address": { "city": "Denver" } })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "address.city".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&Bson::String("Austin".into())));
+    assert!(values.contains(&Bson::String("Denver".into())));
+}
+
+#[test]
+fn distinct_array_field() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "tags": ["rust", "db"] })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "tags": ["db", "perf"] })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "tags".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 3);
+    assert!(values.contains(&Bson::String("rust".into())));
+    assert!(values.contains(&Bson::String("db".into())));
+    assert!(values.contains(&Bson::String("perf".into())));
+}
+
+#[test]
+fn distinct_with_filter() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "gold" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "inactive", "tier": "silver" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "silver" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "tier".into(),
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&Bson::String("gold".into())));
+    assert!(values.contains(&Bson::String("silver".into())));
+}
+
+#[test]
+fn distinct_with_sort_asc() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: Some(SortDirection::Asc),
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(
+        values,
+        vec![
+            Bson::String("apple".into()),
+            Bson::String("banana".into()),
+            Bson::String("cherry".into()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_with_sort_desc() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: Some(SortDirection::Desc),
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(
+        values,
+        vec![
+            Bson::String("cherry".into()),
+            Bson::String("banana".into()),
+            Bson::String("apple".into()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_missing_field() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "name": "alice" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "nonexistent".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert!(values.is_empty());
+}
+
+#[test]
+fn distinct_mixed_presence() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "active" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "inactive" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&Bson::String("active".into())));
+    assert!(values.contains(&Bson::String("inactive".into())));
+}
+
+#[test]
+fn distinct_array_of_sub_documents() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "triggers": [{ "type": "email" }, { "type": "sms" }] },
+    )
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "triggers": [{ "type": "sms" }, { "type": "push" }] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "triggers.type".into(),
+        filter: None,
+        sort: Some(SortDirection::Asc),
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(
+        values,
+        vec![
+            Bson::String("email".into()),
+            Bson::String("push".into()),
+            Bson::String("sms".into()),
+        ]
+    );
+}
+
+#[test]
+fn distinct_sub_document() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "address": { "city": "Austin", "state": "TX" } },
+    )
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "address": { "city": "Denver", "state": "CO" } },
+    )
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "address": { "city": "Austin", "state": "TX" } },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "address".into(),
+        filter: None,
+        sort: None,
+    };
+    let values = txn.distinct(COLLECTION, &query).unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&Bson::Document(doc! { "city": "Austin", "state": "TX" })));
+    assert!(values.contains(&Bson::Document(doc! { "city": "Denver", "state": "CO" })));
 }

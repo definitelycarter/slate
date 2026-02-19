@@ -52,6 +52,18 @@ Results from a single collection (10,000 records). Times are consistent across a
 | 1,000 point lookups (find_by_id) | ~1.5ms | 1,000 | Direct key access |
 | projection (name, status only) | ~7ms | 10,000 | Selective materialization at Projection |
 
+### Distinct
+
+| Query | Time | Values Returned | Notes |
+|-------|------|-----------------|-------|
+| distinct: status (indexed) | ~2.3ms | 2 | Full scan, low cardinality |
+| distinct: status (indexed) + sort asc | ~2.3ms | 2 | Sort overhead negligible at 2 values |
+| distinct: product_recommendation1 (not indexed) | ~2.7ms | 3 | Full scan, low cardinality |
+| distinct: contacts_count (indexed, ~100 values) | ~2.6ms | 100 | Full scan, medium cardinality |
+| distinct: contacts_count (indexed) + sort asc | ~2.6ms | 100 | Sort overhead negligible at 100 values |
+| distinct: rec1 with status='active' filter | ~3.6ms | 3 | IndexScan narrows to ~50% of records |
+| distinct: last_contacted_at (high cardinality) | ~22ms | ~7,000 | Linear dedup O(n*k), ~70% of records have value |
+
 ## Embedded (RocksStore) — 100k Records
 
 Results from a single collection (100,000 records). Times are consistent across all 3 users.
@@ -86,6 +98,18 @@ Results from a single collection (100,000 records). Times are consistent across 
 | status='active' AND notes is null | ~61ms | ~25,000 | IndexScan + lazy filter |
 | 1,000 point lookups (find_by_id) | ~2.2ms | 1,000 | Direct key access |
 | projection (name, status only) | ~75ms | 100,000 | Selective materialization at Projection |
+
+### Distinct
+
+| Query | Time | Values Returned | Notes |
+|-------|------|-----------------|-------|
+| distinct: status (indexed) | ~23ms | 2 | Full scan, low cardinality |
+| distinct: status (indexed) + sort asc | ~22ms | 2 | Sort overhead negligible at 2 values |
+| distinct: product_recommendation1 (not indexed) | ~27ms | 3 | Full scan, low cardinality |
+| distinct: contacts_count (indexed, ~100 values) | ~27ms | 100 | Full scan, medium cardinality |
+| distinct: contacts_count (indexed) + sort asc | ~27ms | 100 | Sort overhead negligible at 100 values |
+| distinct: rec1 with status='active' filter | ~39ms | 3 | IndexScan narrows to ~50% of records |
+| distinct: last_contacted_at (high cardinality) | ~2,000ms | ~70,000 | Linear dedup O(n*k) — quadratic blowup at high cardinality |
 
 ### Key Observations
 
@@ -167,8 +191,11 @@ MessagePack is more compact for structured enum data and handles Rust enums nati
 | sort [low card, count] + take(200) | 12ms | 128ms | 10.7x |
 | 1,000 point lookups | 1.5ms | 2.2ms | 1.5x |
 | Projection (2 cols) | 7ms | 75ms | 10.7x |
+| Distinct (status, 2 values) | 2.3ms | 23ms | 10.0x |
+| Distinct (contacts_count, ~100 values) | 2.6ms | 27ms | 10.4x |
+| Distinct (last_contacted_at, ~7k/70k values) | 22ms | 2,000ms | 90.9x |
 
-Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size.
+Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size. Distinct on high-cardinality fields scales quadratically (~91x for 10x data) due to linear dedup with `Vec<Bson>` + `contains()` — O(n*k) where k approaches n.
 
 ## Concurrency
 
@@ -208,12 +235,17 @@ Same workload as embedded benchmarks, run against both storage backends. 100k re
 | sort [status, contacts_count] + take(200) | 128ms | 100ms | 1.3x |
 | 1,000 point lookups (find_by_id) | 2.2ms | 1.8ms | 1.2x |
 | projection (name, status only) | 75ms | 62ms | 1.2x |
+| distinct: status (2 values) | 23ms | 12ms | 1.9x |
+| distinct: contacts_count (~100 values) | 27ms | 16ms | 1.7x |
+| distinct: rec1 with status filter | 39ms | 21ms | 1.9x |
+| distinct: last_contacted_at (~70k values) | 2,000ms | 2,000ms | 1.0x |
 
 ### Key Observations
 
 - **Writes are 2.5x faster** — MemoryStore has no WAL, no fsync, no LSM compaction. Lazy CF snapshots and dirty-only commits minimize overhead further.
 - **Indexed queries are 1.2-1.7x faster** — index scans hit the store heavily; in-memory B-tree lookups beat RocksDB's block cache. AND filters see up to 1.7x speedup because MemoryStore's zero-copy `Cow::Borrowed` avoids cloning bytes for rejected records.
 - **Full scans are ~equal** — the bottleneck is BSON deserialization, which is identical for both backends. Storage read time is a small fraction.
+- **Distinct low cardinality is 1.7-1.9x faster** — MemoryStore's zero-copy reads benefit the full-scan phase of distinct. High cardinality (~70k values) shows no speedup because the bottleneck is linear dedup, not storage reads.
 - **Concurrent workloads benefit from lock-free reads** — MemoryStore uses `ArcSwap` for atomic snapshot reads, avoiding RocksDB's internal locking overhead.
 
 ### MemoryStore Transaction Model

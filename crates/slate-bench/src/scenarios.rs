@@ -657,6 +657,121 @@ pub fn query_benchmarks<S: Store>(
     results
 }
 
+// --- Phase 3b: Distinct Benchmarks ---
+
+pub fn distinct_benchmarks<S: Store>(
+    db: &Database<S>,
+    _user: usize,
+    _cfg: &BenchConfig,
+) -> Vec<BenchResult> {
+    let mut results = Vec::new();
+
+    // 1. Distinct on indexed field (status) — 2 distinct values
+    results.push(bench("distinct: status (indexed, 2 values)", || {
+        let mut txn = db.begin(true).expect("begin failed");
+        let query = DistinctQuery {
+            field: "status".to_string(),
+            filter: None,
+            sort: None,
+        };
+        let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+        r.len()
+    }));
+
+    // 2. Distinct on indexed field with sort
+    results.push(bench("distinct: status (indexed) + sort asc", || {
+        let mut txn = db.begin(true).expect("begin failed");
+        let query = DistinctQuery {
+            field: "status".to_string(),
+            filter: None,
+            sort: Some(SortDirection::Asc),
+        };
+        let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+        r.len()
+    }));
+
+    // 3. Distinct on non-indexed field (product_recommendation1) — 3 distinct values
+    results.push(bench(
+        "distinct: product_recommendation1 (not indexed, 3 values)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = DistinctQuery {
+                field: "product_recommendation1".to_string(),
+                filter: None,
+                sort: None,
+            };
+            let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+            r.len()
+        },
+    ));
+
+    // 4. Distinct on high-cardinality indexed field (contacts_count) — ~100 values
+    results.push(bench(
+        "distinct: contacts_count (indexed, ~100 values)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = DistinctQuery {
+                field: "contacts_count".to_string(),
+                filter: None,
+                sort: None,
+            };
+            let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+            r.len()
+        },
+    ));
+
+    // 5. Distinct on high-cardinality field with sort
+    results.push(bench(
+        "distinct: contacts_count (indexed) + sort asc",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = DistinctQuery {
+                field: "contacts_count".to_string(),
+                filter: None,
+                sort: Some(SortDirection::Asc),
+            };
+            let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+            r.len()
+        },
+    ));
+
+    // 6. Distinct with filter: status='active' + distinct on product_recommendation1
+    results.push(bench("distinct: rec1 with status='active' filter", || {
+        let mut txn = db.begin(true).expect("begin failed");
+        let query = DistinctQuery {
+            field: "product_recommendation1".to_string(),
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![FilterNode::Condition(Filter {
+                    field: "status".to_string(),
+                    operator: Operator::Eq,
+                    value: Bson::String("active".to_string()),
+                })],
+            }),
+            sort: None,
+        };
+        let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+        r.len()
+    }));
+
+    // 7. Distinct on nullable field (last_contacted_at) — ~70% present
+    results.push(bench(
+        "distinct: last_contacted_at (nullable, high cardinality)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = DistinctQuery {
+                field: "last_contacted_at".to_string(),
+                filter: None,
+                sort: None,
+            };
+            let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
+            r.len()
+        },
+    ));
+
+    results
+}
+
 // --- Phase 4: Concurrency Tests ---
 
 pub fn concurrency_tests<S: Store + Send + Sync + 'static>(

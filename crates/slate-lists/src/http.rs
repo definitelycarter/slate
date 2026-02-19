@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use http::{Method, Request, Response, StatusCode};
 use slate_client::ClientPool;
-use slate_query::{FilterGroup, FilterNode, LogicalOp, Query};
+use slate_query::{DistinctQuery, FilterGroup, FilterNode, LogicalOp, Query};
 
 use crate::config::ListConfig;
 use crate::error::ListError;
 use crate::loader::Loader;
-use crate::request::{ListRequest, ListResponse};
+use crate::request::{DistinctRequest, DistinctResponse, ListRequest, ListResponse};
 
 pub struct ListHttp<L: Loader> {
     config: ListConfig,
@@ -37,6 +37,7 @@ impl<L: Loader> ListHttp<L> {
         match (method, path.trim_end_matches('/')) {
             (&Method::GET, "/config") => self.get_config(),
             (&Method::POST, "/data") => self.get_data(&req),
+            (&Method::POST, "/distinct") => self.get_distinct(&req),
             _ => json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),
         }
     }
@@ -61,6 +62,23 @@ impl<L: Loader> ListHttp<L> {
         };
 
         match self.get_list_data(&list_request, &metadata) {
+            Ok(response) => match serde_json::to_vec(&response) {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            },
+            Err(e) => error_response(e.status_code(), &e.to_string()),
+        }
+    }
+
+    fn get_distinct(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let metadata = extract_metadata(req);
+
+        let distinct_request: DistinctRequest = match serde_json::from_slice(req.body()) {
+            Ok(r) => r,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        };
+
+        match self.get_distinct_data(&distinct_request, &metadata) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -108,6 +126,33 @@ impl<L: Loader> ListHttp<L> {
         let records = self.pool.get()?.find(collection, &query)?;
 
         Ok(ListResponse { records, total })
+    }
+
+    fn get_distinct_data(
+        &self,
+        request: &DistinctRequest,
+        metadata: &HashMap<String, String>,
+    ) -> Result<DistinctResponse, ListError> {
+        let collection = &self.config.collection;
+
+        // Load data if collection is empty
+        let count = self.pool.get()?.count(collection, None)?;
+        if count == 0 {
+            let docs_iter = self.loader.load(collection, metadata)?;
+            self.batch_insert(collection, docs_iter)?;
+        }
+
+        // Merge list default filters with user filters
+        let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
+
+        let query = DistinctQuery {
+            field: request.field.clone(),
+            filter: merged,
+            sort: request.sort,
+        };
+        let values = self.pool.get()?.distinct(collection, &query)?;
+
+        Ok(DistinctResponse { values })
     }
 
     fn batch_insert(

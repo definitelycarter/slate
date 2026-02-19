@@ -1,4 +1,6 @@
-use slate_query::{FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection};
+use slate_query::{
+    DistinctQuery, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
@@ -54,6 +56,14 @@ pub enum PlanNode {
     /// Strip unneeded columns.
     Projection {
         columns: Vec<String>,
+        input: Box<PlanNode>,
+    },
+
+    /// Extract unique values from a field across all matching records.
+    /// Handles field extraction, array flattening, dedup, and optional sorting.
+    Distinct {
+        field: String,
+        direction: Option<SortDirection>,
         input: Box<PlanNode>,
     },
 }
@@ -181,6 +191,49 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
     };
 
     node
+}
+
+/// Build a plan for a distinct query, reusing the filter planning logic.
+///
+/// The plan is: ID tier → ReadRecord → Filter (residual) → Distinct.
+/// No Sort, Limit, or Projection nodes — the Distinct node handles
+/// field extraction, dedup, and optional sorting of the unique values.
+pub fn plan_distinct(
+    collection: &str,
+    indexed_fields: &[String],
+    query: &DistinctQuery,
+) -> PlanNode {
+    // Step 1: Plan the filter — same as find
+    let (id_node, residual_filter) = match &query.filter {
+        Some(group) => plan_filter(collection, indexed_fields, group),
+        None => (
+            PlanNode::Scan {
+                collection: collection.to_string(),
+            },
+            None,
+        ),
+    };
+
+    // Step 2: ReadRecord
+    let node = PlanNode::ReadRecord {
+        input: Box::new(id_node),
+    };
+
+    // Step 3: Wrap with residual filter if any
+    let node = match residual_filter {
+        Some(group) if !group.children.is_empty() => PlanNode::Filter {
+            predicate: group,
+            input: Box::new(node),
+        },
+        _ => node,
+    };
+
+    // Step 4: Distinct — field extraction, dedup, optional sort
+    PlanNode::Distinct {
+        field: query.field.clone(),
+        direction: query.sort,
+        input: Box::new(node),
+    }
 }
 
 /// Replace the Scan node inside a plan subtree with an ordered IndexScan.
@@ -1512,6 +1565,91 @@ mod tests {
                 _ => panic!("expected Sort"),
             },
             _ => panic!("expected Limit, got {:?}", p),
+        }
+    }
+
+    // ── Distinct plan tests ─────────────────────────────────────
+
+    #[test]
+    fn plan_distinct_no_filter() {
+        let q = DistinctQuery {
+            field: "status".into(),
+            filter: None,
+            sort: None,
+        };
+        let p = plan_distinct("col", &[], &q);
+        match p {
+            PlanNode::Distinct {
+                field,
+                direction,
+                input,
+            } => {
+                assert_eq!(field, "status");
+                assert_eq!(direction, None);
+                match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::Scan { collection } => assert_eq!(collection, "col"),
+                        _ => panic!("expected Scan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Distinct"),
+        }
+    }
+
+    #[test]
+    fn plan_distinct_with_filter() {
+        let q = DistinctQuery {
+            field: "status".into(),
+            filter: Some(eq_filter("priority", Bson::String("high".into()))),
+            sort: Some(SortDirection::Asc),
+        };
+        let p = plan_distinct("col", &[], &q);
+        match p {
+            PlanNode::Distinct {
+                field,
+                direction,
+                input,
+            } => {
+                assert_eq!(field, "status");
+                assert_eq!(direction, Some(SortDirection::Asc));
+                match *input {
+                    PlanNode::Filter { predicate, input } => {
+                        assert_eq!(predicate.children.len(), 1);
+                        match *input {
+                            PlanNode::ReadRecord { .. } => {}
+                            _ => panic!("expected ReadRecord"),
+                        }
+                    }
+                    _ => panic!("expected Filter"),
+                }
+            }
+            _ => panic!("expected Distinct"),
+        }
+    }
+
+    #[test]
+    fn plan_distinct_with_indexed_filter() {
+        let q = DistinctQuery {
+            field: "status".into(),
+            filter: Some(eq_filter("priority", Bson::String("high".into()))),
+            sort: None,
+        };
+        let indexed = vec!["priority".to_string()];
+        let p = plan_distinct("col", &indexed, &q);
+        match p {
+            PlanNode::Distinct { input, .. } => match *input {
+                PlanNode::ReadRecord { input } => match *input {
+                    PlanNode::IndexScan { column, value, .. } => {
+                        assert_eq!(column, "priority");
+                        assert_eq!(value, Some(Bson::String("high".into())));
+                    }
+                    _ => panic!("expected IndexScan"),
+                },
+                _ => panic!("expected ReadRecord"),
+            },
+            _ => panic!("expected Distinct"),
         }
     }
 }

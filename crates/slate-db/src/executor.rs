@@ -22,6 +22,51 @@ pub fn execute<'a, T: Transaction + 'a>(
     execute_node(txn, node)
 }
 
+/// Executes a distinct plan tree, returning unique field values.
+pub fn execute_distinct<T: Transaction>(
+    txn: &mut T,
+    node: &PlanNode,
+) -> Result<Vec<bson::Bson>, DbError> {
+    match node {
+        PlanNode::Distinct {
+            field,
+            direction,
+            input,
+        } => {
+            let source = execute_raw_node(txn, input)?;
+            let mut unique: Vec<bson::Bson> = Vec::new();
+
+            for result in source {
+                let (_id, cow) = result?;
+                let raw = RawDocument::from_bytes(&cow)?;
+                let values = exec::raw_get_path_values(raw, field)?;
+
+                for val in values {
+                    let bson_val = bson::Bson::try_from(val)?;
+                    if !unique.contains(&bson_val) {
+                        unique.push(bson_val);
+                    }
+                }
+            }
+
+            if let Some(dir) = direction {
+                unique.sort_by(|a, b| {
+                    let ord = compare_bson_values(a, b);
+                    match dir {
+                        SortDirection::Asc => ord,
+                        SortDirection::Desc => ord.reverse(),
+                    }
+                });
+            }
+
+            Ok(unique)
+        }
+        _ => Err(DbError::InvalidQuery(
+            "expected Distinct node at top of plan".to_string(),
+        )),
+    }
+}
+
 // ── ID tier ─────────────────────────────────────────────────────
 //
 // Nodes below ReadRecord produce record IDs (and optionally raw bytes)
@@ -379,4 +424,23 @@ fn materialize_for_projection(
         }
     }
     Ok(doc)
+}
+
+/// Compare two owned Bson values for sorting.
+/// Mirrors the logic of `raw_compare_two_values` in exec.rs.
+fn compare_bson_values(a: &bson::Bson, b: &bson::Bson) -> std::cmp::Ordering {
+    use bson::Bson;
+    use std::cmp::Ordering;
+
+    match (a, b) {
+        (Bson::String(a), Bson::String(b)) => a.cmp(b),
+        (Bson::Int32(a), Bson::Int32(b)) => a.cmp(b),
+        (Bson::Int64(a), Bson::Int64(b)) => a.cmp(b),
+        (Bson::Int32(a), Bson::Int64(b)) => (*a as i64).cmp(b),
+        (Bson::Int64(a), Bson::Int32(b)) => a.cmp(&(*b as i64)),
+        (Bson::Double(a), Bson::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Bson::Boolean(a), Bson::Boolean(b)) => a.cmp(b),
+        (Bson::DateTime(a), Bson::DateTime(b)) => a.timestamp_millis().cmp(&b.timestamp_millis()),
+        _ => Ordering::Equal,
+    }
 }

@@ -2,7 +2,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
 use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
-use slate_query::{FilterGroup, Query};
+use slate_query::{DistinctQuery, FilterGroup, Query};
 use slate_server::protocol::{Request, Response};
 
 #[derive(Debug)]
@@ -283,6 +283,25 @@ impl Client {
             filter: filter.cloned(),
         })? {
             Response::Count(n) => Ok(n),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Distinct ─────────────────────────────────────────────────
+
+    pub fn distinct(
+        &mut self,
+        collection: &str,
+        query: &DistinctQuery,
+    ) -> Result<Vec<bson::Bson>, ClientError> {
+        match self.request(Request::Distinct {
+            collection: collection.to_string(),
+            query: query.clone(),
+        })? {
+            Response::Values(v) => Ok(v),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
                 "unexpected response: {other:?}"

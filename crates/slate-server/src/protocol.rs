@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
-use slate_query::{FilterGroup, Query};
+use slate_query::{DistinctQuery, FilterGroup, Query};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
@@ -71,6 +71,10 @@ pub enum Request {
     DropCollection {
         collection: String,
     },
+    Distinct {
+        collection: String,
+        query: DistinctQuery,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -85,5 +89,6 @@ pub enum Response {
     Count(u64),
     Indexes(Vec<String>),
     Collections(Vec<String>),
+    Values(Vec<bson::Bson>),
     Error(String),
 }
