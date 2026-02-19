@@ -296,7 +296,7 @@ impl Client {
         &mut self,
         collection: &str,
         query: &DistinctQuery,
-    ) -> Result<Vec<bson::Bson>, ClientError> {
+    ) -> Result<bson::RawBson, ClientError> {
         match self.request(Request::Distinct {
             collection: collection.to_string(),
             query: query.clone(),

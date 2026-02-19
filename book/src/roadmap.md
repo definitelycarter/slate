@@ -142,6 +142,10 @@ Options for multi-field sort:
 
 Given that multi-field sort already works well with inline extraction, option **(c)** may be the pragmatic choice — `ExtractField` benefits Distinct and single-field Sort without complicating multi-field Sort.
 
+## BSON Type in Index Values
+
+Index keys currently store encoded values without type information. When reading a value back from an index (e.g. for index-covered projections), we have to coerce or guess the BSON type. Storing the BSON element type byte alongside the encoded value would let us reconstruct the exact `RawBson` variant on read — no coercion needed, correct types round-trip through the index.
+
 ## Staleness / TTL
 
 Currently the loader fires when `count == 0`. Add TTL-based staleness:

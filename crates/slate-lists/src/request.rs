@@ -25,5 +25,5 @@ pub struct DistinctRequest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DistinctResponse {
-    pub values: Vec<bson::Bson>,
+    pub values: bson::RawBson,
 }

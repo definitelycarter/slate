@@ -1,5 +1,8 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
+use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator};
@@ -168,6 +171,64 @@ fn raw_get_path_in_doc<'a>(
     }
 }
 
+/// Walk a dot-separated path through raw BSON, calling `f` for each leaf value found.
+/// Recursively descends into documents and iterates array elements mid-path.
+pub(crate) fn raw_walk_path<'a>(
+    doc: &'a RawDocument,
+    path: &str,
+    f: &mut impl FnMut(RawBsonRef<'a>) -> Result<(), DbError>,
+) -> Result<(), DbError> {
+    if path == "_id" {
+        return Ok(());
+    }
+    raw_walk(doc, path, f)
+}
+
+fn raw_walk<'a>(
+    doc: &'a RawDocument,
+    path: &str,
+    f: &mut impl FnMut(RawBsonRef<'a>) -> Result<(), DbError>,
+) -> Result<(), DbError> {
+    let (first, rest) = match path.split_once('.') {
+        Some((f, r)) => (f, Some(r)),
+        None => (path, None),
+    };
+
+    match doc.get(first)? {
+        Some(RawBsonRef::Null) | None => {}
+        Some(RawBsonRef::Array(arr)) => match rest {
+            Some(rest) => {
+                for elem in arr.into_iter() {
+                    if let RawBsonRef::Document(sub) = elem? {
+                        raw_walk(sub, rest, f)?;
+                    }
+                }
+            }
+            None => {
+                for elem in arr.into_iter() {
+                    let val = elem?;
+                    if !matches!(val, RawBsonRef::Null) {
+                        f(val)?;
+                    }
+                }
+            }
+        },
+        Some(RawBsonRef::Document(sub)) => {
+            if let Some(rest) = rest {
+                raw_walk(sub, rest, f)?;
+            } else {
+                f(RawBsonRef::Document(sub))?;
+            }
+        }
+        Some(val) => {
+            if rest.is_none() {
+                f(val)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Walk a dot-separated path through raw BSON, collecting all reachable values.
 /// Unlike `raw_get_path` (which returns a single value), this flattens arrays:
 /// - Scalar field → `vec![value]`
@@ -182,8 +243,16 @@ pub(crate) fn raw_get_path_values<'a>(
         return Ok(vec![]);
     }
 
+    // Strip `[]` array traversal markers — raw_collect_path_values
+    // already flattens arrays implicitly
+    let clean: String = path
+        .split('.')
+        .filter(|s| *s != "[]")
+        .collect::<Vec<_>>()
+        .join(".");
+
     let mut results = Vec::new();
-    raw_collect_path_values(raw, path, &mut results)?;
+    raw_collect_path_values(raw, &clean, &mut results)?;
     Ok(results)
 }
 
@@ -441,19 +510,93 @@ fn raw_compare_two_values(a: &RawBsonRef, b: &RawBsonRef) -> Ordering {
     }
 }
 
-/// Compare two owned Bson values for sorting.
-pub(crate) fn compare_bson_values(a: &Bson, b: &Bson) -> Ordering {
-    match (a, b) {
-        (Bson::String(a), Bson::String(b)) => a.cmp(b),
-        (Bson::Int32(a), Bson::Int32(b)) => a.cmp(b),
-        (Bson::Int64(a), Bson::Int64(b)) => a.cmp(b),
-        (Bson::Int32(a), Bson::Int64(b)) => (*a as i64).cmp(b),
-        (Bson::Int64(a), Bson::Int32(b)) => a.cmp(&(*b as i64)),
-        (Bson::Double(a), Bson::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Bson::Boolean(a), Bson::Boolean(b)) => a.cmp(b),
-        (Bson::DateTime(a), Bson::DateTime(b)) => a.timestamp_millis().cmp(&b.timestamp_millis()),
-        _ => Ordering::Equal,
+// ── Distinct helpers ────────────────────────────────────────────
+
+pub(crate) fn hash_raw(raw_ref: RawBsonRef<'_>) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    match raw_ref {
+        RawBsonRef::String(s) => {
+            0u8.hash(&mut hasher);
+            s.hash(&mut hasher);
+        }
+        RawBsonRef::Int32(i) => {
+            1u8.hash(&mut hasher);
+            i.hash(&mut hasher);
+        }
+        RawBsonRef::Int64(i) => {
+            2u8.hash(&mut hasher);
+            i.hash(&mut hasher);
+        }
+        RawBsonRef::Double(f) => {
+            3u8.hash(&mut hasher);
+            f.to_bits().hash(&mut hasher);
+        }
+        RawBsonRef::Boolean(b) => {
+            4u8.hash(&mut hasher);
+            b.hash(&mut hasher);
+        }
+        RawBsonRef::DateTime(dt) => {
+            5u8.hash(&mut hasher);
+            dt.timestamp_millis().hash(&mut hasher);
+        }
+        RawBsonRef::ObjectId(oid) => {
+            6u8.hash(&mut hasher);
+            oid.bytes().hash(&mut hasher);
+        }
+        RawBsonRef::Document(d) => {
+            7u8.hash(&mut hasher);
+            d.as_bytes().hash(&mut hasher);
+        }
+        RawBsonRef::Array(a) => {
+            8u8.hash(&mut hasher);
+            a.as_bytes().hash(&mut hasher);
+        }
+        _ => {
+            255u8.hash(&mut hasher);
+        }
     }
+    hasher.finish()
+}
+
+pub(crate) fn push_raw(buf: &mut bson::RawArrayBuf, raw_ref: RawBsonRef<'_>) {
+    match raw_ref {
+        RawBsonRef::String(s) => buf.push(s),
+        RawBsonRef::Int32(i) => buf.push(i),
+        RawBsonRef::Int64(i) => buf.push(i),
+        RawBsonRef::Double(f) => buf.push(f),
+        RawBsonRef::Boolean(b) => buf.push(b),
+        RawBsonRef::DateTime(dt) => buf.push(dt),
+        RawBsonRef::ObjectId(oid) => buf.push(oid),
+        RawBsonRef::Document(d) => buf.push(d.to_raw_document_buf()),
+        RawBsonRef::Array(a) => buf.push(a.to_raw_array_buf()),
+        _ => {}
+    }
+}
+
+pub(crate) fn try_insert(
+    seen: &mut HashSet<u64>,
+    buf: &mut bson::RawArrayBuf,
+    raw_ref: RawBsonRef<'_>,
+) {
+    let h = hash_raw(raw_ref);
+    if seen.insert(h) {
+        push_raw(buf, raw_ref);
+    }
+}
+
+pub(crate) fn to_raw_bson(raw_ref: RawBsonRef<'_>) -> Option<RawBson> {
+    Some(match raw_ref {
+        RawBsonRef::String(s) => RawBson::String(s.to_string()),
+        RawBsonRef::Int32(i) => RawBson::Int32(i),
+        RawBsonRef::Int64(i) => RawBson::Int64(i),
+        RawBsonRef::Double(f) => RawBson::Double(f),
+        RawBsonRef::Boolean(b) => RawBson::Boolean(b),
+        RawBsonRef::DateTime(dt) => RawBson::DateTime(dt),
+        RawBsonRef::ObjectId(oid) => RawBson::ObjectId(oid),
+        RawBsonRef::Document(d) => RawBson::Document(d.to_raw_document_buf()),
+        RawBsonRef::Array(a) => RawBson::Array(a.to_raw_array_buf()),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

@@ -438,6 +438,85 @@ Projection
 
 Records stream through Filter one at a time. Limit stops after 200 pass. Records that fail the filter don't count toward the limit — the scan continues until 200 qualifying records are found (or the collection is exhausted).
 
+## Distinct Queries
+
+Distinct queries find unique values for a single field. The planner builds a plan tree that reuses the same filter/index infrastructure as `find()`, then adds `Projection` → `Distinct` to extract and deduplicate values.
+
+### Query Model
+
+```rust
+DistinctQuery {
+    field: String,                     // The field to collect unique values from
+    filter: Option<FilterGroup>,       // Optional WHERE clause (same as find)
+    sort: Option<SortDirection>,       // Optional sort on the distinct values
+}
+```
+
+### Pipeline
+
+```
+ID tier:     Scan / IndexScan / IndexMerge
+               ↑
+Raw tier:    ReadRecord → Filter → Projection → Distinct → Sort
+```
+
+Distinct receives projected documents from Projection, extracts the target field, deduplicates with a `HashSet<u64>` (hashing raw BSON bytes), and emits a single `RawBson::Array` containing all unique values. This is fundamentally different from `find()`, which emits one item per record — Distinct collapses the entire result set into one array value.
+
+### Plan Trees
+
+**Distinct (no filter, no sort):**
+
+```
+Distinct(status)
+  └── Projection([status])
+        └── ReadRecord
+              └── Scan
+```
+
+**Distinct (with filter):**
+
+```
+Distinct(status)
+  └── Projection([status])
+        └── Filter(score > 50)
+              └── ReadRecord
+                    └── IndexScan(user_id = "abc")
+```
+
+Filter planning is identical to `find()` — the same index priority rules, AND/OR handling, and residual filter logic apply.
+
+**Distinct (with sort):**
+
+```
+Sort(status ASC)
+  └── Distinct(status)
+        └── Projection([status])
+              └── ReadRecord
+                    └── Scan
+```
+
+Sort sits above Distinct. The planner passes the sort field and direction to `Sort`, which handles the `RawBson::Array` natively.
+
+### How Sort Handles Arrays
+
+Sort detects when its input is a single `RawBson::Array` item (the output shape of Distinct) and switches to array-sorting mode:
+
+1. Unpacks the array into individual `RawBson` elements
+2. Sorts elements using the same comparison infrastructure as document sorting:
+   - **Scalar arrays** (strings, numbers): direct `raw_compare_field_values` comparison
+   - **Document arrays**: extracts the sort field from each document via `raw_get_path`, then compares
+3. Rebuilds a sorted `RawBson::Array` and re-emits it as a single item
+
+This keeps Sort as a single, general-purpose node — it doesn't need to know whether its input came from Distinct or a regular find pipeline.
+
+### Return Type
+
+`distinct()` returns `bson::RawBson` — specifically `RawBson::Array(RawArrayBuf)`. No materialization to `bson::Bson` happens at the database boundary. The raw array is serialized directly when sent over the wire.
+
+### Deduplication
+
+Distinct uses `HashSet<u64>` with a hash of the raw BSON bytes (`hash_raw`). This avoids materializing values for comparison — the raw byte representation is hashed directly. Null values are skipped. Nested fields are supported via `raw_walk_path`, which recursively walks dot-notation paths and invokes a callback for each matching value (handling both scalar fields and array elements).
+
 ## Dot-Notation Paths
 
 Filters, sorts, and projections support nested field access via dot notation:

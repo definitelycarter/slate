@@ -89,6 +89,6 @@ pub enum Response {
     Count(u64),
     Indexes(Vec<String>),
     Collections(Vec<String>),
-    Values(Vec<bson::Bson>),
+    Values(bson::RawBson),
     Error(String),
 }

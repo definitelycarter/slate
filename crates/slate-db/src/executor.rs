@@ -1,7 +1,7 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use bson::raw::{RawBson, RawBsonRef};
+use bson::raw::{RawArrayBuf, RawBson, RawBsonRef};
 use bson::{RawDocument, RawDocumentBuf};
 use slate_query::{LogicalOp, SortDirection};
 use slate_store::Transaction;
@@ -25,8 +25,7 @@ pub(crate) enum RawValue<'a> {
 
 impl<'a> RawValue<'a> {
     /// Uniform borrowed view regardless of ownership.
-    #[allow(dead_code)]
-    fn as_ref(&self) -> RawBsonRef<'_> {
+    pub(crate) fn as_ref(&self) -> RawBsonRef<'_> {
         match self {
             Self::Borrowed(r) => *r,
             Self::Owned(b) => b.as_raw_bson_ref(),
@@ -34,7 +33,7 @@ impl<'a> RawValue<'a> {
     }
 
     /// Extract `&RawDocument` if this value is a document.
-    fn as_document(&self) -> Option<&RawDocument> {
+    pub(crate) fn as_document(&self) -> Option<&RawDocument> {
         match self {
             Self::Borrowed(RawBsonRef::Document(d)) => Some(d),
             Self::Owned(RawBson::Document(d)) => Some(d),
@@ -43,155 +42,37 @@ impl<'a> RawValue<'a> {
     }
 
     /// Convert to owned `RawBson`, dropping the lifetime.
-    /// Returns `None` for borrowed variants (would require cloning the backing store).
-    fn into_owned(self) -> Option<RawBson> {
+    pub(crate) fn into_raw_bson(self) -> Option<RawBson> {
         match self {
             Self::Owned(b) => Some(b),
-            Self::Borrowed(_) => None,
+            Self::Borrowed(r) => crate::exec::to_raw_bson(r),
         }
     }
 
-    /// Convert to `bson::Bson` for materialization into a document.
-    fn to_bson(&self) -> Result<bson::Bson, DbError> {
-        Ok(bson::Bson::try_from(self.as_ref())?)
+    /// Extract as `RawDocumentBuf`, moving owned data without copying.
+    pub(crate) fn into_document_buf(self) -> Option<RawDocumentBuf> {
+        match self {
+            Self::Owned(RawBson::Document(buf)) => Some(buf),
+            Self::Borrowed(RawBsonRef::Document(d)) => Some(d.to_raw_document_buf()),
+            _ => None,
+        }
     }
 }
 
-type BsonIter<'a> = Box<dyn Iterator<Item = Result<bson::Bson, DbError>> + 'a>;
-type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Option<RawValue<'a>>), DbError>> + 'a>;
+pub(crate) type RawIter<'a> =
+    Box<dyn Iterator<Item = Result<(Option<String>, Option<RawValue<'a>>), DbError>> + 'a>;
 
-/// Executes a query plan tree, returning a lazy BSON value iterator.
+/// Executes a query plan tree, returning a lazy raw iterator.
+///
+/// Both `find()` and `distinct()` call this — different plans, same executor.
 pub fn execute<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     node: &'a PlanNode,
-) -> Result<BsonIter<'a>, DbError> {
+) -> Result<RawIter<'a>, DbError> {
     execute_node(txn, node)
 }
 
-/// Executes a distinct plan tree, returning unique field values.
-pub fn execute_distinct<T: Transaction>(
-    txn: &mut T,
-    node: &PlanNode,
-) -> Result<Vec<bson::Bson>, DbError> {
-    match node {
-        PlanNode::Distinct {
-            field,
-            direction,
-            input,
-        } => {
-            let source = execute_raw_node(txn, input)?;
-            let mut unique: Vec<bson::Bson> = Vec::new();
-
-            for result in source {
-                let (_id, opt_val) = result?;
-                let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
-                let raw = val
-                    .as_document()
-                    .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
-                let values = exec::raw_get_path_values(raw, field)?;
-
-                for val in values {
-                    let bson_val = bson::Bson::try_from(val)?;
-                    if !unique.contains(&bson_val) {
-                        unique.push(bson_val);
-                    }
-                }
-            }
-
-            if let Some(dir) = direction {
-                unique.sort_by(|a, b| {
-                    let ord = exec::compare_bson_values(a, b);
-                    match dir {
-                        SortDirection::Asc => ord,
-                        SortDirection::Desc => ord.reverse(),
-                    }
-                });
-            }
-
-            Ok(unique)
-        }
-        _ => Err(DbError::InvalidQuery(
-            "expected Distinct node at top of plan".to_string(),
-        )),
-    }
-}
-
-// ── ID tier ─────────────────────────────────────────────────────
-//
-// Nodes below ReadRecord produce record IDs (and optionally raw values)
-// as a lazy iterator. Scan carries the data it already has; IndexScan
-// yields None since index entries don't contain record data.
-
-/// Execute an ID-tier node, returning a lazy iterator of (id, maybe_value).
-fn execute_id_node<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    node: &'a PlanNode,
-) -> Result<RawIter<'a>, DbError> {
-    match node {
-        PlanNode::Scan { collection } => execute_scan(txn, collection),
-
-        PlanNode::IndexScan {
-            collection,
-            column,
-            value,
-            direction,
-            limit,
-            complete_groups,
-        } => execute_index_scan(
-            txn,
-            collection,
-            column,
-            value.as_ref(),
-            *direction,
-            *limit,
-            *complete_groups,
-        ),
-
-        PlanNode::IndexMerge { logical, lhs, rhs } => {
-            // IndexMerge must collect both sides for dedup — stays eager.
-            // Values are collected as Option<RawBson> (no lifetime) to release
-            // the txn borrow between left and right collection.
-            let left: Vec<(String, Option<RawBson>)> = execute_id_node(txn, lhs)?
-                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_owned))))
-                .collect::<Result<_, _>>()?;
-            let right: Vec<(String, Option<RawBson>)> = execute_id_node(txn, rhs)?
-                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_owned))))
-                .collect::<Result<_, _>>()?;
-
-            let merged = match logical {
-                LogicalOp::Or => {
-                    let mut seen = HashSet::with_capacity(left.len() + right.len());
-                    let mut result = Vec::with_capacity(left.len() + right.len());
-                    for (id, val) in left.into_iter().chain(right) {
-                        if seen.insert(id.clone()) {
-                            result.push((id, val));
-                        }
-                    }
-                    result
-                }
-                LogicalOp::And => {
-                    let right_set: HashSet<String> =
-                        right.iter().map(|(id, _)| id.clone()).collect();
-                    left.into_iter()
-                        .filter(|(id, _)| right_set.contains(id))
-                        .collect()
-                }
-            };
-
-            Ok(Box::new(
-                merged
-                    .into_iter()
-                    .map(|(id, val)| Ok((id, val.map(RawValue::Owned)))),
-            ))
-        }
-
-        _ => Err(DbError::InvalidQuery(
-            "unexpected node in ID tier".to_string(),
-        )),
-    }
-}
-
-/// Scan all records lazily, yielding (id, Some(RawValue)) — data is kept, not discarded.
+/// Scan all records lazily, yielding (Some(id), Some(RawValue)).
 fn execute_scan<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     collection: &str,
@@ -212,18 +93,13 @@ fn execute_scan<'a, T: Transaction + 'a>(
                     Err(e) => return Some(Err(DbError::from(e))),
                 },
             };
-            Some(Ok((record_id, Some(val))))
+            Some(Ok((Some(record_id), Some(val))))
         }
         Err(e) => Some(Err(DbError::Store(e))),
     })))
 }
 
-/// Scan an index prefix, yielding (id, value).
-/// For Eq scans (`value: Some`), returns the known indexed value as `RawValue`.
-/// For ordered scans (`value: None`), returns `None` (value decoding deferred
-/// until the key format includes a type tag).
-/// When `complete_groups` is true and limit is set, reads past the limit
-/// to finish the last value group for correct downstream sub-sorting.
+/// Scan an index prefix, yielding (Some(id), maybe_value).
 fn execute_index_scan<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     collection: &str,
@@ -233,14 +109,14 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     limit: Option<usize>,
     complete_groups: bool,
 ) -> Result<RawIter<'a>, DbError> {
-    // Some(v): `i:{column}\x00{value_bytes}\x00` — entries matching exact value (Eq filter)
-    // None:    `i:{column}\x00`               — all entries for column (ordered scan)
     let prefix = match value {
         Some(v) => encoding::index_scan_prefix(column, v),
         None => encoding::index_scan_field_prefix(column),
     };
 
-    // For Eq scans, convert the known value to RawBson once — cloned per record.
+    // TODO: Store RawBson in PlanNode::IndexScan instead of bson::Bson to avoid this conversion.
+    // The value isn't read from the index key — it's the known Eq value from the query,
+    // carried through so index-covered projections can emit it without a record fetch.
     let raw_val: Option<RawBson> = match value {
         Some(v) => Some(RawBson::try_from(v.clone())?),
         None => None,
@@ -263,7 +139,6 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
         for result in iter.by_ref() {
             match result {
                 Ok((key, _)) => {
-                    // Past the limit — check if we should stop.
                     if let Some(n) = limit {
                         if count >= n {
                             if complete_groups {
@@ -290,7 +165,7 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
                         Some((_, record_id)) => {
                             count += 1;
                             let item_val = raw_val.as_ref().map(|v| RawValue::Owned(v.clone()));
-                            return Some(Ok((record_id.to_string(), item_val)));
+                            return Some(Ok((Some(record_id.to_string()), item_val)));
                         }
                         None => continue,
                     }
@@ -307,20 +182,72 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     })))
 }
 
-// ── Raw tier ────────────────────────────────────────────────────
-//
-// Nodes between ReadRecord and Projection operate on raw BSON bytes.
-// Filter and Sort access individual fields lazily without full deserialization.
-
-fn execute_raw_node<'a, T: Transaction + 'a>(
+fn execute_node<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     node: &'a PlanNode,
 ) -> Result<RawIter<'a>, DbError> {
     match node {
+        PlanNode::Scan { collection } => execute_scan(txn, collection),
+
+        PlanNode::IndexScan {
+            collection,
+            column,
+            value,
+            direction,
+            limit,
+            complete_groups,
+        } => execute_index_scan(
+            txn,
+            collection,
+            column,
+            value.as_ref(),
+            *direction,
+            *limit,
+            *complete_groups,
+        ),
+
+        PlanNode::IndexMerge { logical, lhs, rhs } => {
+            let left: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, lhs)?
+                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
+                .collect::<Result<_, _>>()?;
+            let right: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, rhs)?
+                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
+                .collect::<Result<_, _>>()?;
+
+            let merged = match logical {
+                LogicalOp::Or => {
+                    let mut seen = HashSet::with_capacity(left.len() + right.len());
+                    let mut result = Vec::with_capacity(left.len() + right.len());
+                    for (id, val) in left.into_iter().chain(right) {
+                        if let Some(ref id_str) = id {
+                            if !seen.insert(id_str.clone()) {
+                                continue;
+                            }
+                        }
+                        result.push((id, val));
+                    }
+                    result
+                }
+                LogicalOp::And => {
+                    let right_set: HashSet<String> =
+                        right.iter().filter_map(|(id, _)| id.clone()).collect();
+                    left.into_iter()
+                        .filter(|(id, _)| id.as_ref().map_or(false, |s| right_set.contains(s)))
+                        .collect()
+                }
+            };
+
+            Ok(Box::new(
+                merged
+                    .into_iter()
+                    .map(|(id, val)| Ok((id, val.map(RawValue::Owned)))),
+            ))
+        }
+
         PlanNode::ReadRecord { input } => execute_read_record(txn, input),
 
         PlanNode::Filter { predicate, input } => {
-            let source = execute_raw_node(txn, input)?;
+            let source = execute_node(txn, input)?;
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
@@ -331,7 +258,8 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                             return Some(Err(DbError::InvalidQuery("expected document".into())));
                         }
                     };
-                    match exec::raw_matches_group(raw, &id, predicate) {
+                    let id_str = id.as_deref().unwrap_or("");
+                    match exec::raw_matches_group(raw, id_str, predicate) {
                         Ok(true) => Some(Ok((id, Some(val)))),
                         Ok(false) => None,
                         Err(e) => Some(Err(e)),
@@ -342,15 +270,63 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Sort { sorts, input } => {
-            let source = execute_raw_node(txn, input)?;
+            let source = execute_node(txn, input)?;
 
-            let mut records: Vec<(String, Option<RawValue<'a>>)> =
+            let mut records: Vec<(Option<String>, Option<RawValue<'a>>)> =
                 source.collect::<Result<Vec<_>, _>>()?;
 
+            // If the single item is an array (e.g. from Distinct), sort its elements
+            if records.len() == 1 {
+                if let Some((id, Some(RawValue::Owned(RawBson::Array(arr))))) = records.pop() {
+                    let sort = match sorts.first() {
+                        Some(s) => s,
+                        None => {
+                            return Ok(Box::new(std::iter::once(Ok((
+                                id,
+                                Some(RawValue::Owned(RawBson::Array(arr))),
+                            )))));
+                        }
+                    };
+                    let mut elements: Vec<RawBson> = arr
+                        .into_iter()
+                        .filter_map(|r| exec::to_raw_bson(r.ok()?))
+                        .collect();
+
+                    elements.sort_by(|a, b| {
+                        let a_ref = a.as_raw_bson_ref();
+                        let b_ref = b.as_raw_bson_ref();
+                        let ord = match (&a_ref, &b_ref) {
+                            (RawBsonRef::Document(a_doc), RawBsonRef::Document(b_doc)) => {
+                                let a_field = exec::raw_get_path(a_doc, &sort.field).ok().flatten();
+                                let b_field = exec::raw_get_path(b_doc, &sort.field).ok().flatten();
+                                exec::raw_compare_field_values(a_field, b_field)
+                            }
+                            _ => exec::raw_compare_field_values(Some(a_ref), Some(b_ref)),
+                        };
+                        match sort.direction {
+                            SortDirection::Asc => ord,
+                            SortDirection::Desc => ord.reverse(),
+                        }
+                    });
+
+                    let mut buf = bson::RawArrayBuf::new();
+                    for elem in &elements {
+                        exec::push_raw(&mut buf, elem.as_raw_bson_ref());
+                    }
+                    return Ok(Box::new(std::iter::once(Ok((
+                        id,
+                        Some(RawValue::Owned(RawBson::Array(buf))),
+                    )))));
+                }
+            }
+
+            // Normal case: sort documents by field extraction
             records.sort_by(|(a_id, a_opt), (b_id, b_opt)| {
                 for sort in sorts {
                     let ord = if sort.field == "_id" {
-                        a_id.cmp(b_id)
+                        let a_str = a_id.as_deref().unwrap_or("");
+                        let b_str = b_id.as_deref().unwrap_or("");
+                        a_str.cmp(b_str)
                     } else {
                         let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
                         let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
@@ -361,8 +337,8 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                         exec::raw_compare_field_values(a_field, b_field)
                     };
                     let ord = match sort.direction {
-                        slate_query::SortDirection::Asc => ord,
-                        slate_query::SortDirection::Desc => ord.reverse(),
+                        SortDirection::Asc => ord,
+                        SortDirection::Desc => ord.reverse(),
                     };
                     if ord != std::cmp::Ordering::Equal {
                         return ord;
@@ -375,91 +351,112 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Limit { skip, take, input } => {
-            let source = execute_raw_node(txn, input)?;
+            let source = execute_node(txn, input)?;
             Ok(apply_limit(source, *skip, *take))
         }
 
-        // ID-tier nodes can appear directly in the raw tier when ReadRecord is skipped
-        // (e.g. index-covered projections). Delegate to the ID-tier executor.
-        PlanNode::Scan { .. } | PlanNode::IndexScan { .. } | PlanNode::IndexMerge { .. } => {
-            execute_id_node(txn, node)
-        }
-
-        _ => Err(DbError::InvalidQuery(
-            "unexpected node in raw tier".to_string(),
-        )),
-    }
-}
-
-// ── Document tier ───────────────────────────────────────────────
-//
-// Projection materializes raw records into bson::Document.
-// When no Projection node exists, fallback materializes via to_document().
-
-fn execute_node<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    node: &'a PlanNode,
-) -> Result<BsonIter<'a>, DbError> {
-    match node {
         PlanNode::Projection { columns, input } => {
-            let source = execute_raw_node(txn, input)?;
-            let cols = columns.clone();
+            let source = execute_node(txn, input)?;
+
+            // Build the key_map once, not per record.
+            let key_map: Option<HashMap<String, Vec<String>>> = columns.as_ref().map(|cols| {
+                let mut map: HashMap<String, Vec<String>> = HashMap::new();
+                for col in cols {
+                    match col.split_once('.') {
+                        None => {
+                            map.entry(col.clone()).or_default();
+                        }
+                        Some((top, rest)) => {
+                            map.entry(top.to_string())
+                                .or_default()
+                                .push(rest.to_string());
+                        }
+                    }
+                }
+                map
+            });
+            // Keep first column name for scalar index-covered path
+            let first_col = columns.as_ref().and_then(|c| c.first().cloned());
 
             Ok(Box::new(source.map(move |result| {
                 let (id, opt_val) = result?;
                 let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
 
-                let doc = if let Some(raw) = val.as_document() {
-                    // Full document — selective materialization
-                    let mut doc = materialize_for_projection(raw, &cols)?;
-                    doc.insert("_id", id.as_str());
-                    exec::apply_projection(&mut doc, &cols);
-                    doc
-                } else {
-                    // Scalar value from index — construct document directly
-                    let bson_val = val.to_bson()?;
-                    let mut doc = bson::Document::new();
-                    doc.insert("_id", id.as_str());
-                    for col in &cols {
-                        doc.insert(col.as_str(), bson_val.clone());
+                // No columns specified: prepend _id, pass through all fields
+                let km = match key_map {
+                    Some(ref km) => km,
+                    None => {
+                        if let Some(ref id_str) = id {
+                            if let Some(raw) = val.as_document() {
+                                let mut buf = raw.to_raw_document_buf();
+                                buf.append("_id", id_str.as_str());
+                                return Ok((id, Some(RawValue::Owned(RawBson::Document(buf)))));
+                            }
+                        }
+                        return Ok((id, Some(val)));
                     }
-                    doc
                 };
-                Ok(bson::Bson::Document(doc))
+
+                let mut buf = RawDocumentBuf::new();
+
+                // Inject _id from the tuple
+                if let Some(ref id_str) = id {
+                    buf.append("_id", id_str.as_str());
+                }
+
+                if let Some(raw) = val.as_document() {
+                    raw_project_document(raw, km, &mut buf)?;
+                } else {
+                    // Scalar input (index-covered): construct { field: value }
+                    if let Some(ref field) = first_col {
+                        buf.append_ref(field.as_str(), val.as_ref());
+                    }
+                }
+
+                Ok((id, Some(RawValue::Owned(RawBson::Document(buf)))))
             })))
         }
 
-        // No Projection node — full materialization
-        _ => {
-            let source = execute_raw_node(txn, node)?;
-            Ok(Box::new(source.map(|result| {
-                let (id, opt_val) = result?;
-                let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
+        PlanNode::Distinct { field, input, .. } => {
+            use std::collections::HashSet;
+
+            let source = execute_node(txn, input)?;
+            let mut seen = HashSet::new();
+            let mut buf = bson::RawArrayBuf::new();
+
+            for result in source {
+                let (_id, opt_val) = result?;
+                let val = match opt_val {
+                    Some(v) => v,
+                    None => continue,
+                };
                 let raw = val
                     .as_document()
                     .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
-                let mut doc: bson::Document = raw.try_into()?;
-                doc.insert("_id", id.as_str());
-                Ok(bson::Bson::Document(doc))
-            })))
+
+                exec::raw_walk_path(raw, field, &mut |raw_ref| {
+                    if !matches!(raw_ref, RawBsonRef::Null) {
+                        exec::try_insert(&mut seen, &mut buf, raw_ref);
+                    }
+                    Ok(())
+                })?;
+            }
+
+            Ok(Box::new(std::iter::once(Ok((
+                None,
+                Some(RawValue::Owned(RawBson::Array(buf))),
+            )))))
         }
     }
 }
 
 /// ReadRecord: the boundary between ID tier and raw tier.
-///
-/// - Scan: data flows through lazily — RawValue is already available from the ID tier.
-/// - IndexScan/IndexMerge: IDs are collected eagerly (releasing the `scan_prefix`
-///   borrow on `txn`), then each record is fetched lazily via `txn.get()`.
-///   The ID collection is cheap (small strings); the expensive record fetch is
-///   what Limit cuts short.
 fn execute_read_record<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     input: &'a PlanNode,
 ) -> Result<RawIter<'a>, DbError> {
     if matches!(input, PlanNode::Scan { .. }) {
-        // Scan path: ID tier already carries the data — just pass through.
-        let source = execute_id_node(txn, input)?;
+        let source = execute_node(txn, input)?;
         return Ok(Box::new(source.filter_map(|result| match result {
             Ok((id, Some(val))) => Some(Ok((id, Some(val)))),
             Ok((_, None)) => None,
@@ -469,8 +466,8 @@ fn execute_read_record<'a, T: Transaction + 'a>(
 
     // IndexScan/IndexMerge path: collect IDs (releases txn borrow), then fetch lazily.
     let collection = extract_collection(input);
-    let ids: Vec<String> = execute_id_node(txn, input)?
-        .map(|r| r.map(|(id, _)| id))
+    let ids: Vec<String> = execute_node(txn, input)?
+        .filter_map(|r| r.map(|(id, _)| id).transpose())
         .collect::<Result<_, _>>()?;
 
     Ok(Box::new(ids.into_iter().filter_map(move |id| {
@@ -481,7 +478,10 @@ fn execute_read_record<'a, T: Transaction + 'a>(
                     Ok(r) => r,
                     Err(e) => return Some(Err(DbError::from(e))),
                 };
-                Some(Ok((id, Some(RawValue::Owned(RawBson::Document(raw))))))
+                Some(Ok((
+                    Some(id),
+                    Some(RawValue::Owned(RawBson::Document(raw))),
+                )))
             }
             Ok(None) => None, // dangling index entry
             Err(e) => Some(Err(DbError::Store(e))),
@@ -512,23 +512,85 @@ fn extract_collection(node: &PlanNode) -> String {
     }
 }
 
-/// Selectively materialize a raw document for projection.
-/// Only deserializes top-level keys that are in the projection set.
-fn materialize_for_projection(
-    raw: &RawDocument,
-    columns: &[String],
-) -> Result<bson::Document, DbError> {
-    let top_keys: HashSet<&str> = columns
-        .iter()
-        .map(|c| c.split('.').next().unwrap_or(c.as_str()))
-        .collect();
+// ── Raw projection ──────────────────────────────────────────────
+//
+// Selectively copies fields from a source `&RawDocument` into a destination
+// `RawDocumentBuf`, guided by a list of column paths (e.g. `["name", "address.city"]`).
+//
+// - Flat columns (`name`): `append_ref` copies the raw bytes directly.
+// - Dotted columns (`address.city`): builds a trimmed sub-document containing
+//   only the requested nested fields, recursively. Only the selected leaf
+//   values are copied — not the entire parent.
+// - Arrays of sub-documents (`triggers.type`): each element is walked and
+//   trimmed to the requested fields.
 
-    let mut doc = bson::Document::new();
-    for result in raw.iter() {
+/// Project selected columns from `src` into `dest` using a pre-built key map.
+///
+/// `key_map` maps top-level field names to their sub-paths:
+/// - `"name" → []` means copy the whole field
+/// - `"address" → ["city", "zip"]` means recurse and copy only those nested fields
+fn raw_project_document<S: AsRef<str>>(
+    src: &RawDocument,
+    key_map: &HashMap<String, Vec<S>>,
+    dest: &mut RawDocumentBuf,
+) -> Result<(), DbError> {
+    for result in src.iter() {
         let (key, raw_val) = result?;
-        if top_keys.contains(key) {
-            doc.insert(key, bson::Bson::try_from(raw_val)?);
+        if let Some(sub_paths) = key_map.get(key) {
+            if sub_paths.is_empty() {
+                // Flat column: copy raw bytes directly
+                dest.append_ref(key, raw_val);
+            } else {
+                // Dotted column: recurse into sub-document or array
+                let sub_map = build_key_map(sub_paths);
+                match raw_val {
+                    RawBsonRef::Document(sub_doc) => {
+                        let mut trimmed = RawDocumentBuf::new();
+                        raw_project_document(sub_doc, &sub_map, &mut trimmed)?;
+                        dest.append(key, RawBson::Document(trimmed));
+                    }
+                    RawBsonRef::Array(arr) => {
+                        let mut out = RawArrayBuf::new();
+                        for elem in arr {
+                            let elem = elem?;
+                            match elem {
+                                RawBsonRef::Document(elem_doc) => {
+                                    let mut trimmed = RawDocumentBuf::new();
+                                    raw_project_document(elem_doc, &sub_map, &mut trimmed)?;
+                                    out.push(RawBson::Document(trimmed));
+                                }
+                                other => {
+                                    // Non-document array element: copy as-is
+                                    out.push(other.to_raw_bson());
+                                }
+                            }
+                        }
+                        dest.append(key, RawBson::Array(out));
+                    }
+                    _ => {
+                        // Scalar where we expected a sub-document — copy as-is
+                        dest.append_ref(key, raw_val);
+                    }
+                }
+            }
         }
     }
-    Ok(doc)
+
+    Ok(())
+}
+
+/// Build a key_map from a list of paths (e.g. ["city", "address.zip"] → {"city": [], "address": ["zip"]}).
+fn build_key_map<S: AsRef<str>>(paths: &[S]) -> HashMap<String, Vec<&str>> {
+    let mut map: HashMap<String, Vec<&str>> = HashMap::new();
+    for path in paths {
+        match path.as_ref().split_once('.') {
+            None => {
+                map.entry(path.as_ref().to_string()).or_default();
+            }
+            Some((top, rest)) => {
+                map.entry(top.to_string()).or_default().push(rest);
+            }
+        }
+    }
+    map
 }

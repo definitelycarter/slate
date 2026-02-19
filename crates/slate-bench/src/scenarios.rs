@@ -1,13 +1,20 @@
 use std::sync::Arc;
 use std::thread;
 
-use bson::Bson;
+use bson::{Bson, RawBson};
 use slate_db::{CollectionConfig, Database};
 use slate_query::*;
 use slate_store::Store;
 
 use crate::datagen;
 use crate::report::{BenchResult, bench};
+
+fn raw_array_len(raw: &RawBson) -> usize {
+    match raw {
+        RawBson::Array(arr) => arr.into_iter().count(),
+        _ => 0,
+    }
+}
 
 pub const COLLECTION: &str = "bench";
 
@@ -108,6 +115,7 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
         .iter()
         .filter(|r| {
             r.get_str("_id")
+                .ok()
                 .map(|id| id.starts_with(&user_prefix))
                 .unwrap_or(false)
         })
@@ -120,20 +128,22 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
         user_records.len()
     );
 
+    let has_key = |r: &bson::RawDocumentBuf, k: &str| r.get(k).ok().flatten().is_some();
+
     let mut has_last_contacted = 0;
     let mut null_last_contacted = 0;
     let mut has_notes = 0;
     let mut null_notes = 0;
 
     for record in &user_records {
-        assert!(record.contains_key("name"), "missing 'name' field");
-        assert!(record.contains_key("status"), "missing 'status' field");
+        assert!(has_key(record, "name"), "missing 'name' field");
+        assert!(has_key(record, "status"), "missing 'status' field");
         assert!(
-            record.contains_key("contacts_count"),
+            has_key(record, "contacts_count"),
             "missing 'contacts_count' field"
         );
         assert!(
-            record.contains_key("product_recommendation1"),
+            has_key(record, "product_recommendation1"),
             "missing 'product_recommendation1' field"
         );
 
@@ -144,13 +154,13 @@ pub fn verify_integrity<S: Store>(db: &Database<S>, user: usize, cfg: &BenchConf
             Err(e) => panic!("status has wrong type: {e}"),
         }
 
-        if record.contains_key("last_contacted_at") {
+        if has_key(record, "last_contacted_at") {
             has_last_contacted += 1;
         } else {
             null_last_contacted += 1;
         }
 
-        if record.contains_key("notes") {
+        if has_key(record, "notes") {
             has_notes += 1;
         } else {
             null_notes += 1;
@@ -699,7 +709,7 @@ pub fn distinct_benchmarks<S: Store>(
             sort: None,
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-        r.len()
+        raw_array_len(&r)
     }));
 
     // 2. Distinct on indexed field with sort
@@ -711,7 +721,7 @@ pub fn distinct_benchmarks<S: Store>(
             sort: Some(SortDirection::Asc),
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-        r.len()
+        raw_array_len(&r)
     }));
 
     // 3. Distinct on non-indexed field (product_recommendation1) — 3 distinct values
@@ -725,7 +735,7 @@ pub fn distinct_benchmarks<S: Store>(
                 sort: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-            r.len()
+            raw_array_len(&r)
         },
     ));
 
@@ -740,7 +750,7 @@ pub fn distinct_benchmarks<S: Store>(
                 sort: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-            r.len()
+            raw_array_len(&r)
         },
     ));
 
@@ -755,7 +765,7 @@ pub fn distinct_benchmarks<S: Store>(
                 sort: Some(SortDirection::Asc),
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-            r.len()
+            raw_array_len(&r)
         },
     ));
 
@@ -775,7 +785,7 @@ pub fn distinct_benchmarks<S: Store>(
             sort: None,
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-        r.len()
+        raw_array_len(&r)
     }));
 
     // 7. Distinct on nullable field (last_contacted_at) — ~70% present
@@ -789,7 +799,7 @@ pub fn distinct_benchmarks<S: Store>(
                 sort: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
-            r.len()
+            raw_array_len(&r)
         },
     ));
 

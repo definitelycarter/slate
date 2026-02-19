@@ -77,6 +77,51 @@ pub fn encode_value(value: &bson::Bson) -> Vec<u8> {
     }
 }
 
+pub fn encode_raw_value(value: bson::raw::RawBsonRef) -> Vec<u8> {
+    match value {
+        bson::raw::RawBsonRef::String(s) => s.as_bytes().to_vec(),
+        bson::raw::RawBsonRef::Int32(i) => {
+            let wide = i as i64;
+            let unsigned = (wide as u64) ^ (1u64 << 63);
+            unsigned.to_be_bytes().to_vec()
+        }
+        bson::raw::RawBsonRef::Int64(i) => {
+            let unsigned = (i as u64) ^ (1u64 << 63);
+            unsigned.to_be_bytes().to_vec()
+        }
+        bson::raw::RawBsonRef::Double(f) => {
+            let bits = f.to_bits();
+            let sortable = if bits & (1u64 << 63) != 0 {
+                !bits
+            } else {
+                bits ^ (1u64 << 63)
+            };
+            sortable.to_be_bytes().to_vec()
+        }
+        bson::raw::RawBsonRef::Boolean(b) => vec![b as u8],
+        bson::raw::RawBsonRef::DateTime(dt) => {
+            let millis = dt.timestamp_millis();
+            let unsigned = (millis as u64) ^ (1u64 << 63);
+            unsigned.to_be_bytes().to_vec()
+        }
+        _ => vec![],
+    }
+}
+
+pub fn raw_index_key(column: &str, value: bson::raw::RawBsonRef, record_id: &str) -> Vec<u8> {
+    let value_bytes = encode_raw_value(value);
+    let mut key = Vec::with_capacity(
+        INDEX_PREFIX.len() + column.len() + 1 + value_bytes.len() + 1 + record_id.len(),
+    );
+    key.extend_from_slice(INDEX_PREFIX);
+    key.extend_from_slice(column.as_bytes());
+    key.push(SEP);
+    key.extend_from_slice(&value_bytes);
+    key.push(SEP);
+    key.extend_from_slice(record_id.as_bytes());
+    key
+}
+
 /// Build an index key: `i:{column}\x00{value_bytes}\x00{record_id}`
 pub fn index_key(column: &str, value: &bson::Bson, record_id: &str) -> Vec<u8> {
     let value_bytes = encode_value(value);

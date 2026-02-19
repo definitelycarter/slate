@@ -8,7 +8,7 @@ mod executor;
 mod planner;
 mod result;
 
-pub use bson::{Bson, Document};
+pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
 pub use database::{Database, DatabaseConfig, DatabaseTransaction};
 pub use error::DbError;

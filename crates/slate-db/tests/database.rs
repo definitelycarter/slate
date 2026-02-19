@@ -1,9 +1,36 @@
-use bson::{Bson, doc};
+use bson::raw::RawDocument;
+use bson::{Bson, RawBson, doc};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::{
     DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
 };
 use slate_store::RocksStore;
+
+trait HasKey {
+    fn get_check(&self, key: &str) -> bool;
+}
+
+impl HasKey for RawDocument {
+    fn get_check(&self, key: &str) -> bool {
+        self.get(key).ok().flatten().is_some()
+    }
+}
+
+impl HasKey for bson::RawDocumentBuf {
+    fn get_check(&self, key: &str) -> bool {
+        self.get(key).ok().flatten().is_some()
+    }
+}
+
+fn to_bson_vec(raw: RawBson) -> Vec<Bson> {
+    match raw {
+        RawBson::Array(arr) => arr
+            .into_iter()
+            .map(|r| Bson::try_from(r.unwrap()).unwrap())
+            .collect(),
+        _ => panic!("expected RawBson::Array"),
+    }
+}
 
 const COLLECTION: &str = "accounts";
 
@@ -381,10 +408,10 @@ fn find_with_projection() {
     let results = txn.find(COLLECTION, &query).unwrap();
     assert_eq!(results.len(), 5);
     for record in &results {
-        assert!(record.contains_key("name"));
-        assert!(record.contains_key("status"));
-        assert!(!record.contains_key("revenue"));
-        assert!(!record.contains_key("active"));
+        assert!(record.get_check("name"));
+        assert!(record.get_check("status"));
+        assert!(!record.get_check("revenue"));
+        assert!(!record.get_check("active"));
     }
 }
 
@@ -404,8 +431,8 @@ fn find_projection_includes_filter_columns() {
     let results = txn.find(COLLECTION, &query).unwrap();
     assert_eq!(results.len(), 3);
     for record in &results {
-        assert!(record.contains_key("name"));
-        assert!(!record.contains_key("status")); // filter col stripped
+        assert!(record.get_check("name"));
+        assert!(!record.get_check("status")); // filter col stripped
     }
 }
 
@@ -430,8 +457,8 @@ fn find_projection_includes_sort_columns() {
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-5"); // Stark 200k
     assert_eq!(results[1].get_str("_id").unwrap(), "acct-4"); // Umbrella 95k
     for record in &results {
-        assert!(record.contains_key("name"));
-        assert!(!record.contains_key("revenue")); // sort col stripped
+        assert!(record.get_check("name"));
+        assert!(!record.get_check("revenue")); // sort col stripped
     }
 }
 
@@ -560,8 +587,8 @@ fn replace_one_full_replacement() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "New Corp");
     // Old fields should be gone (replaced, not merged)
-    assert!(!results[0].contains_key("status"));
-    assert!(!results[0].contains_key("revenue"));
+    assert!(!results[0].get_check("status"));
+    assert!(!results[0].get_check("revenue"));
 }
 
 // ── Delete tests ────────────────────────────────────────────────
@@ -1009,8 +1036,8 @@ fn dot_notation_projection() {
     assert_eq!(record.get_str("name").unwrap(), "Alice");
     let addr = record.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Austin");
-    assert!(!addr.contains_key("state"));
-    assert!(!addr.contains_key("zip"));
+    assert!(!addr.get_check("state"));
+    assert!(!addr.get_check("zip"));
 }
 
 #[test]
@@ -1052,7 +1079,7 @@ fn dot_notation_projection_multiple_subfields() {
     let addr = record.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Austin");
     assert_eq!(addr.get_str("zip").unwrap(), "78701");
-    assert!(!addr.contains_key("state"));
+    assert!(!addr.get_check("state"));
 }
 
 #[test]
@@ -1135,11 +1162,11 @@ fn projection_only_uses_selective_read() {
     let results = txn.find(COLLECTION, &query).unwrap();
     assert_eq!(results.len(), 5);
     for record in &results {
-        assert!(record.contains_key("_id"));
-        assert!(record.contains_key("name"));
-        assert!(!record.contains_key("revenue"));
-        assert!(!record.contains_key("status"));
-        assert!(!record.contains_key("active"));
+        assert!(record.get_check("_id"));
+        assert!(record.get_check("name"));
+        assert!(!record.get_check("revenue"));
+        assert!(!record.get_check("status"));
+        assert!(!record.get_check("active"));
     }
 }
 
@@ -1601,7 +1628,7 @@ fn seed_or_test_data(db: &Database<RocksStore>) {
     txn.commit().unwrap();
 }
 
-fn sorted_ids(docs: &[bson::Document]) -> Vec<String> {
+fn sorted_ids(docs: &[bson::RawDocumentBuf]) -> Vec<String> {
     let mut ids: Vec<String> = docs
         .iter()
         .map(|d| d.get_str("_id").unwrap().to_string())
@@ -2043,7 +2070,7 @@ fn distinct_scalar_field() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2072,7 +2099,7 @@ fn distinct_nested_path() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("Austin".into())));
     assert!(values.contains(&Bson::String("Denver".into())));
@@ -2099,7 +2126,7 @@ fn distinct_array_field() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 3);
     assert!(values.contains(&Bson::String("rust".into())));
     assert!(values.contains(&Bson::String("db".into())));
@@ -2129,7 +2156,7 @@ fn distinct_with_filter() {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("gold".into())));
     assert!(values.contains(&Bson::String("silver".into())));
@@ -2158,7 +2185,7 @@ fn distinct_with_sort_asc() {
         filter: None,
         sort: Some(SortDirection::Asc),
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2192,7 +2219,7 @@ fn distinct_with_sort_desc() {
         filter: None,
         sort: Some(SortDirection::Desc),
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2223,7 +2250,7 @@ fn distinct_missing_field() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert!(values.is_empty());
 }
 
@@ -2249,7 +2276,7 @@ fn distinct_mixed_presence() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2282,7 +2309,7 @@ fn distinct_array_of_sub_documents() {
         filter: None,
         sort: Some(SortDirection::Asc),
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2325,7 +2352,7 @@ fn distinct_sub_document() {
         filter: None,
         sort: None,
     };
-    let values = txn.distinct(COLLECTION, &query).unwrap();
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::Document(doc! { "city": "Austin", "state": "TX" })));
     assert!(values.contains(&Bson::Document(doc! { "city": "Denver", "state": "CO" })));
