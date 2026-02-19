@@ -76,6 +76,17 @@ Filtering on array fields (e.g. `triggers.items eq "renewal_due"`) currently ret
 - Applies to `raw_values_eq` (eq) and `raw_compare_values` (gt, gte, lt, lte)
 - Sorting on array fields should remain unsupported (no meaningful scalar ordering)
 
+## Distinct Values
+
+Support selecting distinct values from a field at any document depth — top-level scalars, sub-document paths, or array elements. Example: `distinct("triggers.items")` returns all unique trigger names across the collection.
+
+- **`slate-query`** — `DistinctQuery { field: String, filter: Option<FilterGroup> }`
+- **`slate-db/exec.rs`** — scan documents, resolve dot-path to leaf, flatten arrays (collect each element individually), deduplicate. Use raw BSON bytes comparison for dedup to avoid `Bson` ordering issues.
+- **`slate-client` / `slate-server`** — new protocol message (request: field + optional filter, response: `Vec<Bson>`)
+- **`slate-lists/http.rs`** — `POST /distinct` with `{"field": "triggers.items", "filters": ...}`
+
+Useful for populating filter dropdowns in the UI — e.g. distinct statuses, distinct priorities, distinct trigger names.
+
 ## Staleness / TTL
 
 Currently the loader fires when `count == 0`. Add TTL-based staleness:
