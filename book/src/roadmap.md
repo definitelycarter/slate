@@ -85,85 +85,62 @@ Implemented. `DistinctQuery { field, filter, sort }` with full-stack support:
 - `slate-client` — `Client::distinct()`
 - `slate-lists` — `POST /distinct` endpoint with filter merging
 
-## Unified Raw Tier (RawBsonRef Pipeline)
+## Unified Raw Tier (RawValue Pipeline)
 
-The executor currently has three rigid tiers with different item types:
-- **ID tier** — `(String, Option<Cow<[u8]>>)` — record IDs
-- **Raw tier** — `(String, Cow<[u8]>)` — record ID + full document bytes
-- **Document tier** — `bson::Document` — materialized documents
+### Done
 
-This forces every query to fetch full document bytes via `ReadRecord`, even when the answer is already available from the index or filter. It also forces duplication — Sort needs to extract fields from raw bytes, but Distinct sorts owned `Bson` values, requiring a parallel `compare_bson_values` function that mirrors `raw_compare_two_values`.
+The raw tier has been rearchitected from rigid `Cow<[u8]>` bytes to `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore) and `RawBson` (owned, from RocksDB or index entries). The pipeline item type is `(String, Option<RawValue<'a>>)` throughout.
 
-### Goal
+**Completed work:**
 
-Replace the raw tier's item type with `RawBsonRef`. Every node in the pipeline receives and emits `RawBsonRef` values — which can be documents, scalars, arrays, or any BSON type. Nodes operate generically on whatever they receive:
+- **`RawValue<'a>` enum** — replaces `Cow<[u8]>` as the pipeline item. Carries documents, scalars, or any BSON type. `as_document()` gives `&RawDocument` for field access; `to_bson()` materializes for projection; `into_owned()` drops the lifetime for IndexMerge collection.
+- **Filter and Sort on `RawValue`** — Filter calls `val.as_document()` → `raw_matches_group()`. Sort calls `val.as_document()` → `raw_get_path()` for sort key extraction. Both work on `&RawDocument` views without allocation.
+- **Conditional ReadRecord** — the planner skips `ReadRecord` for index-covered projections (IndexScan Eq where all projected columns match the indexed field). `IndexScan` carries the matched value as `RawValue::Owned(RawBson)`, and `Projection` constructs documents directly from the scalar — no document fetch, no deserialization. Benchmarked at ~5x faster for narrow projections on indexed fields.
+- **ID-tier nodes in raw tier** — `execute_raw_node` delegates `Scan`, `IndexScan`, `IndexMerge` to `execute_id_node`, so ID-tier nodes can appear directly in the raw tier when ReadRecord is skipped.
+- **Lazy IndexScan** — `from_fn` iterator that pulls index entries on demand, stops at limit or group boundary. No intermediate `Vec` allocation.
+- **`raw_compare_field_values` / `raw_compare_two_values`** — raw-tier comparison on `RawBsonRef` with cross-int coercion (Int32/Int64).
 
-- **Sort** — compares two `RawBsonRef` values directly via `raw_compare_field_values`. No longer needs to know if it's sorting documents or scalar values. One code path, no duplication.
-- **Filter** — if it receives a `RawBsonRef::Document`, it can extract fields and evaluate predicates. If it receives a scalar, it compares directly.
-- **Distinct** — reuses Sort naturally since both operate on `RawBsonRef`.
-- **Projection** — converts `RawBsonRef::Document` to `bson::Document` at the end.
+### Remaining
 
-### Conditional ReadRecord
+Two pieces of duplication remain, plus the `ExtractField` plan node idea:
 
-Today `ReadRecord` is a mandatory boundary between the ID tier and raw tier. In the new model it becomes conditional — the planner injects it only when downstream nodes need fields that aren't already available.
+**1. Eliminate `compare_bson_values` duplication**
 
-**Covered query** — all needed fields are available from the index/filter:
-```
--- select score from accounts where score = 5 (score is indexed)
-Projection
-  → IndexScan(column="score", value=5)
-```
-No ReadRecord. IndexScan emits `RawBsonRef::Int32(5)` directly. This is what MongoDB calls a "covered query."
+`exec::compare_bson_values(a: &Bson, b: &Bson)` mirrors `raw_compare_two_values(a: &RawBsonRef, b: &RawBsonRef)` — same match arms, same logic, different types. It's only called from `execute_distinct` to sort the final `Vec<Bson>`. Fix: either convert `Bson` → `RawBsonRef` before comparing (if cheap), or have Distinct sort before materializing to `Bson`.
 
-**Uncovered query** — downstream needs fields not in the index:
-```
--- select score, name from accounts where score = 5 (score is indexed)
-Projection(columns=["score", "name"])
-  → ReadRecord
-    → IndexScan(column="score", value=5)
-```
-Planner sees Projection needs `name` which isn't available from IndexScan, so it injects ReadRecord to fetch full document bytes.
+**2. Distinct inline sort → reuse pipeline Sort**
 
-**ReadRecord as a conditional noop** — when injected, ReadRecord checks: "do I already have a full document flowing through?" If yes, pass through. If no, fetch from store. This makes it safe to inject conservatively.
-
-### Field Extraction as a Plan Node
-
-Today Sort inlines field extraction — it calls `raw_get_path(doc, &sort.field)` inside `sort_by`. In the new model, field extraction is a separate plan node:
+`execute_distinct` collects `Vec<Bson>`, deduplicates with linear `contains()`, then sorts with `compare_bson_values`. This is a separate code path from the pipeline's `Sort` node. Ideally Distinct would work on `RawBsonRef` values and reuse the same comparison logic. The plan would become:
 
 ```
--- sort by score
+Distinct(dedup)
+  → Sort(direction)
+    → ExtractField("field")
+      → Filter
+        → ReadRecord
+          → Scan
+```
+
+But this requires Distinct to operate on `RawBsonRef` values rather than owned `Bson`, which ties into the ExtractField question below.
+
+**3. `ExtractField` plan node (open question)**
+
+Today Sort inlines field extraction — it calls `raw_get_path(doc, &sort.field)` inside `sort_by`. A separate `ExtractField` node would make Sort generic over any `RawBsonRef`:
+
+```
 Sort(direction=Asc)
   → ExtractField("score")
-    → ReadRecord
-      → Scan
+    → ReadRecord → Scan
 ```
 
-`ExtractField` takes a `RawBsonRef::Document`, calls `raw_get_path`, and emits the field's `RawBsonRef`. Sort just compares `RawBsonRef` values — it doesn't know or care where they came from.
+Sort just compares `RawBsonRef` values — it doesn't know or care where they came from. This is clean for single-field sort but awkward for multi-field sort — Sort would need the original document to extract secondary keys.
 
-For multi-field sort, the item would carry the sort key alongside the original data — something like `(RawBsonRef, Cow<[u8]>)` as sort key + original bytes. Or the sort node could receive documents and extract fields internally (current behavior) as a pragmatic choice for multi-field sorts.
+Options for multi-field sort:
+- **(a)** Sort receives full documents and extracts fields internally (current approach, pragmatic)
+- **(b)** `ExtractField` emits a composite sort key alongside the original data
+- **(c)** Only use `ExtractField` for single-field sort; multi-field keeps current inline extraction
 
-### Key Benefits
-
-1. **No duplicated comparison logic** — one `raw_compare_field_values` works for Sort, Distinct, and any future operation that needs to compare values.
-2. **Covered queries** — skip record fetches entirely when the index provides all needed data. Significant performance win for narrow projections on indexed fields.
-3. **Composable pipeline** — new operations (aggregation, grouping) fit naturally because every node speaks the same type.
-4. **Distinct reuses Sort** — no need for a separate `compare_bson_values` or special-cased sort in `execute_distinct`. The plan becomes `Distinct(dedup) → Sort → ExtractField → Filter → ReadRecord → Scan`.
-
-### Migration Path
-
-This is a significant rearchitecture. Suggested approach:
-1. Change `RawIter` item type from `(String, Cow<[u8]>)` to a struct that carries both the record ID and a `RawBsonRef` (which may be a full document or a scalar).
-2. Update `ReadRecord` to emit `RawBsonRef::Document` instead of raw bytes.
-3. Update Filter and Sort to work on `RawBsonRef`.
-4. Add `ExtractField` plan node for field extraction.
-5. Make ReadRecord conditional in the planner — analyze downstream nodes to determine if record fetch is needed.
-6. Remove `compare_bson_values` duplication and `execute_distinct`'s inline sort logic.
-
-### Open Questions
-
-- **Lifetime management** — `RawBsonRef` borrows from the underlying bytes. When the pipeline item type is `RawBsonRef<'a>`, we need the bytes to live long enough. Today `Cow<'a, [u8]>` handles this — the struct wrapping `RawBsonRef` would also need to own or borrow the backing bytes.
-- **Multi-field sort** — if Sort only receives a single extracted field value, how does it access secondary sort keys? Options: (a) Sort receives the full document and extracts internally (current approach, pragmatic), (b) sort key is a tuple of extracted values, (c) ExtractField emits a composite key.
-- **Filter on non-document** — if a scalar flows through and Filter needs a field, it can't extract one. The planner must ensure ReadRecord is injected before Filter when the input might not be a document. This is a planner responsibility, not a runtime check.
+Given that multi-field sort already works well with inline extraction, option **(c)** may be the pragmatic choice — `ExtractField` benefits Distinct and single-field Sort without complicating multi-field Sort.
 
 ## Staleness / TTL
 
