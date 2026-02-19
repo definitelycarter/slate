@@ -123,7 +123,7 @@ pub fn index_key_value_prefix(key: &[u8]) -> Option<&[u8]> {
     let rest = &key[INDEX_PREFIX.len()..];
     let first_sep = rest.iter().position(|&b| b == SEP)?;
     let after_first = &rest[first_sep + 1..];
-    let second_sep = after_first.iter().position(|&b| b == SEP)?;
+    let second_sep = after_first.iter().rposition(|&b| b == SEP)?;
     // Include everything up to and including the second separator
     let prefix_len = INDEX_PREFIX.len() + first_sep + 1 + second_sep + 1;
     Some(&key[..prefix_len])
@@ -145,8 +145,9 @@ pub fn parse_index_key(key: &[u8]) -> Option<(&str, &str)> {
 
     let after_first = &rest[first_sep + 1..];
 
-    // Find second \x00 — separates value_bytes from record_id
-    let second_sep = after_first.iter().position(|&b| b == SEP)?;
+    // Find last \x00 — separates value_bytes from record_id.
+    // Must search from the right because binary value encodings can contain \x00.
+    let second_sep = after_first.iter().rposition(|&b| b == SEP)?;
     let record_id = std::str::from_utf8(&after_first[second_sep + 1..]).ok()?;
 
     Some((column, record_id))
