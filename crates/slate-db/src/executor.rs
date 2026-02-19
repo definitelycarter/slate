@@ -127,55 +127,64 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
         None => encoding::index_scan_field_prefix(column),
     };
 
-    let iter = match direction {
+    let mut iter = match direction {
         SortDirection::Asc => txn.scan_prefix(collection, &prefix)?,
         SortDirection::Desc => txn.scan_prefix_rev(collection, &prefix)?,
     };
 
     let mut count = 0usize;
     let mut boundary_prefix: Option<Vec<u8>> = None;
-    let mut ids: Vec<Result<(String, Option<Cow<'a, [u8]>>), DbError>> = Vec::new();
+    let mut done = false;
 
-    for result in iter {
-        match result {
-            Ok((key, _)) => {
-                // Past the limit — check if we should stop.
-                if let Some(n) = limit {
-                    if count >= n {
-                        if complete_groups {
-                            let val_prefix = encoding::index_key_value_prefix(&key);
-                            let changed = match (&boundary_prefix, val_prefix) {
-                                (Some(prev), Some(cur)) => prev.as_slice() != cur,
-                                _ => false,
-                            };
-                            if changed {
-                                break;
+    Ok(Box::new(std::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+
+        for result in iter.by_ref() {
+            match result {
+                Ok((key, _)) => {
+                    // Past the limit — check if we should stop.
+                    if let Some(n) = limit {
+                        if count >= n {
+                            if complete_groups {
+                                let val_prefix = encoding::index_key_value_prefix(&key);
+                                let changed = match (&boundary_prefix, val_prefix) {
+                                    (Some(prev), Some(cur)) => prev.as_slice() != cur,
+                                    _ => false,
+                                };
+                                if changed {
+                                    done = true;
+                                    return None;
+                                }
+                                if boundary_prefix.is_none() {
+                                    boundary_prefix = val_prefix.map(|p| p.to_vec());
+                                }
+                            } else {
+                                done = true;
+                                return None;
                             }
-                            if boundary_prefix.is_none() {
-                                boundary_prefix = val_prefix.map(|p| p.to_vec());
-                            }
-                        } else {
-                            break;
                         }
                     }
-                }
 
-                match encoding::parse_index_key(&key) {
-                    Some((_, record_id)) => {
-                        count += 1;
-                        ids.push(Ok((record_id.to_string(), None)));
+                    match encoding::parse_index_key(&key) {
+                        Some((_, record_id)) => {
+                            count += 1;
+                            return Some(Ok((record_id.to_string(), None)));
+                        }
+                        None => continue,
                     }
-                    None => continue,
                 }
-            }
-            Err(e) => {
-                ids.push(Err(DbError::Store(e)));
-                break;
+                Err(e) => {
+                    done = true;
+                    return Some(Err(DbError::Store(e)));
+                }
             }
         }
-    }
 
-    Ok(Box::new(ids.into_iter()))
+        done = true;
+        None
+    })))
 }
 
 // ── Raw tier ────────────────────────────────────────────────────
