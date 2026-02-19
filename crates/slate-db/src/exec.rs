@@ -441,6 +441,21 @@ fn raw_compare_two_values(a: &RawBsonRef, b: &RawBsonRef) -> Ordering {
     }
 }
 
+/// Compare two owned Bson values for sorting.
+pub(crate) fn compare_bson_values(a: &Bson, b: &Bson) -> Ordering {
+    match (a, b) {
+        (Bson::String(a), Bson::String(b)) => a.cmp(b),
+        (Bson::Int32(a), Bson::Int32(b)) => a.cmp(b),
+        (Bson::Int64(a), Bson::Int64(b)) => a.cmp(b),
+        (Bson::Int32(a), Bson::Int64(b)) => (*a as i64).cmp(b),
+        (Bson::Int64(a), Bson::Int32(b)) => a.cmp(&(*b as i64)),
+        (Bson::Double(a), Bson::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Bson::Boolean(a), Bson::Boolean(b)) => a.cmp(b),
+        (Bson::DateTime(a), Bson::DateTime(b)) => a.timestamp_millis().cmp(&b.timestamp_millis()),
+        _ => Ordering::Equal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

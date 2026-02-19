@@ -96,9 +96,30 @@ pub fn plan(collection: &str, indexed_fields: &[String], query: &Query) -> PlanN
     let id_is_scan = matches!(id_node, PlanNode::Scan { .. });
     let has_residual_filter = residual_filter.is_some();
 
-    // Step 2: ReadRecord — always present, fetches raw records from IDs
-    let node = PlanNode::ReadRecord {
-        input: Box::new(id_node),
+    // Check if the IndexScan covers the projection (index-only query).
+    // Conditions: IndexScan with Eq value, no residual filter, no sort,
+    // and every projected column is the indexed field.
+    let index_covered = match (&id_node, &residual_filter, &query.sort[..], &query.columns) {
+        (
+            PlanNode::IndexScan {
+                column,
+                value: Some(_),
+                ..
+            },
+            None,
+            [],
+            Some(cols),
+        ) => cols.iter().all(|c| c == column),
+        _ => false,
+    };
+
+    // Step 2: ReadRecord — skip when the index covers the projection
+    let node = if index_covered {
+        id_node
+    } else {
+        PlanNode::ReadRecord {
+            input: Box::new(id_node),
+        }
     };
 
     // Step 3: Wrap with residual filter if any conditions remain

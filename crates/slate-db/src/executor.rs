@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use bson::RawDocument;
+use bson::raw::{RawBson, RawBsonRef};
+use bson::{RawDocument, RawDocumentBuf};
 use slate_query::{LogicalOp, SortDirection};
 use slate_store::Transaction;
 
@@ -10,9 +11,54 @@ use crate::error::DbError;
 use crate::exec;
 use crate::planner::PlanNode;
 
+// ── RawValue ────────────────────────────────────────────────────
+//
+// Cow-like enum for raw BSON values. Borrowed holds a zero-copy
+// reference into the store snapshot; Owned holds bytes returned by
+// RocksDB. Downstream nodes call `.as_document()` to get a uniform
+// `&RawDocument` view without redundant `from_bytes` calls.
+
+pub(crate) enum RawValue<'a> {
+    Borrowed(RawBsonRef<'a>),
+    Owned(RawBson),
+}
+
+impl<'a> RawValue<'a> {
+    /// Uniform borrowed view regardless of ownership.
+    #[allow(dead_code)]
+    fn as_ref(&self) -> RawBsonRef<'_> {
+        match self {
+            Self::Borrowed(r) => *r,
+            Self::Owned(b) => b.as_raw_bson_ref(),
+        }
+    }
+
+    /// Extract `&RawDocument` if this value is a document.
+    fn as_document(&self) -> Option<&RawDocument> {
+        match self {
+            Self::Borrowed(RawBsonRef::Document(d)) => Some(d),
+            Self::Owned(RawBson::Document(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Convert to owned `RawBson`, dropping the lifetime.
+    /// Returns `None` for borrowed variants (would require cloning the backing store).
+    fn into_owned(self) -> Option<RawBson> {
+        match self {
+            Self::Owned(b) => Some(b),
+            Self::Borrowed(_) => None,
+        }
+    }
+
+    /// Convert to `bson::Bson` for materialization into a document.
+    fn to_bson(&self) -> Result<bson::Bson, DbError> {
+        Ok(bson::Bson::try_from(self.as_ref())?)
+    }
+}
+
 type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a>;
-type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Cow<'a, [u8]>), DbError>> + 'a>;
-type IdIter<'a> = Box<dyn Iterator<Item = Result<(String, Option<Cow<'a, [u8]>>), DbError>> + 'a>;
+type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Option<RawValue<'a>>), DbError>> + 'a>;
 
 /// Executes a query plan tree, returning a lazy document iterator.
 pub fn execute<'a, T: Transaction + 'a>(
@@ -37,8 +83,11 @@ pub fn execute_distinct<T: Transaction>(
             let mut unique: Vec<bson::Bson> = Vec::new();
 
             for result in source {
-                let (_id, cow) = result?;
-                let raw = RawDocument::from_bytes(&cow)?;
+                let (_id, opt_val) = result?;
+                let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
+                let raw = val
+                    .as_document()
+                    .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
                 let values = exec::raw_get_path_values(raw, field)?;
 
                 for val in values {
@@ -51,7 +100,7 @@ pub fn execute_distinct<T: Transaction>(
 
             if let Some(dir) = direction {
                 unique.sort_by(|a, b| {
-                    let ord = compare_bson_values(a, b);
+                    let ord = exec::compare_bson_values(a, b);
                     match dir {
                         SortDirection::Asc => ord,
                         SortDirection::Desc => ord.reverse(),
@@ -69,15 +118,15 @@ pub fn execute_distinct<T: Transaction>(
 
 // ── ID tier ─────────────────────────────────────────────────────
 //
-// Nodes below ReadRecord produce record IDs (and optionally raw bytes)
+// Nodes below ReadRecord produce record IDs (and optionally raw values)
 // as a lazy iterator. Scan carries the data it already has; IndexScan
-// yields None for bytes since index entries don't contain record data.
+// yields None since index entries don't contain record data.
 
-/// Execute an ID-tier node, returning a lazy iterator of (id, maybe_bytes).
+/// Execute an ID-tier node, returning a lazy iterator of (id, maybe_value).
 fn execute_id_node<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     node: &'a PlanNode,
-) -> Result<IdIter<'a>, DbError> {
+) -> Result<RawIter<'a>, DbError> {
     match node {
         PlanNode::Scan { collection } => execute_scan(txn, collection),
 
@@ -100,34 +149,40 @@ fn execute_id_node<'a, T: Transaction + 'a>(
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
             // IndexMerge must collect both sides for dedup — stays eager.
-            let left: Vec<String> = execute_id_node(txn, lhs)?
-                .map(|r| r.map(|(id, _)| id))
+            // Values are collected as Option<RawBson> (no lifetime) to release
+            // the txn borrow between left and right collection.
+            let left: Vec<(String, Option<RawBson>)> = execute_id_node(txn, lhs)?
+                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_owned))))
                 .collect::<Result<_, _>>()?;
-            let right: Vec<String> = execute_id_node(txn, rhs)?
-                .map(|r| r.map(|(id, _)| id))
+            let right: Vec<(String, Option<RawBson>)> = execute_id_node(txn, rhs)?
+                .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_owned))))
                 .collect::<Result<_, _>>()?;
 
-            let ids = match logical {
+            let merged = match logical {
                 LogicalOp::Or => {
                     let mut seen = HashSet::with_capacity(left.len() + right.len());
                     let mut result = Vec::with_capacity(left.len() + right.len());
-                    for id in left.into_iter().chain(right) {
+                    for (id, val) in left.into_iter().chain(right) {
                         if seen.insert(id.clone()) {
-                            result.push(id);
+                            result.push((id, val));
                         }
                     }
                     result
                 }
                 LogicalOp::And => {
-                    let right_set: HashSet<String> = right.into_iter().collect();
+                    let right_set: HashSet<String> =
+                        right.iter().map(|(id, _)| id.clone()).collect();
                     left.into_iter()
-                        .filter(|id| right_set.contains(id))
+                        .filter(|(id, _)| right_set.contains(id))
                         .collect()
                 }
             };
 
-            // After dedup, bytes are unknown — ReadRecord will fetch them.
-            Ok(Box::new(ids.into_iter().map(|id| Ok((id, None)))))
+            Ok(Box::new(
+                merged
+                    .into_iter()
+                    .map(|(id, val)| Ok((id, val.map(RawValue::Owned)))),
+            ))
         }
 
         _ => Err(DbError::InvalidQuery(
@@ -136,24 +191,37 @@ fn execute_id_node<'a, T: Transaction + 'a>(
     }
 }
 
-/// Scan all records lazily, yielding (id, Some(bytes)) — data is kept, not discarded.
+/// Scan all records lazily, yielding (id, Some(RawValue)) — data is kept, not discarded.
 fn execute_scan<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     collection: &str,
-) -> Result<IdIter<'a>, DbError> {
+) -> Result<RawIter<'a>, DbError> {
     let scan_prefix = encoding::data_scan_prefix("");
     let iter = txn.scan_prefix(collection, &scan_prefix)?;
 
     Ok(Box::new(iter.filter_map(|result| match result {
         Ok((key, value)) => {
             let record_id = encoding::parse_record_key(&key)?.to_string();
-            Some(Ok((record_id, Some(value))))
+            let val = match value {
+                Cow::Borrowed(b) => match RawDocument::from_bytes(b) {
+                    Ok(raw) => RawValue::Borrowed(RawBsonRef::Document(raw)),
+                    Err(e) => return Some(Err(DbError::from(e))),
+                },
+                Cow::Owned(v) => match RawDocumentBuf::from_bytes(v) {
+                    Ok(raw) => RawValue::Owned(RawBson::Document(raw)),
+                    Err(e) => return Some(Err(DbError::from(e))),
+                },
+            };
+            Some(Ok((record_id, Some(val))))
         }
         Err(e) => Some(Err(DbError::Store(e))),
     })))
 }
 
-/// Scan an index prefix, yielding (id, None).
+/// Scan an index prefix, yielding (id, value).
+/// For Eq scans (`value: Some`), returns the known indexed value as `RawValue`.
+/// For ordered scans (`value: None`), returns `None` (value decoding deferred
+/// until the key format includes a type tag).
 /// When `complete_groups` is true and limit is set, reads past the limit
 /// to finish the last value group for correct downstream sub-sorting.
 fn execute_index_scan<'a, T: Transaction + 'a>(
@@ -164,12 +232,18 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     direction: SortDirection,
     limit: Option<usize>,
     complete_groups: bool,
-) -> Result<IdIter<'a>, DbError> {
+) -> Result<RawIter<'a>, DbError> {
     // Some(v): `i:{column}\x00{value_bytes}\x00` — entries matching exact value (Eq filter)
     // None:    `i:{column}\x00`               — all entries for column (ordered scan)
     let prefix = match value {
         Some(v) => encoding::index_scan_prefix(column, v),
         None => encoding::index_scan_field_prefix(column),
+    };
+
+    // For Eq scans, convert the known value to RawBson once — cloned per record.
+    let raw_val: Option<RawBson> = match value {
+        Some(v) => Some(RawBson::try_from(v.clone())?),
+        None => None,
     };
 
     let mut iter = match direction {
@@ -215,7 +289,8 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
                     match encoding::parse_index_key(&key) {
                         Some((_, record_id)) => {
                             count += 1;
-                            return Some(Ok((record_id.to_string(), None)));
+                            let item_val = raw_val.as_ref().map(|v| RawValue::Owned(v.clone()));
+                            return Some(Ok((record_id.to_string(), item_val)));
                         }
                         None => continue,
                     }
@@ -249,38 +324,41 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
-                Ok((id, cow)) => {
-                    let raw = match RawDocument::from_bytes(&cow) {
-                        Ok(r) => r,
-                        Err(e) => return Some(Err(DbError::from(e))),
+                Ok((id, Some(val))) => {
+                    let raw = match val.as_document() {
+                        Some(r) => r,
+                        None => {
+                            return Some(Err(DbError::InvalidQuery("expected document".into())));
+                        }
                     };
                     match exec::raw_matches_group(raw, &id, predicate) {
-                        Ok(true) => Some(Ok((id, cow))),
+                        Ok(true) => Some(Ok((id, Some(val)))),
                         Ok(false) => None,
                         Err(e) => Some(Err(e)),
                     }
                 }
+                Ok((_, None)) => None,
             })))
         }
 
         PlanNode::Sort { sorts, input } => {
             let source = execute_raw_node(txn, input)?;
 
-            let mut records: Vec<(String, Cow<'a, [u8]>)> =
+            let mut records: Vec<(String, Option<RawValue<'a>>)> =
                 source.collect::<Result<Vec<_>, _>>()?;
 
-            records.sort_by(|(a_id, a_bytes), (b_id, b_bytes)| {
+            records.sort_by(|(a_id, a_opt), (b_id, b_opt)| {
                 for sort in sorts {
                     let ord = if sort.field == "_id" {
                         a_id.cmp(b_id)
                     } else {
-                        let a_raw = RawDocument::from_bytes(a_bytes).ok();
-                        let b_raw = RawDocument::from_bytes(b_bytes).ok();
-                        let a_val =
+                        let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
+                        let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
+                        let a_field =
                             a_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
-                        let b_val =
+                        let b_field =
                             b_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
-                        exec::raw_compare_field_values(a_val, b_val)
+                        exec::raw_compare_field_values(a_field, b_field)
                     };
                     let ord = match sort.direction {
                         slate_query::SortDirection::Asc => ord,
@@ -293,12 +371,18 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
                 std::cmp::Ordering::Equal
             });
 
-            Ok(Box::new(records.into_iter().map(|(id, cow)| Ok((id, cow)))))
+            Ok(Box::new(records.into_iter().map(|(id, val)| Ok((id, val)))))
         }
 
         PlanNode::Limit { skip, take, input } => {
             let source = execute_raw_node(txn, input)?;
             Ok(apply_limit(source, *skip, *take))
+        }
+
+        // ID-tier nodes can appear directly in the raw tier when ReadRecord is skipped
+        // (e.g. index-covered projections). Delegate to the ID-tier executor.
+        PlanNode::Scan { .. } | PlanNode::IndexScan { .. } | PlanNode::IndexMerge { .. } => {
+            execute_id_node(txn, node)
         }
 
         _ => Err(DbError::InvalidQuery(
@@ -322,11 +406,25 @@ fn execute_node<'a, T: Transaction + 'a>(
             let cols = columns.clone();
 
             Ok(Box::new(source.map(move |result| {
-                let (id, cow) = result?;
-                let raw = RawDocument::from_bytes(&cow)?;
-                let mut doc = materialize_for_projection(raw, &cols)?;
-                doc.insert("_id", id.as_str());
-                exec::apply_projection(&mut doc, &cols);
+                let (id, opt_val) = result?;
+                let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
+
+                let doc = if let Some(raw) = val.as_document() {
+                    // Full document — selective materialization
+                    let mut doc = materialize_for_projection(raw, &cols)?;
+                    doc.insert("_id", id.as_str());
+                    exec::apply_projection(&mut doc, &cols);
+                    doc
+                } else {
+                    // Scalar value from index — construct document directly
+                    let bson_val = val.to_bson()?;
+                    let mut doc = bson::Document::new();
+                    doc.insert("_id", id.as_str());
+                    for col in &cols {
+                        doc.insert(col.as_str(), bson_val.clone());
+                    }
+                    doc
+                };
                 Ok(doc)
             })))
         }
@@ -335,8 +433,11 @@ fn execute_node<'a, T: Transaction + 'a>(
         _ => {
             let source = execute_raw_node(txn, node)?;
             Ok(Box::new(source.map(|result| {
-                let (id, cow) = result?;
-                let raw = RawDocument::from_bytes(&cow)?;
+                let (id, opt_val) = result?;
+                let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
+                let raw = val
+                    .as_document()
+                    .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
                 let mut doc: bson::Document = raw.try_into()?;
                 doc.insert("_id", id.as_str());
                 Ok(doc)
@@ -347,7 +448,7 @@ fn execute_node<'a, T: Transaction + 'a>(
 
 /// ReadRecord: the boundary between ID tier and raw tier.
 ///
-/// - Scan: data flows through lazily — bytes are already available from the ID tier.
+/// - Scan: data flows through lazily — RawValue is already available from the ID tier.
 /// - IndexScan/IndexMerge: IDs are collected eagerly (releasing the `scan_prefix`
 ///   borrow on `txn`), then each record is fetched lazily via `txn.get()`.
 ///   The ID collection is cheap (small strings); the expensive record fetch is
@@ -357,10 +458,10 @@ fn execute_read_record<'a, T: Transaction + 'a>(
     input: &'a PlanNode,
 ) -> Result<RawIter<'a>, DbError> {
     if matches!(input, PlanNode::Scan { .. }) {
-        // Scan path: ID tier already carries the data — just unwrap the Option.
+        // Scan path: ID tier already carries the data — just pass through.
         let source = execute_id_node(txn, input)?;
         return Ok(Box::new(source.filter_map(|result| match result {
-            Ok((id, Some(bytes))) => Some(Ok((id, bytes))),
+            Ok((id, Some(val))) => Some(Ok((id, Some(val)))),
             Ok((_, None)) => None,
             Err(e) => Some(Err(e)),
         })));
@@ -375,7 +476,13 @@ fn execute_read_record<'a, T: Transaction + 'a>(
     Ok(Box::new(ids.into_iter().filter_map(move |id| {
         let key = encoding::record_key(&id);
         match txn.get(&collection, &key) {
-            Ok(Some(bytes)) => Some(Ok((id, Cow::Owned(bytes.into_owned())))),
+            Ok(Some(bytes)) => {
+                let raw = match RawDocumentBuf::from_bytes(bytes.into_owned()) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(DbError::from(e))),
+                };
+                Some(Ok((id, Some(RawValue::Owned(RawBson::Document(raw))))))
+            }
             Ok(None) => None, // dangling index entry
             Err(e) => Some(Err(DbError::Store(e))),
         }
@@ -424,23 +531,4 @@ fn materialize_for_projection(
         }
     }
     Ok(doc)
-}
-
-/// Compare two owned Bson values for sorting.
-/// Mirrors the logic of `raw_compare_two_values` in exec.rs.
-fn compare_bson_values(a: &bson::Bson, b: &bson::Bson) -> std::cmp::Ordering {
-    use bson::Bson;
-    use std::cmp::Ordering;
-
-    match (a, b) {
-        (Bson::String(a), Bson::String(b)) => a.cmp(b),
-        (Bson::Int32(a), Bson::Int32(b)) => a.cmp(b),
-        (Bson::Int64(a), Bson::Int64(b)) => a.cmp(b),
-        (Bson::Int32(a), Bson::Int64(b)) => (*a as i64).cmp(b),
-        (Bson::Int64(a), Bson::Int32(b)) => a.cmp(&(*b as i64)),
-        (Bson::Double(a), Bson::Double(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Bson::Boolean(a), Bson::Boolean(b)) => a.cmp(b),
-        (Bson::DateTime(a), Bson::DateTime(b)) => a.timestamp_millis().cmp(&b.timestamp_millis()),
-        _ => Ordering::Equal,
-    }
 }

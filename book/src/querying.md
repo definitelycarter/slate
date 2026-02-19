@@ -19,7 +19,7 @@ ID tier:         Scan / IndexScan / IndexMerge (produce record IDs)
 ```
 
 **ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — operates on `Cow<[u8]>` bytes with borrowed `&RawDocument` views, accessing individual fields lazily. No full deserialization. MemoryStore returns `Cow::Borrowed` (zero-copy from its snapshot), RocksDB returns `Cow::Owned`.
+**Raw tier** — operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`. For index-covered queries, `RawValue` carries scalar values (String, Int, etc.) directly from the index — no document fetch needed.
 **Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns to `bson::Document`.
 
 ## Query Model
@@ -334,6 +334,37 @@ Filter(score > 50 AND name IContains "alice")
 ```
 
 No indexed fields, no `Eq` operators — full scan. All conditions are evaluated lazily on raw bytes. Even without index acceleration, lazy materialization means rejected records are never fully deserialized.
+
+---
+
+### 18. Index-Covered Projection
+
+**Query:** `find({ filter: status = "active", columns: ["status"] })`
+
+```
+Projection(status)
+  └── IndexScan(status = "active")
+```
+
+The projection only requests `status`, which is the indexed field used by the `IndexScan`. Since the `IndexScan` already carries the matched value (`"active"`) as a `RawValue`, the planner skips `ReadRecord` entirely — no document bytes are fetched from storage. `Projection` constructs `{ _id, status: "active" }` directly from the index value.
+
+This optimization applies when **all** of these conditions are met:
+1. The ID tier is an `IndexScan` with an `Eq` value (not an ordered scan)
+2. No residual filter exists (the index fully satisfies the WHERE clause)
+3. No sort is requested
+4. Every projected column matches the indexed field
+
+When any condition isn't met, `ReadRecord` is included as normal:
+
+**Query:** `find({ filter: status = "active", columns: ["status", "name"] })`
+
+```
+Projection(status, name)
+  └── ReadRecord
+        └── IndexScan(status = "active")
+```
+
+Here `name` isn't available from the index, so the full document must be fetched.
 
 ---
 

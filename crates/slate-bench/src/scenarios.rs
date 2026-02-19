@@ -211,6 +211,30 @@ pub fn query_benchmarks<S: Store>(
         r.len()
     }));
 
+    // 2b. Indexed Eq with projection on indexed field only
+    results.push(bench(
+        "query: status = 'active' projection [status] (indexed)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: Some(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![FilterNode::Condition(Filter {
+                        field: "status".to_string(),
+                        operator: Operator::Eq,
+                        value: Bson::String("active".to_string()),
+                    })],
+                }),
+                sort: vec![],
+                skip: None,
+                take: None,
+                columns: Some(vec!["status".to_string()]),
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
     // 3. Product recommendation filter
     results.push(bench("query: product_recommendation1 = 'ProductA'", || {
         let mut txn = db.begin(true).expect("begin failed");
