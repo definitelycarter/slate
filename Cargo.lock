@@ -2095,12 +2095,9 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "rand 0.8.5",
- "slate-client",
  "slate-db",
  "slate-query",
- "slate-server",
  "slate-store",
- "tempfile",
 ]
 
 [[package]]
@@ -2205,6 +2202,7 @@ name = "slate-server"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "rand 0.8.5",
  "rmp-serde",
  "serde",
  "signal-hook",

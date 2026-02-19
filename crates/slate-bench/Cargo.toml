@@ -13,10 +13,7 @@ path = "src/raw_document_bench.rs"
 
 [dependencies]
 slate-db = { path = "../slate-db" }
-slate-store = { path = "../slate-store", features = ["rocksdb", "memory"] }
+slate-store = { path = "../slate-store", features = ["memory"] }
 slate-query = { path = "../slate-query" }
-slate-server = { path = "../slate-server" }
-slate-client = { path = "../slate-client" }
 bson = "2"
 rand = "0.8"
-tempfile = "3"

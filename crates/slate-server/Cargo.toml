@@ -19,4 +19,5 @@ signal-hook = "0.3"
 [dev-dependencies]
 tempfile = "3"
 bson = "2"
+rand = "0.8"
 slate-client = { path = "../slate-client" }
