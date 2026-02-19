@@ -57,14 +57,14 @@ impl<'a> RawValue<'a> {
     }
 }
 
-type DocIter<'a> = Box<dyn Iterator<Item = Result<bson::Document, DbError>> + 'a>;
+type BsonIter<'a> = Box<dyn Iterator<Item = Result<bson::Bson, DbError>> + 'a>;
 type RawIter<'a> = Box<dyn Iterator<Item = Result<(String, Option<RawValue<'a>>), DbError>> + 'a>;
 
-/// Executes a query plan tree, returning a lazy document iterator.
+/// Executes a query plan tree, returning a lazy BSON value iterator.
 pub fn execute<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     node: &'a PlanNode,
-) -> Result<DocIter<'a>, DbError> {
+) -> Result<BsonIter<'a>, DbError> {
     execute_node(txn, node)
 }
 
@@ -399,7 +399,7 @@ fn execute_raw_node<'a, T: Transaction + 'a>(
 fn execute_node<'a, T: Transaction + 'a>(
     txn: &'a mut T,
     node: &'a PlanNode,
-) -> Result<DocIter<'a>, DbError> {
+) -> Result<BsonIter<'a>, DbError> {
     match node {
         PlanNode::Projection { columns, input } => {
             let source = execute_raw_node(txn, input)?;
@@ -425,7 +425,7 @@ fn execute_node<'a, T: Transaction + 'a>(
                     }
                     doc
                 };
-                Ok(doc)
+                Ok(bson::Bson::Document(doc))
             })))
         }
 
@@ -440,7 +440,7 @@ fn execute_node<'a, T: Transaction + 'a>(
                     .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
                 let mut doc: bson::Document = raw.try_into()?;
                 doc.insert("_id", id.as_str());
-                Ok(doc)
+                Ok(bson::Bson::Document(doc))
             })))
         }
     }

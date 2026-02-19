@@ -269,7 +269,15 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         let plan = planner::plan(collection, &indexed_fields, query);
         match executor::execute(&mut self.txn, &plan) {
-            Ok(iter) => iter.collect(),
+            Ok(iter) => iter
+                .map(|r| match r? {
+                    bson::Bson::Document(doc) => Ok(doc),
+                    other => Err(DbError::InvalidQuery(format!(
+                        "expected document, got {:?}",
+                        other
+                    ))),
+                })
+                .collect(),
             Err(DbError::Store(ref e)) if e.to_string().contains("column family not found") => {
                 Ok(vec![])
             }
