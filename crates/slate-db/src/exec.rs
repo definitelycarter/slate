@@ -404,6 +404,10 @@ fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
         (RawBsonRef::Int64(a), Bson::Int64(b)) => *a == *b,
         (RawBsonRef::Int64(a), Bson::Int32(b)) => *a == (*b as i64),
         (RawBsonRef::Double(a), Bson::Double(b)) => *a == *b,
+        (RawBsonRef::Double(a), Bson::Int64(b)) => *a == (*b as f64),
+        (RawBsonRef::Double(a), Bson::Int32(b)) => *a == (*b as f64),
+        (RawBsonRef::Int64(a), Bson::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Int32(a), Bson::Double(b)) => (*a as f64) == *b,
         (RawBsonRef::Boolean(a), Bson::Boolean(b)) => *a == *b,
         (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
             a.timestamp_millis() == b.timestamp_millis()
@@ -444,6 +448,18 @@ fn raw_compare_values(
             (RawBsonRef::Int64(a), Bson::Int32(b)) => predicate(a.cmp(&(*b as i64))),
             (RawBsonRef::Double(a), Bson::Double(b)) => {
                 predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            }
+            (RawBsonRef::Double(a), Bson::Int64(b)) => {
+                predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
+            }
+            (RawBsonRef::Double(a), Bson::Int32(b)) => {
+                predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
+            }
+            (RawBsonRef::Int64(a), Bson::Double(b)) => {
+                predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
+            }
+            (RawBsonRef::Int32(a), Bson::Double(b)) => {
+                predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
             (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
                 predicate(a.timestamp_millis().cmp(&b.timestamp_millis()))
@@ -501,6 +517,18 @@ fn raw_compare_two_values(a: &RawBsonRef, b: &RawBsonRef) -> Ordering {
         (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => a.cmp(&(*b as i64)),
         (RawBsonRef::Double(a), RawBsonRef::Double(b)) => {
             a.partial_cmp(b).unwrap_or(Ordering::Equal)
+        }
+        (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => {
+            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+        }
+        (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => {
+            a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+        }
+        (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => {
+            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+        }
+        (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => {
+            (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
         }
         (RawBsonRef::Boolean(a), RawBsonRef::Boolean(b)) => a.cmp(b),
         (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
@@ -856,6 +884,108 @@ mod tests {
             raw_compare_field_values(Some(RawBsonRef::Int32(10)), Some(RawBsonRef::Int64(10))),
             Ordering::Equal
         );
+    }
+
+    // ── Cross-type: Double ↔ Int field comparison ─────────────────
+
+    #[test]
+    fn raw_compare_field_values_double_vs_int64() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            raw_compare_field_values(Some(RawBsonRef::Double(10.0)), Some(RawBsonRef::Int64(10))),
+            Ordering::Equal
+        );
+        assert_eq!(
+            raw_compare_field_values(Some(RawBsonRef::Double(10.5)), Some(RawBsonRef::Int64(10))),
+            Ordering::Greater
+        );
+        assert_eq!(
+            raw_compare_field_values(Some(RawBsonRef::Int64(10)), Some(RawBsonRef::Double(10.5))),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn raw_compare_field_values_double_vs_int32() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            raw_compare_field_values(Some(RawBsonRef::Double(5.0)), Some(RawBsonRef::Int32(5))),
+            Ordering::Equal
+        );
+        assert_eq!(
+            raw_compare_field_values(Some(RawBsonRef::Int32(5)), Some(RawBsonRef::Double(4.9))),
+            Ordering::Greater
+        );
+    }
+
+    // ── Cross-type coercion: Double ↔ Int filter eq ─────────────
+
+    #[test]
+    fn coerce_double_to_int64_eq() {
+        let raw = make_raw(&doc! { "score": 50.0_f64 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Eq,
+            value: Bson::Int64(50),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_int64_to_double_eq() {
+        let raw = make_raw(&doc! { "score": 50_i64 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Eq,
+            value: Bson::Double(50.0),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_double_to_int32_eq() {
+        let raw = make_raw(&doc! { "price": 10.0_f64 });
+        let filter = Filter {
+            field: "price".into(),
+            operator: Operator::Eq,
+            value: Bson::Int32(10),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_int32_to_double_eq() {
+        let raw = make_raw(&doc! { "price": 10_i32 });
+        let filter = Filter {
+            field: "price".into(),
+            operator: Operator::Eq,
+            value: Bson::Double(10.0),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    // ── Cross-type coercion: Double ↔ Int filter comparison ─────
+
+    #[test]
+    fn coerce_double_to_int64_gt() {
+        let raw = make_raw(&doc! { "score": 50.5_f64 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Gt,
+            value: Bson::Int64(50),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn coerce_int32_to_double_lt() {
+        let raw = make_raw(&doc! { "score": 9_i32 });
+        let filter = Filter {
+            field: "score".into(),
+            operator: Operator::Lt,
+            value: Bson::Double(9.5),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
     }
 
     // ── Cross-type coercion: eq ─────────────────────────────────

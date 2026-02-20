@@ -113,11 +113,6 @@ pub fn bson_type_byte(value: &bson::Bson) -> [u8; 1] {
     [value.element_type() as u8]
 }
 
-/// Return the BSON element type byte for a `RawBsonRef` value.
-pub fn raw_bson_type_byte(value: bson::raw::RawBsonRef) -> [u8; 1] {
-    [value.element_type() as u8]
-}
-
 /// Coerce a `RawBson` value to match the BSON type stored in the index entry.
 ///
 /// Index-covered projections carry the query's value (e.g. `Int64(100)`), but the
