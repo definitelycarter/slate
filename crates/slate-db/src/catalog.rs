@@ -40,8 +40,9 @@ impl Catalog {
         txn: &mut T,
         config: &CollectionConfig,
     ) -> Result<(), DbError> {
+        let sys = txn.cf(SYS_CF)?;
         let key = col_key(&config.name);
-        if txn.get(SYS_CF, &key)?.is_none() {
+        if txn.get(&sys, &key)?.is_none() {
             txn.create_cf(&config.name)?;
             let value = bson::to_vec(config)?;
             txn.put(SYS_CF, &key, &value)?;
@@ -52,14 +53,19 @@ impl Catalog {
     /// Check if a collection exists.
     pub fn collection_exists<T: Transaction>(
         &self,
-        txn: &mut T,
+        txn: &T,
+        sys: &T::Cf,
         name: &str,
     ) -> Result<bool, DbError> {
-        Ok(txn.get(SYS_CF, &col_key(name))?.is_some())
+        Ok(txn.get(sys, &col_key(name))?.is_some())
     }
 
-    pub fn list_collections<T: Transaction>(&self, txn: &mut T) -> Result<Vec<String>, DbError> {
-        let iter = txn.scan_prefix(SYS_CF, COL_PREFIX)?;
+    pub fn list_collections<T: Transaction>(
+        &self,
+        txn: &T,
+        sys: &T::Cf,
+    ) -> Result<Vec<String>, DbError> {
+        let iter = txn.scan_prefix(sys, COL_PREFIX)?;
         let mut collections = Vec::new();
         for result in iter {
             let (key, _) = result?;
@@ -77,9 +83,10 @@ impl Catalog {
         txn.delete(SYS_CF, &col_key(name))?;
 
         // Remove all index metadata for this collection
+        let sys = txn.cf(SYS_CF)?;
         let prefix = idx_collection_prefix(name);
         let keys: Vec<Vec<u8>> = txn
-            .scan_prefix(SYS_CF, &prefix)?
+            .scan_prefix(&sys, &prefix)?
             .map(|r| r.map(|(k, _)| k.to_vec()))
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
@@ -116,11 +123,12 @@ impl Catalog {
 
     pub fn list_indexes<T: Transaction>(
         &self,
-        txn: &mut T,
+        txn: &T,
+        sys: &T::Cf,
         collection: &str,
     ) -> Result<Vec<String>, DbError> {
         let prefix = idx_collection_prefix(collection);
-        let iter = txn.scan_prefix(SYS_CF, &prefix)?;
+        let iter = txn.scan_prefix(sys, &prefix)?;
         let mut fields = Vec::new();
         for result in iter {
             let (key, _) = result?;

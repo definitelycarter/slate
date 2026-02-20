@@ -44,12 +44,64 @@ impl<'db> RedbTransaction<'db> {
         }
         Ok(())
     }
+
+    fn collect_prefix(
+        &self,
+        cf: &str,
+        prefix: &[u8],
+        reverse: bool,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        let cf = cf.to_string();
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+
+        let mut upper = prefix.to_vec();
+        let has_upper = if let Some(last) = upper.last_mut() {
+            *last = last.wrapping_add(1);
+            true
+        } else {
+            false
+        };
+
+        match &self.inner {
+            Inner::Read(txn) => {
+                let table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
+            }
+            Inner::Write(txn) => {
+                let table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+        }
+    }
 }
 
 impl<'db> Transaction for RedbTransaction<'db> {
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+    type Cf = String;
+
+    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
+        // Validate the table exists by attempting to open it.
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(name);
+        match &self.inner {
+            Inner::Read(txn) => {
+                txn.open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+            }
+            Inner::Write(txn) => {
+                txn.open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+            }
+            Inner::Consumed => return Err(StoreError::TransactionConsumed),
+        }
+        Ok(name.to_string())
+    }
+
+    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Read(txn) => {
                 let table = txn
@@ -73,13 +125,12 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn multi_get(
-        &mut self,
-        cf: &str,
+    fn multi_get<'c>(
+        &self,
+        cf: &'c Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError> {
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Read(txn) => {
                 let table = txn
@@ -111,12 +162,12 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn scan_prefix(
-        &mut self,
-        cf: &str,
+    fn scan_prefix<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
         let entries = self.collect_prefix(cf, prefix, false)?;
@@ -127,12 +178,12 @@ impl<'db> Transaction for RedbTransaction<'db> {
         ))
     }
 
-    fn scan_prefix_rev(
-        &mut self,
-        cf: &str,
+    fn scan_prefix_rev<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
         let entries = self.collect_prefix(cf, prefix, true)?;
@@ -235,43 +286,6 @@ impl<'db> Transaction for RedbTransaction<'db> {
                 Ok(())
             }
             Inner::Read(_) => Ok(()),
-            Inner::Consumed => Err(StoreError::TransactionConsumed),
-        }
-    }
-}
-
-impl<'db> RedbTransaction<'db> {
-    fn collect_prefix(
-        &self,
-        cf: &str,
-        prefix: &[u8],
-        reverse: bool,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
-
-        // Compute upper bound: increment last byte of prefix
-        let mut upper = prefix.to_vec();
-        let has_upper = if let Some(last) = upper.last_mut() {
-            *last = last.wrapping_add(1);
-            true
-        } else {
-            false
-        };
-
-        match &self.inner {
-            Inner::Read(txn) => {
-                let table = txn
-                    .open_table(def)
-                    .map_err(|e| StoreError::Storage(e.to_string()))?;
-                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
-            }
-            Inner::Write(txn) => {
-                let table = txn
-                    .open_table(def)
-                    .map_err(|e| StoreError::Storage(e.to_string()))?;
-                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
-            }
             Inner::Consumed => Err(StoreError::TransactionConsumed),
         }
     }

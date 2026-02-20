@@ -4,7 +4,7 @@ Snapshot from `slate-bench` — run on Apple Silicon (M-series) in release mode.
 
 All benchmarks use the **embedded MemoryStore** backend — no persistence layer, no TCP overhead. This isolates query engine performance from storage-specific noise (RocksDB compaction, block cache warmup, etc.), making benchmark-to-benchmark comparisons reliable. For raw storage throughput across all three backends (MemoryStore, RocksDB, redb), see `slate-store-bench`.
 
-Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a two-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` fetches raw BSON bytes by ID but does **not** deserialize them. The **raw tier** (Filter, Sort, Limit, Distinct) operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore snapshots) and `RawBson` (owned). Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. **Projection** builds `RawDocumentBuf` output using `append()` — selective field copying without full materialization. `find()` returns `Vec<RawDocumentBuf>` directly. For index-covered queries (where all projected columns are available from the index), `ReadRecord` is skipped entirely — `Projection` constructs documents directly from `RawValue` scalars carried by `IndexScan`. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
+Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a two-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` streams IDs directly into per-record fetches — no intermediate collection — enabled by explicit CF handles that separate mutation (`&mut self`) from reads (`&self`). The **raw tier** (Filter, Sort, Limit, Distinct) operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore snapshots) and `RawBson` (owned). Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. **Projection** builds `RawDocumentBuf` output using `append()` — selective field copying without full materialization. `find()` returns `Vec<RawDocumentBuf>` directly. For index-covered queries (where all projected columns are available from the index), `ReadRecord` is skipped entirely — `Projection` constructs documents directly from `RawValue` scalars carried by `IndexScan`. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
 
 ## Record Schema
 
@@ -42,7 +42,7 @@ Results from a single collection (10,000 records). Times are consistent across a
 | status='active' + sort + skip/take(50) | ~6.3ms | 50 | IndexScan → Sort → Limit |
 | status='active' (no sort) | ~1.7ms | ~5,000 | IndexScan, no sort |
 | status='active' + sort contacts_count | ~6.6ms | ~5,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~0.35ms | 200 | Lazy ID tier — Limit stops after 200 |
+| status='active' + take(200) (no sort) | ~0.08ms | 200 | Streaming — Limit stops after 200, no collection |
 | status='active' + sort + take(200) | ~6.3ms | 200 | IndexScan → Sort → Limit |
 | sort contacts_count + take(200) | ~0.17ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
 | sort contacts_count (no take) | ~11.6ms | 10,000 | Full sort — no optimization without Limit |
@@ -103,10 +103,11 @@ Results from a single collection (100,000 records). Times are consistent across 
 | status='active' + sort + skip/take(50) | ~68ms | 50 | IndexScan → Sort → Limit |
 | status='active' (no sort) | ~19ms | ~50,000 | IndexScan, no sort |
 | status='active' + sort contacts_count | ~74ms | ~50,000 | IndexScan → Sort |
-| status='active' + take(200) (no sort) | ~3ms | 200 | Lazy ID tier — Limit stops after 200 |
+| status='active' + take(200) (no sort) | ~0.13ms | 200 | Streaming — Limit stops after 200, no collection |
 | status='active' + sort + take(200) | ~66ms | 200 | IndexScan → Sort → Limit |
-| sort contacts_count + take(200) | ~0.3ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
-| sort contacts_count (no take) | ~134ms | 100,000 | Full sort — no optimization without Limit |
+| sort contacts_count + take(200) | ~0.25ms | 200 | Indexed sort — walks 200 index entries, no Sort node |
+| rec1='ProductA' + sort contacts_count + take(200) (indexed sort) | ~0.57ms | 200 | Streaming — IndexScan → ReadRecord → Sort on reduced set |
+| sort contacts_count (no take) | ~133ms | 100,000 | Full sort — no optimization without Limit |
 | sort [contacts_count DESC, name ASC] + take(200) | ~1.2ms | 200 | Indexed sort — group-aware limit, sub-sort ~1 group |
 | sort [status DESC, contacts_count ASC] + take(200) | ~98ms | 200 | Indexed sort — low cardinality (~50k/group) |
 | sort [name ASC, contacts_count DESC] + take(200) | ~13ms | 200 | Not indexed — full Sort, Limit stops early |
@@ -148,7 +149,7 @@ Results from a single collection (100,000 records). Times are consistent across 
 - **Index-covered projection**: When the projection only requests columns available from the `IndexScan` Eq value, `ReadRecord` is skipped entirely. The `IndexScan` carries the matched value as `RawValue::Owned(RawBson)`, and `Projection` constructs `{ _id, field: value }` directly — no document fetch, no deserialization. At 100k records: ~8ms vs ~19ms for the same filter with a full select.
 - **Single key per record**: All columns packed into one value. Reads are a single `get()` or scan iteration — no per-column key overhead.
 - **Dot-notation field access**: Filters, sorts, and projections support dot-notation paths (e.g. `"address.city"`). Nested path resolution works directly on `&RawDocument` via `get_document()` chaining.
-- **Lazy ID tier**: `Scan` yields `(id, bytes)` lazily — data is never discarded and re-fetched. `IndexScan` is a lazy `from_fn` iterator that pulls index entries on demand and stops at the limit (or group boundary for `complete_groups`). `ReadRecord` fetches bytes via `txn.get()`. When Limit is present without Sort, the iterator stops early — `take(200)` on 100k records: ~3ms.
+- **Streaming ID tier**: `Scan` yields `(id, bytes)` lazily — data is never discarded and re-fetched. `IndexScan` is a lazy `from_fn` iterator that pulls index entries on demand and stops at the limit (or group boundary for `complete_groups`). `ReadRecord` streams IDs directly into record fetches — no intermediate collection. When Limit is present without Sort, the entire pipeline stops early — `take(200)` on 100k records: ~0.13ms.
 - **Indexed sort (single field)**: When a query sorts on a single indexed field and has a Limit, the planner eliminates the Sort node entirely and replaces Scan with an ordered IndexScan. The limit is pushed into the IndexScan so it stops after `skip + take` index entries. `sort contacts_count + take(200)` on 100k records: ~0.3ms.
 - **Indexed sort (multi-field)**: When `sort[0]` is indexed and a Limit is present, the planner replaces Scan with an ordered IndexScan using `complete_groups: true` and pushes `skip + take` as the limit. IndexScan reads at least that many index entries, then continues until the current value group is complete — ensuring correct sub-sorting by Sort on the reduced record set. High-cardinality first field (`contacts_count`, ~1k/group): ~1.2ms. Low-cardinality (`status`, ~50k/group): ~97ms.
 - **Sort overhead**: When indexed sort doesn't apply, Sort accesses sort keys lazily from raw bytes but must hold all records in memory via `into_owned()`. Only records that survive the filter pay this cost. This is the dominant cost for sorted queries.
@@ -168,8 +169,8 @@ Results from a single collection (100,000 records). Times are consistent across 
 | AND filter (3 conditions) | 2ms | 21ms | 10.5x |
 | Scan + filter (ProductA) | 1.6ms | 16ms | 10.0x |
 | Sort (full, ~50%) | 6.6ms | 74ms | 11.2x |
-| take(200) no sort | 0.35ms | 3ms | 8.6x |
-| sort + take(200) indexed | 0.17ms | 0.3ms | 1.8x |
+| take(200) no sort | 0.08ms | 0.13ms | 1.6x |
+| sort + take(200) indexed | 0.13ms | 0.25ms | 1.9x |
 | sort [high card, name] + take(200) | 0.27ms | 1.2ms | 4.4x |
 | sort [low card, count] + take(200) | 9.6ms | 98ms | 10.2x |
 | 1,000 point lookups | 1.2ms | 1.9ms | 1.6x |
@@ -183,14 +184,14 @@ Results from a single collection (100,000 records). Times are consistent across 
 | merge_many: 1k merge | 3.7ms | 3.8ms | 1.0x |
 | merge_many: 1k insert | 3.8ms | 4.3ms | 1.1x |
 
-Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size. Distinct now scales linearly across all cardinalities thanks to `HashSet<u64>` O(1) dedup (previously quadratic at high cardinality: ~95x for 10x data). Write operations (upsert/merge) scale ~1.0–1.2x — nearly constant since they operate on a fixed batch of 1,000 records regardless of dataset size. The slight increase at 100k reflects deeper tree traversal in the underlying OrdMap.
+Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size. Streaming `take(200)` without sort scales ~1.6x — nearly constant since only 200 records are fetched regardless of dataset size. Distinct now scales linearly across all cardinalities thanks to `HashSet<u64>` O(1) dedup (previously quadratic at high cardinality: ~95x for 10x data). Write operations (upsert/merge) scale ~1.0–1.2x — nearly constant since they operate on a fixed batch of 1,000 records regardless of dataset size. The slight increase at 100k reflects deeper tree traversal in the underlying OrdMap.
 
 ## Concurrency
 
 | Test | Result |
 |------|--------|
-| 2 writers + 4 readers (10k, concurrent) | ~63ms, all complete successfully |
-| 2 writers + 4 readers (100k, concurrent) | ~325ms, all complete successfully |
+| 2 writers + 4 readers (10k, concurrent) | ~40ms, all complete successfully |
+| 2 writers + 4 readers (100k, concurrent) | ~47ms, all complete successfully |
 
 Writers are serialized (global write lock per store). Readers use snapshot isolation via lazy CF snapshots — reads never block on writes.
 
@@ -220,7 +221,7 @@ Distinct(Projection(Filter(ReadRecord(Scan | IndexScan))))
 - **IndexMerge**: Binary combiner with `lhs`/`rhs` children and a `LogicalOp`. `Or` unions ID sets (for OR queries where every branch has an indexed Eq). `And` intersects (supported but not currently emitted).
 
 **Raw tier** (operates on `RawValue<'a>` — no deserialization):
-- **ReadRecord**: The boundary between ID and raw tiers. For `Scan` inputs, data flows through lazily (bytes already available). For `IndexScan`/`IndexMerge`, collects IDs (releasing the scan borrow), then fetches each record lazily via `txn.get()`. Yields `(id, RawValue<'a>)` tuples. MemoryStore returns `RawValue::Borrowed` (zero-copy from the snapshot), RocksDB returns `RawValue::Owned`. Skipped entirely for index-covered queries.
+- **ReadRecord**: The boundary between ID and raw tiers. For `Scan` inputs, data flows through lazily (bytes already available). For `IndexScan`/`IndexMerge`, streams IDs directly into per-record `txn.get()` fetches — no intermediate Vec collection. Yields `(id, RawValue<'a>)` tuples. MemoryStore returns `RawValue::Owned` (from `into_owned()`), RocksDB returns `RawValue::Owned`. Skipped entirely for index-covered queries. Because reads take `&self` (not `&mut self`), the scan iterator and point lookups can coexist without borrow conflicts.
 - **Filter**: Extracts `&RawDocument` via `RawValue::as_document()` and evaluates predicates by accessing individual fields lazily. Records that fail are never deserialized or cloned. AND/OR short-circuit. Supports dot-notation paths.
 - **Sort**: For documents, uses `RawValue::as_document()` to access sort keys lazily via `&RawDocument` views and sorts in memory. For `RawBson::Array` values (from Distinct), Sort unpacks the array, sorts elements in-place (direct scalar comparison or document field extraction), and re-emits as a sorted `RawBson::Array`. Eliminated entirely when the planner detects a single indexed sort field + Limit. For multi-field sort where `sort[0]` is indexed, Sort operates on a reduced record set — IndexScan with `complete_groups` feeds only the records needed for correct ordering.
 - **Limit**: Peeks the first item — if it's a `RawBson::Array` (from Distinct), slices elements with `skip/take` and rebuilds a `RawArrayBuf`. Otherwise chains the peeked item back and applies lazy `skip()` + `take()` on the record stream. Preserves lazy streaming for find queries.

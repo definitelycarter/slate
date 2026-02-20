@@ -124,14 +124,15 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
     let mut data_loss = 0usize;
     let mut corruption = 0usize;
 
-    // Read in batches using multi_get
+    // Read in batches using multi_get (single txn + cf handle for the whole phase)
+    let mut txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
     for batch_idx in 0..num_batches {
         let base = batch_idx * BATCH_SIZE;
         let keys: Vec<Vec<u8>> = (0..BATCH_SIZE).map(|i| make_key(base + i)).collect();
         let key_refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
 
-        let mut txn = store.begin(true).unwrap();
-        let results = txn.multi_get(CF, &key_refs).unwrap();
+        let results = txn.multi_get(&cf, &key_refs).unwrap();
 
         for (i, result) in results.into_iter().enumerate() {
             let id = base + i;
@@ -154,7 +155,8 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
     // -- Scan phase: prefix scan a subset --
     let scan_start = Instant::now();
     let mut txn = store.begin(true).unwrap();
-    let scan_count: usize = txn.scan_prefix(CF, b"d:rec:").unwrap().count();
+    let cf = txn.cf(CF).unwrap();
+    let scan_count: usize = txn.scan_prefix(&cf, b"d:rec:").unwrap().count();
     assert_eq!(scan_count, TOTAL_RECORDS, "scan returned wrong count");
     let scan_time = scan_start.elapsed();
 
@@ -225,18 +227,22 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
                     let key = make_key(id);
 
                     match store.begin(true) {
-                        Ok(mut txn) => match txn.get("stress", &key) {
-                            Ok(Some(data)) => {
-                                if verify_value(id, &data) {
-                                    read_successes.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    corruption_count.fetch_add(1, Ordering::Relaxed);
+                        Ok(mut txn) => match txn.cf("stress") {
+                            Ok(cf) => match txn.get(&cf, &key) {
+                                Ok(Some(data)) => {
+                                    if verify_value(id, &data) {
+                                        read_successes.fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        corruption_count.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
-                            }
-                            Ok(None) => {
-                                // Could be deleted by writer, not necessarily an error
-                                read_errors.fetch_add(1, Ordering::Relaxed);
-                            }
+                                Ok(None) => {
+                                    read_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(_) => {
+                                    read_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            },
                             Err(_) => {
                                 read_errors.fetch_add(1, Ordering::Relaxed);
                             }
@@ -312,15 +318,10 @@ fn test_rollback_integrity<S: Store>(store: &S, name: &str) {
 
     // Verify nothing changed
     let mut txn = store.begin(true).unwrap();
-    assert_eq!(
-        &*txn.get("rollback", b"key1").unwrap().unwrap(),
-        b"original"
-    );
-    assert_eq!(
-        &*txn.get("rollback", b"key2").unwrap().unwrap(),
-        b"original"
-    );
-    assert!(txn.get("rollback", b"key3").unwrap().is_none());
+    let cf = txn.cf("rollback").unwrap();
+    assert_eq!(&*txn.get(&cf, b"key1").unwrap().unwrap(), b"original");
+    assert_eq!(&*txn.get(&cf, b"key2").unwrap().unwrap(), b"original");
+    assert!(txn.get(&cf, b"key3").unwrap().is_none());
 
     println!("  PASSED: rollback preserved original state");
     println!();
@@ -345,7 +346,8 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
 
     // Reader takes a snapshot
     let mut reader = store.begin(true).unwrap();
-    assert_eq!(&*reader.get("isolation", b"key1").unwrap().unwrap(), b"v1");
+    let cf = reader.cf("isolation").unwrap();
+    assert_eq!(&*reader.get(&cf, b"key1").unwrap().unwrap(), b"v1");
 
     // Writer modifies data after reader started
     let mut writer = store.begin(false).unwrap();
@@ -354,16 +356,14 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
     writer.commit().unwrap();
 
     // Reader should still see old data (snapshot isolation)
-    assert_eq!(&*reader.get("isolation", b"key1").unwrap().unwrap(), b"v1");
-    assert!(reader.get("isolation", b"key2").unwrap().is_none());
+    assert_eq!(&*reader.get(&cf, b"key1").unwrap().unwrap(), b"v1");
+    assert!(reader.get(&cf, b"key2").unwrap().is_none());
 
     // New reader should see new data
     let mut reader2 = store.begin(true).unwrap();
-    assert_eq!(&*reader2.get("isolation", b"key1").unwrap().unwrap(), b"v2");
-    assert_eq!(
-        &*reader2.get("isolation", b"key2").unwrap().unwrap(),
-        b"new"
-    );
+    let cf2 = reader2.cf("isolation").unwrap();
+    assert_eq!(&*reader2.get(&cf2, b"key1").unwrap().unwrap(), b"v2");
+    assert_eq!(&*reader2.get(&cf2, b"key2").unwrap().unwrap(), b"new");
 
     println!("  PASSED: snapshot isolation verified");
     println!();
@@ -399,11 +399,12 @@ fn test_delete_range_integrity<S: Store>(store: &S, name: &str) {
 
     // Verify: 0-199 present, 200-799 gone, 800-999 present
     let mut txn = store.begin(true).unwrap();
+    let cf = txn.cf("delrange").unwrap();
     let mut present = 0;
     let mut absent = 0;
     for i in 0..count {
         let key = make_key(i);
-        match txn.get("delrange", &key).unwrap() {
+        match txn.get(&cf, &key).unwrap() {
             Some(data) => {
                 assert!(i < 200 || i >= 800, "record {i} should have been deleted");
                 assert!(verify_value(i, &data), "corruption at record {i}");

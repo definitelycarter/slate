@@ -89,11 +89,14 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
                     break;
                 }
                 let collections = match sweep_inner.store.begin(true) {
-                    Ok(mut txn) => match Catalog.list_collections(&mut txn) {
-                        Ok(c) => {
-                            let _ = txn.rollback();
-                            c
-                        }
+                    Ok(mut txn) => match txn.cf(SYS_CF) {
+                        Ok(sys) => match Catalog.list_collections(&txn, &sys) {
+                            Ok(c) => {
+                                let _ = txn.rollback();
+                                c
+                            }
+                            Err(_) => continue,
+                        },
                         Err(_) => continue,
                     },
                     Err(_) => continue,
@@ -120,16 +123,14 @@ fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Res
     let mut txn = inner.store.begin(false).map_err(DbError::Store)?;
     let now_bytes = encoding::encode_datetime_millis(bson::DateTime::now().timestamp_millis());
 
+    let cf = txn.cf(collection).map_err(DbError::Store)?;
     let prefix = encoding::index_scan_field_prefix("ttl");
     let val_start = prefix.len();
     let val_end = val_start + 8;
     let id_start = val_end + 1;
 
     let mut entries: Vec<(Vec<u8>, String)> = Vec::new();
-    for result in txn
-        .scan_prefix(collection, &prefix)
-        .map_err(DbError::Store)?
-    {
+    for result in txn.scan_prefix(&cf, &prefix).map_err(DbError::Store)? {
         let (key, _) = result.map_err(DbError::Store)?;
         if key.len() < id_start {
             continue;
@@ -146,11 +147,12 @@ fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Res
     }
 
     let mut deleted = 0u64;
-    let indexed_fields = inner.catalog.list_indexes(&mut txn, collection)?;
+    let sys = txn.cf(SYS_CF).map_err(DbError::Store)?;
+    let indexed_fields = inner.catalog.list_indexes(&txn, &sys, collection)?;
 
     for (ttl_key, record_id) in &entries {
         let data_key = encoding::record_key(record_id);
-        if let Some(bytes) = txn.get(collection, &data_key).map_err(DbError::Store)? {
+        if let Some(bytes) = txn.get(&cf, &data_key).map_err(DbError::Store)? {
             let doc: bson::Document = bson::from_slice(&bytes)?;
             for field in &indexed_fields {
                 for value in exec::get_path_values(&doc, field) {
@@ -212,7 +214,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let key = encoding::record_key(&id);
 
         // Check for duplicate
-        if self.txn.get(collection, &key)?.is_some() {
+        let cf = self.txn.cf(collection)?;
+        if self.txn.get(&cf, &key)?.is_some() {
             return Err(DbError::DuplicateKey(id));
         }
 
@@ -220,7 +223,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
 
         // Index maintenance
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         self.write_index_entries(collection, &id, &doc, &indexed_fields)?;
         self.write_ttl_index_entry(collection, &id, &doc)?;
 
@@ -235,14 +239,16 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ) -> Result<Vec<InsertResult>, DbError> {
         self.require_collection(collection)?;
 
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let cf = self.txn.cf(collection)?;
         let mut results = Vec::with_capacity(docs.len());
 
         for mut doc in docs {
             let id = extract_or_generate_id(&mut doc);
             let key = encoding::record_key(&id);
 
-            if self.txn.get(collection, &key)?.is_some() {
+            if self.txn.get(&cf, &key)?.is_some() {
                 return Err(DbError::DuplicateKey(id));
             }
 
@@ -266,9 +272,17 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         query: &Query,
     ) -> Result<Vec<RawDocumentBuf>, DbError> {
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan(collection, &indexed_fields, query);
-        match executor::execute(&mut self.txn, &plan) {
+        let cf = match self.txn.cf(collection) {
+            Ok(cf) => cf,
+            Err(ref e) if e.to_string().contains("column family not found") => {
+                return Ok(vec![]);
+            }
+            Err(e) => return Err(DbError::Store(e)),
+        };
+        match executor::execute(&self.txn, &cf, &plan) {
             Ok(iter) => iter
                 .map(|r| {
                     let (_id, opt_val) = r?;
@@ -292,8 +306,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         id: &str,
         columns: Option<&[&str]>,
     ) -> Result<Option<bson::Document>, DbError> {
+        let cf = match self.txn.cf(collection) {
+            Ok(cf) => cf,
+            Err(ref e) if e.to_string().contains("column family not found") => return Ok(None),
+            Err(e) => return Err(DbError::Store(e)),
+        };
         let key = encoding::record_key(id);
-        let bytes = match self.txn.get(collection, &key) {
+        let bytes = match self.txn.get(&cf, &key) {
             Ok(Some(b)) => b,
             Ok(None) => return Ok(None),
             Err(ref e) if e.to_string().contains("column family not found") => return Ok(None),
@@ -341,11 +360,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         };
         let matches = self.find(collection, &query)?;
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
         if let Some(matched_doc) = matches.into_iter().next() {
             let id = matched_doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            let modified = self.raw_merge_update(collection, id, &update, &indexed_fields)?;
+            let sys = self.txn.cf(SYS_CF)?;
+            let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+            let cf = self.txn.cf(collection)?;
+            let modified = self.raw_merge_update(collection, id, &update, &cf, &indexed_fields)?;
             Ok(UpdateResult {
                 matched: 1,
                 modified: if modified { 1 } else { 0 },
@@ -382,13 +403,15 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         };
         let matches = self.find(collection, &query)?;
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let cf = self.txn.cf(collection)?;
         let matched = matches.len() as u64;
         let mut modified = 0u64;
 
         for doc in &matches {
             let id = doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            if self.raw_merge_update(collection, id, &update, &indexed_fields)? {
+            if self.raw_merge_update(collection, id, &update, &cf, &indexed_fields)? {
                 modified += 1;
             }
         }
@@ -420,10 +443,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             let id = matched_doc.get_str(ID_COLUMN).ok().unwrap_or_default();
 
             let key = encoding::record_key(id);
-            let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+            let sys = self.txn.cf(SYS_CF)?;
+            let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
 
             // Read stored raw bytes for index cleanup (no deserialization)
-            let old_bytes = self.txn.get(collection, &key)?.map(|b| b.to_vec());
+            let cf = self.txn.cf(collection)?;
+            let old_bytes = self.txn.get(&cf, &key)?.map(|b| b.to_vec());
             if let Some(ref bytes) = old_bytes {
                 let raw = bson::RawDocument::from_bytes(bytes)?;
                 self.delete_raw_index_entries(collection, id, raw, &indexed_fields)?;
@@ -474,7 +499,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
         if let Some(doc) = matches.into_iter().next() {
             let id = doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            self.delete_by_id(collection, id)?;
+            let sys = self.txn.cf(SYS_CF)?;
+            let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+            let cf = self.txn.cf(collection)?;
+            self.delete_by_id(collection, id, &cf, &indexed_fields)?;
             Ok(DeleteResult { deleted: 1 })
         } else {
             Ok(DeleteResult { deleted: 0 })
@@ -495,11 +523,14 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         };
         let matches = self.find(collection, &query)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let cf = self.txn.cf(collection)?;
         let count = matches.len() as u64;
 
         for doc in &matches {
             let id = doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            self.delete_by_id(collection, id)?;
+            self.delete_by_id(collection, id, &cf, &indexed_fields)?;
         }
 
         Ok(DeleteResult { deleted: count })
@@ -516,7 +547,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         docs: Vec<bson::Document>,
     ) -> Result<UpsertResult, DbError> {
         self.require_collection(collection)?;
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let cf = self.txn.cf(collection)?;
         let mut inserted = 0u64;
         let mut updated = 0u64;
 
@@ -524,8 +557,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             let id = extract_or_generate_id(&mut doc);
             let key = encoding::record_key(&id);
 
-            if self.txn.get(collection, &key)?.is_some() {
-                self.replace_by_id(collection, &id, doc, &indexed_fields)?;
+            if self.txn.get(&cf, &key)?.is_some() {
+                self.replace_by_id(collection, &id, doc, &cf, &indexed_fields)?;
                 updated += 1;
             } else {
                 self.insert_with_id(collection, &id, doc, &indexed_fields)?;
@@ -546,7 +579,9 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         docs: Vec<bson::Document>,
     ) -> Result<UpsertResult, DbError> {
         self.require_collection(collection)?;
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let cf = self.txn.cf(collection)?;
         let mut inserted = 0u64;
         let mut updated = 0u64;
 
@@ -554,8 +589,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             let id = extract_or_generate_id(&mut doc);
             let key = encoding::record_key(&id);
 
-            if self.txn.get(collection, &key)?.is_some() {
-                self.raw_merge_update(collection, &id, &doc, &indexed_fields)?;
+            if self.txn.get(&cf, &key)?.is_some() {
+                self.raw_merge_update(collection, &id, &doc, &cf, &indexed_fields)?;
                 updated += 1;
             } else {
                 self.insert_with_id(collection, &id, doc, &indexed_fields)?;
@@ -591,9 +626,17 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         query: &DistinctQuery,
     ) -> Result<bson::RawBson, DbError> {
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_distinct(collection, &indexed_fields, query);
-        match executor::execute(&mut self.txn, &plan) {
+        let cf = match self.txn.cf(collection) {
+            Ok(cf) => cf,
+            Err(ref e) if e.to_string().contains("column family not found") => {
+                return Ok(bson::RawBson::Array(bson::RawArrayBuf::new()));
+            }
+            Err(e) => return Err(DbError::Store(e)),
+        };
+        match executor::execute(&self.txn, &cf, &plan) {
             Ok(mut iter) => match iter.next() {
                 Some(result) => {
                     let (_id, opt_val) = result?;
@@ -620,10 +663,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             .create_index(&mut self.txn, collection, field)?;
 
         // Backfill: scan all records and index the field
+        let cf = self.txn.cf(collection)?;
         let scan_prefix = encoding::data_scan_prefix("");
         let entries: Vec<(Vec<u8>, Vec<u8>)> = self
             .txn
-            .scan_prefix(collection, &scan_prefix)?
+            .scan_prefix(&cf, &scan_prefix)?
             .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())))
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
@@ -647,10 +691,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     /// Drop an index and remove all its entries.
     pub fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
         // Remove all index entries for this field
+        let cf = self.txn.cf(collection)?;
         let prefix = encoding::index_scan_field_prefix(field);
         let keys: Vec<Vec<u8>> = self
             .txn
-            .scan_prefix(collection, &prefix)?
+            .scan_prefix(&cf, &prefix)?
             .map(|r| r.map(|(k, _)| k.to_vec()))
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
@@ -664,23 +709,26 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// List indexed fields for a collection.
     pub fn list_indexes(&mut self, collection: &str) -> Result<Vec<String>, DbError> {
-        self.catalog.list_indexes(&mut self.txn, collection)
+        let sys = self.txn.cf(SYS_CF)?;
+        self.catalog.list_indexes(&self.txn, &sys, collection)
     }
 
     // ── Collection operations ───────────────────────────────────
 
     /// List all known collection names.
     pub fn list_collections(&mut self) -> Result<Vec<String>, DbError> {
-        self.catalog.list_collections(&mut self.txn)
+        let sys = self.txn.cf(SYS_CF)?;
+        self.catalog.list_collections(&self.txn, &sys)
     }
 
     /// Drop a collection and all its data, indexes, and metadata.
     pub fn drop_collection(&mut self, collection: &str) -> Result<(), DbError> {
         // Delete all data keys
+        let cf = self.txn.cf(collection)?;
         let data_prefix = encoding::data_scan_prefix("");
         let data_keys: Vec<Vec<u8>> = self
             .txn
-            .scan_prefix(collection, &data_prefix)?
+            .scan_prefix(&cf, &data_prefix)?
             .map(|r| r.map(|(k, _)| k.to_vec()))
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
@@ -692,7 +740,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let idx_prefix = b"i:".to_vec();
         let idx_keys: Vec<Vec<u8>> = self
             .txn
-            .scan_prefix(collection, &idx_prefix)?
+            .scan_prefix(&cf, &idx_prefix)?
             .map(|r| r.map(|(k, _)| k.to_vec()))
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
@@ -730,7 +778,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Ensure all indexes declared in the config exist, creating any that are missing.
     pub fn ensure_indexes(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
-        let existing = self.catalog.list_indexes(&mut self.txn, &config.name)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let existing = self.catalog.list_indexes(&self.txn, &sys, &config.name)?;
         for field in &config.indexes {
             if !existing.contains(field) {
                 self.create_index(&config.name, field)?;
@@ -743,18 +792,27 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
     /// Verify a collection exists, returning CollectionNotFound if not.
     fn require_collection(&mut self, collection: &str) -> Result<(), DbError> {
-        if !self.catalog.collection_exists(&mut self.txn, collection)? {
+        let sys = self.txn.cf(SYS_CF)?;
+        if !self
+            .catalog
+            .collection_exists(&self.txn, &sys, collection)?
+        {
             return Err(DbError::CollectionNotFound(collection.to_string()));
         }
         Ok(())
     }
 
     /// Delete a document by _id, cleaning up its index entries.
-    fn delete_by_id(&mut self, collection: &str, id: &str) -> Result<(), DbError> {
+    fn delete_by_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+        cf: &<S::Txn<'db> as Transaction>::Cf,
+        indexed_fields: &[String],
+    ) -> Result<(), DbError> {
         let key = encoding::record_key(id);
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
-        let old_bytes = self.txn.get(collection, &key)?.map(|b| b.to_vec());
+        let old_bytes = self.txn.get(cf, &key)?.map(|b| b.to_vec());
         if let Some(ref bytes) = old_bytes {
             let raw = bson::RawDocument::from_bytes(bytes)?;
             self.delete_raw_index_entries(collection, id, raw, &indexed_fields)?;
@@ -851,12 +909,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         id: &str,
         doc: bson::Document,
+        cf: &<S::Txn<'db> as Transaction>::Cf,
         indexed_fields: &[String],
     ) -> Result<(), DbError> {
         let key = encoding::record_key(id);
 
         // Clean up old index entries from raw bytes (no deserialization)
-        let old_bytes = self.txn.get(collection, &key)?.map(|b| b.to_vec());
+        let old_bytes = self.txn.get(cf, &key)?.map(|b| b.to_vec());
         if let Some(ref bytes) = old_bytes {
             let raw = bson::RawDocument::from_bytes(bytes)?;
             self.delete_raw_index_entries(collection, id, raw, indexed_fields)?;
@@ -878,11 +937,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         id: &str,
         update: &bson::Document,
+        cf: &<S::Txn<'db> as Transaction>::Cf,
         indexed_fields: &[String],
     ) -> Result<bool, DbError> {
         let key = encoding::record_key(id);
 
-        let old_bytes = match self.txn.get(collection, &key)? {
+        let old_bytes = match self.txn.get(cf, &key)? {
             Some(b) => b.to_vec(),
             None => return Ok(false),
         };

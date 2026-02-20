@@ -11,6 +11,11 @@ use crate::store::Transaction;
 
 type DB = OptimisticTransactionDB<MultiThreaded>;
 
+/// Pre-resolved column family handle for reads.
+pub struct RocksCf<'db> {
+    handle: Arc<BoundColumnFamily<'db>>,
+}
+
 pub struct RocksTransaction<'db> {
     txn: Option<rocksdb::Transaction<'db, DB>>,
     db: &'db DB,
@@ -40,6 +45,7 @@ impl<'db> RocksTransaction<'db> {
         Ok(())
     }
 
+    /// Resolve a CF handle, caching it for reuse. Used internally by writes.
     fn cf_handle(&mut self, cf: &str) -> Result<Arc<BoundColumnFamily<'db>>, StoreError> {
         if let Some(handle) = self.cf_cache.get(cf) {
             return Ok(Arc::clone(handle));
@@ -54,46 +60,50 @@ impl<'db> RocksTransaction<'db> {
 }
 
 impl<'db> Transaction for RocksTransaction<'db> {
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
-        let cf_handle = self.cf_handle(cf)?;
-        let data = self
-            .txn()?
-            .get_cf(&cf_handle, key)
-            .map_err(|e| StoreError::Storage(e.to_string()))?;
-        Ok(data.map(|v| Cow::Owned(v)))
+    type Cf = RocksCf<'db>;
+
+    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
+        let handle = self.cf_handle(name)?;
+        Ok(RocksCf { handle })
     }
 
-    fn multi_get(
-        &mut self,
-        cf: &str,
+    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+        let data = self
+            .txn()?
+            .get_cf(&cf.handle, key)
+            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        Ok(data.map(Cow::Owned))
+    }
+
+    fn multi_get<'c>(
+        &self,
+        cf: &'c Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError> {
-        let cf_handle = self.cf_handle(cf)?;
+    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
         let txn = self.txn()?;
-        let cf_keys: Vec<_> = keys.iter().map(|k| (&cf_handle, *k)).collect();
+        let cf_keys: Vec<_> = keys.iter().map(|k| (&cf.handle, *k)).collect();
         let results = txn.multi_get_cf(cf_keys);
         results
             .into_iter()
             .map(|r| {
-                r.map(|opt| opt.map(|v| Cow::Owned(v)))
+                r.map(|opt| opt.map(Cow::Owned))
                     .map_err(|e| StoreError::Storage(e.to_string()))
             })
             .collect()
     }
 
-    fn scan_prefix(
-        &mut self,
-        cf: &str,
+    fn scan_prefix<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
-        let cf_handle = self.cf_handle(cf)?;
         let prefix_owned = prefix.to_vec();
         let iter = self
             .txn()?
-            .iterator_cf(&cf_handle, IteratorMode::From(prefix, Direction::Forward));
+            .iterator_cf(&cf.handle, IteratorMode::From(prefix, Direction::Forward));
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),
@@ -106,24 +116,22 @@ impl<'db> Transaction for RocksTransaction<'db> {
         ))
     }
 
-    fn scan_prefix_rev(
-        &mut self,
-        cf: &str,
+    fn scan_prefix_rev<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
-        let cf_handle = self.cf_handle(cf)?;
         let prefix_owned = prefix.to_vec();
-        // Seek to the key just past the end of the prefix range
         let mut upper = prefix.to_vec();
         if let Some(last) = upper.last_mut() {
             *last = last.wrapping_add(1);
         }
         let iter = self
             .txn()?
-            .iterator_cf(&cf_handle, IteratorMode::From(&upper, Direction::Reverse));
+            .iterator_cf(&cf.handle, IteratorMode::From(&upper, Direction::Reverse));
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::MutexGuard;
+use std::sync::{Arc, MutexGuard};
 
 use crate::error::StoreError;
 use crate::store::{Store, Transaction};
@@ -9,7 +9,7 @@ use super::store::{ColumnFamily, MemoryStore};
 
 /// Lazily-loaded snapshot of column families.
 struct Snapshot {
-    data: HashMap<String, ColumnFamily>,
+    data: HashMap<String, Arc<ColumnFamily>>,
 }
 
 impl Snapshot {
@@ -36,16 +36,18 @@ impl Snapshot {
         Ok(())
     }
 
-    fn get_cf(&self, cf: &str) -> Result<&ColumnFamily, StoreError> {
+    fn get_cf(&self, cf: &str) -> Result<&Arc<ColumnFamily>, StoreError> {
         self.data
             .get(cf)
             .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))
     }
 
     fn get_cf_mut(&mut self, cf: &str) -> Result<&mut ColumnFamily, StoreError> {
-        self.data
+        let arc = self
+            .data
             .get_mut(cf)
-            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))
+            .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
+        Ok(Arc::make_mut(arc))
     }
 }
 
@@ -87,17 +89,7 @@ impl<'a> MemoryTransaction<'a> {
         Ok(())
     }
 
-    /// Ensure a CF is loaded, then return a reference to it.
-    fn ensure_cf(&mut self, cf: &str) -> Result<&ColumnFamily, StoreError> {
-        let snap = self
-            .snapshot
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
-        snap.ensure(self.store, cf)?;
-        snap.get_cf(cf)
-    }
-
-    /// Ensure a CF is loaded, then return a mutable reference to it.
+    /// Ensure a CF is loaded, then return a mutable reference to it (for writes).
     fn ensure_cf_mut(&mut self, cf: &str) -> Result<&mut ColumnFamily, StoreError> {
         let snap = self
             .snapshot
@@ -109,69 +101,66 @@ impl<'a> MemoryTransaction<'a> {
 }
 
 impl<'a> Transaction for MemoryTransaction<'a> {
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError> {
-        let data = self.ensure_cf(cf)?;
-        Ok(data.get(key).map(|v| Cow::Borrowed(v.as_slice())))
-    }
+    type Cf = Arc<ColumnFamily>;
 
-    fn multi_get(
-        &mut self,
-        cf: &str,
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError> {
-        let data = self.ensure_cf(cf)?;
-        Ok(keys
-            .iter()
-            .map(|k| data.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
-            .collect())
-    }
-
-    fn scan_prefix(
-        &mut self,
-        cf: &str,
-        prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
-        StoreError,
-    > {
+    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
         let snap = self
             .snapshot
             .as_mut()
             .ok_or(StoreError::TransactionConsumed)?;
-        snap.ensure(self.store, cf)?;
-        let data = snap.get_cf(cf)?;
+        snap.ensure(self.store, name)?;
+        Ok(Arc::clone(snap.get_cf(name)?))
+    }
+
+    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+        Ok(cf.get(key).map(|v| Cow::Borrowed(v.as_slice())))
+    }
+
+    fn multi_get<'c>(
+        &self,
+        cf: &'c Self::Cf,
+        keys: &[&[u8]],
+    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+        Ok(keys
+            .iter()
+            .map(|k| cf.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
+            .collect())
+    }
+
+    fn scan_prefix<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
+        prefix: &[u8],
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        StoreError,
+    > {
         let prefix_vec = prefix.to_vec();
 
         Ok(Box::new(
-            data.range(prefix_vec.clone()..)
+            cf.range(prefix_vec.clone()..)
                 .take_while(move |(k, _)| k.starts_with(&prefix_vec))
                 .map(|(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))),
         ))
     }
 
-    fn scan_prefix_rev(
-        &mut self,
-        cf: &str,
+    fn scan_prefix_rev<'c>(
+        &'c self,
+        cf: &'c Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>,
+        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
-        let snap = self
-            .snapshot
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
-        snap.ensure(self.store, cf)?;
-        let data = snap.get_cf(cf)?;
-        let prefix_vec = prefix.to_vec();
-        let mut upper = prefix.to_vec();
+        let lower = prefix.to_vec();
+        let mut upper = lower.clone();
         if let Some(last) = upper.last_mut() {
             *last = last.wrapping_add(1);
         }
 
-        Ok(Box::new(data.range(prefix_vec..upper).rev().map(
-            |(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
-        )))
+        Ok(Box::new(cf.range(lower..upper).rev().map(|(k, v)| {
+            Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))
+        })))
     }
 
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
@@ -209,7 +198,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
             .ok_or(StoreError::TransactionConsumed)?;
         snap.data
             .entry(name.to_string())
-            .or_insert_with(ColumnFamily::new);
+            .or_insert_with(|| Arc::new(ColumnFamily::new()));
         self.dirty.insert(name.to_string());
         Ok(())
     }
@@ -221,7 +210,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
             return Err(StoreError::ReadOnly);
         }
 
-        let dirty: HashMap<String, ColumnFamily> = snapshot
+        let dirty: HashMap<String, Arc<ColumnFamily>> = snapshot
             .data
             .into_iter()
             .filter(|(name, _)| self.dirty.contains(name))

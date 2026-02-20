@@ -65,20 +65,22 @@ pub(crate) type RawIter<'a> =
 /// Executes a query plan tree, returning a lazy raw iterator.
 ///
 /// Both `find()` and `distinct()` call this — different plans, same executor.
-pub fn execute<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    node: &'a PlanNode,
-) -> Result<RawIter<'a>, DbError> {
-    execute_node(txn, node)
+/// Takes `&T` (not `&mut T`) plus a pre-resolved CF handle for the collection.
+pub fn execute<'c, T: Transaction + 'c>(
+    txn: &'c T,
+    cf: &'c T::Cf,
+    node: &'c PlanNode,
+) -> Result<RawIter<'c>, DbError> {
+    execute_node(txn, cf, node)
 }
 
 /// Scan all records lazily, yielding (Some(id), Some(RawValue)).
-fn execute_scan<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    collection: &str,
-) -> Result<RawIter<'a>, DbError> {
+fn execute_scan<'c, T: Transaction + 'c>(
+    txn: &'c T,
+    cf: &'c T::Cf,
+) -> Result<RawIter<'c>, DbError> {
     let scan_prefix = encoding::data_scan_prefix("");
-    let iter = txn.scan_prefix(collection, &scan_prefix)?;
+    let iter = txn.scan_prefix(cf, &scan_prefix)?;
 
     Ok(Box::new(iter.filter_map(|result| match result {
         Ok((key, value)) => {
@@ -100,15 +102,15 @@ fn execute_scan<'a, T: Transaction + 'a>(
 }
 
 /// Scan an index prefix, yielding (Some(id), maybe_value).
-fn execute_index_scan<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    collection: &str,
+fn execute_index_scan<'c, T: Transaction + 'c>(
+    txn: &'c T,
+    cf: &'c T::Cf,
     column: &str,
     value: Option<&bson::Bson>,
     direction: SortDirection,
     limit: Option<usize>,
     complete_groups: bool,
-) -> Result<RawIter<'a>, DbError> {
+) -> Result<RawIter<'c>, DbError> {
     let prefix = match value {
         Some(v) => encoding::index_scan_prefix(column, v),
         None => encoding::index_scan_field_prefix(column),
@@ -123,8 +125,8 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     };
 
     let mut iter = match direction {
-        SortDirection::Asc => txn.scan_prefix(collection, &prefix)?,
-        SortDirection::Desc => txn.scan_prefix_rev(collection, &prefix)?,
+        SortDirection::Asc => txn.scan_prefix(cf, &prefix)?,
+        SortDirection::Desc => txn.scan_prefix_rev(cf, &prefix)?,
     };
 
     let mut count = 0usize;
@@ -184,23 +186,24 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
     })))
 }
 
-fn execute_node<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    node: &'a PlanNode,
-) -> Result<RawIter<'a>, DbError> {
+fn execute_node<'c, T: Transaction + 'c>(
+    txn: &'c T,
+    cf: &'c T::Cf,
+    node: &'c PlanNode,
+) -> Result<RawIter<'c>, DbError> {
     match node {
-        PlanNode::Scan { collection } => execute_scan(txn, collection),
+        PlanNode::Scan { .. } => execute_scan(txn, cf),
 
         PlanNode::IndexScan {
-            collection,
             column,
             value,
             direction,
             limit,
             complete_groups,
+            ..
         } => execute_index_scan(
             txn,
-            collection,
+            cf,
             column,
             value.as_ref(),
             *direction,
@@ -209,10 +212,10 @@ fn execute_node<'a, T: Transaction + 'a>(
         ),
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
-            let left: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, lhs)?
+            let left: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, cf, lhs)?
                 .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
                 .collect::<Result<_, _>>()?;
-            let right: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, rhs)?
+            let right: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, cf, rhs)?
                 .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
                 .collect::<Result<_, _>>()?;
 
@@ -246,10 +249,10 @@ fn execute_node<'a, T: Transaction + 'a>(
             ))
         }
 
-        PlanNode::ReadRecord { input } => execute_read_record(txn, input),
+        PlanNode::ReadRecord { input } => execute_read_record(txn, cf, input),
 
         PlanNode::Filter { predicate, input } => {
-            let source = execute_node(txn, input)?;
+            let source = execute_node(txn, cf, input)?;
 
             Ok(Box::new(source.filter_map(move |result| match result {
                 Err(e) => Some(Err(e)),
@@ -272,7 +275,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Sort { sorts, input } => {
-            let mut source = execute_node(txn, input)?;
+            let mut source = execute_node(txn, cf, input)?;
 
             // Peek first item — if it's an array (from Distinct), sort its elements
             match source.next() {
@@ -319,7 +322,7 @@ fn execute_node<'a, T: Transaction + 'a>(
                 }
                 Some(first) => {
                     // Not an array — collect all records for sorting
-                    let mut records: Vec<(Option<String>, Option<RawValue<'a>>)> =
+                    let mut records: Vec<(Option<String>, Option<RawValue<'c>>)> =
                         std::iter::once(first)
                             .chain(source)
                             .collect::<Result<Vec<_>, _>>()?;
@@ -359,7 +362,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Limit { skip, take, input } => {
-            let mut source = execute_node(txn, input)?;
+            let mut source = execute_node(txn, cf, input)?;
 
             // Check first item — if it's a single array (from Distinct), slice its elements
             match source.next() {
@@ -386,7 +389,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Projection { columns, input } => {
-            let source = execute_node(txn, input)?;
+            let source = execute_node(txn, cf, input)?;
 
             // Build the key_map once, not per record.
             let key_map: Option<HashMap<String, Vec<String>>> = columns.as_ref().map(|cols| {
@@ -450,7 +453,7 @@ fn execute_node<'a, T: Transaction + 'a>(
         PlanNode::Distinct { field, input, .. } => {
             use std::collections::HashSet;
 
-            let source = execute_node(txn, input)?;
+            let source = execute_node(txn, cf, input)?;
             let mut seen = HashSet::new();
             let mut buf = bson::RawArrayBuf::new();
 
@@ -481,12 +484,13 @@ fn execute_node<'a, T: Transaction + 'a>(
 }
 
 /// ReadRecord: the boundary between ID tier and raw tier.
-fn execute_read_record<'a, T: Transaction + 'a>(
-    txn: &'a mut T,
-    input: &'a PlanNode,
-) -> Result<RawIter<'a>, DbError> {
+fn execute_read_record<'c, T: Transaction + 'c>(
+    txn: &'c T,
+    cf: &'c T::Cf,
+    input: &'c PlanNode,
+) -> Result<RawIter<'c>, DbError> {
     if matches!(input, PlanNode::Scan { .. }) {
-        let source = execute_node(txn, input)?;
+        let source = execute_node(txn, cf, input)?;
         return Ok(Box::new(source.filter_map(|result| match result {
             Ok((id, Some(val))) => Some(Ok((id, Some(val)))),
             Ok((_, None)) => None,
@@ -494,15 +498,17 @@ fn execute_read_record<'a, T: Transaction + 'a>(
         })));
     }
 
-    // IndexScan/IndexMerge path: collect IDs (releases txn borrow), then fetch lazily.
-    let collection = extract_collection(input);
-    let ids: Vec<String> = execute_node(txn, input)?
-        .filter_map(|r| r.map(|(id, _)| id).transpose())
-        .collect::<Result<_, _>>()?;
+    // IndexScan/IndexMerge path: stream IDs directly into record fetches.
+    let source = execute_node(txn, cf, input)?;
 
-    Ok(Box::new(ids.into_iter().filter_map(move |id| {
+    Ok(Box::new(source.filter_map(move |result| {
+        let id = match result {
+            Ok((Some(id), _)) => id,
+            Ok((None, _)) => return None,
+            Err(e) => return Some(Err(e)),
+        };
         let key = encoding::record_key(&id);
-        match txn.get(&collection, &key) {
+        match txn.get(cf, &key) {
             Ok(Some(bytes)) => {
                 let raw = match RawDocumentBuf::from_bytes(bytes.into_owned()) {
                     Ok(r) => r,
@@ -529,16 +535,6 @@ fn apply_limit<'a, T: 'a>(
     match take {
         Some(n) => Box::new(iter.take(n)),
         None => Box::new(iter),
-    }
-}
-
-/// Extract the collection name from an ID-tier node.
-fn extract_collection(node: &PlanNode) -> String {
-    match node {
-        PlanNode::Scan { collection } => collection.clone(),
-        PlanNode::IndexScan { collection, .. } => collection.clone(),
-        PlanNode::IndexMerge { lhs, .. } => extract_collection(lhs),
-        _ => String::new(),
     }
 }
 

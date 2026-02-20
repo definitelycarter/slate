@@ -33,20 +33,19 @@ impl MemoryStore {
     }
 
     /// Snapshot a single column family (lazy — called on first access).
-    pub(crate) fn snapshot_cf(&self, name: &str) -> Option<ColumnFamily> {
+    pub(crate) fn snapshot_cf(&self, name: &str) -> Option<Arc<ColumnFamily>> {
         let cfs = self.cfs.read().unwrap();
         let arc_swap = cfs.get(name)?;
-        let arc = arc_swap.load_full();
-        Some((*arc).clone())
+        Some(arc_swap.load_full())
     }
 
     /// Commit dirty CFs back to the store. The caller must already hold the
     /// write lock, so no conflict detection is needed.
-    pub(crate) fn commit(&self, dirty: HashMap<String, ColumnFamily>) {
+    pub(crate) fn commit(&self, dirty: HashMap<String, Arc<ColumnFamily>>) {
         let cfs = self.cfs.read().unwrap();
         for (name, data) in dirty {
             if let Some(arc_swap) = cfs.get(&name) {
-                arc_swap.store(Arc::new(data));
+                arc_swap.store(data);
             }
         }
     }
