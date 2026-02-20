@@ -4,7 +4,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 
 ## Features
 
-- **BSON document storage** — schema-flexible documents with zero-copy reads and lazy materialization
+- **BSON document storage** — schema-flexible documents with zero-copy reads and no deserialization in the query pipeline
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
 - **Indexed queries** — single-field indexes with automatic plan optimization (index scans, covered projections)
 - **Three storage backends** — RocksDB (fast, default), redb (pure Rust, no C dependencies), in-memory (ephemeral)

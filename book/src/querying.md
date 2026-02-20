@@ -586,11 +586,11 @@ For projections with dot-notation, the top-level key is included in materializat
 
 ## Performance Characteristics
 
-**Lazy materialization** is the core optimization. The cost model:
+**Zero deserialization** is the core optimization — the entire pipeline stays in raw bytes. The cost model:
 
-| Scenario | Deserialization cost |
-|----------|---------------------|
-| Record passes filter + included in result | Selective field copying (projection) or full raw copy |
+| Scenario | Cost |
+|----------|------|
+| Record passes filter + included in result | Selective field copying (projection via `RawDocumentBuf::append`) or full raw copy |
 | Record passes filter + excluded by Limit (with sort) | Sort key access only (raw bytes) |
 | Record passes filter + excluded by Limit (no sort) | Zero — never touched |
 | Record fails filter | Filter field access only (raw bytes) |
@@ -604,4 +604,4 @@ For projections with dot-notation, the top-level key is included in materializat
 | `IndexScan` (single index) | Records matching the indexed condition |
 | `IndexMerge(Or)` | Union of records from each index |
 
-**Combined effect:** A query with an indexed filter that rejects 90% of candidates and a non-indexed filter that rejects another 50% of the remaining — only 5% of records are fully deserialized.
+**Combined effect:** A query with an indexed filter that rejects 90% of candidates and a non-indexed filter that rejects another 50% of the remaining — only 5% of records pay the cost of selective field copying into the result set.

@@ -4,7 +4,7 @@ Snapshot from `slate-bench` — run on Apple Silicon (M-series) in release mode.
 
 All benchmarks use the **embedded MemoryStore** backend — no persistence layer, no TCP overhead. This isolates query engine performance from storage-specific noise (RocksDB compaction, block cache warmup, etc.), making benchmark-to-benchmark comparisons reliable. For raw storage throughput across all three backends (MemoryStore, RocksDB, redb), see `slate-store-bench`.
 
-Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a three-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` fetches raw BSON bytes by ID but does **not** deserialize them. The **raw tier** (Filter, Sort, Limit, Distinct) operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore snapshots) and `RawBson` (owned). Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. **Projection** builds `RawDocumentBuf` output using `append()` — selective field copying without full materialization. `find()` returns `Vec<RawDocumentBuf>` directly. For index-covered queries (where all projected columns are available from the index), `ReadRecord` is skipped entirely — `Projection` constructs documents directly from `RawValue` scalars carried by `IndexScan`. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
+Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a two-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` fetches raw BSON bytes by ID but does **not** deserialize them. The **raw tier** (Filter, Sort, Limit, Distinct) operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore snapshots) and `RawBson` (owned). Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. **Projection** builds `RawDocumentBuf` output using `append()` — selective field copying without full materialization. `find()` returns `Vec<RawDocumentBuf>` directly. For index-covered queries (where all projected columns are available from the index), `ReadRecord` is skipped entirely — `Projection` constructs documents directly from `RawValue` scalars carried by `IndexScan`. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
 
 ## Record Schema
 
@@ -196,7 +196,7 @@ Writers are serialized (global write lock per store). Readers use snapshot isola
 
 ## Query Planner
 
-The query planner builds a three-tier plan tree:
+The query planner builds a two-tier plan tree:
 
 ```
 Projection(Limit(Sort(Filter(ReadRecord(IndexScan | IndexMerge | Scan)))))
@@ -226,7 +226,6 @@ Distinct(Projection(Filter(ReadRecord(Scan | IndexScan))))
 - **Limit**: Peeks the first item — if it's a `RawBson::Array` (from Distinct), slices elements with `skip/take` and rebuilds a `RawArrayBuf`. Otherwise chains the peeked item back and applies lazy `skip()` + `take()` on the record stream. Preserves lazy streaming for find queries.
 - **Distinct**: Extracts field values via `raw_walk_path` (recursive callback-based traversal, zero allocation). Deduplicates with `HashSet<u64>` using manual `hash_raw()` over `RawBsonRef` variants. Collects unique values into `RawArrayBuf` and emits a single `(None, Some(RawValue::Owned(RawBson::Array(buf))))`. `distinct()` returns `RawBson` directly — no per-value conversion to `bson::Bson`.
 
-**Document tier** (materialization):
 - **Projection**: Builds `RawDocumentBuf` output using `append()` for selective field copying. Injects `_id` from the record ID. For scalar `RawValue` from index-covered queries, constructs `{ _id, field: value }` directly without any raw byte parsing. `find()` returns `Vec<RawDocumentBuf>` — no `bson::Document` materialization in the pipeline.
 
 **Index selection**: For AND groups, the planner picks the highest-priority indexed field (ordered by `CollectionConfig.indexes`) with an `Eq` condition. For OR groups, if every branch has at least one indexed `Eq`, the planner builds an `IndexMerge(Or)` tree with a residual `Filter` for recheck; if any branch lacks an indexed condition, the entire OR falls back to `Scan`.

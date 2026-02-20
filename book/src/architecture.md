@@ -49,15 +49,21 @@ All read/write operations go through a transaction. Read-only transactions retur
 ```rust
 pub trait Transaction {
     // Reads
-    fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Box<[u8]>>, StoreError>;
-    fn multi_get(&self, cf: &str, keys: &[&[u8]]) -> Result<Vec<Option<Box<[u8]>>>, StoreError>;
-    fn scan_prefix(&self, cf: &str, prefix: &[u8])
-        -> Result<Box<dyn Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), StoreError>> + '_>, StoreError>;
+    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError>;
+    fn multi_get(&mut self, cf: &str, keys: &[&[u8]])
+        -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError>;
+    fn scan_prefix(&mut self, cf: &str, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>, StoreError>;
+    fn scan_prefix_rev(&mut self, cf: &str, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>, StoreError>;
 
     // Writes
     fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
     fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError>;
+
+    // Schema
+    fn create_cf(&mut self, name: &str) -> Result<(), StoreError>;
 
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;
@@ -67,7 +73,7 @@ pub trait Transaction {
 
 ### Error Type
 
-Custom `StoreError` enum with variants: `TransactionConsumed`, `ReadOnly`, `Serialization`, `Storage`.
+Custom `StoreError` enum with variants: `TransactionConsumed`, `ReadOnly`, `Storage`.
 
 ### Implementation: RocksDB
 
@@ -156,20 +162,9 @@ pub struct FilterGroup {
 }
 ```
 
-### Query Values
+### Filter Values
 
-Scalar types only — no `Map` or `List` (those are storage concerns, not query concerns):
-
-```rust
-pub enum QueryValue {
-    String(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Date(i64),
-    Null,
-}
-```
+Filter values use `bson::Bson` directly — no custom value type. This means filters can match against any BSON scalar (String, Int64, Double, Boolean, DateTime, Null) using the same types that documents are stored with.
 
 ## Tier 3: Database Layer (`slate-db`)
 
@@ -235,9 +230,9 @@ txn.insert_many("users", vec![
 ])?;
 
 // Query
-let results = txn.find("users", &query)?;               // -> Vec<Document>
-let one = txn.find_one("users", &query)?;                // -> Option<Document>
-let record = txn.find_by_id("users", "bob", None)?;      // -> Option<Document>
+let results = txn.find("users", &query)?;               // -> Vec<RawDocumentBuf>
+let one = txn.find_one("users", &query)?;                // -> Option<RawDocumentBuf>
+let record = txn.find_by_id("users", "bob", None)?;      // -> Option<RawDocumentBuf>
 let record = txn.find_by_id("users", "bob",
     Some(&["name"]))?;                                    // with projection
 
@@ -272,7 +267,7 @@ txn.commit()?;
 
 ### Query Execution
 
-Query execution uses a three-tier plan tree with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
+Query execution uses a two-tier plan tree with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
 
 **Planning** builds a pipeline:
 
@@ -280,15 +275,16 @@ Query execution uses a three-tier plan tree with lazy materialization. See [Quer
 Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMerge / Scan
 ```
 
-**Three tiers:**
+**Two tiers:**
 
 1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
-2. **Raw tier** — `ReadRecord`, `Filter`, `Sort`, `Limit` operate on `Cow<[u8]>` bytes with borrowed `&RawDocument` views, accessing individual fields lazily. Records that fail a filter are never cloned or deserialized.
-3. **Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns from raw bytes to `bson::Document`.
+2. **Raw tier** — everything above `ReadRecord` operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly.
+
+For index-covered queries, `RawValue` carries scalar values directly from the index — no document fetch needed. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`.
 
 **Key properties:**
 
-- **Lazy materialization** — 30-80% improvement on filtered queries. Rejected records never pay deserialization cost.
+- **No deserialization** — the entire pipeline stays in raw bytes. Records that fail a filter are never cloned or materialized.
 - **Priority-based index selection** — `CollectionConfig.indexes` order determines which index is preferred for AND groups.
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
@@ -322,6 +318,7 @@ enum Request {
     Find { collection: String, query: Query },
     FindOne { collection: String, query: Query },
     FindById { collection: String, id: String, columns: Option<Vec<String>> },
+    Distinct { collection: String, query: DistinctQuery },
     // Update
     UpdateOne { collection: String, filter: FilterGroup, update: bson::Document, upsert: bool },
     UpdateMany { collection: String, filter: FilterGroup, update: bson::Document },
@@ -331,6 +328,9 @@ enum Request {
     DeleteMany { collection: String, filter: FilterGroup },
     // Count
     Count { collection: String, filter: Option<FilterGroup> },
+    // Bulk
+    UpsertMany { collection: String, docs: Vec<bson::Document> },
+    MergeMany { collection: String, docs: Vec<bson::Document> },
     // Index management
     CreateIndex { collection: String, field: String },
     DropIndex { collection: String, field: String },
@@ -352,6 +352,8 @@ enum Response {
     Count(u64),
     Indexes(Vec<String>),
     Collections(Vec<String>),
+    Values(bson::RawBson),
+    Upsert(UpsertResult),
     Error(String),
 }
 ```
