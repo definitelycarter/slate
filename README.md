@@ -1,12 +1,12 @@
 # Slate
 
-A document database built in Rust. Schema-flexible BSON documents on top of RocksDB (or in-memory) with query execution, indexing, and a TCP server/client.
+A document database built in Rust. Schema-flexible BSON documents with pluggable storage (RocksDB, redb, or in-memory), query execution, indexing, and a TCP server/client.
 
 ## Crate Structure
 
 ```
 slate/
-  ├── slate-store            → Store/Transaction traits, MemoryStore + RocksDB backends
+  ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
   ├── slate-query            → Query model: filters, operators, sorting (pure data structures)
   ├── slate-db               → Database layer: collections, indexes, query planner + executor
   ├── slate-server           → TCP server with MessagePack wire protocol, thread-per-connection
@@ -42,7 +42,7 @@ cargo run --release -p slate-store-bench
 ```rust
 use bson::doc;
 use slate_db::{Database, DatabaseConfig};
-use slate_store::RocksStore;
+use slate_store::RocksStore; // or RedbStore for pure-Rust (no C deps)
 
 let store = RocksStore::open("/tmp/slate-data")?;
 let db = Database::open(store, DatabaseConfig::default());
@@ -102,7 +102,7 @@ client.find("accounts", &query)?;
 
 ## Performance
 
-See [benchmarks](book/src/benchmarks.md) for full results including MemoryStore vs RocksDB comparisons across bulk inserts, queries, indexes, and concurrency tests.
+See [benchmarks](book/src/benchmarks.md) for full results including MemoryStore vs RocksDB vs redb comparisons across bulk inserts, queries, indexes, and concurrency tests.
 
 ## Documentation
 

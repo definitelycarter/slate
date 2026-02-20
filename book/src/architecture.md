@@ -8,7 +8,7 @@ A layered system with a dynamic storage engine, a database layer with query exec
 
 ```
 slate/
-  ├── slate-store            → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
+  ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
   ├── slate-query            → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
   ├── slate-db               → Database, Catalog, query execution, depends on slate-store + slate-query
   ├── slate-server           → TCP server, MessagePack wire protocol, thread-per-connection
@@ -78,7 +78,24 @@ The default implementation uses RocksDB (feature-gated). RocksDB provides:
 - Snapshot isolation for read-only transactions
 - MVCC-like behavior built in — no need to implement our own
 
-Other implementations can be added behind feature flags.
+### Implementation: redb (`RedbStore`)
+
+The redb implementation (feature-gated behind `redb`) is a pure-Rust embedded key-value store designed for environments where C dependencies are problematic — notably Apple platforms (macOS/iOS) where RocksDB's C toolchain complicates cross-compilation and distribution.
+
+**Why redb?** RocksDB is faster (2-4x on raw throughput) but requires a C compiler, `libclang`, and platform-specific build configuration. redb is ~15k LOC of pure Rust with no C dependencies — it compiles cleanly for all Apple targets and produces smaller binaries. For frontend applications with user-generated data, redb's performance is more than adequate (sub-15ms for all operations at 10k records).
+
+**Architecture:**
+
+- **Copy-on-write B-trees** with MVCC. Single writer, multiple concurrent readers.
+- **`redb::Database`** — single file on disk, created via `Database::create(path)`.
+- **Tables as column families** — each `cf` string maps to a `TableDefinition<&[u8], &[u8]>`. Tables are opened inline per operation (lightweight handle, no caching needed).
+- **Separate transaction types** — redb has distinct `ReadTransaction` / `WriteTransaction` types, wrapped in an `Inner` enum inside `RedbTransaction`.
+
+**Key differences from RocksDB:**
+
+- **No native `delete_range`** — implemented via iterate-and-delete within a write transaction.
+- **Eager scan collection** — redb iterators borrow the table handle and can't outlive the method. Prefix scans collect results into a `Vec` before returning. Acceptable because prefix scans in slate are bounded by collection size.
+- **Returns `Cow::Owned`** — like RocksDB, values must be copied out of redb's `AccessGuard`. No zero-copy borrows across the transaction boundary.
 
 ### Implementation: In-Memory (`MemoryStore`)
 

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use slate_db::{Database, DatabaseConfig};
-use slate_store::{MemoryStore, Store};
+use slate_store::{MemoryStore, RedbStore, Store};
 
 fn run_embedded<S: Store + Send + Sync + 'static>(
     backend: &str,
@@ -92,26 +92,64 @@ fn make_memory_db() -> Database<MemoryStore> {
     Database::open(MemoryStore::new(), DatabaseConfig::default())
 }
 
+fn make_redb_db() -> Database<RedbStore> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bench.redb");
+    let store = RedbStore::open(&path).unwrap();
+    // Leak the tempdir so it lives for the duration of the benchmark
+    std::mem::forget(dir);
+    Database::open(store, DatabaseConfig::default())
+}
+
 fn main() {
     println!("=== Slate Benchmark Suite ===\n");
 
     let total_start = Instant::now();
     let mut all_results = Vec::new();
 
-    run_embedded(
-        "MemoryStore",
-        &scenarios::CONFIG_10K,
-        3,
-        &mut all_results,
-        make_memory_db,
-    );
-    run_embedded(
-        "MemoryStore",
-        &scenarios::CONFIG_100K,
-        3,
-        &mut all_results,
-        make_memory_db,
-    );
+    let backend = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "memory".to_string());
+
+    match backend.as_str() {
+        "memory" => {
+            run_embedded(
+                "MemoryStore",
+                &scenarios::CONFIG_10K,
+                3,
+                &mut all_results,
+                make_memory_db,
+            );
+            run_embedded(
+                "MemoryStore",
+                &scenarios::CONFIG_100K,
+                3,
+                &mut all_results,
+                make_memory_db,
+            );
+        }
+        "redb" => {
+            run_embedded(
+                "RedbStore",
+                &scenarios::CONFIG_10K,
+                3,
+                &mut all_results,
+                make_redb_db,
+            );
+            run_embedded(
+                "RedbStore",
+                &scenarios::CONFIG_100K,
+                3,
+                &mut all_results,
+                make_redb_db,
+            );
+        }
+        other => {
+            eprintln!("Unknown backend: {other}");
+            eprintln!("Usage: slate-bench [memory|redb]");
+            std::process::exit(1);
+        }
+    }
 
     let total_duration = total_start.elapsed();
     println!("=== Complete ===");

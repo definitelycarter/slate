@@ -8,6 +8,6 @@ name = "slate-store-bench"
 path = "src/main.rs"
 
 [dependencies]
-slate-store = { path = "../slate-store", features = ["rocksdb", "memory"] }
+slate-store = { path = "../slate-store", features = ["rocksdb", "memory", "redb"] }
 rand = "0.8"
 tempfile = "3"

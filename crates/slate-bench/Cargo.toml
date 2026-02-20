@@ -13,7 +13,8 @@ path = "src/raw_document_bench.rs"
 
 [dependencies]
 slate-db = { path = "../slate-db" }
-slate-store = { path = "../slate-store", features = ["memory"] }
+slate-store = { path = "../slate-store", features = ["memory", "redb"] }
 slate-query = { path = "../slate-query" }
 bson = "2"
 rand = "0.8"
+tempfile = "3"

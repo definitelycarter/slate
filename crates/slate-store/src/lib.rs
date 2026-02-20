@@ -15,3 +15,9 @@ mod memory;
 
 #[cfg(feature = "memory")]
 pub use memory::MemoryStore;
+
+#[cfg(feature = "redb")]
+mod redb_store;
+
+#[cfg(feature = "redb")]
+pub use redb_store::RedbStore;

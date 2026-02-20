@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
 use rand::Rng;
-use slate_store::{MemoryStore, RocksStore, Store, Transaction};
+use slate_store::{MemoryStore, RedbStore, RocksStore, Store, Transaction};
 
 const CF: &str = "data";
 const TOTAL_RECORDS: usize = 500_000;
@@ -469,28 +469,53 @@ fn main() {
     test_delete_range_integrity(&rocks_store2, "RocksStore");
     stress_concurrent(&rocks_store2, "RocksStore");
 
+    // -- RedbStore --
+    println!("============================================================");
+    println!("  RedbStore");
+    println!("============================================================");
+    println!();
+
+    let redb_dir = tempfile::tempdir().unwrap();
+    let redb_store = RedbStore::open(&redb_dir.path().join("bench.redb")).unwrap();
+    let redb_result = bench_store(&redb_store, "RedbStore");
+    redb_result.print();
+
+    let redb_dir2 = tempfile::tempdir().unwrap();
+    let redb_store2 = RedbStore::open(&redb_dir2.path().join("bench.redb")).unwrap();
+    test_rollback_integrity(&redb_store2, "RedbStore");
+    test_delete_range_integrity(&redb_store2, "RedbStore");
+    // Note: concurrent stress test skipped for redb — single writer means
+    // reader threads would block while writer holds the write transaction.
+
     // -- Comparison --
     println!("============================================================");
     println!("  Comparison");
     println!("============================================================");
     println!();
     println!(
-        "  write:       memory {:.0}ms vs rocks {:.0}ms ({:.1}x)",
+        "  {:>12} {:>10} {:>10} {:>10}",
+        "", "memory", "rocks", "redb"
+    );
+    println!(
+        "  {:>12} {:>9.0}ms {:>9.0}ms {:>9.0}ms",
+        "write",
         mem_result.write_time.as_secs_f64() * 1000.0,
         rocks_result.write_time.as_secs_f64() * 1000.0,
-        rocks_result.write_time.as_secs_f64() / mem_result.write_time.as_secs_f64(),
+        redb_result.write_time.as_secs_f64() * 1000.0,
     );
     println!(
-        "  read all:    memory {:.0}ms vs rocks {:.0}ms ({:.1}x)",
+        "  {:>12} {:>9.0}ms {:>9.0}ms {:>9.0}ms",
+        "read all",
         mem_result.read_all_time.as_secs_f64() * 1000.0,
         rocks_result.read_all_time.as_secs_f64() * 1000.0,
-        rocks_result.read_all_time.as_secs_f64() / mem_result.read_all_time.as_secs_f64(),
+        redb_result.read_all_time.as_secs_f64() * 1000.0,
     );
     println!(
-        "  scan:        memory {:.0}ms vs rocks {:.0}ms ({:.1}x)",
+        "  {:>12} {:>9.0}ms {:>9.0}ms {:>9.0}ms",
+        "scan",
         mem_result.scan_time.as_secs_f64() * 1000.0,
         rocks_result.scan_time.as_secs_f64() * 1000.0,
-        rocks_result.scan_time.as_secs_f64() / mem_result.scan_time.as_secs_f64(),
+        redb_result.scan_time.as_secs_f64() * 1000.0,
     );
     println!();
     println!(
@@ -500,6 +525,10 @@ fn main() {
     println!(
         "  rocks data loss:   {}   corruption: {}",
         rocks_result.data_loss, rocks_result.corruption
+    );
+    println!(
+        "  redb data loss:    {}   corruption: {}",
+        redb_result.data_loss, redb_result.corruption
     );
     println!();
 }
