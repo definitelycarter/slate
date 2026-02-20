@@ -15,7 +15,7 @@ use crate::error::DbError;
 use crate::exec;
 use crate::executor;
 use crate::planner;
-use crate::result::{DeleteResult, InsertResult, UpdateResult};
+use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 
 const SYS_CF: &str = "_sys";
 const ID_COLUMN: &str = "_id";
@@ -341,10 +341,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         };
         let matches = self.find(collection, &query)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
 
         if let Some(matched_doc) = matches.into_iter().next() {
             let id = matched_doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            let modified = self.merge_update(collection, id, &update)?;
+            let modified = self.raw_merge_update(collection, id, &update, &indexed_fields)?;
             Ok(UpdateResult {
                 matched: 1,
                 modified: if modified { 1 } else { 0 },
@@ -381,12 +382,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         };
         let matches = self.find(collection, &query)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
         let matched = matches.len() as u64;
         let mut modified = 0u64;
 
         for doc in &matches {
             let id = doc.get_str(ID_COLUMN).ok().unwrap_or_default();
-            if self.merge_update(collection, id, &update)? {
+            if self.raw_merge_update(collection, id, &update, &indexed_fields)? {
                 modified += 1;
             }
         }
@@ -501,6 +503,67 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         }
 
         Ok(DeleteResult { deleted: count })
+    }
+
+    // ── Bulk upsert / merge operations ────────────────────────────
+
+    /// Upsert (insert-or-replace) a batch of documents by `_id`.
+    /// Each document must have an `_id`. If a document with that `_id` exists,
+    /// it is fully replaced. Otherwise it is inserted.
+    pub fn upsert_many(
+        &mut self,
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<UpsertResult, DbError> {
+        self.require_collection(collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let mut inserted = 0u64;
+        let mut updated = 0u64;
+
+        for mut doc in docs {
+            let id = extract_or_generate_id(&mut doc);
+            let key = encoding::record_key(&id);
+
+            if self.txn.get(collection, &key)?.is_some() {
+                self.replace_by_id(collection, &id, doc, &indexed_fields)?;
+                updated += 1;
+            } else {
+                self.insert_with_id(collection, &id, doc, &indexed_fields)?;
+                inserted += 1;
+            }
+        }
+
+        Ok(UpsertResult { inserted, updated })
+    }
+
+    /// Merge (insert-or-patch) a batch of partial documents by `_id`.
+    /// Each document must have an `_id`. If a document with that `_id` exists,
+    /// the provided fields are merged into it (existing fields not in the update
+    /// are preserved). Otherwise the document is inserted as-is.
+    pub fn merge_many(
+        &mut self,
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<UpsertResult, DbError> {
+        self.require_collection(collection)?;
+        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
+        let mut inserted = 0u64;
+        let mut updated = 0u64;
+
+        for mut doc in docs {
+            let id = extract_or_generate_id(&mut doc);
+            let key = encoding::record_key(&id);
+
+            if self.txn.get(collection, &key)?.is_some() {
+                self.raw_merge_update(collection, &id, &doc, &indexed_fields)?;
+                updated += 1;
+            } else {
+                self.insert_with_id(collection, &id, doc, &indexed_fields)?;
+                inserted += 1;
+            }
+        }
+
+        Ok(UpsertResult { inserted, updated })
     }
 
     // ── Count ───────────────────────────────────────────────────
@@ -686,94 +749,6 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         Ok(())
     }
 
-    /// Merge update fields into an existing document by _id.
-    /// Returns true if the document was actually modified.
-    fn merge_update(
-        &mut self,
-        collection: &str,
-        id: &str,
-        update: &bson::Document,
-    ) -> Result<bool, DbError> {
-        let key = encoding::record_key(id);
-        let indexed_fields = self.catalog.list_indexes(&mut self.txn, collection)?;
-
-        let mut existing = match self.txn.get(collection, &key)? {
-            Some(bytes) => bson::from_slice::<bson::Document>(&bytes)?,
-            None => return Ok(false),
-        };
-
-        // Track old TTL value before merge
-        let old_ttl = existing.get("ttl").cloned();
-
-        // Track old indexed values (multi-key aware)
-        let old_indexed: Vec<(String, Vec<Bson>)> = indexed_fields
-            .iter()
-            .map(|f| {
-                let values = exec::get_path_values(&existing, f)
-                    .into_iter()
-                    .cloned()
-                    .collect();
-                (f.clone(), values)
-            })
-            .collect();
-
-        // Merge
-        let mut changed = false;
-        for (column, value) in update {
-            if column == ID_COLUMN {
-                continue;
-            }
-            if existing.get(column) != Some(value) {
-                changed = true;
-            }
-            existing.insert(column.clone(), value.clone());
-        }
-
-        if !changed {
-            return Ok(false);
-        }
-
-        // Write
-        self.txn.put(collection, &key, &bson::to_vec(&existing)?)?;
-
-        // Index maintenance: diff old vs new value sets
-        for (field, old_values) in &old_indexed {
-            let new_values: Vec<&Bson> = exec::get_path_values(&existing, field);
-
-            for old_val in old_values {
-                if !new_values.contains(&old_val) {
-                    let idx_key = encoding::index_key(field, old_val, id);
-                    self.txn.delete(collection, &idx_key)?;
-                }
-            }
-
-            for new_val in &new_values {
-                if !old_values.contains(new_val) {
-                    let idx_key = encoding::index_key(field, new_val, id);
-                    self.txn
-                        .put(collection, &idx_key, &encoding::bson_type_byte(new_val))?;
-                }
-            }
-        }
-
-        // TTL index maintenance: diff old vs new ttl value
-        let new_ttl = existing.get("ttl").cloned();
-        if old_ttl != new_ttl {
-            if let Some(Bson::DateTime(dt)) = &old_ttl {
-                let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
-                self.txn.delete(collection, &idx_key)?;
-            }
-            if let Some(Bson::DateTime(dt)) = &new_ttl {
-                let val = Bson::DateTime(*dt);
-                let idx_key = encoding::index_key("ttl", &val, id);
-                self.txn
-                    .put(collection, &idx_key, &encoding::bson_type_byte(&val))?;
-            }
-        }
-
-        Ok(true)
-    }
-
     /// Delete a document by _id, cleaning up its index entries.
     fn delete_by_id(&mut self, collection: &str, id: &str) -> Result<(), DbError> {
         let key = encoding::record_key(id);
@@ -853,6 +828,174 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             self.txn.delete(collection, &idx_key)?;
         }
         Ok(())
+    }
+
+    /// Insert a document with a known `_id` (already extracted from the doc).
+    fn insert_with_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: bson::Document,
+        indexed_fields: &[String],
+    ) -> Result<(), DbError> {
+        let key = encoding::record_key(id);
+        self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
+        self.write_index_entries(collection, id, &doc, indexed_fields)?;
+        self.write_ttl_index_entry(collection, id, &doc)?;
+        Ok(())
+    }
+
+    /// Replace a document by `_id`: delete old indexes, write new doc + indexes.
+    fn replace_by_id(
+        &mut self,
+        collection: &str,
+        id: &str,
+        doc: bson::Document,
+        indexed_fields: &[String],
+    ) -> Result<(), DbError> {
+        let key = encoding::record_key(id);
+
+        // Clean up old index entries from raw bytes (no deserialization)
+        let old_bytes = self.txn.get(collection, &key)?.map(|b| b.to_vec());
+        if let Some(ref bytes) = old_bytes {
+            let raw = bson::RawDocument::from_bytes(bytes)?;
+            self.delete_raw_index_entries(collection, id, raw, indexed_fields)?;
+            self.delete_raw_ttl_index_entry(collection, id, raw)?;
+        }
+
+        // Write new document and indexes
+        self.txn.put(collection, &key, &bson::to_vec(&doc)?)?;
+        self.write_index_entries(collection, id, &doc, indexed_fields)?;
+        self.write_ttl_index_entry(collection, id, &doc)?;
+        Ok(())
+    }
+
+    /// Merge fields into an existing document using raw BSON (no full deserialization).
+    /// Unchanged fields are copied as raw bytes via `append_ref()`.
+    /// Returns true if the document was actually modified.
+    fn raw_merge_update(
+        &mut self,
+        collection: &str,
+        id: &str,
+        update: &bson::Document,
+        indexed_fields: &[String],
+    ) -> Result<bool, DbError> {
+        let key = encoding::record_key(id);
+
+        let old_bytes = match self.txn.get(collection, &key)? {
+            Some(b) => b.to_vec(),
+            None => return Ok(false),
+        };
+        let old_raw = bson::RawDocument::from_bytes(&old_bytes)?;
+
+        // Collect old indexed values from raw bytes
+        let old_indexed: Vec<(&str, Vec<bson::raw::RawBsonRef<'_>>)> = indexed_fields
+            .iter()
+            .map(|f| {
+                let vals = exec::raw_get_path_values(old_raw, f).unwrap_or_default();
+                (f.as_str(), vals)
+            })
+            .collect();
+
+        // Track old TTL
+        let old_ttl_raw = old_raw.get("ttl")?;
+
+        // Build update key set for fast lookup
+        let update_keys: std::collections::HashSet<&str> = update
+            .keys()
+            .filter(|k| *k != ID_COLUMN)
+            .map(|k| k.as_str())
+            .collect();
+
+        // Check if anything actually changed
+        let mut changed = false;
+        for (ukey, uval) in update {
+            if ukey == ID_COLUMN {
+                continue;
+            }
+            match old_raw.get(ukey)? {
+                Some(old_val) => {
+                    if !exec::raw_values_eq(&old_val, uval) {
+                        changed = true;
+                        break;
+                    }
+                }
+                None => {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(false);
+        }
+
+        // Build merged RawDocumentBuf
+        let mut merged = RawDocumentBuf::new();
+
+        // Copy old fields not in the update
+        for result in old_raw.iter() {
+            let (field_key, field_val) = result?;
+            if !update_keys.contains(field_key) {
+                merged.append_ref(field_key, field_val);
+            }
+        }
+
+        // Append update fields
+        for (ukey, uval) in update {
+            if ukey == ID_COLUMN {
+                continue;
+            }
+            let raw_val = bson::RawBson::try_from(uval.clone())
+                .map_err(|e| DbError::Serialization(e.to_string()))?;
+            merged.append(ukey, raw_val);
+        }
+
+        // Write merged document
+        self.txn.put(collection, &key, merged.as_bytes())?;
+
+        // Index maintenance: diff old vs new
+        let new_raw = bson::RawDocument::from_bytes(merged.as_bytes())?;
+        for (field, old_vals) in &old_indexed {
+            let new_vals = exec::raw_get_path_values(new_raw, field)?;
+
+            // Delete removed index entries
+            for old_val in old_vals {
+                if !new_vals.iter().any(|nv| exec::raw_refs_eq(nv, old_val)) {
+                    let idx_key = encoding::raw_index_key(field, *old_val, id);
+                    self.txn.delete(collection, &idx_key)?;
+                }
+            }
+
+            // Add new index entries
+            for new_val in &new_vals {
+                if !old_vals.iter().any(|ov| exec::raw_refs_eq(new_val, ov)) {
+                    let idx_key = encoding::raw_index_key(field, *new_val, id);
+                    let type_byte = encoding::raw_bson_ref_type_byte(*new_val);
+                    self.txn.put(collection, &idx_key, &type_byte)?;
+                }
+            }
+        }
+
+        // TTL index maintenance
+        let new_ttl_raw = new_raw.get("ttl")?;
+        if old_ttl_raw != new_ttl_raw {
+            if let Some(bson::raw::RawBsonRef::DateTime(dt)) = old_ttl_raw {
+                let idx_key =
+                    encoding::raw_index_key("ttl", bson::raw::RawBsonRef::DateTime(dt), id);
+                self.txn.delete(collection, &idx_key)?;
+            }
+            if let Some(bson::raw::RawBsonRef::DateTime(dt)) = new_ttl_raw {
+                let idx_key =
+                    encoding::raw_index_key("ttl", bson::raw::RawBsonRef::DateTime(dt), id);
+                let type_byte =
+                    encoding::raw_bson_ref_type_byte(bson::raw::RawBsonRef::DateTime(dt));
+                self.txn.put(collection, &idx_key, &type_byte)?;
+            }
+        }
+
+        Ok(true)
     }
 }
 

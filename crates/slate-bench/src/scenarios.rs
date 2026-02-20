@@ -909,6 +909,109 @@ pub fn concurrency_tests<S: Store + Send + Sync + 'static>(
     results
 }
 
+// --- Phase 4b: Upsert / Merge Benchmarks ---
+
+pub fn upsert_merge_benchmarks<S: Store>(
+    db: &Database<S>,
+    user: usize,
+    cfg: &BenchConfig,
+) -> Vec<BenchResult> {
+    let total_records = cfg.total_records();
+    let mut results = Vec::new();
+
+    // 1. upsert_many — all new (insert path)
+    //    Use a separate ID range to avoid conflicts with existing records
+    let upsert_new_count = 1000;
+    results.push(bench(
+        &format!("upsert_many: {upsert_new_count} new records (insert path)"),
+        || {
+            let base = total_records + 100_000;
+            let docs = datagen::generate_batch_docs(user, base, upsert_new_count);
+            let mut txn = db.begin(false).expect("begin failed");
+            let r = txn
+                .upsert_many(COLLECTION, docs)
+                .expect("upsert_many failed");
+            txn.commit().expect("commit failed");
+            r.inserted as usize
+        },
+    ));
+
+    // 2. upsert_many — all existing (replace path)
+    //    Re-upsert the same records with modified data
+    results.push(bench(
+        &format!("upsert_many: {upsert_new_count} existing records (replace path)"),
+        || {
+            let base = total_records + 100_000;
+            let mut docs = datagen::generate_batch_docs(user, base, upsert_new_count);
+            // Modify a field to ensure actual replacement
+            for doc in &mut docs {
+                doc.insert("status", "rejected");
+            }
+            let mut txn = db.begin(false).expect("begin failed");
+            let r = txn
+                .upsert_many(COLLECTION, docs)
+                .expect("upsert_many failed");
+            txn.commit().expect("commit failed");
+            r.updated as usize
+        },
+    ));
+
+    // 3. merge_many — all existing (merge path, partial update)
+    //    Merge a single field change into existing records
+    results.push(bench(
+        &format!("merge_many: {upsert_new_count} existing records (merge path)"),
+        || {
+            let base = total_records + 100_000;
+            let docs: Vec<bson::Document> = (0..upsert_new_count)
+                .map(|i| {
+                    let id = datagen::generate_record_id(user, base + i);
+                    bson::doc! { "_id": id, "status": "active" }
+                })
+                .collect();
+            let mut txn = db.begin(false).expect("begin failed");
+            let r = txn.merge_many(COLLECTION, docs).expect("merge_many failed");
+            txn.commit().expect("commit failed");
+            r.updated as usize
+        },
+    ));
+
+    // 4. merge_many — all new (insert path)
+    let merge_new_base = total_records + 200_000;
+    results.push(bench(
+        &format!("merge_many: {upsert_new_count} new records (insert path)"),
+        || {
+            let docs = datagen::generate_batch_docs(user, merge_new_base, upsert_new_count);
+            let mut txn = db.begin(false).expect("begin failed");
+            let r = txn.merge_many(COLLECTION, docs).expect("merge_many failed");
+            txn.commit().expect("commit failed");
+            r.inserted as usize
+        },
+    ));
+
+    // 5. merge_many — mixed (50% new, 50% existing)
+    results.push(bench(
+        &format!("merge_many: {upsert_new_count} mixed (50/50 new/existing)"),
+        || {
+            let half = upsert_new_count / 2;
+            let mut docs = Vec::with_capacity(upsert_new_count);
+            // Existing records — merge a field
+            for i in 0..half {
+                let id = datagen::generate_record_id(user, i);
+                docs.push(bson::doc! { "_id": id, "notes": "updated via merge" });
+            }
+            // New records
+            let new_base = total_records + 300_000;
+            docs.extend(datagen::generate_batch_docs(user, new_base, half));
+            let mut txn = db.begin(false).expect("begin failed");
+            let r = txn.merge_many(COLLECTION, docs).expect("merge_many failed");
+            txn.commit().expect("commit failed");
+            (r.inserted + r.updated) as usize
+        },
+    ));
+
+    results
+}
+
 // --- Phase 5: Post-Concurrency Integrity ---
 
 pub fn verify_post_concurrency<S: Store>(db: &Database<S>, _user: usize, cfg: &BenchConfig) {

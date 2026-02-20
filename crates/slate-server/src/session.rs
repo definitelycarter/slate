@@ -116,6 +116,14 @@ impl<S: Store> Session<S> {
                 let values = txn.distinct(&collection, &query)?;
                 Ok(Response::Values(values))
             }),
+            Request::UpsertMany { collection, docs } => self.write(|txn| {
+                let result = txn.upsert_many(&collection, docs)?;
+                Ok(Response::Upsert(result))
+            }),
+            Request::MergeMany { collection, docs } => self.write(|txn| {
+                let result = txn.merge_many(&collection, docs)?;
+                Ok(Response::Upsert(result))
+            }),
         }
     }
 

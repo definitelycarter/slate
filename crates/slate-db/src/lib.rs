@@ -12,4 +12,4 @@ pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
 pub use database::{Database, DatabaseConfig, DatabaseTransaction};
 pub use error::DbError;
-pub use result::{DeleteResult, InsertResult, UpdateResult};
+pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};

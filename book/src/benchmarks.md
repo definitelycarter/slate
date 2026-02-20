@@ -69,6 +69,18 @@ Results from a single collection (10,000 records). Times are consistent across a
 | distinct: rec1 with status='active' filter | ~3.6ms | 3 | IndexScan narrows to ~50% of records |
 | distinct: last_contacted_at (high cardinality) | ~4.9ms | ~7,000 | HashSet O(1) dedup, ~70% of records have value |
 
+### Upsert / Merge
+
+1,000 records per operation, run after 10k records already inserted.
+
+| Operation | Time | Per Record | Notes |
+|-----------|------|------------|-------|
+| upsert_many: 1,000 new (insert path) | ~3.6ms | ~0.0036ms | Insert + index write per record |
+| upsert_many: 1,000 existing (replace path) | ~5.5ms | ~0.0055ms | Delete old indexes + replace doc + reindex |
+| merge_many: 1,000 existing (merge path) | ~3.7ms | ~0.0037ms | Raw merge via `RawDocumentBuf::append_ref()` — unchanged fields zero-copy |
+| merge_many: 1,000 new (insert path) | ~3.8ms | ~0.0038ms | Falls back to insert when `_id` not found |
+| merge_many: 1,000 mixed (50/50) | ~4.3ms | ~0.0043ms | Mix of insert and merge paths |
+
 ## 100k Records
 
 Results from a single collection (100,000 records). Times are consistent across all 3 users.
@@ -118,6 +130,18 @@ Results from a single collection (100,000 records). Times are consistent across 
 | distinct: rec1 with status='active' filter | ~38ms | 3 | IndexScan narrows to ~50% of records |
 | distinct: last_contacted_at (high cardinality) | ~51ms | ~70,000 | HashSet O(1) dedup — linear scaling vs previous quadratic |
 
+### Upsert / Merge
+
+1,000 records per operation, run after 100k records already inserted.
+
+| Operation | Time | Per Record | Notes |
+|-----------|------|------------|-------|
+| upsert_many: 1,000 new (insert path) | ~4.2ms | ~0.0042ms | Insert + index write per record |
+| upsert_many: 1,000 existing (replace path) | ~6.2ms | ~0.0062ms | Delete old indexes + replace doc + reindex |
+| merge_many: 1,000 existing (merge path) | ~3.8ms | ~0.0038ms | Raw merge via `RawDocumentBuf::append_ref()` — unchanged fields zero-copy |
+| merge_many: 1,000 new (insert path) | ~4.3ms | ~0.0043ms | Falls back to insert when `_id` not found |
+| merge_many: 1,000 mixed (50/50) | ~6.2ms | ~0.0062ms | Mix of insert and merge paths |
+
 ### Key Observations
 
 - **Zero-copy reads + lazy materialization**: The raw tier uses `RawValue<'a>` — `RawValue::Borrowed(RawBsonRef<'a>)` for zero-copy access to MemoryStore snapshots, `RawValue::Owned(RawBson)` for owned data. Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no full `bson::Document` materialization in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly.
@@ -131,6 +155,7 @@ Results from a single collection (100,000 records). Times are consistent across 
 - **Distinct dedup**: Uses `HashSet<u64>` with manual hashing of `RawBsonRef` variants for O(1) dedup. Unique values collected into `RawArrayBuf`. Zero `bson::Bson` allocation in the distinct path. `raw_walk_path` recursively walks document paths, descending into arrays of sub-documents without intermediate `Vec` allocation.
 - **Point lookups**: ~1.3ms (10k) to ~1.8ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
 - **Array element matching**: Filtering on array fields (e.g. `tags = "renewal_due"`) iterates array elements per record — any element match satisfies the filter. At 100k records with 2-4 tags each: ~32ms for ~48k matches. Scales linearly and inherits all cross-type coercion.
+- **Raw merge (`merge_many`)**: Partial updates use `RawDocumentBuf::append_ref()` for unchanged fields — raw bytes are copied directly without parsing or allocation. Only updated fields go through `Bson` → `RawBson` conversion. At 100k records, merging 1,000 existing records costs ~3.8ms (~0.0038ms/record) — 39% faster than upsert replace (~6.2ms) which must rewrite the entire document and all indexes.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
 
 ## Scaling: 10k → 100k
@@ -153,8 +178,12 @@ Results from a single collection (100,000 records). Times are consistent across 
 | Distinct (status, 2 values) | 5ms | 49ms | 9.8x |
 | Distinct (contacts_count, ~100 values) | 4.9ms | 48ms | 9.8x |
 | Distinct (last_contacted_at, ~7k/70k values) | 4.9ms | 51ms | 10.4x |
+| upsert_many: 1k insert | 3.6ms | 4.2ms | 1.2x |
+| upsert_many: 1k replace | 5.5ms | 6.2ms | 1.1x |
+| merge_many: 1k merge | 3.7ms | 3.8ms | 1.0x |
+| merge_many: 1k insert | 3.8ms | 4.3ms | 1.1x |
 
-Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size. Distinct now scales linearly across all cardinalities thanks to `HashSet<u64>` O(1) dedup (previously quadratic at high cardinality: ~95x for 10x data).
+Queries scale ~10x for 10x data — near-linear. Point lookups are nearly constant regardless of dataset size. Distinct now scales linearly across all cardinalities thanks to `HashSet<u64>` O(1) dedup (previously quadratic at high cardinality: ~95x for 10x data). Write operations (upsert/merge) scale ~1.0–1.2x — nearly constant since they operate on a fixed batch of 1,000 records regardless of dataset size. The slight increase at 100k reflects deeper tree traversal in the underlying OrdMap.
 
 ## Concurrency
 

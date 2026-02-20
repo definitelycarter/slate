@@ -16,3 +16,9 @@ pub struct UpdateResult {
 pub struct DeleteResult {
     pub deleted: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertResult {
+    pub inserted: u64,
+    pub updated: u64,
+}

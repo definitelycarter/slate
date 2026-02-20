@@ -72,6 +72,15 @@ fn run_embedded<S: Store + Send + Sync + 'static>(
         all_results.extend(concurrency_results);
         println!();
 
+        // Phase 4b: Upsert / Merge Benchmarks
+        println!("[Phase 4b] Upsert / Merge Benchmarks");
+        let upsert_merge_results = scenarios::upsert_merge_benchmarks(&db_arc, user, cfg);
+        for r in &upsert_merge_results {
+            r.print();
+        }
+        all_results.extend(upsert_merge_results);
+        println!();
+
         // Phase 5: Post-Concurrency Integrity
         println!("[Phase 5] Post-Concurrency Integrity");
         scenarios::verify_post_concurrency(&db_arc, user, cfg);

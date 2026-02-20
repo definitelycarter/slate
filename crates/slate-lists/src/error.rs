@@ -4,7 +4,6 @@ use std::fmt;
 pub enum ListError {
     Client(slate_client::ClientError),
     NotFound(String),
-    Loader(String),
 }
 
 impl fmt::Display for ListError {
@@ -12,7 +11,6 @@ impl fmt::Display for ListError {
         match self {
             ListError::Client(e) => write!(f, "client error: {e}"),
             ListError::NotFound(id) => write!(f, "list not found: {id}"),
-            ListError::Loader(msg) => write!(f, "loader error: {msg}"),
         }
     }
 }
@@ -23,7 +21,7 @@ impl ListError {
     pub fn status_code(&self) -> http::StatusCode {
         match self {
             ListError::NotFound(_) => http::StatusCode::NOT_FOUND,
-            ListError::Client(_) | ListError::Loader(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
+            ListError::Client(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

@@ -1,7 +1,7 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
-use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
+use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult, UpsertResult};
 use slate_query::{DistinctQuery, FilterGroup, Query};
 use slate_server::protocol::{Request, Response};
 
@@ -228,6 +228,42 @@ impl Client {
             doc,
         })? {
             Response::Update(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    // ── Bulk upsert / merge operations ────────────────────────────
+
+    pub fn upsert_many(
+        &mut self,
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<UpsertResult, ClientError> {
+        match self.request(Request::UpsertMany {
+            collection: collection.to_string(),
+            docs,
+        })? {
+            Response::Upsert(r) => Ok(r),
+            Response::Error(e) => Err(ClientError::Server(e)),
+            other => Err(ClientError::Server(format!(
+                "unexpected response: {other:?}"
+            ))),
+        }
+    }
+
+    pub fn merge_many(
+        &mut self,
+        collection: &str,
+        docs: Vec<bson::Document>,
+    ) -> Result<UpsertResult, ClientError> {
+        match self.request(Request::MergeMany {
+            collection: collection.to_string(),
+            docs,
+        })? {
+            Response::Upsert(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
             other => Err(ClientError::Server(format!(
                 "unexpected response: {other:?}"

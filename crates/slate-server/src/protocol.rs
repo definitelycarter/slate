@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult};
+use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult, UpsertResult};
 use slate_query::{DistinctQuery, FilterGroup, Query};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,6 +75,14 @@ pub enum Request {
         collection: String,
         query: DistinctQuery,
     },
+    UpsertMany {
+        collection: String,
+        docs: Vec<bson::Document>,
+    },
+    MergeMany {
+        collection: String,
+        docs: Vec<bson::Document>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,5 +98,6 @@ pub enum Response {
     Indexes(Vec<String>),
     Collections(Vec<String>),
     Values(bson::RawBson),
+    Upsert(UpsertResult),
     Error(String),
 }

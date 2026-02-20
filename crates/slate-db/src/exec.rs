@@ -411,7 +411,7 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
     }
 }
 
-fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
+pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
     match (store_val, query_val) {
         // ── Direct type matches ─────────────────────────────────
         (RawBsonRef::String(a), Bson::String(b)) => *a == b.as_str(),
@@ -446,6 +446,27 @@ fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
         (RawBsonRef::DateTime(a), Bson::Int32(b)) => a.timestamp_millis() == (*b as i64 * 1000),
 
         // ── Incompatible types: silent exclusion ────────────────
+        _ => false,
+    }
+}
+
+/// Compare two `RawBsonRef` values for equality (used for index diff in raw_merge_update).
+pub(crate) fn raw_refs_eq(a: &RawBsonRef, b: &RawBsonRef) -> bool {
+    match (a, b) {
+        (RawBsonRef::String(a), RawBsonRef::String(b)) => a == b,
+        (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => a == b,
+        (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => a == b,
+        (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => (*a as i64) == *b,
+        (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => *a == (*b as i64),
+        (RawBsonRef::Double(a), RawBsonRef::Double(b)) => a == b,
+        (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => *a == (*b as f64),
+        (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => *a == (*b as f64),
+        (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Boolean(a), RawBsonRef::Boolean(b)) => a == b,
+        (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
+            a.timestamp_millis() == b.timestamp_millis()
+        }
         _ => false,
     }
 }

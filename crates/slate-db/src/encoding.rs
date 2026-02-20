@@ -141,6 +141,11 @@ pub fn coerce_to_stored_type(
     }
 }
 
+/// Return the BSON element type byte for a `RawBsonRef` value.
+pub fn raw_bson_ref_type_byte(value: bson::raw::RawBsonRef) -> [u8; 1] {
+    [value.element_type() as u8]
+}
+
 pub fn raw_index_key(column: &str, value: bson::raw::RawBsonRef, record_id: &str) -> Vec<u8> {
     let value_bytes = encode_raw_value(value);
     let mut key = Vec::with_capacity(

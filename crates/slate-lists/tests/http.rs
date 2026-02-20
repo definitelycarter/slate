@@ -84,7 +84,6 @@ fn active_config() -> ListConfig {
                 pinned: false,
             },
         ],
-        loader: None,
     }
 }
 
@@ -108,13 +107,12 @@ fn all_config() -> ListConfig {
                 pinned: false,
             },
         ],
-        loader: None,
     }
 }
 
-fn build_handler(addr: &str, config: ListConfig) -> ListHttp<NoopLoader> {
+fn build_handler(addr: &str, config: ListConfig) -> ListHttp {
     let pool = ClientPool::new(addr, 2).unwrap();
-    ListHttp::new(config, pool, NoopLoader)
+    ListHttp::new(config, pool)
 }
 
 // ── GET /config ─────────────────────────────────────────────────
@@ -149,7 +147,7 @@ fn get_data_returns_filtered_records() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/data")
+        .uri("/query")
         .body(Vec::new())
         .unwrap();
 
@@ -169,7 +167,7 @@ fn get_data_returns_all_records() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/data")
+        .uri("/query")
         .body(Vec::new())
         .unwrap();
 
@@ -202,7 +200,7 @@ fn get_data_with_user_filters() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/data")
+        .uri("/query")
         .body(serde_json::to_vec(&request_body).unwrap())
         .unwrap();
 
@@ -227,7 +225,7 @@ fn get_data_with_pagination() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/data")
+        .uri("/query")
         .body(serde_json::to_vec(&request_body).unwrap())
         .unwrap();
 
@@ -247,6 +245,245 @@ fn get_data_bad_request_body() {
 
     let req = Request::builder()
         .method(Method::POST)
+        .uri("/query")
+        .body(b"not json".to_vec())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ── POST /data (insert) ─────────────────────────────────────────
+
+#[test]
+fn post_data_inserts_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let body = serde_json::json!([
+        { "_id": "acct-10", "name": "NewCo", "status": "active" },
+        { "_id": "acct-11", "name": "FreshCo", "status": "rejected" },
+    ]);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["inserted"], 2);
+
+    // Verify via query
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/query")
+        .body(Vec::new())
+        .unwrap();
+    let resp = handler.handle(req);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["total"], 7);
+}
+
+// ── PUT /data (upsert) ─────────────────────────────────────────
+
+#[test]
+fn put_data_inserts_new_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let body = serde_json::json!([
+        { "_id": "acct-20", "name": "BrandNew", "status": "active" },
+    ]);
+
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["inserted"], 1);
+    assert_eq!(result["updated"], 0);
+}
+
+#[test]
+fn put_data_replaces_existing_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    // Upsert acct-1 with new name
+    let body = serde_json::json!([
+        { "_id": "acct-1", "name": "Acme Corp v2", "status": "rejected" },
+    ]);
+
+    let req = Request::builder()
+        .method(Method::PUT)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["inserted"], 0);
+    assert_eq!(result["updated"], 1);
+
+    // Verify total unchanged (replace, not insert)
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/query")
+        .body(Vec::new())
+        .unwrap();
+    let resp = handler.handle(req);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["total"], 5);
+}
+
+// ── PATCH /data (merge) ─────────────────────────────────────────
+
+#[test]
+fn patch_data_merges_existing_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, active_config());
+
+    // Merge: change status on acct-1 from active to rejected
+    let body = serde_json::json!([
+        { "_id": "acct-1", "status": "rejected" },
+    ]);
+
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["inserted"], 0);
+    assert_eq!(result["updated"], 1);
+
+    // Query active — should now be 2 instead of 3
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/query")
+        .body(Vec::new())
+        .unwrap();
+    let resp = handler.handle(req);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["total"], 2);
+}
+
+#[test]
+fn patch_data_inserts_new_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let body = serde_json::json!([
+        { "_id": "acct-30", "name": "MergeCo", "status": "active" },
+    ]);
+
+    let req = Request::builder()
+        .method(Method::PATCH)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["inserted"], 1);
+    assert_eq!(result["updated"], 0);
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/query")
+        .body(Vec::new())
+        .unwrap();
+    let resp = handler.handle(req);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["total"], 6);
+}
+
+// ── DELETE /data ────────────────────────────────────────────────
+
+#[test]
+fn delete_data_removes_matching_records() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let body = serde_json::json!({
+        "filter": {
+            "logical": "and",
+            "children": [{
+                "condition": {
+                    "field": "status",
+                    "operator": "eq",
+                    "value": "rejected"
+                }
+            }]
+        }
+    });
+
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/data")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["deleted"], 1); // Globex
+
+    // Verify total is now 4
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/query")
+        .body(Vec::new())
+        .unwrap();
+    let resp = handler.handle(req);
+    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
+    assert_eq!(result["total"], 4);
+}
+
+// ── Bad request bodies ──────────────────────────────────────────
+
+#[test]
+fn post_data_bad_body_returns_400() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/data")
+        .body(b"not json".to_vec())
+        .unwrap();
+
+    let resp = handler.handle(req);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn delete_data_bad_body_returns_400() {
+    let addr = start_server();
+    seed_data(&addr);
+    let handler = build_handler(&addr, all_config());
+
+    let req = Request::builder()
+        .method(Method::DELETE)
         .uri("/data")
         .body(b"not json".to_vec())
         .unwrap();
@@ -279,7 +516,7 @@ fn wrong_method_returns_404() {
 
     let req = Request::builder()
         .method(Method::DELETE)
-        .uri("/data")
+        .uri("/nonexistent")
         .body(Vec::new())
         .unwrap();
 
@@ -297,7 +534,7 @@ fn metadata_headers_passed_through() {
 
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/data")
+        .uri("/query")
         .header("x-meta-tenant", "acme")
         .header("x-meta-region", "us-east")
         .body(Vec::new())

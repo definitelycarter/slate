@@ -1,33 +1,20 @@
-use std::collections::HashMap;
-
 use http::{Method, Request, Response, StatusCode};
+use serde::Deserialize;
 use slate_client::ClientPool;
 use slate_query::{DistinctQuery, FilterGroup, FilterNode, LogicalOp, Query};
 
 use crate::config::ListConfig;
 use crate::error::ListError;
-use crate::loader::Loader;
 use crate::request::{DistinctRequest, DistinctResponse, ListRequest, ListResponse};
 
-pub struct ListHttp<L: Loader> {
+pub struct ListHttp {
     config: ListConfig,
     pool: ClientPool,
-    loader: L,
 }
 
-impl<L: Loader> ListHttp<L> {
-    const BATCH_SIZE: usize = 1000;
-
-    pub fn new(config: ListConfig, pool: ClientPool, loader: L) -> Self {
-        Self {
-            config,
-            pool,
-            loader,
-        }
-    }
-
-    pub fn loader(&self) -> &L {
-        &self.loader
+impl ListHttp {
+    pub fn new(config: ListConfig, pool: ClientPool) -> Self {
+        Self { config, pool }
     }
 
     pub fn handle(&self, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -36,8 +23,12 @@ impl<L: Loader> ListHttp<L> {
 
         match (method, path.trim_end_matches('/')) {
             (&Method::GET, "/config") => self.get_config(),
-            (&Method::POST, "/data") => self.get_data(&req),
-            (&Method::POST, "/distinct") => self.get_distinct(&req),
+            (&Method::POST, "/query") => self.get_data(&req),
+            (&Method::POST, "/query/distinct") => self.get_distinct(&req),
+            (&Method::POST, "/data") => self.post_records(&req),
+            (&Method::PUT, "/data") => self.put_records(&req),
+            (&Method::PATCH, "/data") => self.patch_records(&req),
+            (&Method::DELETE, "/data") => self.delete_records(&req),
             _ => json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#),
         }
     }
@@ -50,8 +41,6 @@ impl<L: Loader> ListHttp<L> {
     }
 
     fn get_data(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let metadata = extract_metadata(req);
-
         let list_request: ListRequest = if req.body().is_empty() {
             ListRequest::default()
         } else {
@@ -61,7 +50,7 @@ impl<L: Loader> ListHttp<L> {
             }
         };
 
-        match self.get_list_data(&list_request, &metadata) {
+        match self.get_list_data(&list_request) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -71,14 +60,12 @@ impl<L: Loader> ListHttp<L> {
     }
 
     fn get_distinct(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let metadata = extract_metadata(req);
-
         let distinct_request: DistinctRequest = match serde_json::from_slice(req.body()) {
             Ok(r) => r,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
 
-        match self.get_distinct_data(&distinct_request, &metadata) {
+        match self.get_distinct_data(&distinct_request) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -87,19 +74,8 @@ impl<L: Loader> ListHttp<L> {
         }
     }
 
-    fn get_list_data(
-        &self,
-        request: &ListRequest,
-        metadata: &HashMap<String, String>,
-    ) -> Result<ListResponse, ListError> {
+    fn get_list_data(&self, request: &ListRequest) -> Result<ListResponse, ListError> {
         let collection = &self.config.collection;
-
-        // Load data if collection is empty
-        let count = self.pool.get()?.count(collection, None)?;
-        if count == 0 {
-            let docs_iter = self.loader.load(collection, metadata)?;
-            self.batch_insert(collection, docs_iter)?;
-        }
 
         // Merge list default filters with user filters
         let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
@@ -128,19 +104,8 @@ impl<L: Loader> ListHttp<L> {
         Ok(ListResponse { records, total })
     }
 
-    fn get_distinct_data(
-        &self,
-        request: &DistinctRequest,
-        metadata: &HashMap<String, String>,
-    ) -> Result<DistinctResponse, ListError> {
+    fn get_distinct_data(&self, request: &DistinctRequest) -> Result<DistinctResponse, ListError> {
         let collection = &self.config.collection;
-
-        // Load data if collection is empty
-        let count = self.pool.get()?.count(collection, None)?;
-        if count == 0 {
-            let docs_iter = self.loader.load(collection, metadata)?;
-            self.batch_insert(collection, docs_iter)?;
-        }
 
         // Merge list default filters with user filters
         let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
@@ -157,26 +122,90 @@ impl<L: Loader> ListHttp<L> {
         Ok(DistinctResponse { values })
     }
 
-    fn batch_insert(
-        &self,
-        collection: &str,
-        docs: Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>,
-    ) -> Result<(), ListError> {
-        let mut batch = Vec::with_capacity(Self::BATCH_SIZE);
-        for doc_result in docs {
-            batch.push(doc_result?);
-            if batch.len() >= Self::BATCH_SIZE {
-                self.pool
-                    .get()?
-                    .insert_many(collection, std::mem::take(&mut batch))?;
-                batch.reserve(Self::BATCH_SIZE);
+    // ── Data write routes ───────────────────────────────────────
+
+    fn post_records(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let docs: Vec<bson::Document> = match serde_json::from_slice(req.body()) {
+            Ok(b) => b,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        };
+        let collection = &self.config.collection;
+        match self
+            .pool
+            .get()
+            .and_then(|mut c| Ok(c.insert_many(collection, docs)?))
+        {
+            Ok(results) => {
+                match serde_json::to_vec(&serde_json::json!({ "inserted": results.len() })) {
+                    Ok(b) => json_response(StatusCode::OK, b),
+                    Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                }
             }
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         }
-        if !batch.is_empty() {
-            self.pool.get()?.insert_many(collection, batch)?;
-        }
-        Ok(())
     }
+
+    fn put_records(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let docs: Vec<bson::Document> = match serde_json::from_slice(req.body()) {
+            Ok(b) => b,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        };
+        let collection = &self.config.collection;
+        match self
+            .pool
+            .get()
+            .and_then(|mut c| Ok(c.upsert_many(collection, docs)?))
+        {
+            Ok(result) => match serde_json::to_vec(&result) {
+                Ok(b) => json_response(StatusCode::OK, b),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            },
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    }
+
+    fn patch_records(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let docs: Vec<bson::Document> = match serde_json::from_slice(req.body()) {
+            Ok(b) => b,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        };
+        let collection = &self.config.collection;
+        match self
+            .pool
+            .get()
+            .and_then(|mut c| Ok(c.merge_many(collection, docs)?))
+        {
+            Ok(result) => match serde_json::to_vec(&result) {
+                Ok(b) => json_response(StatusCode::OK, b),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            },
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    }
+
+    fn delete_records(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let body: DeleteBody = match serde_json::from_slice(req.body()) {
+            Ok(b) => b,
+            Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        };
+        let collection = &self.config.collection;
+        match self
+            .pool
+            .get()
+            .and_then(|mut c| Ok(c.delete_many(collection, &body.filter)?))
+        {
+            Ok(result) => match serde_json::to_vec(&result) {
+                Ok(b) => json_response(StatusCode::OK, b),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+            },
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    filter: FilterGroup,
 }
 
 /// Merge two optional filter groups under a top-level AND.
@@ -199,23 +228,6 @@ pub fn merge_filters(
             ],
         }),
     }
-}
-
-fn extract_metadata<T>(req: &Request<T>) -> HashMap<String, String> {
-    req.headers()
-        .iter()
-        .filter_map(|(name, value)| {
-            let name = name.as_str();
-            if let Some(key) = name.strip_prefix("x-meta-") {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|v| (key.to_string(), v.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 fn json_response(status: StatusCode, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {

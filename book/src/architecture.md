@@ -440,52 +440,31 @@ pub struct Column {
 
 ### ListService
 
-The core service handles filter merging, lazy loading, and query execution over TCP.
+The core service handles filter merging and query execution over TCP.
 
 ```rust
-pub struct ListService<L: Loader> {
+pub struct ListService {
     pool: ClientPool,
-    loader: L,
 }
 ```
 
 **`get_list_data(config, key, request, metadata)`:**
 
-1. Check if data exists — `count(collection)`. If empty, call `loader.load()` to stream documents from an external source, batch-inserting in chunks of 1000.
-2. Merge list default filters with user-provided filters (AND them together).
-3. Build projection from the list's column `field` values — only fetch fields the view needs.
-4. Execute the query with filters, sort, skip/take, and projection.
-5. Return `ListResponse { records, total }`.
+1. Merge list default filters with user-provided filters (AND them together).
+2. Build projection from the list's column `field` values — only fetch fields the view needs.
+3. Execute the query with filters, sort, skip/take, and projection.
+4. Return `ListResponse { records, total }`.
 
-### Loader Trait
-
-The loader abstracts data population from external sources. It returns a streaming iterator of BSON documents — each implementation owns its conversion to BSON.
-
-```rust
-pub trait Loader: Send + Sync {
-    fn load(
-        &self,
-        collection: &str,
-        key: &str,
-        metadata: &HashMap<String, String>,
-    ) -> Result<Box<dyn Iterator<Item = Result<bson::Document, ListError>> + '_>, ListError>;
-}
-```
-
-- **REST loader** — calls an HTTP endpoint, deserializes a JSON array, converts each item to `bson::Document`, yields as iterator.
-- **gRPC loader** — connects via gRPC streaming, each message is a document, true streaming.
-- **NoopLoader** — returns empty iterator, for pre-populated data.
-
-Loading is **per-key** (e.g. per user). If the collection has no data for a key, the loader fires. If data exists but filters return empty, that's a legit empty result — no loading. Duplicate loads are idempotent.
+Data ingestion is push-based — external pipelines POST/PUT/PATCH data to the HTTP write endpoints. Slate is a store and query engine, not a data fetcher.
 
 ### HTTP Handler
 
 `ListHttp` holds a single `ListConfig` and a `ListService`. One service instance per list.
 
 ```rust
-pub struct ListHttp<L: Loader> {
+pub struct ListHttp {
     config: ListConfig,
-    service: ListService<L>,
+    service: ListService,
 }
 ```
 
@@ -494,12 +473,17 @@ pub struct ListHttp<L: Loader> {
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/config` | Return this service's list config as JSON |
-| POST | `/data` | Execute list query, return matching records |
+| POST | `/query` | Execute list query, return matching records |
+| POST | `/query/distinct` | Execute distinct query on a field |
+| POST | `/data` | Insert new records |
+| PUT | `/data` | Upsert records (insert or replace) |
+| PATCH | `/data` | Merge records (insert or partial update) |
+| DELETE | `/data` | Delete records matching a filter |
 
 **Request context:**
-- `X-List-Key` header — the per-user/per-tenant key for loading
-- `X-Meta-*` headers — metadata forwarded to the loader (auth tokens, tenant context)
-- Request body — `ListRequest` JSON (filters, sort, skip, take). Empty body uses defaults.
+- Request body — `ListRequest` JSON (filters, sort, skip, take) for `/query`. Empty body uses defaults.
+- Request body — `Vec<bson::Document>` (JSON array) for POST/PUT/PATCH `/data`.
+- Request body — `{ "filter": {...} }` for DELETE `/data`.
 
 The `handle` method takes `http::Request<Vec<u8>>` and returns `http::Response<Vec<u8>>`. This is the boundary that platform adapters call into.
 
