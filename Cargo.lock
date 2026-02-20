@@ -2163,6 +2163,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-server-init"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "slate-client",
+ "slate-db",
+]
+
+[[package]]
 name = "slate-store"
 version = "0.1.0"
 dependencies = [

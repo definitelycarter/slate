@@ -1,0 +1,11 @@
+{
+  "id": "active-accounts",
+  "title": "Active Accounts",
+  "collection": "accounts",
+  "filters": null,
+  "columns": [
+    { "field": "name", "header": "Name", "width": 200, "pinned": true },
+    { "field": "status", "header": "Status", "width": 100, "pinned": false },
+    { "field": "score", "header": "Score", "width": 80, "pinned": false }
+  ]
+}

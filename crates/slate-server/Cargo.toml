@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 slate-db = { path = "../slate-db" }
-slate-store = { path = "../slate-store", features = ["memory"] }
+slate-store = { path = "../slate-store", features = ["memory", "rocksdb"] }
 slate-query = { path = "../slate-query" }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"

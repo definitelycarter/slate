@@ -60,7 +60,7 @@ impl<S: Store + Send + Sync + 'static> Server<S> {
                     }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(Duration::from_millis(100));
                 }
                 Err(e) => {
                     eprintln!("accept error: {e}");

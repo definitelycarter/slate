@@ -1,0 +1,6 @@
+[
+  {
+    "name": "accounts",
+    "indexes": ["status", "score"]
+  }
+]
