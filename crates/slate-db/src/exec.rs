@@ -359,6 +359,14 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
             _ => Ok(field_value.is_none()),
         },
         Operator::Eq => match field_value {
+            Some(RawBsonRef::Array(arr)) => {
+                for elem in arr.into_iter().flatten() {
+                    if raw_values_eq(&elem, &filter.value) {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
             Some(v) => Ok(raw_values_eq(&v, &filter.value)),
             None => Ok(false),
         },
@@ -380,18 +388,26 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
             }
             _ => Ok(false),
         },
-        Operator::Gt => raw_compare_values(field_value.as_ref(), &filter.value, |o| {
-            o == Ordering::Greater
-        }),
-        Operator::Gte => {
-            raw_compare_values(field_value.as_ref(), &filter.value, |o| o != Ordering::Less)
+        Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
+            let predicate: fn(Ordering) -> bool = match filter.operator {
+                Operator::Gt => |o| o == Ordering::Greater,
+                Operator::Gte => |o| o != Ordering::Less,
+                Operator::Lt => |o| o == Ordering::Less,
+                Operator::Lte => |o| o != Ordering::Greater,
+                _ => unreachable!(),
+            };
+            match field_value {
+                Some(RawBsonRef::Array(arr)) => {
+                    for elem in arr.into_iter().flatten() {
+                        if raw_compare_values(Some(&elem), &filter.value, predicate)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                }
+                _ => raw_compare_values(field_value.as_ref(), &filter.value, predicate),
+            }
         }
-        Operator::Lt => {
-            raw_compare_values(field_value.as_ref(), &filter.value, |o| o == Ordering::Less)
-        }
-        Operator::Lte => raw_compare_values(field_value.as_ref(), &filter.value, |o| {
-            o != Ordering::Greater
-        }),
     }
 }
 
@@ -1414,6 +1430,96 @@ mod tests {
             field: "name".into(),
             operator: Operator::Eq,
             value: Bson::Double(1.0),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    // ── Array element matching ──────────────────────────────────
+
+    #[test]
+    fn array_element_eq() {
+        let raw = make_raw(&doc! { "tags": ["rust", "db", "bson"] });
+        let filter = Filter {
+            field: "tags".into(),
+            operator: Operator::Eq,
+            value: Bson::String("db".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_eq_no_match() {
+        let raw = make_raw(&doc! { "tags": ["rust", "db"] });
+        let filter = Filter {
+            field: "tags".into(),
+            operator: Operator::Eq,
+            value: Bson::String("python".into()),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_eq_numeric() {
+        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
+        let filter = Filter {
+            field: "scores".into(),
+            operator: Operator::Eq,
+            value: Bson::Int32(20),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_gt() {
+        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
+        let filter = Filter {
+            field: "scores".into(),
+            operator: Operator::Gt,
+            value: Bson::Int32(25),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_gt_no_match() {
+        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
+        let filter = Filter {
+            field: "scores".into(),
+            operator: Operator::Gt,
+            value: Bson::Int32(30),
+        };
+        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_lte() {
+        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
+        let filter = Filter {
+            field: "scores".into(),
+            operator: Operator::Lte,
+            value: Bson::Int32(15),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_element_cross_type() {
+        let raw = make_raw(&doc! { "values": [1.5, 2.5, 3.5] });
+        let filter = Filter {
+            field: "values".into(),
+            operator: Operator::Eq,
+            value: Bson::String("2.5".into()),
+        };
+        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+    }
+
+    #[test]
+    fn array_empty_no_match() {
+        let raw = make_raw(&doc! { "tags": bson::Bson::Array(vec![]) });
+        let filter = Filter {
+            field: "tags".into(),
+            operator: Operator::Eq,
+            value: Bson::String("anything".into()),
         };
         assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
     }

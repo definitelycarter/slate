@@ -59,14 +59,6 @@ loader:
 - **Datasource CRD** → configures loader endpoint, TTL, forwarded headers
 - **Gateway API / Kourier** → routes `/lists/{id}/*` to correct Knative Service
 
-## Array Element Matching
-
-Filtering on array fields (e.g. `triggers.items eq "renewal_due"`) currently returns no results because `RawBsonRef::Array` falls through to the default `false` arm. Add implicit element-wise matching (like MongoDB's behavior without `$elemMatch`):
-
-- `(RawBsonRef::Array(arr), query_val)` — iterate array elements, return true if *any* element satisfies the comparison
-- Applies to `raw_values_eq` (eq) and `raw_compare_values` (gt, gte, lt, lte)
-- Sorting on array fields should remain unsupported (no meaningful scalar ordering)
-
 ## Staleness / TTL
 
 Currently the loader fires when `count == 0`. Add TTL-based staleness:

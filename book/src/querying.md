@@ -386,6 +386,24 @@ The `IndexScan` on `status` carries the value `"active"`, but has no way to prov
 
 ---
 
+### 19. Array Element Matching
+
+**Query:** `find({ filter: tags = "renewal_due" })` (where `tags` is an array field like `["active", "renewal_due"]`)
+
+```
+Filter(tags = "renewal_due")
+  └── ReadRecord
+        └── Scan
+```
+
+When a filter field resolves to a `RawBsonRef::Array`, the executor iterates the array elements and returns true if **any** element satisfies the operator. This is implicit — no special syntax needed, matching MongoDB's behavior without `$elemMatch`.
+
+Applies to all scalar comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Each element delegates to the existing scalar comparison functions, so cross-type coercion (String→Int, Double↔Int, etc.) works automatically within array elements.
+
+**Not supported:** sorting on array fields has no meaningful scalar ordering and is left unsupported. Filtering on nested array paths (e.g. `items.[].sku = "A1"`) is handled separately by the multi-key path resolution in `get_path_values`.
+
+---
+
 ## Full Pipeline Example
 
 **Query:** `find({ filter: status = "active" AND score > 50, sort: score DESC, skip: 10, take: 5, columns: ["name", "score"] })`
