@@ -212,6 +212,8 @@ fn execute_node<'c, T: Transaction + 'c>(
         ),
 
         PlanNode::IndexMerge { logical, lhs, rhs } => {
+            // TODO: And path could stream left lazily (only right needs collecting).
+            // Or path could use streaming HashSet dedup. Neither emitted by planner yet.
             let left: Vec<(Option<String>, Option<RawBson>)> = execute_node(txn, cf, lhs)?
                 .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
                 .collect::<Result<_, _>>()?;
