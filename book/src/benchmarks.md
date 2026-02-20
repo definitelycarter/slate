@@ -16,6 +16,7 @@ Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_
 | product_recommendation1 | String | No | Random: ProductA / ProductB / ProductC |
 | product_recommendation2 | String | No | Random: ProductX / ProductY / ProductZ |
 | product_recommendation3 | String | No | Random: Widget1 / Widget2 / Widget3 |
+| tags | Array(String) | No | 2-4 random tags from 5 values |
 | last_contacted_at | Date | No | ~30% null |
 | notes | String | No | ~50% null |
 
@@ -54,6 +55,7 @@ Results from a single collection (10,000 records). Times are consistent across a
 | status='active' AND notes is null | ~2.2ms | ~2,500 | IndexScan + lazy filter |
 | 1,000 point lookups (find_by_id) | ~1.2ms | 1,000 | Direct key access |
 | projection (name, status only) | ~4.5ms | 10,000 | Selective field copying via RawDocumentBuf::append() |
+| tags = 'renewal_due' (array element match) | ~3.3ms | ~4,800 | Scan + element-wise filter, iterates array per record |
 
 ### Distinct
 
@@ -102,6 +104,7 @@ Results from a single collection (100,000 records). Times are consistent across 
 | status='active' AND notes is null | ~24ms | ~25,000 | IndexScan + lazy filter |
 | 1,000 point lookups (find_by_id) | ~1.9ms | 1,000 | Direct key access |
 | projection (name, status only) | ~45ms | 100,000 | Selective field copying via RawDocumentBuf::append() |
+| tags = 'renewal_due' (array element match) | ~32ms | ~48,000 | Scan + element-wise filter, iterates array per record |
 
 ### Distinct
 
@@ -127,6 +130,7 @@ Results from a single collection (100,000 records). Times are consistent across 
 - **Sort overhead**: When indexed sort doesn't apply, Sort accesses sort keys lazily from raw bytes but must hold all records in memory via `into_owned()`. Only records that survive the filter pay this cost. This is the dominant cost for sorted queries.
 - **Distinct dedup**: Uses `HashSet<u64>` with manual hashing of `RawBsonRef` variants for O(1) dedup. Unique values collected into `RawArrayBuf`. Zero `bson::Bson` allocation in the distinct path. `raw_walk_path` recursively walks document paths, descending into arrays of sub-documents without intermediate `Vec` allocation.
 - **Point lookups**: ~1.3ms (10k) to ~1.8ms (100k) for 1,000 lookups — direct key access via `find_by_id`.
+- **Array element matching**: Filtering on array fields (e.g. `tags = "renewal_due"`) iterates array elements per record — any element match satisfies the filter. At 100k records with 2-4 tags each: ~32ms for ~48k matches. Scales linearly and inherits all cross-type coercion.
 - **Near-linear scaling**: Most queries scale ~10x from 10k → 100k (10x data), showing minimal overhead from larger datasets.
 
 ## Scaling: 10k → 100k
@@ -145,6 +149,7 @@ Results from a single collection (100,000 records). Times are consistent across 
 | sort [low card, count] + take(200) | 9.6ms | 98ms | 10.2x |
 | 1,000 point lookups | 1.2ms | 1.9ms | 1.6x |
 | Projection (2 cols) | 4.5ms | 45ms | 10.0x |
+| Array element match (tags) | 3.3ms | 32ms | 9.7x |
 | Distinct (status, 2 values) | 5ms | 49ms | 9.8x |
 | Distinct (contacts_count, ~100 values) | 4.9ms | 48ms | 9.8x |
 | Distinct (last_contacted_at, ~7k/70k values) | 4.9ms | 51ms | 10.4x |

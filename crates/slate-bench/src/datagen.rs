@@ -5,6 +5,13 @@ const STATUSES: &[&str] = &["active", "rejected"];
 const REC1: &[&str] = &["ProductA", "ProductB", "ProductC"];
 const REC2: &[&str] = &["ProductX", "ProductY", "ProductZ"];
 const REC3: &[&str] = &["Widget1", "Widget2", "Widget3"];
+const TAGS: &[&str] = &[
+    "renewal_due",
+    "high_value",
+    "churning",
+    "new_customer",
+    "enterprise",
+];
 
 pub fn generate_doc(user: usize, seq: usize) -> bson::Document {
     let mut rng = rand::thread_rng();
@@ -16,6 +23,13 @@ pub fn generate_doc(user: usize, seq: usize) -> bson::Document {
         "product_recommendation2": REC2[rng.gen_range(0..REC2.len())],
         "product_recommendation3": REC3[rng.gen_range(0..REC3.len())],
     };
+
+    // Tags — 2-4 random tags per record
+    let tag_count = rng.gen_range(2..=4);
+    let tags: Vec<&str> = (0..tag_count)
+        .map(|_| TAGS[rng.gen_range(0..TAGS.len())])
+        .collect();
+    doc.insert("tags", tags);
 
     // Nullable fields — omitted to represent null
     if rng.gen_ratio(7, 10) {

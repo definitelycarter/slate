@@ -662,7 +662,31 @@ pub fn query_benchmarks<S: Store>(
         },
     ));
 
-    // 21. Multi-field sort: first field NOT indexed — baseline (no optimization possible)
+    // 21. Array element matching — filter on array field
+    results.push(bench(
+        "query: tags = 'renewal_due' (array element match)",
+        || {
+            let mut txn = db.begin(true).expect("begin failed");
+            let query = Query {
+                filter: Some(FilterGroup {
+                    logical: LogicalOp::And,
+                    children: vec![FilterNode::Condition(Filter {
+                        field: "tags".to_string(),
+                        operator: Operator::Eq,
+                        value: Bson::String("renewal_due".into()),
+                    })],
+                }),
+                sort: vec![],
+                skip: None,
+                take: None,
+                columns: None,
+            };
+            let r = txn.find(COLLECTION, &query).expect("find failed");
+            r.len()
+        },
+    ));
+
+    // 22. Multi-field sort: first field NOT indexed — baseline (no optimization possible)
     results.push(bench(
         "query: sort [name ASC, contacts_count DESC] + take(200) (not indexed)",
         || {
