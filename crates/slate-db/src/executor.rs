@@ -351,8 +351,30 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Limit { skip, take, input } => {
-            let source = execute_node(txn, input)?;
-            Ok(apply_limit(source, *skip, *take))
+            let mut source = execute_node(txn, input)?;
+
+            // Check first item — if it's a single array (from Distinct), slice its elements
+            match source.next() {
+                Some(Ok((id, Some(RawValue::Owned(RawBson::Array(arr)))))) => {
+                    let take_n = take.unwrap_or(usize::MAX);
+                    let mut buf = RawArrayBuf::new();
+                    for elem in arr.into_iter().skip(*skip).take(take_n) {
+                        if let Ok(val) = elem {
+                            exec::push_raw(&mut buf, val);
+                        }
+                    }
+                    Ok(Box::new(std::iter::once(Ok((
+                        id,
+                        Some(RawValue::Owned(RawBson::Array(buf))),
+                    )))))
+                }
+                Some(first) => {
+                    // Not an array — chain first item back and apply normal skip/take
+                    let full = std::iter::once(first).chain(source);
+                    Ok(apply_limit(Box::new(full), *skip, *take))
+                }
+                None => Ok(Box::new(std::iter::empty())),
+            }
         }
 
         PlanNode::Projection { columns, input } => {

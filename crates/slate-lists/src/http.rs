@@ -149,6 +149,8 @@ impl<L: Loader> ListHttp<L> {
             field: request.field.clone(),
             filter: merged,
             sort: request.sort,
+            skip: request.skip,
+            take: request.take,
         };
         let values = self.pool.get()?.distinct(collection, &query)?;
 

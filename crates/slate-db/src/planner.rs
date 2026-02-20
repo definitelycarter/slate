@@ -271,6 +271,16 @@ pub fn plan_distinct(
         None => node,
     };
 
+    // Step 7: Limit (if requested)
+    let node = match (query.skip, query.take) {
+        (None, None) => node,
+        (skip, take) => PlanNode::Limit {
+            skip: skip.unwrap_or(0),
+            take,
+            input: Box::new(node),
+        },
+    };
+
     node
 }
 
@@ -1600,6 +1610,8 @@ mod tests {
             field: "status".into(),
             filter: None,
             sort: None,
+            skip: None,
+            take: None,
         };
         let p = plan_distinct("col", &[], &q);
         // Distinct → Projection([status]) → ReadRecord → Scan
@@ -1632,6 +1644,8 @@ mod tests {
             field: "status".into(),
             filter: Some(eq_filter("priority", Bson::String("high".into()))),
             sort: Some(SortDirection::Asc),
+            skip: None,
+            take: None,
         };
         let p = plan_distinct("col", &[], &q);
         // Sort → Distinct → Projection([status]) → Filter → ReadRecord → Scan
@@ -1670,6 +1684,8 @@ mod tests {
             field: "status".into(),
             filter: Some(eq_filter("priority", Bson::String("high".into()))),
             sort: None,
+            skip: None,
+            take: None,
         };
         let indexed = vec!["priority".to_string()];
         let p = plan_distinct("col", &indexed, &q);

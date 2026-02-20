@@ -2069,6 +2069,8 @@ fn distinct_scalar_field() {
         field: "status".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
@@ -2098,6 +2100,8 @@ fn distinct_nested_path() {
         field: "address.city".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
@@ -2125,6 +2129,8 @@ fn distinct_array_field() {
         field: "tags".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 3);
@@ -2155,6 +2161,8 @@ fn distinct_with_filter() {
         field: "tier".into(),
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
@@ -2184,6 +2192,8 @@ fn distinct_with_sort_asc() {
         field: "status".into(),
         filter: None,
         sort: Some(SortDirection::Asc),
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
@@ -2218,6 +2228,8 @@ fn distinct_with_sort_desc() {
         field: "status".into(),
         filter: None,
         sort: Some(SortDirection::Desc),
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
@@ -2249,6 +2261,8 @@ fn distinct_missing_field() {
         field: "nonexistent".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert!(values.is_empty());
@@ -2275,6 +2289,8 @@ fn distinct_mixed_presence() {
         field: "status".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
@@ -2308,6 +2324,8 @@ fn distinct_array_of_sub_documents() {
         field: "triggers.type".into(),
         filter: None,
         sort: Some(SortDirection::Asc),
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(
@@ -2351,9 +2369,116 @@ fn distinct_sub_document() {
         field: "address".into(),
         filter: None,
         sort: None,
+        skip: None,
+        take: None,
     };
     let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::Document(doc! { "city": "Austin", "state": "TX" })));
     assert!(values.contains(&Bson::Document(doc! { "city": "Denver", "state": "CO" })));
+}
+
+#[test]
+fn distinct_with_take() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "date" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: Some(SortDirection::Asc),
+        skip: None,
+        take: Some(2),
+    };
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    assert_eq!(
+        values,
+        vec![Bson::String("apple".into()), Bson::String("banana".into()),]
+    );
+}
+
+#[test]
+fn distinct_with_skip_take() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "date" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: Some(SortDirection::Asc),
+        skip: Some(1),
+        take: Some(2),
+    };
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    assert_eq!(
+        values,
+        vec![Bson::String("banana".into()), Bson::String("cherry".into()),]
+    );
+}
+
+#[test]
+fn distinct_with_sort_and_limit() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec![],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "date" })
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "status": "elderberry" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    // Sort desc, skip 1, take 2 → ["date", "cherry"]
+    let query = DistinctQuery {
+        field: "status".into(),
+        filter: None,
+        sort: Some(SortDirection::Desc),
+        skip: Some(1),
+        take: Some(2),
+    };
+    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    assert_eq!(
+        values,
+        vec![Bson::String("date".into()), Bson::String("cherry".into()),]
+    );
 }

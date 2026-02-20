@@ -21,6 +21,8 @@ pub struct DistinctRequest {
     pub field: String,
     pub filters: Option<FilterGroup>,
     pub sort: Option<SortDirection>,
+    pub skip: Option<usize>,
+    pub take: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]

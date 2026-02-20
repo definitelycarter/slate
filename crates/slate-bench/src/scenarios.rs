@@ -707,6 +707,8 @@ pub fn distinct_benchmarks<S: Store>(
             field: "status".to_string(),
             filter: None,
             sort: None,
+            skip: None,
+            take: None,
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
         raw_array_len(&r)
@@ -719,6 +721,8 @@ pub fn distinct_benchmarks<S: Store>(
             field: "status".to_string(),
             filter: None,
             sort: Some(SortDirection::Asc),
+            skip: None,
+            take: None,
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
         raw_array_len(&r)
@@ -733,6 +737,8 @@ pub fn distinct_benchmarks<S: Store>(
                 field: "product_recommendation1".to_string(),
                 filter: None,
                 sort: None,
+                skip: None,
+                take: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
             raw_array_len(&r)
@@ -748,6 +754,8 @@ pub fn distinct_benchmarks<S: Store>(
                 field: "contacts_count".to_string(),
                 filter: None,
                 sort: None,
+                skip: None,
+                take: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
             raw_array_len(&r)
@@ -763,6 +771,8 @@ pub fn distinct_benchmarks<S: Store>(
                 field: "contacts_count".to_string(),
                 filter: None,
                 sort: Some(SortDirection::Asc),
+                skip: None,
+                take: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
             raw_array_len(&r)
@@ -783,6 +793,8 @@ pub fn distinct_benchmarks<S: Store>(
                 })],
             }),
             sort: None,
+            skip: None,
+            take: None,
         };
         let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
         raw_array_len(&r)
@@ -797,6 +809,8 @@ pub fn distinct_benchmarks<S: Store>(
                 field: "last_contacted_at".to_string(),
                 filter: None,
                 sort: None,
+                skip: None,
+                take: None,
             };
             let r = txn.distinct(COLLECTION, &query).expect("distinct failed");
             raw_array_len(&r)

@@ -19,4 +19,6 @@ pub struct DistinctQuery {
     pub field: String,
     pub filter: Option<FilterGroup>,
     pub sort: Option<SortDirection>,
+    pub skip: Option<usize>,
+    pub take: Option<usize>,
 }
