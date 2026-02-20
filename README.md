@@ -1,6 +1,18 @@
 # Slate
 
-A document database built in Rust. Schema-flexible BSON documents with pluggable storage (RocksDB, redb, or in-memory), query execution, indexing, and a TCP server/client.
+A document database built in Rust. Schema-flexible BSON documents with pluggable storage, query execution, indexing, and multiple deployment modes — from embedded in a Swift app to running in Kubernetes.
+
+## Features
+
+- **BSON document storage** — schema-flexible documents with zero-copy reads and lazy materialization
+- **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
+- **Indexed queries** — single-field indexes with automatic plan optimization (index scans, covered projections)
+- **Three storage backends** — RocksDB (fast, default), redb (pure Rust, no C dependencies), in-memory (ephemeral)
+- **TCP server/client** — MessagePack wire protocol, thread-per-connection, connection pooling
+- **HTTP API** — framework-agnostic CRUD endpoints with a standalone server
+- **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
+- **Kubernetes operator** — declarative Server and Collection CRDs with full lifecycle management
+- **Sub-millisecond indexed queries** at 100k records across all backends
 
 ## Crate Structure
 
