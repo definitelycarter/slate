@@ -153,10 +153,10 @@ fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Res
     for (ttl_key, record_id) in &entries {
         let data_key = encoding::record_key(record_id);
         if let Some(bytes) = txn.get(&cf, &data_key).map_err(DbError::Store)? {
-            let doc: bson::Document = bson::from_slice(&bytes)?;
+            let raw = bson::RawDocument::from_bytes(&bytes)?;
             for field in &indexed_fields {
-                for value in exec::get_path_values(&doc, field) {
-                    let idx_key = encoding::index_key(field, value, record_id);
+                for value in exec::raw_get_path_values(raw, field)? {
+                    let idx_key = encoding::raw_index_key(field, value, record_id);
                     txn.delete(collection, &idx_key).map_err(DbError::Store)?;
                 }
             }
@@ -604,6 +604,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     // ── Count ───────────────────────────────────────────────────
 
     /// Count documents matching a filter.
+    /// Streams results without materializing all documents into memory.
     pub fn count(
         &mut self,
         collection: &str,
@@ -616,8 +617,28 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             take: None,
             columns: None,
         };
-        let results = self.find(collection, &query)?;
-        Ok(results.len() as u64)
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let plan = planner::plan(collection, &indexed_fields, &query);
+        let cf = match self.txn.cf(collection) {
+            Ok(cf) => cf,
+            Err(ref e) if e.to_string().contains("column family not found") => return Ok(0),
+            Err(e) => return Err(DbError::Store(e)),
+        };
+        match executor::execute(&self.txn, &cf, &plan) {
+            Ok(iter) => {
+                let mut n = 0u64;
+                for result in iter {
+                    result?;
+                    n += 1;
+                }
+                Ok(n)
+            }
+            Err(DbError::Store(ref e)) if e.to_string().contains("column family not found") => {
+                Ok(0)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Return distinct values for a field, with optional filter and sort.
