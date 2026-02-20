@@ -270,14 +270,11 @@ fn execute_node<'a, T: Transaction + 'a>(
         }
 
         PlanNode::Sort { sorts, input } => {
-            let source = execute_node(txn, input)?;
+            let mut source = execute_node(txn, input)?;
 
-            let mut records: Vec<(Option<String>, Option<RawValue<'a>>)> =
-                source.collect::<Result<Vec<_>, _>>()?;
-
-            // If the single item is an array (e.g. from Distinct), sort its elements
-            if records.len() == 1 {
-                if let Some((id, Some(RawValue::Owned(RawBson::Array(arr))))) = records.pop() {
+            // Peek first item — if it's an array (from Distinct), sort its elements
+            match source.next() {
+                Some(Ok((id, Some(RawValue::Owned(RawBson::Array(arr)))))) => {
                     let sort = match sorts.first() {
                         Some(s) => s,
                         None => {
@@ -318,36 +315,45 @@ fn execute_node<'a, T: Transaction + 'a>(
                         Some(RawValue::Owned(RawBson::Array(buf))),
                     )))));
                 }
-            }
+                Some(first) => {
+                    // Not an array — collect all records for sorting
+                    let mut records: Vec<(Option<String>, Option<RawValue<'a>>)> =
+                        std::iter::once(first)
+                            .chain(source)
+                            .collect::<Result<Vec<_>, _>>()?;
 
-            // Normal case: sort documents by field extraction
-            records.sort_by(|(a_id, a_opt), (b_id, b_opt)| {
-                for sort in sorts {
-                    let ord = if sort.field == "_id" {
-                        let a_str = a_id.as_deref().unwrap_or("");
-                        let b_str = b_id.as_deref().unwrap_or("");
-                        a_str.cmp(b_str)
-                    } else {
-                        let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
-                        let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
-                        let a_field =
-                            a_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
-                        let b_field =
-                            b_raw.and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
-                        exec::raw_compare_field_values(a_field, b_field)
-                    };
-                    let ord = match sort.direction {
-                        SortDirection::Asc => ord,
-                        SortDirection::Desc => ord.reverse(),
-                    };
-                    if ord != std::cmp::Ordering::Equal {
-                        return ord;
-                    }
+                    records.sort_by(|(a_id, a_opt), (b_id, b_opt)| {
+                        for sort in sorts {
+                            let ord = if sort.field == "_id" {
+                                let a_str = a_id.as_deref().unwrap_or("");
+                                let b_str = b_id.as_deref().unwrap_or("");
+                                a_str.cmp(b_str)
+                            } else {
+                                let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
+                                let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
+                                let a_field = a_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                let b_field = b_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                exec::raw_compare_field_values(a_field, b_field)
+                            };
+                            let ord = match sort.direction {
+                                SortDirection::Asc => ord,
+                                SortDirection::Desc => ord.reverse(),
+                            };
+                            if ord != std::cmp::Ordering::Equal {
+                                return ord;
+                            }
+                        }
+                        std::cmp::Ordering::Equal
+                    });
+
+                    Ok(Box::new(records.into_iter().map(|(id, val)| Ok((id, val)))))
                 }
-                std::cmp::Ordering::Equal
-            });
-
-            Ok(Box::new(records.into_iter().map(|(id, val)| Ok((id, val)))))
+                None => Ok(Box::new(std::iter::empty())),
+            }
         }
 
         PlanNode::Limit { skip, take, input } => {
