@@ -6,6 +6,7 @@ use crate::sort::{Sort, SortDirection};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Query {
     pub filter: Option<FilterGroup>,
+    #[serde(default)]
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
