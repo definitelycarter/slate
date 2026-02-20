@@ -108,6 +108,44 @@ pub fn encode_raw_value(value: bson::raw::RawBsonRef) -> Vec<u8> {
     }
 }
 
+/// Return the BSON element type byte for a `Bson` value.
+pub fn bson_type_byte(value: &bson::Bson) -> [u8; 1] {
+    [value.element_type() as u8]
+}
+
+/// Return the BSON element type byte for a `RawBsonRef` value.
+pub fn raw_bson_type_byte(value: bson::raw::RawBsonRef) -> [u8; 1] {
+    [value.element_type() as u8]
+}
+
+/// Coerce a `RawBson` value to match the BSON type stored in the index entry.
+///
+/// Index-covered projections carry the query's value (e.g. `Int64(100)`), but the
+/// stored document may have used a different numeric type (e.g. `Int32(100)`).
+/// The stored type byte (from the BSON spec) lets us reconstruct the correct type.
+/// Falls back to cloning the query value if the stored value is empty (backward
+/// compat with old index entries) or if no coercion is needed.
+pub fn coerce_to_stored_type(
+    query_val: &bson::raw::RawBson,
+    stored_value: &[u8],
+) -> bson::raw::RawBson {
+    use bson::raw::RawBson;
+
+    if stored_value.is_empty() {
+        return query_val.clone();
+    }
+    let stored_type = stored_value[0];
+    let query_type = query_val.element_type() as u8;
+    if stored_type == query_type {
+        return query_val.clone();
+    }
+    match (query_val, stored_type) {
+        (RawBson::Int64(n), 0x10) => RawBson::Int32(*n as i32), // stored Int32
+        (RawBson::Int32(n), 0x12) => RawBson::Int64(*n as i64), // stored Int64
+        _ => query_val.clone(),
+    }
+}
+
 pub fn raw_index_key(column: &str, value: bson::raw::RawBsonRef, record_id: &str) -> Vec<u8> {
     let value_bytes = encode_raw_value(value);
     let mut key = Vec::with_capacity(
@@ -253,5 +291,18 @@ mod tests {
         let k3 = index_key("score", &bson::Bson::Int64(-5), "rec-1");
         assert!(k3 < k1); // -5 < 10
         assert!(k1 < k2); // 10 < 20
+    }
+
+    #[test]
+    fn bson_type_byte_values() {
+        assert_eq!(bson_type_byte(&bson::Bson::Double(1.0)), [0x01]);
+        assert_eq!(bson_type_byte(&bson::Bson::String("x".into())), [0x02]);
+        assert_eq!(bson_type_byte(&bson::Bson::Boolean(true)), [0x08]);
+        assert_eq!(
+            bson_type_byte(&bson::Bson::DateTime(bson::DateTime::now())),
+            [0x09]
+        );
+        assert_eq!(bson_type_byte(&bson::Bson::Int32(1)), [0x10]);
+        assert_eq!(bson_type_byte(&bson::Bson::Int64(1)), [0x12]);
     }
 }

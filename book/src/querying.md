@@ -347,6 +347,8 @@ Projection(status)
 
 The projection only requests `status`, which is the indexed field used by the `IndexScan`. Since the `IndexScan` already carries the matched value (`"active"`) as a `RawValue`, the planner skips `ReadRecord` entirely — no document bytes are fetched from storage. `Projection` constructs `{ _id, status: "active" }` directly from the index value.
 
+Each index entry stores the BSON element type byte in its value (e.g. `0x10` for Int32, `0x12` for Int64). When the query's value type differs from the stored type (e.g. query sends `Int64(100)` but the document stored `Int32(100)`), the executor coerces the emitted value to match the stored type. This ensures correct type round-tripping through index-covered projections.
+
 This optimization applies when **all** of these conditions are met:
 1. The ID tier is an `IndexScan` with an `Eq` value (not an ordered scan)
 2. No residual filter exists (the index fully satisfies the WHERE clause)
@@ -364,6 +366,23 @@ Projection(status, name)
 ```
 
 Here `name` isn't available from the index, so the full document must be fetched.
+
+#### Limitation: Multi-Column Coverage
+
+The optimization is single-field only — the indexed column must be the *only* projected column (besides `_id`). Even if all projected columns are individually indexed, `ReadRecord` is still required:
+
+**Query:** `find({ filter: status = "active", columns: ["user_id", "status"] })` (both indexed)
+
+```
+Projection(user_id, status)
+  └── ReadRecord
+        └── IndexScan(status = "active")
+```
+
+The `IndexScan` on `status` carries the value `"active"`, but has no way to provide `user_id` — that lives in a separate index. To cover this case without `ReadRecord`, two possible future approaches:
+
+1. **Composite indexes** — a single index on `(status, user_id)` that stores both values per key
+2. **Secondary index lookups** — after getting IDs from the primary `IndexScan`, look up each ID in the `user_id` index to retrieve its value
 
 ---
 

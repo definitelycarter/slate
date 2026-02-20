@@ -573,7 +573,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             let doc: bson::Document = bson::from_slice(&value)?;
             for val in exec::get_path_values(&doc, field) {
                 let idx_key = encoding::index_key(field, val, &record_id);
-                self.txn.put(collection, &idx_key, &[])?;
+                self.txn
+                    .put(collection, &idx_key, &encoding::bson_type_byte(val))?;
             }
         }
 
@@ -749,7 +750,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             for new_val in &new_values {
                 if !old_values.contains(new_val) {
                     let idx_key = encoding::index_key(field, new_val, id);
-                    self.txn.put(collection, &idx_key, &[])?;
+                    self.txn
+                        .put(collection, &idx_key, &encoding::bson_type_byte(new_val))?;
                 }
             }
         }
@@ -762,8 +764,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
                 self.txn.delete(collection, &idx_key)?;
             }
             if let Some(Bson::DateTime(dt)) = &new_ttl {
-                let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
-                self.txn.put(collection, &idx_key, &[])?;
+                let val = Bson::DateTime(*dt);
+                let idx_key = encoding::index_key("ttl", &val, id);
+                self.txn
+                    .put(collection, &idx_key, &encoding::bson_type_byte(&val))?;
             }
         }
 
@@ -797,7 +801,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         for field in indexed_fields {
             for value in exec::get_path_values(doc, field) {
                 let idx_key = encoding::index_key(field, value, id);
-                self.txn.put(collection, &idx_key, &[])?;
+                self.txn
+                    .put(collection, &idx_key, &encoding::bson_type_byte(value))?;
             }
         }
         Ok(())
@@ -811,8 +816,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         doc: &bson::Document,
     ) -> Result<(), DbError> {
         if let Some(Bson::DateTime(dt)) = doc.get("ttl") {
-            let idx_key = encoding::index_key("ttl", &Bson::DateTime(*dt), id);
-            self.txn.put(collection, &idx_key, &[])?;
+            let val = Bson::DateTime(*dt);
+            let idx_key = encoding::index_key("ttl", &val, id);
+            self.txn
+                .put(collection, &idx_key, &encoding::bson_type_byte(&val))?;
         }
         Ok(())
     }

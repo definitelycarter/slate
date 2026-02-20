@@ -138,7 +138,7 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
 
         for result in iter.by_ref() {
             match result {
-                Ok((key, _)) => {
+                Ok((key, stored_value)) => {
                     if let Some(n) = limit {
                         if count >= n {
                             if complete_groups {
@@ -164,7 +164,9 @@ fn execute_index_scan<'a, T: Transaction + 'a>(
                     match encoding::parse_index_key(&key) {
                         Some((_, record_id)) => {
                             count += 1;
-                            let item_val = raw_val.as_ref().map(|v| RawValue::Owned(v.clone()));
+                            let item_val = raw_val.as_ref().map(|v| {
+                                RawValue::Owned(encoding::coerce_to_stored_type(v, &stored_value))
+                            });
                             return Some(Ok((Some(record_id.to_string()), item_val)));
                         }
                         None => continue,

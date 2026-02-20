@@ -2482,3 +2482,70 @@ fn distinct_with_sort_and_limit() {
         vec![Bson::String("date".into()), Bson::String("cherry".into()),]
     );
 }
+
+// ── Index-covered projection type preservation ─────────────────
+
+#[test]
+fn index_covered_preserves_int32_type() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec!["score".to_string()],
+    })
+    .unwrap();
+    // Insert with Int32
+    txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Query with Int64 — same encoded bytes, different BSON type
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("score", Bson::Int64(100))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: Some(vec!["score".into()]),
+    };
+    let results = txn.find(COLLECTION, &query).unwrap();
+    assert_eq!(results.len(), 1);
+    // Should preserve the stored Int32 type, not the query's Int64
+    let score = results[0].get("score").unwrap().unwrap();
+    assert!(
+        matches!(score, bson::raw::RawBsonRef::Int32(100)),
+        "expected Int32(100), got {:?}",
+        score
+    );
+}
+
+#[test]
+fn index_covered_preserves_string_type() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.to_string(),
+        indexes: vec!["status".to_string()],
+    })
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "status": "active" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(eq_filter("status", Bson::String("active".into()))),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: Some(vec!["status".into()]),
+    };
+    let results = txn.find(COLLECTION, &query).unwrap();
+    assert_eq!(results.len(), 1);
+    let status = results[0].get("status").unwrap().unwrap();
+    assert!(
+        matches!(status, bson::raw::RawBsonRef::String("active")),
+        "expected String(\"active\"), got {:?}",
+        status
+    );
+}
