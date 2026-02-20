@@ -47,8 +47,18 @@ fn collect_from_doc<'a>(
 
 fn collect_from_value<'a>(value: &'a Bson, segments: &[&str], idx: usize, out: &mut Vec<&'a Bson>) {
     if idx >= segments.len() {
-        if is_indexable_scalar(value) {
-            out.push(value);
+        match value {
+            Bson::Array(arr) => {
+                for elem in arr {
+                    if is_indexable_scalar(elem) {
+                        out.push(elem);
+                    }
+                }
+            }
+            _ if is_indexable_scalar(value) => {
+                out.push(value);
+            }
+            _ => {}
         }
         return;
     }
@@ -747,6 +757,34 @@ mod tests {
     fn get_path_values_null_skipped() {
         let doc = doc! { "status": bson::Bson::Null };
         let vals = get_path_values(&doc, "status");
+        assert!(vals.is_empty());
+    }
+
+    #[test]
+    fn get_path_values_array_scalars_direct() {
+        let doc = doc! { "tags": ["rust", "db", "fast"] };
+        let vals = get_path_values(&doc, "tags");
+        assert_eq!(vals.len(), 3);
+        assert_eq!(vals[0], &Bson::String("rust".into()));
+        assert_eq!(vals[1], &Bson::String("db".into()));
+        assert_eq!(vals[2], &Bson::String("fast".into()));
+    }
+
+    #[test]
+    fn get_path_values_array_mixed_types() {
+        let doc = doc! { "vals": [1_i64, "hello", true, bson::Bson::Null] };
+        let vals = get_path_values(&doc, "vals");
+        // Null is not indexable, so only 3 values
+        assert_eq!(vals.len(), 3);
+        assert_eq!(vals[0], &Bson::Int64(1));
+        assert_eq!(vals[1], &Bson::String("hello".into()));
+        assert_eq!(vals[2], &Bson::Boolean(true));
+    }
+
+    #[test]
+    fn get_path_values_empty_array() {
+        let doc = doc! { "tags": bson::Bson::Array(vec![]) };
+        let vals = get_path_values(&doc, "tags");
         assert!(vals.is_empty());
     }
 
