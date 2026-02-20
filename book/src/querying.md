@@ -2,12 +2,12 @@
 
 ## Overview
 
-Queries are executed as a three-tier plan tree. The planner analyzes filter conditions and available indexes to build an optimal execution plan, then the executor runs it lazily — records that fail a filter are never fully deserialized.
+Queries are executed as a two-tier plan tree. The planner analyzes filter conditions and available indexes to build an optimal execution plan, then the executor runs it lazily — records that fail a filter are never fully deserialized.
 
 ```
-Document tier:   Projection (materialize raw → bson::Document)
+Raw tier:        Projection (selective field copying via RawDocumentBuf::append)
                    ↑
-Raw tier:        Limit (skip/take on raw record stream)
+                 Limit (skip/take on record stream or RawBson::Array)
                    ↑
                  Sort (lazy field access on raw bytes)
                    ↑
@@ -19,8 +19,7 @@ ID tier:         Scan / IndexScan / IndexMerge (produce record IDs)
 ```
 
 **ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`. For index-covered queries, `RawValue` carries scalar values (String, Int, etc.) directly from the index — no document fetch needed.
-**Document tier** — `Projection` is the single materialization point, selectively converting only the requested columns to `bson::Document`.
+**Raw tier** — everything above ReadRecord operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`. For index-covered queries, `RawValue` carries scalar values (String, Int, etc.) directly from the index — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
 ## Query Model
 
@@ -388,13 +387,13 @@ Execution flow:
 3. **Filter** — evaluates `score > 50` by accessing just the `score` field from raw bytes. Rejected records are skipped with zero deserialization cost
 4. **Sort** — collects surviving records, accesses `score` from raw bytes for comparison, sorts in memory
 5. **Limit** — skips the first 10 records, takes the next 5
-6. **Projection** — materializes only `name` and `score` from raw bytes into a `bson::Document`, inserts `_id`
+6. **Projection** — copies only `name` and `score` from raw bytes into a `RawDocumentBuf` via `append()`, inserts `_id`
 
-Records that fail the filter at step 3 never reach steps 4-6. Only the final 5 records at step 6 pay the cost of full (selective) deserialization.
+Records that fail the filter at step 3 never reach steps 4-6. Only the final 5 records at step 6 pay the cost of selective field copying.
 
 ## Limit Placement
 
-Limit operates in the raw tier — it's `skip()` + `take()` on the `Cow<[u8]>` iterator, not on materialized documents. Where it sits in the plan tree depends on whether Sort is present.
+Limit operates in the raw tier. For record streams (find queries), it's lazy `skip()` + `take()` on the iterator. For `RawBson::Array` values (distinct queries), it slices the array elements directly. Where it sits in the plan tree depends on whether Sort is present.
 
 ### Scenario A: Limit with Sort
 
@@ -449,6 +448,8 @@ DistinctQuery {
     field: String,                     // The field to collect unique values from
     filter: Option<FilterGroup>,       // Optional WHERE clause (same as find)
     sort: Option<SortDirection>,       // Optional sort on the distinct values
+    skip: Option<usize>,              // Skip first N unique values
+    take: Option<usize>,              // Take N unique values
 }
 ```
 
@@ -457,7 +458,7 @@ DistinctQuery {
 ```
 ID tier:     Scan / IndexScan / IndexMerge
                ↑
-Raw tier:    ReadRecord → Filter → Projection → Distinct → Sort
+Raw tier:    ReadRecord → Filter → Projection → Distinct → Sort → Limit
 ```
 
 Distinct receives projected documents from Projection, extracts the target field, deduplicates with a `HashSet<u64>` (hashing raw BSON bytes), and emits a single `RawBson::Array` containing all unique values. This is fundamentally different from `find()`, which emits one item per record — Distinct collapses the entire result set into one array value.
@@ -497,7 +498,20 @@ Sort(status ASC)
 
 Sort sits above Distinct. The planner passes the sort field and direction to `Sort`, which handles the `RawBson::Array` natively.
 
-### How Sort Handles Arrays
+**Distinct (with sort and limit):**
+
+```
+Limit(skip: 1, take: 2)
+  └── Sort(status ASC)
+        └── Distinct(status)
+              └── Projection([status])
+                    └── ReadRecord
+                          └── Scan
+```
+
+Limit sits above Sort. It detects the single `RawBson::Array` item and slices its elements with skip/take — no per-record iteration needed.
+
+### How Sort and Limit Handle Arrays
 
 Sort detects when its input is a single `RawBson::Array` item (the output shape of Distinct) and switches to array-sorting mode:
 
@@ -507,7 +521,9 @@ Sort detects when its input is a single `RawBson::Array` item (the output shape 
    - **Document arrays**: extracts the sort field from each document via `raw_get_path`, then compares
 3. Rebuilds a sorted `RawBson::Array` and re-emits it as a single item
 
-This keeps Sort as a single, general-purpose node — it doesn't need to know whether its input came from Distinct or a regular find pipeline.
+Limit uses the same pattern — it peeks the first item from its source. If it's a `RawBson::Array`, it slices elements with `skip/take` and rebuilds a `RawArrayBuf`. Otherwise it chains the peeked item back and applies lazy `skip().take()` on the record stream.
+
+Both Sort and Limit are general-purpose nodes — they don't need to know whether their input came from Distinct or a regular find pipeline.
 
 ### Return Type
 
@@ -537,11 +553,11 @@ For projections with dot-notation, the top-level key is included in materializat
 
 | Scenario | Deserialization cost |
 |----------|---------------------|
-| Record passes filter + included in result | Full (or selective with projection) |
+| Record passes filter + included in result | Selective field copying (projection) or full raw copy |
 | Record passes filter + excluded by Limit (with sort) | Sort key access only (raw bytes) |
-| Record passes filter + excluded by Limit (no sort) | Zero — never materialized |
+| Record passes filter + excluded by Limit (no sort) | Zero — never touched |
 | Record fails filter | Filter field access only (raw bytes) |
-| No filter, no projection | Full deserialization |
+| No filter, no projection | Full raw copy (all fields) |
 
 **Index acceleration** reduces the number of records entering the raw tier:
 
