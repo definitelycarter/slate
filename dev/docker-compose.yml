@@ -22,11 +22,11 @@ services:
     volumes:
       - ./collections.json:/etc/slate/collections.json:ro
 
-  lists:
+  collection-http:
     build:
       context: ..
       dockerfile: dev/Dockerfile
-      target: lists
+      target: collection-http
     ports:
       - "8080:8080"
     depends_on:
@@ -34,7 +34,5 @@ services:
         condition: service_completed_successfully
     environment:
       SLATE_SERVER_ADDR: db:9600
-      SLATE_LIST_CONFIG: /etc/slate/list.json
+      SLATE_COLLECTION: accounts
       SLATE_POOL_SIZE: "4"
-    volumes:
-      - ./list.json:/etc/slate/list.json:ro

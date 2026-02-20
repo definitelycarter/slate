@@ -2,11 +2,10 @@ use std::net::TcpListener;
 use std::thread;
 
 use ::http::{Method, Request, StatusCode};
-use bson::{Bson, doc};
+use bson::doc;
 use slate_client::{Client, ClientPool};
+use slate_collection::*;
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
-use slate_lists::*;
-use slate_query::*;
 use slate_server::Server;
 use slate_store::MemoryStore;
 
@@ -51,99 +50,18 @@ fn seed_data(addr: &str) {
         .unwrap();
 }
 
-fn active_config() -> ListConfig {
-    ListConfig {
-        id: "active-accounts".into(),
-        title: "Active Accounts".into(),
-        collection: COLLECTION.into(),
-        filters: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: Bson::String("active".into()),
-            })],
-        }),
-        columns: vec![
-            Column {
-                field: "name".into(),
-                header: "Name".into(),
-                width: 200,
-                pinned: true,
-            },
-            Column {
-                field: "status".into(),
-                header: "Status".into(),
-                width: 100,
-                pinned: false,
-            },
-            Column {
-                field: "revenue".into(),
-                header: "Revenue".into(),
-                width: 120,
-                pinned: false,
-            },
-        ],
-    }
-}
-
-fn all_config() -> ListConfig {
-    ListConfig {
-        id: "all-accounts".into(),
-        title: "All Accounts".into(),
-        collection: COLLECTION.into(),
-        filters: None,
-        columns: vec![
-            Column {
-                field: "name".into(),
-                header: "Name".into(),
-                width: 200,
-                pinned: false,
-            },
-            Column {
-                field: "status".into(),
-                header: "Status".into(),
-                width: 100,
-                pinned: false,
-            },
-        ],
-    }
-}
-
-fn build_handler(addr: &str, config: ListConfig) -> ListHttp {
+fn build_handler(addr: &str) -> CollectionHttp {
     let pool = ClientPool::new(addr, 2).unwrap();
-    ListHttp::new(config, pool)
+    CollectionHttp::new(COLLECTION.into(), pool)
 }
 
-// ── GET /config ─────────────────────────────────────────────────
+// ── POST /query ─────────────────────────────────────────────────
 
 #[test]
-fn get_config() {
-    let addr = start_server();
-    let handler = build_handler(&addr, active_config());
-
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("/config")
-        .body(Vec::new())
-        .unwrap();
-
-    let resp = handler.handle(req);
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(body["id"], "active-accounts");
-    assert_eq!(body["title"], "Active Accounts");
-    assert_eq!(body["columns"].as_array().unwrap().len(), 3);
-}
-
-// ── POST /data ──────────────────────────────────────────────────
-
-#[test]
-fn get_data_returns_records() {
+fn query_returns_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::POST)
@@ -155,15 +73,15 @@ fn get_data_returns_records() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(body["total"], 3);
-    assert_eq!(body["records"].as_array().unwrap().len(), 3);
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["records"].as_array().unwrap().len(), 5);
 }
 
 #[test]
-fn get_data_with_filters() {
+fn query_with_filters() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
         "filters": {
@@ -188,15 +106,14 @@ fn get_data_with_filters() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    // active AND revenue > 50000 → Umbrella (95k)
-    assert_eq!(body["total"], 1);
+    assert_eq!(body["total"], 3);
 }
 
 #[test]
-fn get_data_with_pagination() {
+fn query_with_pagination() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
         "skip": 1,

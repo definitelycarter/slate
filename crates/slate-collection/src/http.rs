@@ -1,20 +1,19 @@
 use http::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use slate_client::ClientPool;
-use slate_query::{DistinctQuery, FilterGroup, FilterNode, LogicalOp, Query};
+use slate_query::{DistinctQuery, FilterGroup, Query};
 
-use crate::config::ListConfig;
-use crate::error::ListError;
-use crate::request::{DistinctRequest, DistinctResponse, ListRequest, ListResponse};
+use crate::error::CollectionHttpError;
+use crate::request::{DistinctRequest, DistinctResponse, QueryRequest, QueryResponse};
 
-pub struct ListHttp {
-    config: ListConfig,
+pub struct CollectionHttp {
+    collection: String,
     pool: ClientPool,
 }
 
-impl ListHttp {
-    pub fn new(config: ListConfig, pool: ClientPool) -> Self {
-        Self { config, pool }
+impl CollectionHttp {
+    pub fn new(collection: String, pool: ClientPool) -> Self {
+        Self { collection, pool }
     }
 
     pub fn handle(&self, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -22,9 +21,8 @@ impl ListHttp {
         let method = req.method();
 
         match (method, path.trim_end_matches('/')) {
-            (&Method::GET, "/config") => self.get_config(),
-            (&Method::POST, "/query") => self.get_data(&req),
-            (&Method::POST, "/query/distinct") => self.get_distinct(&req),
+            (&Method::POST, "/query") => self.query(&req),
+            (&Method::POST, "/query/distinct") => self.query_distinct(&req),
             (&Method::POST, "/data") => self.post_records(&req),
             (&Method::PUT, "/data") => self.put_records(&req),
             (&Method::PATCH, "/data") => self.patch_records(&req),
@@ -33,16 +31,9 @@ impl ListHttp {
         }
     }
 
-    fn get_config(&self) -> Response<Vec<u8>> {
-        match serde_json::to_vec(&self.config) {
-            Ok(body) => json_response(StatusCode::OK, body),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        }
-    }
-
-    fn get_data(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let list_request: ListRequest = if req.body().is_empty() {
-            ListRequest::default()
+    fn query(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let request: QueryRequest = if req.body().is_empty() {
+            QueryRequest::default()
         } else {
             match serde_json::from_slice(req.body()) {
                 Ok(r) => r,
@@ -50,7 +41,7 @@ impl ListHttp {
             }
         };
 
-        match self.get_list_data(&list_request) {
+        match self.execute_query(&request) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -59,13 +50,13 @@ impl ListHttp {
         }
     }
 
-    fn get_distinct(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
-        let distinct_request: DistinctRequest = match serde_json::from_slice(req.body()) {
+    fn query_distinct(&self, req: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+        let request: DistinctRequest = match serde_json::from_slice(req.body()) {
             Ok(r) => r,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
 
-        match self.get_distinct_data(&distinct_request) {
+        match self.execute_distinct(&request) {
             Ok(response) => match serde_json::to_vec(&response) {
                 Ok(body) => json_response(StatusCode::OK, body),
                 Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -74,50 +65,36 @@ impl ListHttp {
         }
     }
 
-    fn get_list_data(&self, request: &ListRequest) -> Result<ListResponse, ListError> {
-        let collection = &self.config.collection;
+    fn execute_query(&self, request: &QueryRequest) -> Result<QueryResponse, CollectionHttpError> {
+        let total = self
+            .pool
+            .get()?
+            .count(&self.collection, request.filters.as_ref())?;
 
-        // Merge list default filters with user filters
-        let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
-
-        // Build projection from column fields
-        let columns: Vec<String> = self
-            .config
-            .columns
-            .iter()
-            .map(|c| c.field.clone())
-            .collect();
-
-        // Get total count with merged filters (before skip/take)
-        let total = self.pool.get()?.count(collection, merged.as_ref())?;
-
-        // Execute query
         let query = Query {
-            filter: merged,
+            filter: request.filters.clone(),
             sort: request.sort.clone(),
             skip: request.skip,
             take: request.take,
-            columns: Some(columns),
+            columns: request.columns.clone(),
         };
-        let records = self.pool.get()?.find(collection, &query)?;
+        let records = self.pool.get()?.find(&self.collection, &query)?;
 
-        Ok(ListResponse { records, total })
+        Ok(QueryResponse { records, total })
     }
 
-    fn get_distinct_data(&self, request: &DistinctRequest) -> Result<DistinctResponse, ListError> {
-        let collection = &self.config.collection;
-
-        // Merge list default filters with user filters
-        let merged = merge_filters(self.config.filters.as_ref(), request.filters.as_ref());
-
+    fn execute_distinct(
+        &self,
+        request: &DistinctRequest,
+    ) -> Result<DistinctResponse, CollectionHttpError> {
         let query = DistinctQuery {
             field: request.field.clone(),
-            filter: merged,
+            filter: request.filters.clone(),
             sort: request.sort,
             skip: request.skip,
             take: request.take,
         };
-        let values = self.pool.get()?.distinct(collection, &query)?;
+        let values = self.pool.get()?.distinct(&self.collection, &query)?;
 
         Ok(DistinctResponse { values })
     }
@@ -129,11 +106,10 @@ impl ListHttp {
             Ok(b) => b,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
-        let collection = &self.config.collection;
         match self
             .pool
             .get()
-            .and_then(|mut c| Ok(c.insert_many(collection, docs)?))
+            .and_then(|mut c| Ok(c.insert_many(&self.collection, docs)?))
         {
             Ok(results) => {
                 match serde_json::to_vec(&serde_json::json!({ "inserted": results.len() })) {
@@ -150,11 +126,10 @@ impl ListHttp {
             Ok(b) => b,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
-        let collection = &self.config.collection;
         match self
             .pool
             .get()
-            .and_then(|mut c| Ok(c.upsert_many(collection, docs)?))
+            .and_then(|mut c| Ok(c.upsert_many(&self.collection, docs)?))
         {
             Ok(result) => match serde_json::to_vec(&result) {
                 Ok(b) => json_response(StatusCode::OK, b),
@@ -169,11 +144,10 @@ impl ListHttp {
             Ok(b) => b,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
-        let collection = &self.config.collection;
         match self
             .pool
             .get()
-            .and_then(|mut c| Ok(c.merge_many(collection, docs)?))
+            .and_then(|mut c| Ok(c.merge_many(&self.collection, docs)?))
         {
             Ok(result) => match serde_json::to_vec(&result) {
                 Ok(b) => json_response(StatusCode::OK, b),
@@ -188,11 +162,10 @@ impl ListHttp {
             Ok(b) => b,
             Err(e) => return error_response(StatusCode::BAD_REQUEST, &e.to_string()),
         };
-        let collection = &self.config.collection;
         match self
             .pool
             .get()
-            .and_then(|mut c| Ok(c.delete_many(collection, &body.filter)?))
+            .and_then(|mut c| Ok(c.delete_many(&self.collection, &body.filter)?))
         {
             Ok(result) => match serde_json::to_vec(&result) {
                 Ok(b) => json_response(StatusCode::OK, b),
@@ -206,28 +179,6 @@ impl ListHttp {
 #[derive(Deserialize)]
 struct DeleteBody {
     filter: FilterGroup,
-}
-
-/// Merge two optional filter groups under a top-level AND.
-///
-/// - Both None → None
-/// - One present → that one
-/// - Both present → AND(list_filters, user_filters)
-pub fn merge_filters(
-    list_filters: Option<&FilterGroup>,
-    user_filters: Option<&FilterGroup>,
-) -> Option<FilterGroup> {
-    match (list_filters, user_filters) {
-        (None, None) => None,
-        (Some(f), None) | (None, Some(f)) => Some(f.clone()),
-        (Some(list), Some(user)) => Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![
-                FilterNode::Group(list.clone()),
-                FilterNode::Group(user.clone()),
-            ],
-        }),
-    }
 }
 
 fn json_response(status: StatusCode, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {

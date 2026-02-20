@@ -16,10 +16,10 @@ metadata:
 rules:
   # CRDs
   - apiGroups: ["slate.io"]
-    resources: ["servers", "collections", "listviews"]
+    resources: ["servers", "collections"]
     verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["slate.io"]
-    resources: ["servers/status", "collections/status", "listviews/status"]
+    resources: ["servers/status", "collections/status"]
     verbs: ["get", "patch"]
   # Owned resources created by the server reconciler
   - apiGroups: ["apps"]
@@ -27,10 +27,6 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch"]
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["get", "list", "watch", "create", "patch"]
-  # Owned resources created by the list reconciler
-  - apiGroups: [""]
-    resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "patch"]
   # Controller-runtime needs events
   - apiGroups: [""]

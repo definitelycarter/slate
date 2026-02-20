@@ -1,12 +1,11 @@
 use std::net::TcpListener;
 use std::thread;
 
-use ::http::{Method, Request, StatusCode};
-use bson::{Bson, doc};
+use bson::doc;
+use http::{Method, Request, StatusCode};
 use slate_client::{Client, ClientPool};
+use slate_collection::*;
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
-use slate_lists::*;
-use slate_query::*;
 use slate_server::Server;
 use slate_store::MemoryStore;
 
@@ -51,119 +50,18 @@ fn seed_data(addr: &str) {
         .unwrap();
 }
 
-fn active_config() -> ListConfig {
-    ListConfig {
-        id: "active-accounts".into(),
-        title: "Active Accounts".into(),
-        collection: COLLECTION.into(),
-        filters: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: Bson::String("active".into()),
-            })],
-        }),
-        columns: vec![
-            Column {
-                field: "name".into(),
-                header: "Name".into(),
-                width: 200,
-                pinned: true,
-            },
-            Column {
-                field: "status".into(),
-                header: "Status".into(),
-                width: 100,
-                pinned: false,
-            },
-            Column {
-                field: "revenue".into(),
-                header: "Revenue".into(),
-                width: 120,
-                pinned: false,
-            },
-        ],
-    }
-}
-
-fn all_config() -> ListConfig {
-    ListConfig {
-        id: "all-accounts".into(),
-        title: "All Accounts".into(),
-        collection: COLLECTION.into(),
-        filters: None,
-        columns: vec![
-            Column {
-                field: "name".into(),
-                header: "Name".into(),
-                width: 200,
-                pinned: false,
-            },
-            Column {
-                field: "status".into(),
-                header: "Status".into(),
-                width: 100,
-                pinned: false,
-            },
-        ],
-    }
-}
-
-fn build_handler(addr: &str, config: ListConfig) -> ListHttp {
+fn build_handler(addr: &str) -> CollectionHttp {
     let pool = ClientPool::new(addr, 2).unwrap();
-    ListHttp::new(config, pool)
+    CollectionHttp::new(COLLECTION.into(), pool)
 }
 
-// ── GET /config ─────────────────────────────────────────────────
+// ── POST /query ─────────────────────────────────────────────────
 
 #[test]
-fn get_config_returns_list() {
-    let addr = start_server();
-    let handler = build_handler(&addr, active_config());
-
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("/config")
-        .body(Vec::new())
-        .unwrap();
-
-    let resp = handler.handle(req);
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(body["id"], "active-accounts");
-    assert_eq!(body["title"], "Active Accounts");
-    assert_eq!(body["columns"].as_array().unwrap().len(), 3);
-}
-
-// ── POST /data ──────────────────────────────────────────────────
-
-#[test]
-fn get_data_returns_filtered_records() {
+fn query_returns_all_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
-
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/query")
-        .body(Vec::new())
-        .unwrap();
-
-    let resp = handler.handle(req);
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(body["total"], 3);
-    assert_eq!(body["records"].as_array().unwrap().len(), 3);
-}
-
-#[test]
-fn get_data_returns_all_records() {
-    let addr = start_server();
-    seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::POST)
@@ -180,19 +78,19 @@ fn get_data_returns_all_records() {
 }
 
 #[test]
-fn get_data_with_user_filters() {
+fn query_with_filters() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
         "filters": {
             "logical": "and",
             "children": [{
                 "condition": {
-                    "field": "revenue",
-                    "operator": "gt",
-                    "value": 50000.0
+                    "field": "status",
+                    "operator": "eq",
+                    "value": "active"
                 }
             }]
         }
@@ -208,19 +106,19 @@ fn get_data_with_user_filters() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    // active AND revenue > 50000 → Umbrella (95k)
-    assert_eq!(body["total"], 1);
+    assert_eq!(body["total"], 3);
+    assert_eq!(body["records"].as_array().unwrap().len(), 3);
 }
 
 #[test]
-fn get_data_with_pagination() {
+fn query_with_pagination() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
         "skip": 1,
-        "take": 1
+        "take": 2
     });
 
     let req = Request::builder()
@@ -233,15 +131,15 @@ fn get_data_with_pagination() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let body: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(body["total"], 5); // total before pagination
-    assert_eq!(body["records"].as_array().unwrap().len(), 1); // paginated
+    assert_eq!(body["total"], 5);
+    assert_eq!(body["records"].as_array().unwrap().len(), 2);
 }
 
 #[test]
-fn get_data_bad_request_body() {
+fn query_bad_body() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::POST)
@@ -259,7 +157,7 @@ fn get_data_bad_request_body() {
 fn post_data_inserts_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let body = serde_json::json!([
         { "_id": "acct-10", "name": "NewCo", "status": "active" },
@@ -294,7 +192,7 @@ fn post_data_inserts_records() {
 fn put_data_inserts_new_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let body = serde_json::json!([
         { "_id": "acct-20", "name": "BrandNew", "status": "active" },
@@ -317,9 +215,8 @@ fn put_data_inserts_new_records() {
 fn put_data_replaces_existing_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
-    // Upsert acct-1 with new name
     let body = serde_json::json!([
         { "_id": "acct-1", "name": "Acme Corp v2", "status": "rejected" },
     ]);
@@ -336,7 +233,7 @@ fn put_data_replaces_existing_records() {
     assert_eq!(result["inserted"], 0);
     assert_eq!(result["updated"], 1);
 
-    // Verify total unchanged (replace, not insert)
+    // Verify total unchanged
     let req = Request::builder()
         .method(Method::POST)
         .uri("/query")
@@ -353,9 +250,8 @@ fn put_data_replaces_existing_records() {
 fn patch_data_merges_existing_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
-    // Merge: change status on acct-1 from active to rejected
     let body = serde_json::json!([
         { "_id": "acct-1", "status": "rejected" },
     ]);
@@ -371,23 +267,13 @@ fn patch_data_merges_existing_records() {
     let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
     assert_eq!(result["inserted"], 0);
     assert_eq!(result["updated"], 1);
-
-    // Query active — should now be 2 instead of 3
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/query")
-        .body(Vec::new())
-        .unwrap();
-    let resp = handler.handle(req);
-    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(result["total"], 2);
 }
 
 #[test]
 fn patch_data_inserts_new_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let body = serde_json::json!([
         { "_id": "acct-30", "name": "MergeCo", "status": "active" },
@@ -404,15 +290,6 @@ fn patch_data_inserts_new_records() {
     let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
     assert_eq!(result["inserted"], 1);
     assert_eq!(result["updated"], 0);
-
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/query")
-        .body(Vec::new())
-        .unwrap();
-    let resp = handler.handle(req);
-    let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(result["total"], 6);
 }
 
 // ── DELETE /data ────────────────────────────────────────────────
@@ -421,7 +298,7 @@ fn patch_data_inserts_new_records() {
 fn delete_data_removes_matching_records() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let body = serde_json::json!({
         "filter": {
@@ -445,7 +322,7 @@ fn delete_data_removes_matching_records() {
     let resp = handler.handle(req);
     assert_eq!(resp.status(), StatusCode::OK);
     let result: serde_json::Value = serde_json::from_slice(resp.body()).unwrap();
-    assert_eq!(result["deleted"], 1); // Globex
+    assert_eq!(result["deleted"], 1);
 
     // Verify total is now 4
     let req = Request::builder()
@@ -464,7 +341,7 @@ fn delete_data_removes_matching_records() {
 fn post_data_bad_body_returns_400() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::POST)
@@ -480,7 +357,7 @@ fn post_data_bad_body_returns_400() {
 fn delete_data_bad_body_returns_400() {
     let addr = start_server();
     seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::DELETE)
@@ -497,7 +374,7 @@ fn delete_data_bad_body_returns_400() {
 #[test]
 fn unknown_route_returns_404() {
     let addr = start_server();
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::GET)
@@ -512,7 +389,7 @@ fn unknown_route_returns_404() {
 #[test]
 fn wrong_method_returns_404() {
     let addr = start_server();
-    let handler = build_handler(&addr, active_config());
+    let handler = build_handler(&addr);
 
     let req = Request::builder()
         .method(Method::DELETE)
@@ -522,24 +399,4 @@ fn wrong_method_returns_404() {
 
     let resp = handler.handle(req);
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-// ── Metadata ────────────────────────────────────────────────────
-
-#[test]
-fn metadata_headers_passed_through() {
-    let addr = start_server();
-    seed_data(&addr);
-    let handler = build_handler(&addr, all_config());
-
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/query")
-        .header("x-meta-tenant", "acme")
-        .header("x-meta-region", "us-east")
-        .body(Vec::new())
-        .unwrap();
-
-    let resp = handler.handle(req);
-    assert_eq!(resp.status(), StatusCode::OK);
 }

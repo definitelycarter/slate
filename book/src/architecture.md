@@ -2,29 +2,23 @@
 
 ## Overview
 
-A three-tiered system with a dynamic storage engine, a database layer with query execution, a TCP interface, and native + web frontends sharing a common WASM engine.
-
-```
-rust core (lib crate)
-  └── wasm-bindgen → WASM module
-        ├── SwiftUI app (embedded WASM runtime)
-        ├── Web app (browser WASM runtime)
-        └── TCP server (cloud deployment, native Rust)
-```
+A layered system with a dynamic storage engine, a database layer with query execution, a TCP interface, and an HTTP layer for collection access.
 
 ## Crate Structure
 
 ```
 slate/
-  ├── slate-store          → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
-  ├── slate-query          → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  ├── slate-db             → Database, Catalog, query execution, depends on slate-store + slate-query
-  ├── slate-server         → TCP server, MessagePack wire protocol, thread-per-connection
-  ├── slate-client         → TCP client, connection pool (crossbeam channel)
-  ├── slate-lists          → List service, config types, HTTP handler, loader trait
-  ├── slate-lists-knative  → Knative adapter for slate-lists
-  ├── slate-bench          → DB-level benchmark suite (embedded + TCP, both backends)
-  └── slate-store-bench    → Store-level stress test (500k records, race conditions, data integrity)
+  ├── slate-store            → Store/Transaction traits, RocksDB + MemoryStore impls (feature-gated)
+  ├── slate-query            → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
+  ├── slate-db               → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-server           → TCP server, MessagePack wire protocol, thread-per-connection
+  ├── slate-client           → TCP client, connection pool (crossbeam channel)
+  ├── slate-server-init      → CLI tool to initialize collections on a running server
+  ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
+  ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
+  ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
+  ├── slate-bench            → DB-level benchmark suite (embedded + TCP, both backends)
+  └── slate-store-bench      → Store-level stress test (500k records, race conditions, data integrity)
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
@@ -408,72 +402,28 @@ client.find("users", &query)?;
 
 Internally, `PooledClient` wraps an `Option<Client>` and implements `Deref`/`DerefMut` for transparent access. On `Drop`, the client is returned to the channel. The `Option` + `take()` + `expect("BUG: ...")` pattern (borrowed from sqlx) handles the provably-unreachable None case.
 
-## Tier 4: Lists Layer (`slate-lists`)
+## HTTP Layer (`slate-collection` + `slate-collection-http`)
 
 ### Overview
 
-Lists are saved view configurations that define how data is presented. A list has a title, a target collection, default filters, and column definitions. The lists layer is framework-agnostic — it uses raw `http::Request`/`http::Response` from the `http` crate, with no dependency on axum, lambda_http, or any framework.
+`slate-collection` provides a framework-agnostic HTTP handler (`CollectionHttp`) for CRUD operations on a single collection. It uses raw `http::Request`/`http::Response` from the `http` crate, with no dependency on any web framework. `slate-collection-http` wraps it in a standalone hyper-based HTTP server.
 
-### List Config
-
-List configurations come from external sources (Kubernetes CRDs, AWS CDK, config files) and are injected at startup. The HTTP layer treats them as read-only.
+### CollectionHttp
 
 ```rust
-pub struct ListConfig {
-    pub id: String,
-    pub title: String,
-    pub collection: String,
-    pub indexes: Vec<String>,
-    pub filters: Option<FilterGroup>,
-    pub columns: Vec<Column>,
-}
-
-pub struct Column {
-    pub field: String,       // dot-notation path (e.g. "address.city")
-    pub header: String,      // display label
-    pub width: u32,          // pixel width
-    pub pinned: bool,        // sticky column
-}
-```
-
-`ListConfig` can produce a `CollectionConfig` via `collection_config()` for collection setup.
-
-### ListService
-
-The core service handles filter merging and query execution over TCP.
-
-```rust
-pub struct ListService {
+pub struct CollectionHttp {
+    collection: String,
     pool: ClientPool,
 }
 ```
 
-**`get_list_data(config, key, request, metadata)`:**
-
-1. Merge list default filters with user-provided filters (AND them together).
-2. Build projection from the list's column `field` values — only fetch fields the view needs.
-3. Execute the query with filters, sort, skip/take, and projection.
-4. Return `ListResponse { records, total }`.
-
-Data ingestion is push-based — external pipelines POST/PUT/PATCH data to the HTTP write endpoints. Slate is a store and query engine, not a data fetcher.
-
-### HTTP Handler
-
-`ListHttp` holds a single `ListConfig` and a `ListService`. One service instance per list.
-
-```rust
-pub struct ListHttp {
-    config: ListConfig,
-    service: ListService,
-}
-```
+The handler is configured with a collection name and a TCP client pool. All requests are proxied to the slate-server via the pool.
 
 **Endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/config` | Return this service's list config as JSON |
-| POST | `/query` | Execute list query, return matching records |
+| POST | `/query` | Execute query, return matching records |
 | POST | `/query/distinct` | Execute distinct query on a field |
 | POST | `/data` | Insert new records |
 | PUT | `/data` | Upsert records (insert or replace) |
@@ -481,86 +431,8 @@ pub struct ListHttp {
 | DELETE | `/data` | Delete records matching a filter |
 
 **Request context:**
-- Request body — `ListRequest` JSON (filters, sort, skip, take) for `/query`. Empty body uses defaults.
+- Request body — `QueryRequest` JSON (filters, sort, skip, take, columns) for `/query`. Empty body returns all records.
 - Request body — `Vec<bson::Document>` (JSON array) for POST/PUT/PATCH `/data`.
 - Request body — `{ "filter": {...} }` for DELETE `/data`.
 
-The `handle` method takes `http::Request<Vec<u8>>` and returns `http::Response<Vec<u8>>`. This is the boundary that platform adapters call into.
-
-## Deployment Architecture
-
-### One List, One Service
-
-Each list is deployed as its own isolated service instance. The list config is injected via environment/config at startup. Routing to the correct service is handled at the infrastructure layer, not in application code.
-
-```
-                                    ┌──────────────────────┐
-                                    │  List Service A      │
-  ┌────────────┐                    │  (Active Accounts)   │
-  │            │  /lists/active ──► │  ListHttp + DB + TCP │
-  │  Gateway / │                    └──────────────────────┘
-  │  Router    │                    ┌──────────────────────┐
-  │            │  /lists/snoozed ─► │  List Service B      │
-  │            │                    │  (Snoozed Accounts)  │
-  └────────────┘                    │  ListHttp + DB + TCP │
-                                    └──────────────────────┘
-```
-
-### Kubernetes / Knative
-
-- **List CRD** — defines a list config (title, collection, filters, columns)
-- **Operator** — watches List CRDs, creates a Knative Service per list
-- **Knative Serving** — manages the service lifecycle, scale-to-zero when idle
-- **Gateway API / Kourier** — routes `/lists/{id}/*` to the correct Knative Service
-- **Config injection** — operator renders the ListConfig as a ConfigMap or env var, mounted into the pod
-
-Each service runs its own in-memory DB (MemoryStore), TCP server, and ListService. Data is ephemeral — lazily loaded from upstream via the loader on first request. No PVCs needed.
-
-### AWS
-
-- **Lambda** — one function per list, wraps `ListHttp` with `lambda_http`
-- **API Gateway** — routes `/lists/{id}/*` to the correct Lambda function
-- **CDK / CloudFormation** — defines list configs, provisions Lambda functions and API Gateway routes
-- **Config injection** — list config passed as Lambda environment variable
-
-Same `ListHttp` handler, different adapter. The Lambda binary is a thin wrapper:
-
-```rust
-// Pseudocode
-fn main() {
-    let config: ListConfig = from_env("LIST_CONFIG");
-    let service = ListService::new(pool, loader);
-    let handler = ListHttp::new(config, service);
-    lambda_http::run(|req| handler.handle(req));
-}
-```
-
-### Why One-Per-Service?
-
-- **Independent scaling** — hot lists scale up, cold lists scale to zero
-- **Simple config** — one env var per service, no routing logic in app code
-- **Isolation** — a misbehaving list doesn't affect others
-- **Matches serverless** — Lambda and Knative both model this naturally
-
-## Tier 5: Frontend
-
-### Shared WASM Engine
-
-The Rust core compiles to a WASM module via `wasm-bindgen`. Both frontends consume the same WASM engine, guaranteeing behavioral parity.
-
-### SwiftUI (macOS)
-
-- Native macOS application using SwiftUI.
-- Embeds the WASM module via an in-process WASM runtime (e.g., WasmKit, Wasmtime).
-- Native look and feel, leveraging SwiftUI's `Table` and list components.
-
-### Web
-
-- Browser-based frontend.
-- Loads the WASM module via the browser's native WASM runtime.
-- JS/TS UI layer on top (e.g., ag-grid for table rendering).
-
-### Cloud API
-
-- The TCP server can also be deployed as a cloud service.
-- Runs native Rust (no WASM overhead on the server side).
+The `handle` method takes `http::Request<Vec<u8>>` and returns `http::Response<Vec<u8>>`.
