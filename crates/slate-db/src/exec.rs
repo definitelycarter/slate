@@ -343,6 +343,16 @@ fn raw_matches_node(raw: &RawDocument, id: &str, node: &FilterNode) -> Result<bo
     }
 }
 
+/// Zero-allocation case-insensitive substring search (ASCII only).
+fn ascii_icontains(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bool, DbError> {
     // _id is stored externally, not in raw bytes
     if filter.field == "_id" {
@@ -382,20 +392,21 @@ fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bo
         },
         Operator::IContains => match (field_value, &filter.value) {
             (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
-                Ok(haystack.to_lowercase().contains(&needle.to_lowercase()))
+                Ok(ascii_icontains(haystack, needle))
             }
             _ => Ok(false),
         },
         Operator::IStartsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
-                Ok(haystack.to_lowercase().starts_with(&needle.to_lowercase()))
-            }
+            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => Ok(haystack.len()
+                >= needle.len()
+                && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())),
             _ => Ok(false),
         },
         Operator::IEndsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
-                Ok(haystack.to_lowercase().ends_with(&needle.to_lowercase()))
-            }
+            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => Ok(haystack.len()
+                >= needle.len()
+                && haystack.as_bytes()[haystack.len() - needle.len()..]
+                    .eq_ignore_ascii_case(needle.as_bytes())),
             _ => Ok(false),
         },
         Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
