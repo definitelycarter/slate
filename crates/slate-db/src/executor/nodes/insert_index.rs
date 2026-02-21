@@ -17,13 +17,13 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     if !paths.iter().any(|p| p == "ttl") {
         paths.push("ttl".into());
     }
+    let tree = FieldTree::from_paths(&paths);
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         if let Some(ref val) = opt_val {
             if let Some(raw) = val.as_document() {
                 if let Some(id_str) = exec::raw_extract_id(raw)? {
-                    let tree = FieldTree::from_paths(&paths);
                     let mut err: Option<DbError> = None;
                     walk(raw, &tree, |path, value| {
                         if err.is_some() {

@@ -418,7 +418,7 @@ pub(crate) fn raw_refs_eq(a: &RawBsonRef, b: &RawBsonRef) -> bool {
 }
 
 /// Merge update fields into an existing raw document, producing a new raw document.
-/// Returns `(merged_doc, changed)` — `changed` is false if the update is a no-op.
+/// Returns `None` if the update is a no-op (all values unchanged).
 ///
 /// Fields in `update` overwrite corresponding fields in `old_raw`.
 /// Fields in `old_raw` not present in `update` are preserved as raw bytes.
@@ -426,7 +426,7 @@ pub(crate) fn raw_refs_eq(a: &RawBsonRef, b: &RawBsonRef) -> bool {
 pub(crate) fn raw_merge_doc(
     old_raw: &RawDocument,
     update: &bson::Document,
-) -> Result<(bson::RawDocumentBuf, bool), DbError> {
+) -> Result<Option<bson::RawDocumentBuf>, DbError> {
     let update_keys: std::collections::HashSet<&str> = update
         .keys()
         .filter(|k| *k != "_id")
@@ -454,7 +454,7 @@ pub(crate) fn raw_merge_doc(
     }
 
     if !changed {
-        return Ok((old_raw.to_raw_document_buf(), false));
+        return Ok(None);
     }
 
     // Build merged document
@@ -478,7 +478,7 @@ pub(crate) fn raw_merge_doc(
         merged.append(ukey, raw_val);
     }
 
-    Ok((merged, true))
+    Ok(Some(merged))
 }
 
 pub(crate) fn raw_compare_values(

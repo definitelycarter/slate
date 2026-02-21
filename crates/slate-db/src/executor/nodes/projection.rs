@@ -35,7 +35,7 @@ pub(crate) fn execute<'a>(
 
 fn project_document(
     src: &RawDocument,
-    tree: &HashMap<&str, FieldTree>,
+    tree: &HashMap<String, FieldTree>,
     dest: &mut RawDocumentBuf,
 ) -> Result<(), DbError> {
     for result in src.iter() {

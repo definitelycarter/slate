@@ -279,15 +279,39 @@ Each node consumes the extracted fields differently:
 ### Problem
 
 `upsert_many` and `merge_many` do per-document conditional logic (check if exists, then
-branch to insert or update) with manual store operations. This is the hardest operation
-to route through the planner because of the per-document branching.
+branch to insert or update) with manual store operations. This duplicates executor logic
+in `database.rs` with different (worse) performance characteristics.
+
+Four functions in `database.rs` bypass the executor and do manual index work:
+
+- **`delete_raw_index_entries()`** — deletes index keys during updates/deletes by calling
+  `exec::raw_get_path_values()` per field per document
+- **`purge_expired_inner()`** — TTL purge, scans all indexes per expired doc via
+  `exec::raw_get_path_values()`
+- **`raw_merge_update()` (old values)** — collects old index values for diff via
+  `exec::raw_get_path_values()`
+- **`raw_merge_update()` (new values)** — collects new index values for diff via
+  `exec::raw_get_path_values()`
+
+These calls use `raw_get_path_values()` which allocates a `String` on every invocation to
+strip `[]` array markers — even for simple paths like `"status"` that have no `[]`. The
+executor pipeline uses `FieldTree::walk()` instead, which builds the tree once and walks
+each document with zero per-document allocations.
+
+Routing these operations through the planner eliminates the parallel implementation
+entirely. The executor's `DeleteIndex` / `InsertIndex` nodes handle index maintenance
+via `FieldTree::walk()`, and the streaming pipeline gives `O(1)` memory.
 
 ### Approach
 
-Options to explore:
-- Keep the per-document conditional logic in `database.rs`, calling `plan()` for each branch
-- Introduce a `PlanNode::Upsert` that handles the exists-check + branch internally
-- Defer until inserts and range scans are proven stable
+- **TTL purge** becomes `Statement::Delete { filter: ttl < now }` once index range scans
+  are implemented (see above). The planner routes it through
+  `Delete → DeleteIndex → ReadRecord → IndexScan(ttl, range)`.
+- **merge_many / upsert_many**: introduce a `PlanNode::Merge` node that applies the
+  merge and returns the merged doc if changed, `None` if unchanged. The pipeline becomes
+  `InsertIndex → Merge → DeleteIndex → ReadRecord → source`. Per-document branching
+  (insert vs update) can stay in `database.rs`, calling `plan()` for each branch.
+- Defer until inserts and range scans are proven stable.
 
 ---
 

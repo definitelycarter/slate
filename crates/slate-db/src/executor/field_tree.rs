@@ -11,22 +11,21 @@ use bson::raw::{RawBsonRef, RawDocument};
 /// ```
 ///
 /// Built once, reused across all documents. No per-document allocations.
-/// Borrows from the input path strings — zero-copy construction.
 ///
 /// Each Leaf stores the original full dotted path so that consumers
 /// (filter, sort, index ops) can use it without reconstructing the string.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum FieldTree<'a> {
+pub(crate) enum FieldTree {
     /// Take the entire field value. Carries the original full path.
-    Leaf(&'a str),
+    Leaf(String),
     /// Recurse into sub-fields.
-    Branch(HashMap<&'a str, FieldTree<'a>>),
+    Branch(HashMap<String, FieldTree>),
 }
 
-impl<'a> FieldTree<'a> {
+impl FieldTree {
     /// Build a tree from a list of dot-notation paths.
-    pub(crate) fn from_paths(paths: &'a [String]) -> HashMap<&'a str, FieldTree<'a>> {
-        let mut root: HashMap<&'a str, FieldTree<'a>> = HashMap::new();
+    pub(crate) fn from_paths(paths: &[String]) -> HashMap<String, FieldTree> {
+        let mut root: HashMap<String, FieldTree> = HashMap::new();
         for path in paths {
             insert_path(&mut root, path, path);
         }
@@ -40,7 +39,7 @@ impl<'a> FieldTree<'a> {
 /// once per element. If a Branch field is an array of documents, each
 /// document element is recursed into. Use this for Distinct, index ops,
 /// and anywhere you need individual scalar values.
-pub(crate) fn walk<'a, F>(doc: &'a RawDocument, tree: &HashMap<&str, FieldTree>, mut visitor: F)
+pub(crate) fn walk<'a, F>(doc: &'a RawDocument, tree: &HashMap<String, FieldTree>, mut visitor: F)
 where
     F: FnMut(&str, RawBsonRef<'a>),
 {
@@ -49,7 +48,7 @@ where
 
 fn walk_inner<'a, F>(
     doc: &'a RawDocument,
-    tree: &HashMap<&str, FieldTree>,
+    tree: &HashMap<String, FieldTree>,
     visitor: &mut F,
     expand_leaf_arrays: bool,
 ) where
@@ -93,29 +92,28 @@ fn walk_inner<'a, F>(
     }
 }
 
-fn insert_path<'a>(
-    map: &mut HashMap<&'a str, FieldTree<'a>>,
-    full_path: &'a str,
-    remaining: &'a str,
-) {
+fn insert_path(map: &mut HashMap<String, FieldTree>, full_path: &str, remaining: &str) {
     match remaining.split_once('.') {
         None => {
             // Leaf — takes the whole field. Overrides any existing Branch
             // (if someone asks for both "foo" and "foo.bar", "foo" wins).
-            map.insert(remaining, FieldTree::Leaf(full_path));
+            map.insert(
+                remaining.to_string(),
+                FieldTree::Leaf(full_path.to_string()),
+            );
         }
         Some((top, rest)) => {
             if rest == "[]" {
                 // `tags.[]` — the field is an array; treat as Leaf.
                 // The walker expands arrays at Leaf level.
-                map.insert(top, FieldTree::Leaf(full_path));
+                map.insert(top.to_string(), FieldTree::Leaf(full_path.to_string()));
             } else {
                 // Strip `[].` — e.g. `tags.[].name` becomes recursion into `name`
                 // under the `tags` branch. The walker handles Branch + Array
                 // by iterating array elements and recursing into documents.
                 let rest = rest.strip_prefix("[].").unwrap_or(rest);
                 let entry = map
-                    .entry(top)
+                    .entry(top.to_string())
                     .or_insert_with(|| FieldTree::Branch(HashMap::new()));
                 if let FieldTree::Branch(children) = entry {
                     insert_path(children, full_path, rest);
@@ -135,8 +133,8 @@ mod tests {
     fn flat_fields() {
         let paths = vec!["name".into(), "status".into()];
         let tree = FieldTree::from_paths(&paths);
-        assert_eq!(tree.get("name"), Some(&FieldTree::Leaf("name")));
-        assert_eq!(tree.get("status"), Some(&FieldTree::Leaf("status")));
+        assert_eq!(tree.get("name"), Some(&FieldTree::Leaf("name".into())));
+        assert_eq!(tree.get("status"), Some(&FieldTree::Leaf("status".into())));
         assert_eq!(tree.get("missing"), None);
     }
 
@@ -147,8 +145,8 @@ mod tests {
         match tree.get("foo") {
             Some(FieldTree::Branch(foo)) => match foo.get("bar") {
                 Some(FieldTree::Branch(bar)) => {
-                    assert_eq!(bar.get("baz"), Some(&FieldTree::Leaf("foo.bar.baz")));
-                    assert_eq!(bar.get("bux"), Some(&FieldTree::Leaf("foo.bar.bux")));
+                    assert_eq!(bar.get("baz"), Some(&FieldTree::Leaf("foo.bar.baz".into())));
+                    assert_eq!(bar.get("bux"), Some(&FieldTree::Leaf("foo.bar.bux".into())));
                 }
                 other => panic!("expected Branch for bar, got {:?}", other),
             },
@@ -160,25 +158,31 @@ mod tests {
     fn leaf_overrides_branch() {
         let paths = vec!["foo.bar".into(), "foo".into()];
         let tree = FieldTree::from_paths(&paths);
-        assert_eq!(tree.get("foo"), Some(&FieldTree::Leaf("foo")));
+        assert_eq!(tree.get("foo"), Some(&FieldTree::Leaf("foo".into())));
     }
 
     #[test]
     fn branch_does_not_override_leaf() {
         let paths = vec!["foo".into(), "foo.bar".into()];
         let tree = FieldTree::from_paths(&paths);
-        assert_eq!(tree.get("foo"), Some(&FieldTree::Leaf("foo")));
+        assert_eq!(tree.get("foo"), Some(&FieldTree::Leaf("foo".into())));
     }
 
     #[test]
     fn mixed_flat_and_nested() {
         let paths = vec!["name".into(), "address.city".into(), "address.zip".into()];
         let tree = FieldTree::from_paths(&paths);
-        assert_eq!(tree.get("name"), Some(&FieldTree::Leaf("name")));
+        assert_eq!(tree.get("name"), Some(&FieldTree::Leaf("name".into())));
         match tree.get("address") {
             Some(FieldTree::Branch(addr)) => {
-                assert_eq!(addr.get("city"), Some(&FieldTree::Leaf("address.city")));
-                assert_eq!(addr.get("zip"), Some(&FieldTree::Leaf("address.zip")));
+                assert_eq!(
+                    addr.get("city"),
+                    Some(&FieldTree::Leaf("address.city".into()))
+                );
+                assert_eq!(
+                    addr.get("zip"),
+                    Some(&FieldTree::Leaf("address.zip".into()))
+                );
             }
             other => panic!("expected Branch for address, got {:?}", other),
         }

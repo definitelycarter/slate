@@ -27,13 +27,13 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             None => return Ok(None),
         };
 
-        let (merged, changed) = exec::raw_merge_doc(old_raw, update)?;
-        if changed {
-            let key = encoding::record_key(&id_str);
-            txn.put(cf, &key, merged.as_bytes())?;
-            Ok(Some(RawValue::Owned(RawBson::Document(merged))))
-        } else {
-            Ok(None)
+        match exec::raw_merge_doc(old_raw, update)? {
+            Some(merged) => {
+                let key = encoding::record_key(&id_str);
+                txn.put(cf, &key, merged.as_bytes())?;
+                Ok(Some(RawValue::Owned(RawBson::Document(merged))))
+            }
+            None => Ok(None),
         }
     })))
 }
