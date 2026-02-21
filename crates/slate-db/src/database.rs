@@ -254,10 +254,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         query: &Query,
     ) -> Result<Vec<RawDocumentBuf>, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan(collection, &indexed_fields, query);
+        let stmt = planner::Statement::Find(query.clone());
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => iter
                 .map(|r| {
@@ -319,11 +317,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         update: bson::Document,
         upsert: bool,
     ) -> Result<UpdateResult, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan =
-            planner::plan_update(collection, &indexed_fields, filter, update.clone(), Some(1));
+        let stmt = planner::Statement::Update {
+            filter: filter.clone(),
+            update: update.clone(),
+            limit: Some(1),
+        };
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -352,10 +351,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         filter: &FilterGroup,
         update: bson::Document,
     ) -> Result<UpdateResult, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan_update(collection, &indexed_fields, filter, update, None);
+        let stmt = planner::Statement::Update {
+            filter: filter.clone(),
+            update,
+            limit: None,
+        };
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -374,10 +375,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         filter: &FilterGroup,
         replacement: bson::Document,
     ) -> Result<UpdateResult, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan_replace(collection, &indexed_fields, filter, replacement);
+        let stmt = planner::Statement::Replace {
+            filter: filter.clone(),
+            replacement,
+        };
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -397,10 +399,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         filter: &FilterGroup,
     ) -> Result<DeleteResult, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan_delete(collection, &indexed_fields, filter, Some(1));
+        let stmt = planner::Statement::Delete {
+            filter: filter.clone(),
+            limit: Some(1),
+        };
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
@@ -414,10 +417,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         filter: &FilterGroup,
     ) -> Result<DeleteResult, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan_delete(collection, &indexed_fields, filter, None);
+        let stmt = planner::Statement::Delete {
+            filter: filter.clone(),
+            limit: None,
+        };
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
@@ -497,17 +501,14 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         filter: Option<&FilterGroup>,
     ) -> Result<u64, DbError> {
-        let query = Query {
+        let stmt = planner::Statement::Find(Query {
             filter: filter.cloned(),
             sort: vec![],
             skip: None,
             take: None,
             columns: None,
-        };
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan(collection, &indexed_fields, &query);
+        });
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => {
                 let mut n = 0u64;
@@ -527,10 +528,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         query: &DistinctQuery,
     ) -> Result<bson::RawBson, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan_distinct(collection, &indexed_fields, query);
+        let stmt = planner::Statement::Distinct(query.clone());
+        let (plan, cf) = self.plan_statement(collection, &stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
@@ -653,6 +652,19 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     }
 
     // ── Private helpers ─────────────────────────────────────────
+
+    /// Resolve catalog metadata and plan a statement through the planner.
+    fn plan_statement(
+        &mut self,
+        collection: &str,
+        statement: &planner::Statement,
+    ) -> Result<(planner::PlanNode, <S::Txn<'db> as Transaction>::Cf), DbError> {
+        let cf = self.collection_cf(collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let plan = planner::plan(collection, &indexed_fields, statement);
+        Ok((plan, cf))
+    }
 
     /// Resolve a collection CF, returning CollectionNotFound if it doesn't exist.
     fn collection_cf(
