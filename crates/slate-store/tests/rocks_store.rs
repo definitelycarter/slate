@@ -13,7 +13,8 @@ const CF: &str = "test";
 fn put_and_get() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"value1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -35,11 +36,13 @@ fn get_missing_key_returns_none() {
 fn put_and_delete() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"value1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.delete(CF, b"key1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.delete(&cf, b"key1").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -52,8 +55,9 @@ fn put_and_delete() {
 fn put_batch() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
     txn.put_batch(
-        CF,
+        &cf,
         &[
             (b"accounts:1:email" as &[u8], b"a@test.com" as &[u8]),
             (b"accounts:1:name", b"Alice"),
@@ -83,10 +87,11 @@ fn put_batch() {
 fn scan_prefix_returns_matching_pairs() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
-    txn.put(CF, b"accounts:1:name", b"Alice").unwrap();
-    txn.put(CF, b"accounts:2:email", b"b@test.com").unwrap();
-    txn.put(CF, b"other:1:foo", b"bar").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
+    txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
+    txn.put(&cf, b"accounts:2:email", b"b@test.com").unwrap();
+    txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -107,7 +112,8 @@ fn scan_prefix_returns_matching_pairs() {
 fn scan_prefix_no_matches() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -124,11 +130,12 @@ fn scan_prefix_no_matches() {
 fn scan_prefix_broader() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
-    txn.put(CF, b"accounts:1:name", b"Alice").unwrap();
-    txn.put(CF, b"accounts:2:email", b"b@test.com").unwrap();
-    txn.put(CF, b"accounts:2:name", b"Bob").unwrap();
-    txn.put(CF, b"other:1:foo", b"bar").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
+    txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
+    txn.put(&cf, b"accounts:2:email", b"b@test.com").unwrap();
+    txn.put(&cf, b"accounts:2:name", b"Bob").unwrap();
+    txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -145,10 +152,11 @@ fn scan_prefix_broader() {
 fn scan_prefix_rev_returns_reverse_order() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
-    txn.put(CF, b"accounts:1:name", b"Alice").unwrap();
-    txn.put(CF, b"accounts:2:email", b"b@test.com").unwrap();
-    txn.put(CF, b"other:1:foo", b"bar").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
+    txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
+    txn.put(&cf, b"accounts:2:email", b"b@test.com").unwrap();
+    txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -170,7 +178,8 @@ fn scan_prefix_rev_returns_reverse_order() {
 fn scan_prefix_rev_no_matches() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"accounts:1:email", b"a@test.com").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -187,7 +196,8 @@ fn scan_prefix_rev_no_matches() {
 fn read_only_rejects_put() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(true).unwrap();
-    let result = txn.put(CF, b"key1", b"value1");
+    let cf = txn.cf(CF).unwrap();
+    let result = txn.put(&cf, b"key1", b"value1");
     assert!(result.is_err());
 }
 
@@ -195,7 +205,8 @@ fn read_only_rejects_put() {
 fn read_only_rejects_put_batch() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(true).unwrap();
-    let result = txn.put_batch(CF, &[(b"key1" as &[u8], b"value1" as &[u8])]);
+    let cf = txn.cf(CF).unwrap();
+    let result = txn.put_batch(&cf, &[(b"key1" as &[u8], b"value1" as &[u8])]);
     assert!(result.is_err());
 }
 
@@ -203,7 +214,8 @@ fn read_only_rejects_put_batch() {
 fn read_only_rejects_delete() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(true).unwrap();
-    let result = txn.delete(CF, b"key1");
+    let cf = txn.cf(CF).unwrap();
+    let result = txn.delete(&cf, b"key1");
     assert!(result.is_err());
 }
 
@@ -211,11 +223,13 @@ fn read_only_rejects_delete() {
 fn overwrite_key() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"old").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"old").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"new").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"new").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -228,7 +242,8 @@ fn overwrite_key() {
 fn rollback_discards_writes() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"value1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.rollback().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -241,12 +256,14 @@ fn rollback_discards_writes() {
 fn rollback_does_not_affect_committed_data() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key1", b"value1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"key2", b"value2").unwrap();
-    txn.delete(CF, b"key1").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key2", b"value2").unwrap();
+    txn.delete(&cf, b"key1").unwrap();
     txn.rollback().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -259,7 +276,8 @@ fn rollback_does_not_affect_committed_data() {
 fn empty_value() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"index:key", b"").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"index:key", b"").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -277,7 +295,8 @@ fn create_and_use_cf() {
     store.create_cf("accounts").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("accounts", b"key1", b"value1").unwrap();
+    let cf = txn.cf("accounts").unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -294,8 +313,10 @@ fn cf_isolation() {
     store.create_cf("cf_b").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("cf_a", b"key1", b"value_a").unwrap();
-    txn.put("cf_b", b"key1", b"value_b").unwrap();
+    let cf_a = txn.cf("cf_a").unwrap();
+    let cf_b = txn.cf("cf_b").unwrap();
+    txn.put(&cf_a, b"key1", b"value_a").unwrap();
+    txn.put(&cf_b, b"key1", b"value_b").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();
@@ -322,7 +343,8 @@ fn drop_cf_removes_data() {
     store.create_cf("temp").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("temp", b"key1", b"value1").unwrap();
+    let cf = txn.cf("temp").unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     store.drop_cf("temp").unwrap();
@@ -339,11 +361,12 @@ fn delete_range_clears_matching_keys() {
     store.create_cf("data").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("data", b"a", b"1").unwrap();
-    txn.put("data", b"b", b"2").unwrap();
-    txn.put("data", b"c", b"3").unwrap();
-    txn.put("data", b"d", b"4").unwrap();
-    txn.put("data", b"e", b"5").unwrap();
+    let cf = txn.cf("data").unwrap();
+    txn.put(&cf, b"a", b"1").unwrap();
+    txn.put(&cf, b"b", b"2").unwrap();
+    txn.put(&cf, b"c", b"3").unwrap();
+    txn.put(&cf, b"d", b"4").unwrap();
+    txn.put(&cf, b"e", b"5").unwrap();
     txn.commit().unwrap();
 
     // Delete range [b, d) — should remove b and c
@@ -367,9 +390,10 @@ fn delete_range_unbounded_clears_all() {
     store.create_cf("cache").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("cache", b"x", b"1").unwrap();
-    txn.put("cache", b"y", b"2").unwrap();
-    txn.put("cache", b"z", b"3").unwrap();
+    let cf = txn.cf("cache").unwrap();
+    txn.put(&cf, b"x", b"1").unwrap();
+    txn.put(&cf, b"y", b"2").unwrap();
+    txn.put(&cf, b"z", b"3").unwrap();
     txn.commit().unwrap();
 
     store.delete_range("cache", ..).unwrap();
@@ -388,9 +412,10 @@ fn delete_range_inclusive_end() {
     store.create_cf("data").unwrap();
 
     let mut txn = store.begin(false).unwrap();
-    txn.put("data", b"a", b"1").unwrap();
-    txn.put("data", b"b", b"2").unwrap();
-    txn.put("data", b"c", b"3").unwrap();
+    let cf = txn.cf("data").unwrap();
+    txn.put(&cf, b"a", b"1").unwrap();
+    txn.put(&cf, b"b", b"2").unwrap();
+    txn.put(&cf, b"c", b"3").unwrap();
     txn.commit().unwrap();
 
     // Delete range [a, b] inclusive — should remove a and b
@@ -413,7 +438,8 @@ fn cfs_persist_across_reopen() {
         let store = RocksStore::open(dir.path()).unwrap();
         store.create_cf("persistent").unwrap();
         let mut txn = store.begin(false).unwrap();
-        txn.put("persistent", b"key", b"value").unwrap();
+        let cf = txn.cf("persistent").unwrap();
+        txn.put(&cf, b"key", b"value").unwrap();
         txn.commit().unwrap();
     }
 
@@ -429,9 +455,10 @@ fn cfs_persist_across_reopen() {
 fn multi_get_returns_matching_values() {
     let (store, _dir) = temp_store();
     let mut txn = store.begin(false).unwrap();
-    txn.put(CF, b"k1", b"v1").unwrap();
-    txn.put(CF, b"k2", b"v2").unwrap();
-    txn.put(CF, b"k3", b"v3").unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"k1", b"v1").unwrap();
+    txn.put(&cf, b"k2", b"v2").unwrap();
+    txn.put(&cf, b"k3", b"v3").unwrap();
     txn.commit().unwrap();
 
     let mut txn = store.begin(true).unwrap();

@@ -57,13 +57,14 @@ pub trait Transaction {
         StoreError,
     >;
 
-    // Writes
-    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
-    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
-    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError>;
+    // Writes — &self + &Self::Cf, allowing interleaved reads/writes.
+    fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
+    fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
+    fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError>;
 
     // Schema
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError>;
+    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError>;
 
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;

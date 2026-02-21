@@ -194,10 +194,9 @@ impl<'db> Transaction for RedbTransaction<'db> {
         ))
     }
 
-    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+    fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Write(txn) => {
                 let mut table = txn
@@ -213,10 +212,9 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+    fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Write(txn) => {
                 let mut table = txn
@@ -234,10 +232,9 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError> {
+    fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf = cf.to_string();
-        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Write(txn) => {
                 let mut table = txn
@@ -260,6 +257,21 @@ impl<'db> Transaction for RedbTransaction<'db> {
         match &self.inner {
             Inner::Write(txn) => {
                 txn.open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                Ok(())
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+            _ => unreachable!(),
+        }
+    }
+
+    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+        self.check_writable()?;
+        let name = name.to_string();
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&name);
+        match &self.inner {
+            Inner::Write(txn) => {
+                txn.delete_table(def)
                     .map_err(|e| StoreError::Storage(e.to_string()))?;
                 Ok(())
             }

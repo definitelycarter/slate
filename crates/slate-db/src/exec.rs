@@ -492,6 +492,70 @@ pub(crate) fn raw_refs_eq(a: &RawBsonRef, b: &RawBsonRef) -> bool {
     }
 }
 
+/// Merge update fields into an existing raw document, producing a new raw document.
+/// Returns `(merged_doc, changed)` — `changed` is false if the update is a no-op.
+///
+/// Fields in `update` overwrite corresponding fields in `old_raw`.
+/// Fields in `old_raw` not present in `update` are preserved as raw bytes.
+/// `_id` fields in the update are ignored (ID is stored externally).
+pub(crate) fn raw_merge_doc(
+    old_raw: &RawDocument,
+    update: &bson::Document,
+) -> Result<(bson::RawDocumentBuf, bool), DbError> {
+    let update_keys: std::collections::HashSet<&str> = update
+        .keys()
+        .filter(|k| *k != "_id")
+        .map(|k| k.as_str())
+        .collect();
+
+    // Check if anything actually changed
+    let mut changed = false;
+    for (ukey, uval) in update {
+        if ukey == "_id" {
+            continue;
+        }
+        match old_raw.get(ukey)? {
+            Some(old_val) => {
+                if !raw_values_eq(&old_val, uval) {
+                    changed = true;
+                    break;
+                }
+            }
+            None => {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if !changed {
+        return Ok((old_raw.to_raw_document_buf(), false));
+    }
+
+    // Build merged document
+    let mut merged = bson::RawDocumentBuf::new();
+
+    // Copy old fields not in the update
+    for result in old_raw.iter() {
+        let (field_key, field_val) = result?;
+        if !update_keys.contains(field_key) {
+            merged.append_ref(field_key, field_val);
+        }
+    }
+
+    // Append update fields
+    for (ukey, uval) in update {
+        if ukey == "_id" {
+            continue;
+        }
+        let raw_val = bson::RawBson::try_from(uval.clone())
+            .map_err(|e| DbError::Serialization(e.to_string()))?;
+        merged.append(ukey, raw_val);
+    }
+
+    Ok((merged, true))
+}
+
 fn raw_compare_values(
     field_value: Option<&RawBsonRef>,
     query_val: &Bson,

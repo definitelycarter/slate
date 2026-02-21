@@ -45,19 +45,9 @@ impl Catalog {
         if txn.get(&sys, &key)?.is_none() {
             txn.create_cf(&config.name)?;
             let value = bson::to_vec(config)?;
-            txn.put(SYS_CF, &key, &value)?;
+            txn.put(&sys, &key, &value)?;
         }
         Ok(())
-    }
-
-    /// Check if a collection exists.
-    pub fn collection_exists<T: Transaction>(
-        &self,
-        txn: &T,
-        sys: &T::Cf,
-        name: &str,
-    ) -> Result<bool, DbError> {
-        Ok(txn.get(sys, &col_key(name))?.is_some())
     }
 
     pub fn list_collections<T: Transaction>(
@@ -79,11 +69,12 @@ impl Catalog {
     }
 
     pub fn drop_collection<T: Transaction>(&self, txn: &mut T, name: &str) -> Result<(), DbError> {
+        let sys = txn.cf(SYS_CF)?;
+
         // Remove collection marker
-        txn.delete(SYS_CF, &col_key(name))?;
+        txn.delete(&sys, &col_key(name))?;
 
         // Remove all index metadata for this collection
-        let sys = txn.cf(SYS_CF)?;
         let prefix = idx_collection_prefix(name);
         let keys: Vec<Vec<u8>> = txn
             .scan_prefix(&sys, &prefix)?
@@ -91,7 +82,7 @@ impl Catalog {
             .collect::<Result<_, _>>()
             .map_err(DbError::Store)?;
         for key in keys {
-            txn.delete(SYS_CF, &key)?;
+            txn.delete(&sys, &key)?;
         }
 
         Ok(())
@@ -105,8 +96,9 @@ impl Catalog {
         collection: &str,
         field: &str,
     ) -> Result<(), DbError> {
+        let sys = txn.cf(SYS_CF)?;
         let key = idx_key(collection, field);
-        txn.put(SYS_CF, &key, &[])?;
+        txn.put(&sys, &key, &[])?;
         Ok(())
     }
 
@@ -116,8 +108,9 @@ impl Catalog {
         collection: &str,
         field: &str,
     ) -> Result<(), DbError> {
+        let sys = txn.cf(SYS_CF)?;
         let key = idx_key(collection, field);
-        txn.delete(SYS_CF, &key)?;
+        txn.delete(&sys, &key)?;
         Ok(())
     }
 

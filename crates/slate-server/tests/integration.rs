@@ -77,6 +77,7 @@ fn insert_and_find_one() {
 fn find_one_not_found() {
     let (addr, _dir) = start_server();
     let mut client = Client::connect(&addr).unwrap();
+    ensure_collection(&mut client, COLLECTION);
 
     let query = Query {
         filter: Some(FilterGroup {

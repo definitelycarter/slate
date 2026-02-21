@@ -113,7 +113,8 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
             .collect();
         let mut txn = store.begin(false).unwrap();
-        txn.put_batch(CF, &refs).unwrap();
+        let cf = txn.cf(CF).unwrap();
+        txn.put_batch(&cf, &refs).unwrap();
         txn.commit().unwrap();
     }
     let write_time = write_start.elapsed();
@@ -200,7 +201,8 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
             .collect();
         let mut txn = store.begin(false).unwrap();
-        txn.put_batch("stress", &refs).unwrap();
+        let cf = txn.cf("stress").unwrap();
+        txn.put_batch(&cf, &refs).unwrap();
         txn.commit().unwrap();
     }
 
@@ -273,7 +275,8 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
                     let value = make_value(id);
 
                     let mut txn = store.begin(false).unwrap();
-                    txn.put("stress", &key, &value).unwrap();
+                    let cf = txn.cf("stress").unwrap();
+                    txn.put(&cf, &key, &value).unwrap();
                     txn.commit().unwrap();
                     write_count.fetch_add(1, Ordering::Relaxed);
                 }
@@ -305,15 +308,17 @@ fn test_rollback_integrity<S: Store>(store: &S, name: &str) {
 
     // Write some baseline data
     let mut txn = store.begin(false).unwrap();
-    txn.put("rollback", b"key1", b"original").unwrap();
-    txn.put("rollback", b"key2", b"original").unwrap();
+    let cf = txn.cf("rollback").unwrap();
+    txn.put(&cf, b"key1", b"original").unwrap();
+    txn.put(&cf, b"key2", b"original").unwrap();
     txn.commit().unwrap();
 
     // Start a write transaction, modify data, then rollback
     let mut txn = store.begin(false).unwrap();
-    txn.put("rollback", b"key1", b"modified").unwrap();
-    txn.delete("rollback", b"key2").unwrap();
-    txn.put("rollback", b"key3", b"new").unwrap();
+    let cf = txn.cf("rollback").unwrap();
+    txn.put(&cf, b"key1", b"modified").unwrap();
+    txn.delete(&cf, b"key2").unwrap();
+    txn.put(&cf, b"key3", b"new").unwrap();
     txn.rollback().unwrap();
 
     // Verify nothing changed
@@ -341,7 +346,8 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
 
     // Write initial data
     let mut txn = store.begin(false).unwrap();
-    txn.put("isolation", b"key1", b"v1").unwrap();
+    let cf = txn.cf("isolation").unwrap();
+    txn.put(&cf, b"key1", b"v1").unwrap();
     txn.commit().unwrap();
 
     // Reader takes a snapshot
@@ -351,8 +357,9 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
 
     // Writer modifies data after reader started
     let mut writer = store.begin(false).unwrap();
-    writer.put("isolation", b"key1", b"v2").unwrap();
-    writer.put("isolation", b"key2", b"new").unwrap();
+    let wcf = writer.cf("isolation").unwrap();
+    writer.put(&wcf, b"key1", b"v2").unwrap();
+    writer.put(&wcf, b"key2", b"new").unwrap();
     writer.commit().unwrap();
 
     // Reader should still see old data (snapshot isolation)
@@ -387,7 +394,8 @@ fn test_delete_range_integrity<S: Store>(store: &S, name: &str) {
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let mut txn = store.begin(false).unwrap();
-    txn.put_batch("delrange", &refs).unwrap();
+    let cf = txn.cf("delrange").unwrap();
+    txn.put_batch(&cf, &refs).unwrap();
     txn.commit().unwrap();
 
     // Delete range [200, 800)

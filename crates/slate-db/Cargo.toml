@@ -3,6 +3,10 @@ name = "slate-db"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["rocksdb"]
+rocksdb = ["slate-store/rocksdb"]
+
 [dependencies]
 slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }

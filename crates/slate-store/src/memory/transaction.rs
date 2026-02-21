@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, MutexGuard};
 
@@ -6,6 +7,12 @@ use crate::error::StoreError;
 use crate::store::{Store, Transaction};
 
 use super::store::{ColumnFamily, MemoryStore};
+
+/// Pre-resolved column family handle for the memory backend.
+pub struct MemoryCf {
+    pub(crate) name: String,
+    pub(crate) data: Arc<ColumnFamily>,
+}
 
 /// Lazily-loaded snapshot of column families.
 struct Snapshot {
@@ -52,9 +59,9 @@ impl Snapshot {
 }
 
 pub struct MemoryTransaction<'a> {
-    snapshot: Option<Snapshot>,
+    snapshot: RefCell<Option<Snapshot>>,
     /// CFs that have been written to.
-    dirty: HashSet<String>,
+    dirty: RefCell<HashSet<String>>,
     store: &'a MemoryStore,
     read_only: bool,
     /// Write lock held for the duration of a write transaction.
@@ -64,8 +71,8 @@ pub struct MemoryTransaction<'a> {
 impl<'a> MemoryTransaction<'a> {
     pub(crate) fn new_read_only(store: &'a MemoryStore) -> Self {
         Self {
-            snapshot: Some(Snapshot::new()),
-            dirty: HashSet::new(),
+            snapshot: RefCell::new(Some(Snapshot::new())),
+            dirty: RefCell::new(HashSet::new()),
             store,
             read_only: true,
             _write_guard: None,
@@ -74,8 +81,8 @@ impl<'a> MemoryTransaction<'a> {
 
     pub(crate) fn new_writable(store: &'a MemoryStore, guard: MutexGuard<'a, ()>) -> Self {
         Self {
-            snapshot: Some(Snapshot::new()),
-            dirty: HashSet::new(),
+            snapshot: RefCell::new(Some(Snapshot::new())),
+            dirty: RefCell::new(HashSet::new()),
             store,
             read_only: false,
             _write_guard: Some(guard),
@@ -88,32 +95,27 @@ impl<'a> MemoryTransaction<'a> {
         }
         Ok(())
     }
-
-    /// Ensure a CF is loaded, then return a mutable reference to it (for writes).
-    fn ensure_cf_mut(&mut self, cf: &str) -> Result<&mut ColumnFamily, StoreError> {
-        let snap = self
-            .snapshot
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
-        snap.ensure(self.store, cf)?;
-        snap.get_cf_mut(cf)
-    }
 }
 
 impl<'a> Transaction for MemoryTransaction<'a> {
-    type Cf = Arc<ColumnFamily>;
+    type Cf = MemoryCf;
 
     fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
         let snap = self
             .snapshot
+            .get_mut()
             .as_mut()
             .ok_or(StoreError::TransactionConsumed)?;
         snap.ensure(self.store, name)?;
-        Ok(Arc::clone(snap.get_cf(name)?))
+        let data = Arc::clone(snap.get_cf(name)?);
+        Ok(MemoryCf {
+            name: name.to_string(),
+            data,
+        })
     }
 
     fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
-        Ok(cf.get(key).map(|v| Cow::Borrowed(v.as_slice())))
+        Ok(cf.data.get(key).map(|v| Cow::Borrowed(v.as_slice())))
     }
 
     fn multi_get<'c>(
@@ -123,7 +125,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
     ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
         Ok(keys
             .iter()
-            .map(|k| cf.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
+            .map(|k| cf.data.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
             .collect())
     }
 
@@ -138,7 +140,8 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         let prefix_vec = prefix.to_vec();
 
         Ok(Box::new(
-            cf.range(prefix_vec.clone()..)
+            cf.data
+                .range(prefix_vec.clone()..)
                 .take_while(move |(k, _)| k.starts_with(&prefix_vec))
                 .map(|(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))),
         ))
@@ -158,33 +161,39 @@ impl<'a> Transaction for MemoryTransaction<'a> {
             *last = last.wrapping_add(1);
         }
 
-        Ok(Box::new(cf.range(lower..upper).rev().map(|(k, v)| {
+        Ok(Box::new(cf.data.range(lower..upper).rev().map(|(k, v)| {
             Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))
         })))
     }
 
-    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+    fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        self.dirty.insert(cf.to_string());
-        let data = self.ensure_cf_mut(cf)?;
+        self.dirty.borrow_mut().insert(cf.name.clone());
+        let mut snap = self.snapshot.borrow_mut();
+        let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf_mut(&cf.name)?;
         data.insert(key.to_vec(), value.to_vec());
         Ok(())
     }
 
-    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+    fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
         self.check_writable()?;
-        self.dirty.insert(cf.to_string());
-        let data = self.ensure_cf_mut(cf)?;
+        self.dirty.borrow_mut().insert(cf.name.clone());
+        let mut snap = self.snapshot.borrow_mut();
+        let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf_mut(&cf.name)?;
         for (key, value) in entries {
             data.insert(key.to_vec(), value.to_vec());
         }
         Ok(())
     }
 
-    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError> {
+    fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        self.dirty.insert(cf.to_string());
-        let data = self.ensure_cf_mut(cf)?;
+        self.dirty.borrow_mut().insert(cf.name.clone());
+        let mut snap = self.snapshot.borrow_mut();
+        let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf_mut(&cf.name)?;
         data.remove(key);
         Ok(())
     }
@@ -194,26 +203,44 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         let _ = self.store.create_cf(name);
         let snap = self
             .snapshot
+            .get_mut()
             .as_mut()
             .ok_or(StoreError::TransactionConsumed)?;
         snap.data
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(ColumnFamily::new()));
-        self.dirty.insert(name.to_string());
+        self.dirty.get_mut().insert(name.to_string());
+        Ok(())
+    }
+
+    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+        self.check_writable()?;
+        self.store.drop_cf(name)?;
+        let snap = self
+            .snapshot
+            .get_mut()
+            .as_mut()
+            .ok_or(StoreError::TransactionConsumed)?;
+        snap.data.remove(name);
+        self.dirty.get_mut().remove(name);
         Ok(())
     }
 
     fn commit(self) -> Result<(), StoreError> {
-        let snapshot = self.snapshot.ok_or(StoreError::TransactionConsumed)?;
+        let snapshot = self
+            .snapshot
+            .into_inner()
+            .ok_or(StoreError::TransactionConsumed)?;
 
         if self.read_only {
             return Err(StoreError::ReadOnly);
         }
 
+        let dirty_set = self.dirty.into_inner();
         let dirty: HashMap<String, Arc<ColumnFamily>> = snapshot
             .data
             .into_iter()
-            .filter(|(name, _)| self.dirty.contains(name))
+            .filter(|(name, _)| dirty_set.contains(name))
             .collect();
 
         if dirty.is_empty() {
@@ -225,7 +252,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
     }
 
     fn rollback(self) -> Result<(), StoreError> {
-        if self.snapshot.is_none() {
+        if self.snapshot.into_inner().is_none() {
             return Err(StoreError::TransactionConsumed);
         }
         Ok(())

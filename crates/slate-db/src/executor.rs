@@ -62,16 +62,55 @@ impl<'a> RawValue<'a> {
 pub(crate) type RawIter<'a> =
     Box<dyn Iterator<Item = Result<(Option<String>, Option<RawValue<'a>>), DbError>> + 'a>;
 
-/// Executes a query plan tree, returning a lazy raw iterator.
+/// Typed result from executing a plan.
+pub enum ExecutionResult<'a> {
+    /// Read query — lazy iterator of (id, doc) tuples.
+    Rows(RawIter<'a>),
+    /// Delete mutation — count of deleted records.
+    Delete { deleted: u64 },
+    /// Update/replace mutation — counts of matched and modified records.
+    Update { matched: u64, modified: u64 },
+}
+
+/// Executes a query plan tree, returning a typed result.
 ///
-/// Both `find()` and `distinct()` call this — different plans, same executor.
-/// Takes `&T` (not `&mut T`) plus a pre-resolved CF handle for the collection.
+/// The root node type determines the result variant:
+/// - `Delete` root → drains the pipeline, returns `Delete { deleted }`
+/// - `InsertIndex` root (wrapping Update/Replace) → drains, returns `Update { matched, modified }`
+/// - Everything else → returns `Rows(iter)` for the caller to consume
 pub fn execute<'c, T: Transaction + 'c>(
     txn: &'c T,
     cf: &'c T::Cf,
     node: &'c PlanNode,
-) -> Result<RawIter<'c>, DbError> {
-    execute_node(txn, cf, node)
+) -> Result<ExecutionResult<'c>, DbError> {
+    match node {
+        PlanNode::Delete { .. } => {
+            let iter = execute_node(txn, cf, node)?;
+            let mut deleted = 0u64;
+            for result in iter {
+                result?;
+                deleted += 1;
+            }
+            Ok(ExecutionResult::Delete { deleted })
+        }
+        PlanNode::InsertIndex { .. } => {
+            let iter = execute_node(txn, cf, node)?;
+            let mut matched = 0u64;
+            let mut modified = 0u64;
+            for result in iter {
+                let (_id, opt_val) = result?;
+                matched += 1;
+                if opt_val.is_some() {
+                    modified += 1;
+                }
+            }
+            Ok(ExecutionResult::Update { matched, modified })
+        }
+        _ => {
+            let iter = execute_node(txn, cf, node)?;
+            Ok(ExecutionResult::Rows(iter))
+        }
+    }
 }
 
 /// Scan all records lazily, yielding (Some(id), Some(RawValue)).
@@ -481,6 +520,132 @@ fn execute_node<'c, T: Transaction + 'c>(
                 None,
                 Some(RawValue::Owned(RawBson::Array(buf))),
             )))))
+        }
+
+        // ── Mutation nodes ──────────────────────────────────────
+        PlanNode::DeleteIndex {
+            indexed_fields,
+            input,
+        } => {
+            let source = execute_node(txn, cf, input)?;
+
+            Ok(Box::new(source.map(move |result| {
+                let (id, opt_val) = result?;
+                if let (Some(id_str), Some(val)) = (&id, &opt_val) {
+                    if let Some(raw) = val.as_document() {
+                        for field in indexed_fields {
+                            for value in exec::raw_get_path_values(raw, field)? {
+                                let idx_key = encoding::raw_index_key(field, value, id_str);
+                                txn.delete(cf, &idx_key)?;
+                            }
+                        }
+                        // TTL index
+                        if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
+                            let idx_key = encoding::raw_index_key(
+                                "ttl",
+                                bson::raw::RawBsonRef::DateTime(dt),
+                                id_str,
+                            );
+                            txn.delete(cf, &idx_key)?;
+                        }
+                    }
+                }
+                Ok((id, opt_val))
+            })))
+        }
+
+        PlanNode::Delete { input } => {
+            let source = execute_node(txn, cf, input)?;
+
+            Ok(Box::new(source.map(move |result| {
+                let (id, _opt_val) = result?;
+                if let Some(ref id_str) = id {
+                    let key = encoding::record_key(id_str);
+                    txn.delete(cf, &key)?;
+                }
+                Ok((id, None))
+            })))
+        }
+
+        PlanNode::Update { update, input } => {
+            let source = execute_node(txn, cf, input)?;
+
+            Ok(Box::new(source.map(move |result| {
+                let (id, opt_val) = result?;
+                let id_str = match &id {
+                    Some(s) => s,
+                    None => return Ok((id, None)),
+                };
+                let old_raw = match &opt_val {
+                    Some(val) => match val.as_document() {
+                        Some(r) => r,
+                        None => return Ok((id, None)),
+                    },
+                    None => return Ok((id, None)),
+                };
+
+                let (merged, changed) = exec::raw_merge_doc(old_raw, update)?;
+                if changed {
+                    let key = encoding::record_key(id_str);
+                    txn.put(cf, &key, merged.as_bytes())?;
+                    Ok((id, Some(RawValue::Owned(RawBson::Document(merged)))))
+                } else {
+                    Ok((id, None))
+                }
+            })))
+        }
+
+        PlanNode::Replace { replacement, input } => {
+            let source = execute_node(txn, cf, input)?;
+            // Pre-serialize the replacement once
+            let replacement_bytes =
+                bson::to_vec(replacement).map_err(|e| DbError::Serialization(e.to_string()))?;
+
+            Ok(Box::new(source.map(move |result| {
+                let (id, _opt_val) = result?;
+                if let Some(ref id_str) = id {
+                    let key = encoding::record_key(id_str);
+                    txn.put(cf, &key, &replacement_bytes)?;
+                }
+                let raw = RawDocumentBuf::from_bytes(replacement_bytes.clone())
+                    .map_err(|e| DbError::from(e))?;
+                Ok((id, Some(RawValue::Owned(RawBson::Document(raw)))))
+            })))
+        }
+
+        PlanNode::InsertIndex {
+            indexed_fields,
+            input,
+        } => {
+            let source = execute_node(txn, cf, input)?;
+
+            Ok(Box::new(source.map(move |result| {
+                let (id, opt_val) = result?;
+                if let (Some(id_str), Some(val)) = (&id, &opt_val) {
+                    if let Some(raw) = val.as_document() {
+                        for field in indexed_fields {
+                            for value in exec::raw_get_path_values(raw, field)? {
+                                let idx_key = encoding::raw_index_key(field, value, id_str);
+                                let type_byte = encoding::raw_bson_ref_type_byte(value);
+                                txn.put(cf, &idx_key, &type_byte)?;
+                            }
+                        }
+                        // TTL index
+                        if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
+                            let idx_key = encoding::raw_index_key(
+                                "ttl",
+                                bson::raw::RawBsonRef::DateTime(dt),
+                                id_str,
+                            );
+                            let type_byte = encoding::raw_bson_ref_type_byte(
+                                bson::raw::RawBsonRef::DateTime(dt),
+                            );
+                            txn.put(cf, &idx_key, &type_byte)?;
+                        }
+                    }
+                }
+                Ok((id, opt_val))
+            })))
         }
     }
 }

@@ -64,6 +64,48 @@ pub enum PlanNode {
     /// Receives documents from Projection, extracts the field, deduplicates.
     /// Emits `(None, Some(scalar))`.
     Distinct { field: String, input: Box<PlanNode> },
+
+    // ── Mutation nodes ──────────────────────────────────────────
+    //
+    // These form composable pipelines for streaming mutations.
+    // Each node receives (id, doc) from below, performs a side effect,
+    // and passes through (or transforms) the tuple.
+    /// Delete index entries for each (id, doc) flowing through.
+    /// Side effect: deletes index keys + TTL index for the record.
+    /// Passes (id, doc) through unchanged.
+    DeleteIndex {
+        indexed_fields: Vec<String>,
+        input: Box<PlanNode>,
+    },
+
+    /// Delete the record itself.
+    /// Side effect: deletes the record key from the CF.
+    /// Yields (id, None) — the doc is consumed.
+    Delete { input: Box<PlanNode> },
+
+    /// Merge update fields into the existing document.
+    /// Side effect: writes the merged document to the CF.
+    /// Yields (id, Some(new_doc)) if changed, (id, None) if unchanged.
+    Update {
+        update: bson::Document,
+        input: Box<PlanNode>,
+    },
+
+    /// Replace the entire document with a new one.
+    /// Side effect: writes the replacement document to the CF.
+    /// Yields (id, Some(replacement)).
+    Replace {
+        replacement: bson::Document,
+        input: Box<PlanNode>,
+    },
+
+    /// Insert index entries for each (id, doc) flowing through.
+    /// Side effect: writes index keys + TTL index for the record.
+    /// Passes (id, doc) through unchanged.
+    InsertIndex {
+        indexed_fields: Vec<String>,
+        input: Box<PlanNode>,
+    },
 }
 
 /// Build a query plan from a collection name and its indexed fields.
@@ -527,6 +569,120 @@ fn try_or_index_merge(
     }
 
     Some(result)
+}
+
+// ── Mutation plan builders ──────────────────────────────────────
+//
+// Each builder composes a pipeline of mutation nodes on top of a
+// filtered read source. The read source is built from the same
+// filter planning logic used by `plan()`.
+
+/// Build the read source for a mutation: ReadRecord → Filter → Scan/IndexScan.
+/// Optionally wraps with Limit for `_one` variants.
+fn build_filtered_source(
+    collection: &str,
+    indexed_fields: &[String],
+    filter: &FilterGroup,
+    take: Option<usize>,
+) -> PlanNode {
+    let (id_node, residual_filter) = plan_filter(collection, indexed_fields, filter);
+
+    let node = PlanNode::ReadRecord {
+        input: Box::new(id_node),
+    };
+
+    let node = match residual_filter {
+        Some(group) if !group.children.is_empty() => PlanNode::Filter {
+            predicate: group,
+            input: Box::new(node),
+        },
+        _ => node,
+    };
+
+    match take {
+        Some(n) => PlanNode::Limit {
+            skip: 0,
+            take: Some(n),
+            input: Box::new(node),
+        },
+        None => node,
+    }
+}
+
+/// Plan a delete operation.
+///
+/// Pipeline: `Delete → DeleteIndex → [Limit] → Filter → ReadRecord → Scan/IndexScan`
+pub fn plan_delete(
+    collection: &str,
+    indexed_fields: &[String],
+    filter: &FilterGroup,
+    take: Option<usize>,
+) -> PlanNode {
+    let source = build_filtered_source(collection, indexed_fields, filter, take);
+
+    let node = PlanNode::DeleteIndex {
+        indexed_fields: indexed_fields.to_vec(),
+        input: Box::new(source),
+    };
+
+    PlanNode::Delete {
+        input: Box::new(node),
+    }
+}
+
+/// Plan an update (merge) operation.
+///
+/// Pipeline: `InsertIndex → Update → DeleteIndex → [Limit] → Filter → ReadRecord → Scan/IndexScan`
+pub fn plan_update(
+    collection: &str,
+    indexed_fields: &[String],
+    filter: &FilterGroup,
+    update: bson::Document,
+    take: Option<usize>,
+) -> PlanNode {
+    let source = build_filtered_source(collection, indexed_fields, filter, take);
+
+    let node = PlanNode::DeleteIndex {
+        indexed_fields: indexed_fields.to_vec(),
+        input: Box::new(source),
+    };
+
+    let node = PlanNode::Update {
+        update,
+        input: Box::new(node),
+    };
+
+    PlanNode::InsertIndex {
+        indexed_fields: indexed_fields.to_vec(),
+        input: Box::new(node),
+    }
+}
+
+/// Plan a replace operation.
+///
+/// Pipeline: `InsertIndex → Replace → DeleteIndex → [Limit(1)] → Filter → ReadRecord → Scan/IndexScan`
+pub fn plan_replace(
+    collection: &str,
+    indexed_fields: &[String],
+    filter: &FilterGroup,
+    replacement: bson::Document,
+) -> PlanNode {
+    let source = build_filtered_source(collection, indexed_fields, filter, Some(1));
+
+    let node = PlanNode::DeleteIndex {
+        indexed_fields: indexed_fields.to_vec(),
+        input: Box::new(source),
+    };
+
+    let node = PlanNode::Replace {
+        replacement,
+        input: Box::new(node),
+    };
+
+    PlanNode::InsertIndex {
+        indexed_fields: indexed_fields.to_vec(),
+        input: Box::new(node),
+    }
 }
 
 #[cfg(test)]

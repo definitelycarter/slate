@@ -496,6 +496,7 @@ fn update_one_merge() {
 #[test]
 fn update_one_no_match() {
     let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("nonexistent".into()));
@@ -753,8 +754,11 @@ fn drop_collection() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
-    assert_eq!(results.len(), 0);
+    let result = txn.find(COLLECTION, &no_filter_query());
+    assert!(matches!(
+        result,
+        Err(slate_db::DbError::CollectionNotFound(_))
+    ));
     let collections = txn.list_collections().unwrap();
     assert!(!collections.contains(&COLLECTION.to_string()));
 }
@@ -1199,8 +1203,11 @@ fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
     let mut txn = db.begin(true).unwrap();
-    let result = txn.find_by_id("no_such_collection", "id-1", None).unwrap();
-    assert!(result.is_none());
+    let result = txn.find_by_id("no_such_collection", "id-1", None);
+    assert!(matches!(
+        result,
+        Err(slate_db::DbError::CollectionNotFound(_))
+    ));
 }
 
 #[test]

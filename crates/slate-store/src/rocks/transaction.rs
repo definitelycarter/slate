@@ -144,31 +144,28 @@ impl<'db> Transaction for RocksTransaction<'db> {
         ))
     }
 
-    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
+    fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self.cf_handle(cf)?;
         self.txn()?
-            .put_cf(&cf_handle, key, value)
+            .put_cf(&cf.handle, key, value)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
         Ok(())
     }
 
-    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
+    fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self.cf_handle(cf)?;
         let txn = self.txn()?;
         for (key, value) in entries {
-            txn.put_cf(&cf_handle, key, value)
+            txn.put_cf(&cf.handle, key, value)
                 .map_err(|e| StoreError::Storage(e.to_string()))?;
         }
         Ok(())
     }
 
-    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError> {
+    fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
-        let cf_handle = self.cf_handle(cf)?;
         self.txn()?
-            .delete_cf(&cf_handle, key)
+            .delete_cf(&cf.handle, key)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
         Ok(())
     }
@@ -186,6 +183,14 @@ impl<'db> Transaction for RocksTransaction<'db> {
             self.cf_cache.insert(name.to_string(), handle);
         }
         Ok(())
+    }
+
+    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+        self.check_writable()?;
+        self.cf_cache.remove(name);
+        self.db
+            .drop_cf(name)
+            .map_err(|e| StoreError::Storage(e.to_string()))
     }
 
     fn commit(mut self) -> Result<(), StoreError> {
