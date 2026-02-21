@@ -222,28 +222,19 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         docs: Vec<bson::Document>,
     ) -> Result<Vec<InsertResult>, DbError> {
-        let cf = self.collection_cf(collection)?;
-        let sys = self.txn.cf(SYS_CF)?;
-        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let mut results = Vec::with_capacity(docs.len());
+        let raw_docs: Vec<RawDocumentBuf> = docs
+            .into_iter()
+            .map(|doc| Ok(RawDocumentBuf::from_document(&doc)?))
+            .collect::<Result<Vec<_>, DbError>>()?;
 
-        for mut doc in docs {
-            let id = extract_or_generate_id(&mut doc);
-            let key = encoding::record_key(&id);
+        let stmt = planner::Statement::Insert { docs: raw_docs };
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
+        let ids = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+            executor::ExecutionResult::Insert { ids } => ids,
+            _ => unreachable!(),
+        };
 
-            if self.txn.get(&cf, &key)?.is_some() {
-                return Err(DbError::DuplicateKey(id));
-            }
-
-            self.txn.put(&cf, &key, &bson::to_vec(&doc)?)?;
-
-            self.write_index_entries(&cf, &id, &doc, &indexed_fields)?;
-            self.write_ttl_index_entry(&cf, &id, &doc)?;
-
-            results.push(InsertResult { id });
-        }
-
-        Ok(results)
+        Ok(ids.into_iter().map(|id| InsertResult { id }).collect())
     }
 
     // ── Query operations ────────────────────────────────────────
@@ -255,7 +246,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         query: &Query,
     ) -> Result<Vec<RawDocumentBuf>, DbError> {
         let stmt = planner::Statement::Find(query.clone());
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => iter
                 .map(|r| {
@@ -322,7 +313,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             update: update.clone(),
             limit: Some(1),
         };
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -356,7 +347,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             update,
             limit: None,
         };
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -379,7 +370,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             filter: filter.clone(),
             replacement,
         };
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
@@ -403,7 +394,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             filter: filter.clone(),
             limit: Some(1),
         };
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
@@ -421,7 +412,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             filter: filter.clone(),
             limit: None,
         };
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
@@ -508,7 +499,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             take: None,
             columns: None,
         });
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => {
                 let mut n = 0u64;
@@ -529,7 +520,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         query: &DistinctQuery,
     ) -> Result<bson::RawBson, DbError> {
         let stmt = planner::Statement::Distinct(query.clone());
-        let (plan, cf) = self.plan_statement(collection, &stmt)?;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
@@ -657,12 +648,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     fn plan_statement(
         &mut self,
         collection: &str,
-        statement: &planner::Statement,
+        statement: planner::Statement,
     ) -> Result<(planner::PlanNode, <S::Txn<'db> as Transaction>::Cf), DbError> {
         let cf = self.collection_cf(collection)?;
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan(collection, &indexed_fields, statement);
+        let plan = planner::plan(collection, indexed_fields, statement);
         Ok((plan, cf))
     }
 

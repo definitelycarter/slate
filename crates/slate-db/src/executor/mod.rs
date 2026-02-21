@@ -72,6 +72,8 @@ pub enum ExecutionResult<'a> {
     Delete { deleted: u64 },
     /// Update/replace mutation — counts of matched and modified records.
     Update { matched: u64, modified: u64 },
+    /// Insert mutation — IDs of inserted records.
+    Insert { ids: Vec<String> },
 }
 
 // ── Executor ────────────────────────────────────────────────────
@@ -102,6 +104,19 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                     deleted += 1;
                 }
                 Ok(ExecutionResult::Delete { deleted })
+            }
+            PlanNode::InsertIndex { input, .. }
+                if matches!(**input, PlanNode::InsertRecord { .. }) =>
+            {
+                let iter = self.execute_node(node)?;
+                let mut ids = Vec::new();
+                for result in iter {
+                    let (id, _) = result?;
+                    if let Some(id_str) = id {
+                        ids.push(id_str);
+                    }
+                }
+                Ok(ExecutionResult::Insert { ids })
             }
             PlanNode::InsertIndex { .. } => {
                 let iter = self.execute_node(node)?;
@@ -663,6 +678,46 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         }
                     }
                     Ok((id, opt_val))
+                })))
+            }
+
+            PlanNode::InsertRecord { input } => {
+                let source = self.execute_node(input)?;
+                let txn = self.txn;
+                let cf = self.cf;
+
+                Ok(Box::new(source.map(move |result| {
+                    let (_id, opt_val) = result?;
+                    let val = match &opt_val {
+                        Some(v) => v,
+                        None => {
+                            return Err(DbError::InvalidQuery(
+                                "InsertRecord requires document".into(),
+                            ));
+                        }
+                    };
+
+                    let raw = val
+                        .as_document()
+                        .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
+
+                    // Extract _id from doc if present, otherwise generate one
+                    let id_str = match raw.get("_id")? {
+                        Some(RawBsonRef::String(s)) => s.to_string(),
+                        Some(other) => format!("{:?}", other),
+                        None => uuid::Uuid::new_v4().to_string(),
+                    };
+
+                    // Duplicate key check
+                    let key = encoding::record_key(&id_str);
+                    if txn.get(cf, &key)?.is_some() {
+                        return Err(DbError::DuplicateKey(id_str));
+                    }
+
+                    // Write doc bytes as-is
+                    txn.put(cf, &key, raw.as_bytes())?;
+
+                    Ok((Some(id_str), opt_val))
                 })))
             }
 
