@@ -250,7 +250,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => iter
                 .map(|r| {
-                    let (_id, opt_val) = r?;
+                    let opt_val = r?;
                     let val =
                         opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
                     val.into_document_buf()
@@ -276,8 +276,6 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         };
 
         let mut doc: bson::Document = bson::from_slice(&bytes)?;
-        doc.insert("_id", id);
-
         if let Some(wanted) = columns {
             let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
             exec::apply_projection(&mut doc, &cols);
@@ -524,7 +522,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
-                    let (_id, opt_val) = result?;
+                    let opt_val = result?;
                     opt_val
                         .ok_or_else(|| DbError::InvalidQuery("expected value".into()))?
                         .into_raw_bson()
@@ -902,11 +900,15 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 }
 
 /// Extract `_id` from a document, or generate a UUID if not present.
-/// Removes `_id` from the document (it's stored in the key, not the value).
+/// Keeps `_id` in the document — it is stored in both the key and the value.
 fn extract_or_generate_id(doc: &mut bson::Document) -> String {
-    match doc.remove(ID_COLUMN) {
-        Some(Bson::String(s)) => s,
+    match doc.get(ID_COLUMN) {
+        Some(Bson::String(s)) => s.clone(),
         Some(other) => other.to_string(),
-        None => uuid::Uuid::new_v4().to_string(),
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            doc.insert(ID_COLUMN, &id);
+            id
+        }
     }
 }

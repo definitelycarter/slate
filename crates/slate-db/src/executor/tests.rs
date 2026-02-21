@@ -155,16 +155,31 @@ impl Transaction for MockTransaction {
 
 // ── Helpers ─────────────────────────────────────────────────
 
-fn collect_docs(result: ExecutionResult) -> Vec<(Option<String>, Option<bson::Document>)> {
+/// Collect bare string ids from an IndexScan/IndexMerge result.
+fn collect_ids(result: ExecutionResult) -> Vec<String> {
     match result {
         ExecutionResult::Rows(iter) => iter
             .map(|r| {
-                let (id, opt_val) = r.unwrap();
-                let doc = opt_val.and_then(|v| {
+                let opt_val = r.unwrap();
+                match opt_val.unwrap().into_raw_bson().unwrap() {
+                    bson::RawBson::String(s) => s,
+                    other => panic!("expected String, got {:?}", other),
+                }
+            })
+            .collect(),
+        _ => panic!("expected Rows"),
+    }
+}
+
+fn collect_docs(result: ExecutionResult) -> Vec<Option<bson::Document>> {
+    match result {
+        ExecutionResult::Rows(iter) => iter
+            .map(|r| {
+                let opt_val = r.unwrap();
+                opt_val.and_then(|v| {
                     v.into_document_buf()
                         .map(|raw| bson::from_slice::<bson::Document>(raw.as_bytes()).unwrap())
-                });
-                (id, doc)
+                })
             })
             .collect(),
         _ => panic!("expected Rows"),
@@ -193,16 +208,13 @@ fn values_yields_all_docs() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].0.as_deref(), Some("1"));
-    assert_eq!(rows[1].0.as_deref(), Some("2"));
-    assert_eq!(rows[2].0.as_deref(), Some("3"));
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "2");
+    assert_eq!(rows[2].as_ref().unwrap().get_str("_id").unwrap(), "3");
+    assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
+    assert_eq!(rows[1].as_ref().unwrap().get_str("name").unwrap(), "Bob");
     assert_eq!(
-        rows[0].1.as_ref().unwrap().get_str("name").unwrap(),
-        "Alice"
-    );
-    assert_eq!(rows[1].1.as_ref().unwrap().get_str("name").unwrap(), "Bob");
-    assert_eq!(
-        rows[2].1.as_ref().unwrap().get_str("name").unwrap(),
+        rows[2].as_ref().unwrap().get_str("name").unwrap(),
         "Charlie"
     );
 }
@@ -229,8 +241,8 @@ fn filter_on_values() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0.as_deref(), Some("1"));
-    assert_eq!(rows[1].0.as_deref(), Some("3"));
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
 }
 
 #[test]
@@ -274,9 +286,9 @@ fn sort_on_values() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].0.as_deref(), Some("2")); // Bob: 90
-    assert_eq!(rows[1].0.as_deref(), Some("3")); // Charlie: 80
-    assert_eq!(rows[2].0.as_deref(), Some("1")); // Alice: 70
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2"); // Bob: 90
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3"); // Charlie: 80
+    assert_eq!(rows[2].as_ref().unwrap().get_str("_id").unwrap(), "1"); // Alice: 70
 }
 
 #[test]
@@ -296,8 +308,8 @@ fn limit_skip_take() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0.as_deref(), Some("2"));
-    assert_eq!(rows[1].0.as_deref(), Some("3"));
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2");
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
 }
 
 #[test]
@@ -315,7 +327,7 @@ fn limit_take_only() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0.as_deref(), Some("1"));
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
 }
 
 #[test]
@@ -332,7 +344,7 @@ fn projection_on_values() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 2);
-    let doc0 = rows[0].1.as_ref().unwrap();
+    let doc0 = rows[0].as_ref().unwrap();
     assert_eq!(doc0.get_str("_id").unwrap(), "1");
     assert_eq!(doc0.get_str("name").unwrap(), "Alice");
     assert!(doc0.get("status").is_none());
@@ -359,8 +371,7 @@ fn distinct_on_values() {
     let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
     match result {
         ExecutionResult::Rows(mut iter) => {
-            let (id, val) = iter.next().unwrap().unwrap();
-            assert!(id.is_none()); // distinct returns no ID
+            let val = iter.next().unwrap().unwrap();
             let raw_bson = val.unwrap().into_raw_bson().unwrap();
             let arr = match raw_bson {
                 RawBson::Array(a) => a,
@@ -417,8 +428,8 @@ fn composed_filter_sort_limit() {
     // Sort desc by score: Charlie(90), Diana(80), Alice(70)
     // Limit take=2: Charlie, Diana
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0.as_deref(), Some("3")); // Charlie: 90
-    assert_eq!(rows[1].0.as_deref(), Some("4")); // Diana: 80
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "3"); // Charlie: 90
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "4"); // Diana: 80
 }
 
 // ── Tier 2: Mutation tests (MockTransaction) ────────────────
@@ -740,13 +751,10 @@ fn scan_yields_all_records() {
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 3);
     // Scan yields in key order (record_key is "d:{id}")
-    assert_eq!(rows[0].0.as_deref(), Some("1"));
-    assert_eq!(rows[1].0.as_deref(), Some("2"));
-    assert_eq!(rows[2].0.as_deref(), Some("3"));
-    assert_eq!(
-        rows[0].1.as_ref().unwrap().get_str("name").unwrap(),
-        "Alice"
-    );
+    assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
+    assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "2");
+    assert_eq!(rows[2].as_ref().unwrap().get_str("_id").unwrap(), "3");
+    assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
 }
 
 #[test]
@@ -763,17 +771,10 @@ fn index_scan_eq_filter() {
         limit: None,
         complete_groups: false,
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
-    let rows = match result {
-        ExecutionResult::Rows(iter) => iter
-            .map(|r| r.unwrap())
-            .map(|(id, _val)| id.unwrap())
-            .collect::<Vec<_>>(),
-        _ => panic!("expected Rows"),
-    };
-    assert_eq!(rows.len(), 2);
-    assert!(rows.contains(&"1".to_string())); // Alice
-    assert!(rows.contains(&"3".to_string())); // Charlie
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"1".to_string())); // Alice
+    assert!(ids.contains(&"3".to_string())); // Charlie
 }
 
 #[test]
@@ -791,11 +792,7 @@ fn index_scan_full_column() {
         limit: None,
         complete_groups: false,
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
-    let ids: Vec<String> = match result {
-        ExecutionResult::Rows(iter) => iter.map(|r| r.unwrap().0.unwrap()).collect(),
-        _ => panic!("expected Rows"),
-    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     // score order: 70 (id=1), 80 (id=3), 90 (id=2)
     assert_eq!(ids, vec!["1", "3", "2"]);
 }
@@ -814,10 +811,7 @@ fn index_scan_desc() {
         limit: None,
         complete_groups: false,
     };
-    let ids: Vec<String> = match Executor::new(&txn, &cf).execute(&plan).unwrap() {
-        ExecutionResult::Rows(iter) => iter.map(|r| r.unwrap().0.unwrap()).collect(),
-        _ => panic!("expected Rows"),
-    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     // Descending score: 90 (id=2), 80 (id=3), 70 (id=1)
     assert_eq!(ids, vec!["2", "3", "1"]);
 }
@@ -836,10 +830,7 @@ fn index_scan_with_limit() {
         limit: Some(2),
         complete_groups: false,
     };
-    let ids: Vec<String> = match Executor::new(&txn, &cf).execute(&plan).unwrap() {
-        ExecutionResult::Rows(iter) => iter.map(|r| r.unwrap().0.unwrap()).collect(),
-        _ => panic!("expected Rows"),
-    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
@@ -869,10 +860,7 @@ fn index_merge_or() {
             complete_groups: false,
         }),
     };
-    let ids: Vec<String> = match Executor::new(&txn, &cf).execute(&plan).unwrap() {
-        ExecutionResult::Rows(iter) => iter.map(|r| r.unwrap().0.unwrap()).collect(),
-        _ => panic!("expected Rows"),
-    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(ids.len(), 3);
     // Union: all three IDs present (deduped)
     assert!(ids.contains(&"1".to_string()));
@@ -906,10 +894,7 @@ fn index_merge_and() {
             complete_groups: false,
         }),
     };
-    let ids: Vec<String> = match Executor::new(&txn, &cf).execute(&plan).unwrap() {
-        ExecutionResult::Rows(iter) => iter.map(|r| r.unwrap().0.unwrap()).collect(),
-        _ => panic!("expected Rows"),
-    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(ids, vec!["3"]); // Charlie: active AND score=80
 }
 
@@ -935,7 +920,7 @@ fn read_record_fetches_docs_from_index_scan() {
     // Verify we got full documents back (not just IDs)
     let names: Vec<&str> = rows
         .iter()
-        .map(|(_, doc)| doc.as_ref().unwrap().get_str("name").unwrap())
+        .map(|doc| doc.as_ref().unwrap().get_str("name").unwrap())
         .collect();
     assert!(names.contains(&"Alice"));
     assert!(names.contains(&"Charlie"));
@@ -985,8 +970,5 @@ fn read_record_over_scan() {
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(rows.len(), 3);
-    assert_eq!(
-        rows[0].1.as_ref().unwrap().get_str("name").unwrap(),
-        "Alice"
-    );
+    assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
 }

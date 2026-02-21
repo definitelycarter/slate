@@ -135,20 +135,27 @@ pub(crate) fn apply_projection(doc: &mut bson::Document, columns: &[String]) {
     }
 }
 
+// ── Raw BSON _id extraction ─────────────────────────────────────
+
+/// Extract `_id` from a raw document as a zero-copy `&str` borrow.
+/// Returns `Ok(None)` if `_id` is missing or not a string.
+pub(crate) fn raw_extract_id(raw: &RawDocument) -> Result<Option<&str>, DbError> {
+    match raw.get("_id")? {
+        Some(RawBsonRef::String(s)) => Ok(Some(s)),
+        _ => Ok(None),
+    }
+}
+
 // ── Raw BSON filter matching ────────────────────────────────────
 //
 // Filter matching operates on RawDocument / RawBsonRef to avoid full deserialization.
 
 /// Walk a dot-separated path through raw BSON bytes.
-/// Returns None if the path is missing, Null, or if `path` is `"_id"` (handled by caller).
+/// Returns None if the path is missing or Null.
 pub(crate) fn raw_get_path<'a>(
     raw: &'a RawDocument,
     path: &str,
 ) -> Result<Option<RawBsonRef<'a>>, DbError> {
-    if path == "_id" {
-        return Ok(None);
-    }
-
     if !path.contains('.') {
         return match raw.get(path)? {
             Some(RawBsonRef::Null) | None => Ok(None),
@@ -188,9 +195,6 @@ pub(crate) fn raw_walk_path<'a>(
     path: &str,
     f: &mut impl FnMut(RawBsonRef<'a>) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
-    if path == "_id" {
-        return Ok(());
-    }
     raw_walk(doc, path, f)
 }
 
@@ -249,10 +253,6 @@ pub(crate) fn raw_get_path_values<'a>(
     raw: &'a RawDocument,
     path: &str,
 ) -> Result<Vec<RawBsonRef<'a>>, DbError> {
-    if path == "_id" {
-        return Ok(vec![]);
-    }
-
     // Strip `[]` array traversal markers — raw_collect_path_values
     // already flattens arrays implicitly
     let clean: String = path
@@ -311,15 +311,11 @@ fn raw_collect_path_values<'a>(
     Ok(())
 }
 
-pub(crate) fn raw_matches_group(
-    raw: &RawDocument,
-    id: &str,
-    group: &FilterGroup,
-) -> Result<bool, DbError> {
+pub(crate) fn raw_matches_group(raw: &RawDocument, group: &FilterGroup) -> Result<bool, DbError> {
     match group.logical {
         LogicalOp::And => {
             for child in &group.children {
-                if !raw_matches_node(raw, id, child)? {
+                if !raw_matches_node(raw, child)? {
                     return Ok(false);
                 }
             }
@@ -327,7 +323,7 @@ pub(crate) fn raw_matches_group(
         }
         LogicalOp::Or => {
             for child in &group.children {
-                if raw_matches_node(raw, id, child)? {
+                if raw_matches_node(raw, child)? {
                     return Ok(true);
                 }
             }
@@ -336,10 +332,10 @@ pub(crate) fn raw_matches_group(
     }
 }
 
-fn raw_matches_node(raw: &RawDocument, id: &str, node: &FilterNode) -> Result<bool, DbError> {
+fn raw_matches_node(raw: &RawDocument, node: &FilterNode) -> Result<bool, DbError> {
     match node {
-        FilterNode::Condition(filter) => raw_matches_filter(raw, id, filter),
-        FilterNode::Group(group) => raw_matches_group(raw, id, group),
+        FilterNode::Condition(filter) => raw_matches_filter(raw, filter),
+        FilterNode::Group(group) => raw_matches_group(raw, group),
     }
 }
 
@@ -353,23 +349,7 @@ fn ascii_icontains(haystack: &str, needle: &str) -> bool {
     h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
-fn raw_matches_filter(raw: &RawDocument, id: &str, filter: &Filter) -> Result<bool, DbError> {
-    // _id is stored externally, not in raw bytes
-    if filter.field == "_id" {
-        return match filter.operator {
-            Operator::Eq => match &filter.value {
-                Bson::String(s) => Ok(id == s.as_str()),
-                _ => Ok(false),
-            },
-            Operator::IsNull => match &filter.value {
-                Bson::Boolean(true) => Ok(false),
-                Bson::Boolean(false) => Ok(true),
-                _ => Ok(false),
-            },
-            _ => Ok(false),
-        };
-    }
-
+fn raw_matches_filter(raw: &RawDocument, filter: &Filter) -> Result<bool, DbError> {
     let field_value = raw_get_path(raw, &filter.field)?;
 
     match filter.operator {
@@ -899,10 +879,10 @@ mod tests {
     }
 
     #[test]
-    fn raw_get_path_id_returns_none() {
-        let raw = make_raw(&doc! { "name": "test" });
+    fn raw_get_path_id_returns_value() {
+        let raw = make_raw(&doc! { "_id": "abc123", "name": "test" });
         let val = raw_get_path(&raw, "_id").unwrap();
-        assert_eq!(val, None);
+        assert_eq!(val, Some(RawBsonRef::String("abc123")));
     }
 
     #[test]
@@ -923,7 +903,7 @@ mod tests {
                 }),
             ],
         };
-        assert!(raw_matches_group(&raw, "id1", &group).unwrap());
+        assert!(raw_matches_group(&raw, &group).unwrap());
     }
 
     #[test]
@@ -944,7 +924,7 @@ mod tests {
                 }),
             ],
         };
-        assert!(!raw_matches_group(&raw, "id1", &group).unwrap());
+        assert!(!raw_matches_group(&raw, &group).unwrap());
     }
 
     #[test]
@@ -965,19 +945,25 @@ mod tests {
                 }),
             ],
         };
-        assert!(raw_matches_group(&raw, "id1", &group).unwrap());
+        assert!(raw_matches_group(&raw, &group).unwrap());
     }
 
     #[test]
     fn raw_matches_filter_id_eq() {
-        let raw = make_raw(&doc! { "name": "test" });
+        let raw = make_raw(&doc! { "_id": "abc123", "name": "test" });
         let filter = Filter {
             field: "_id".into(),
             operator: Operator::Eq,
             value: Bson::String("abc123".into()),
         };
-        assert!(raw_matches_filter(&raw, "abc123", &filter).unwrap());
-        assert!(!raw_matches_filter(&raw, "xyz", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
+
+        let filter_miss = Filter {
+            field: "_id".into(),
+            operator: Operator::Eq,
+            value: Bson::String("xyz".into()),
+        };
+        assert!(!raw_matches_filter(&raw, &filter_miss).unwrap());
     }
 
     #[test]
@@ -988,14 +974,14 @@ mod tests {
             operator: Operator::IsNull,
             value: Bson::Boolean(true),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
 
         let filter_not_null = Filter {
             field: "name".into(),
             operator: Operator::IsNull,
             value: Bson::Boolean(true),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter_not_null).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter_not_null).unwrap());
     }
 
     #[test]
@@ -1006,7 +992,7 @@ mod tests {
             operator: Operator::IContains,
             value: Bson::String("hello".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1078,7 +1064,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Int64(50),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1089,7 +1075,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Double(50.0),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1100,7 +1086,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Int32(10),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1111,7 +1097,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Double(10.0),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Cross-type coercion: Double ↔ Int filter comparison ─────
@@ -1124,7 +1110,7 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::Int64(50),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1135,7 +1121,7 @@ mod tests {
             operator: Operator::Lt,
             value: Bson::Double(9.5),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Cross-type coercion: eq ─────────────────────────────────
@@ -1148,7 +1134,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("50".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1159,7 +1145,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("50".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1170,7 +1156,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("19.99".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1181,14 +1167,14 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("true".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
 
         let filter_false = Filter {
             field: "active".into(),
             operator: Operator::Eq,
             value: Bson::String("false".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter_false).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter_false).unwrap());
     }
 
     #[test]
@@ -1200,7 +1186,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("2024-01-15T00:00:00Z".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1212,7 +1198,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Int64(1705276800),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Cross-type coercion: comparisons ────────────────────────
@@ -1225,14 +1211,14 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::String("50".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
 
         let filter_not = Filter {
             field: "score".into(),
             operator: Operator::Gt,
             value: Bson::String("100".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
     }
 
     #[test]
@@ -1243,14 +1229,14 @@ mod tests {
             operator: Operator::Lte,
             value: Bson::String("19.99".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
 
         let filter_not = Filter {
             field: "price".into(),
             operator: Operator::Lte,
             value: Bson::String("19.98".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
     }
 
     #[test]
@@ -1262,14 +1248,14 @@ mod tests {
             operator: Operator::Gte,
             value: Bson::String("2024-01-01T00:00:00Z".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
 
         let filter_not = Filter {
             field: "updated_at".into(),
             operator: Operator::Gte,
             value: Bson::String("2025-01-01T00:00:00Z".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
     }
 
     #[test]
@@ -1282,7 +1268,7 @@ mod tests {
             operator: Operator::Lt,
             value: Bson::Int64(1705276800 + 86400),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Cross-type coercion: full operator coverage ────────────
@@ -1295,13 +1281,13 @@ mod tests {
             operator: op,
             value: Bson::String("80".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f(Operator::Gte)).unwrap());
+        assert!(raw_matches_filter(&raw, &f(Operator::Gte)).unwrap());
         let f_above = Filter {
             field: "score".into(),
             operator: Operator::Gte,
             value: Bson::String("81".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_above).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_above).unwrap());
     }
 
     #[test]
@@ -1312,13 +1298,13 @@ mod tests {
             operator: Operator::Lt,
             value: Bson::String("100".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "score".into(),
             operator: Operator::Lt,
             value: Bson::String("80".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1329,13 +1315,13 @@ mod tests {
             operator: Operator::Lte,
             value: Bson::String("80".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "score".into(),
             operator: Operator::Lte,
             value: Bson::String("79".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1346,13 +1332,13 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::String("19.98".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Gt,
             value: Bson::String("19.99".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1363,13 +1349,13 @@ mod tests {
             operator: Operator::Gte,
             value: Bson::String("19.99".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Gte,
             value: Bson::String("20.00".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1380,13 +1366,13 @@ mod tests {
             operator: Operator::Lt,
             value: Bson::String("20.00".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "price".into(),
             operator: Operator::Lt,
             value: Bson::String("19.99".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1398,13 +1384,13 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::String("2024-06-15T11:00:00Z".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
             value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1416,13 +1402,13 @@ mod tests {
             operator: Operator::Lt,
             value: Bson::String("2024-06-15T13:00:00Z".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lt,
             value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1434,13 +1420,13 @@ mod tests {
             operator: Operator::Lte,
             value: Bson::String("2024-06-15T12:00:00Z".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
             value: Bson::String("2024-06-15T11:00:00Z".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1452,13 +1438,13 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::Int64(1705276800 - 1),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gt,
             value: Bson::Int64(1705276800),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1470,13 +1456,13 @@ mod tests {
             operator: Operator::Gte,
             value: Bson::Int64(1705276800),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Gte,
             value: Bson::Int64(1705276800 + 1),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     #[test]
@@ -1488,13 +1474,13 @@ mod tests {
             operator: Operator::Lte,
             value: Bson::Int64(1705276800),
         };
-        assert!(raw_matches_filter(&raw, "id1", &f).unwrap());
+        assert!(raw_matches_filter(&raw, &f).unwrap());
         let f_not = Filter {
             field: "ts".into(),
             operator: Operator::Lte,
             value: Bson::Int64(1705276800 - 1),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &f_not).unwrap());
+        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
     }
 
     // ── Silent exclusion on failed coercion ─────────────────────
@@ -1507,7 +1493,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("not_a_number".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1518,7 +1504,7 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::String("abc".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1529,7 +1515,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("yes".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1541,7 +1527,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("not-a-date".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Incompatible types: silent exclusion ────────────────────
@@ -1554,7 +1540,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Int64(1),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1565,7 +1551,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Double(1.0),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     // ── Array element matching ──────────────────────────────────
@@ -1578,7 +1564,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("db".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1589,7 +1575,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("python".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1600,7 +1586,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::Int32(20),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1611,7 +1597,7 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::Int32(25),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1622,7 +1608,7 @@ mod tests {
             operator: Operator::Gt,
             value: Bson::Int32(30),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1633,7 +1619,7 @@ mod tests {
             operator: Operator::Lte,
             value: Bson::Int32(15),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1644,7 +1630,7 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("2.5".into()),
         };
-        assert!(raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(raw_matches_filter(&raw, &filter).unwrap());
     }
 
     #[test]
@@ -1655,6 +1641,6 @@ mod tests {
             operator: Operator::Eq,
             value: Bson::String("anything".into()),
         };
-        assert!(!raw_matches_filter(&raw, "id1", &filter).unwrap());
+        assert!(!raw_matches_filter(&raw, &filter).unwrap());
     }
 }

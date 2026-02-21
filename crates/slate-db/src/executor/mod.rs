@@ -61,12 +61,11 @@ impl<'a> RawValue<'a> {
     }
 }
 
-pub(crate) type RawIter<'a> =
-    Box<dyn Iterator<Item = Result<(Option<String>, Option<RawValue<'a>>), DbError>> + 'a>;
+pub(crate) type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
 
 /// Typed result from executing a plan.
 pub enum ExecutionResult<'a> {
-    /// Read query — lazy iterator of (id, doc) tuples.
+    /// Read query — lazy iterator of values.
     Rows(RawIter<'a>),
     /// Delete mutation — count of deleted records.
     Delete { deleted: u64 },
@@ -92,6 +91,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
     ///
     /// The root node type determines the result variant:
     /// - `Delete` root → drains the pipeline, returns `Delete { deleted }`
+    /// - `InsertIndex` root (wrapping InsertRecord) → drains, returns `Insert { ids }`
     /// - `InsertIndex` root (wrapping Update/Replace) → drains, returns `Update { matched, modified }`
     /// - Everything else → returns `Rows(iter)` for the caller to consume
     pub fn execute(&self, node: &'c PlanNode) -> Result<ExecutionResult<'c>, DbError> {
@@ -111,9 +111,12 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let iter = self.execute_node(node)?;
                 let mut ids = Vec::new();
                 for result in iter {
-                    let (id, _) = result?;
-                    if let Some(id_str) = id {
-                        ids.push(id_str);
+                    if let Some(val) = result? {
+                        if let Some(raw) = val.as_document() {
+                            if let Some(id_str) = exec::raw_extract_id(raw)? {
+                                ids.push(id_str.to_string());
+                            }
+                        }
                     }
                 }
                 Ok(ExecutionResult::Insert { ids })
@@ -123,7 +126,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let mut matched = 0u64;
                 let mut modified = 0u64;
                 for result in iter {
-                    let (_id, opt_val) = result?;
+                    let opt_val = result?;
                     matched += 1;
                     if opt_val.is_some() {
                         modified += 1;
@@ -138,14 +141,13 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         }
     }
 
-    /// Scan all records lazily, yielding (Some(id), Some(RawValue)).
+    /// Scan all records lazily, yielding Some(RawValue).
     fn execute_scan(&self) -> Result<RawIter<'c>, DbError> {
         let scan_prefix = encoding::data_scan_prefix("");
         let iter = self.txn.scan_prefix(self.cf, &scan_prefix)?;
 
         Ok(Box::new(iter.filter_map(|result| match result {
-            Ok((key, value)) => {
-                let record_id = encoding::parse_record_key(&key)?.to_string();
+            Ok((_key, value)) => {
                 let val = match value {
                     Cow::Borrowed(b) => match RawDocument::from_bytes(b) {
                         Ok(raw) => RawValue::Borrowed(RawBsonRef::Document(raw)),
@@ -156,13 +158,13 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         Err(e) => return Some(Err(DbError::from(e))),
                     },
                 };
-                Some(Ok((Some(record_id), Some(val))))
+                Some(Ok(Some(val)))
             }
             Err(e) => Some(Err(DbError::Store(e))),
         })))
     }
 
-    /// Scan an index prefix, yielding (Some(id), maybe_value).
+    /// Scan an index prefix, yielding documents with `_id` and indexed column value.
     fn execute_index_scan(
         &self,
         column: &str,
@@ -174,12 +176,6 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         let prefix = match value {
             Some(v) => encoding::index_scan_prefix(column, v),
             None => encoding::index_scan_field_prefix(column),
-        };
-
-        // TODO: Store RawBson in PlanNode::IndexScan instead of bson::Bson to avoid this conversion.
-        let raw_val: Option<RawBson> = match value {
-            Some(v) => Some(RawBson::try_from(v.clone())?),
-            None => None,
         };
 
         let txn = self.txn;
@@ -200,7 +196,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
 
             for result in iter.by_ref() {
                 match result {
-                    Ok((key, stored_value)) => {
+                    Ok((key, _stored_value)) => {
                         if let Some(n) = limit {
                             if count >= n {
                                 if complete_groups {
@@ -226,13 +222,9 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         match encoding::parse_index_key(&key) {
                             Some((_, record_id)) => {
                                 count += 1;
-                                let item_val = raw_val.as_ref().map(|v| {
-                                    RawValue::Owned(encoding::coerce_to_stored_type(
-                                        v,
-                                        &stored_value,
-                                    ))
-                                });
-                                return Some(Ok((Some(record_id.to_string()), item_val)));
+                                return Some(Ok(Some(RawValue::Owned(RawBson::String(
+                                    record_id.to_string(),
+                                )))));
                             }
                             None => continue,
                         }
@@ -271,42 +263,59 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
             PlanNode::IndexMerge { logical, lhs, rhs } => {
                 // TODO: And path could stream left lazily (only right needs collecting).
                 // Or path could use streaming HashSet dedup. Neither emitted by planner yet.
-                let left: Vec<(Option<String>, Option<RawBson>)> = self
+                let left: Vec<Option<RawBson>> = self
                     .execute_node(lhs)?
-                    .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
+                    .map(|r| r.map(|opt| opt.and_then(RawValue::into_raw_bson)))
                     .collect::<Result<_, _>>()?;
-                let right: Vec<(Option<String>, Option<RawBson>)> = self
+                let right: Vec<Option<RawBson>> = self
                     .execute_node(rhs)?
-                    .map(|r| r.map(|(id, val)| (id, val.and_then(RawValue::into_raw_bson))))
+                    .map(|r| r.map(|opt| opt.and_then(RawValue::into_raw_bson)))
                     .collect::<Result<_, _>>()?;
+
+                // Extract id from a RawBson value — bare String from IndexScan
+                // or Document with _id from Scan.
+                fn extract_id(v: &RawBson) -> Option<&str> {
+                    match v {
+                        RawBson::String(s) => Some(s.as_str()),
+                        RawBson::Document(doc) => exec::raw_extract_id(doc).ok().flatten(),
+                        _ => None,
+                    }
+                }
 
                 let merged = match logical {
                     LogicalOp::Or => {
                         let mut seen = HashSet::with_capacity(left.len() + right.len());
                         let mut result = Vec::with_capacity(left.len() + right.len());
-                        for (id, val) in left.into_iter().chain(right) {
-                            if let Some(ref id_str) = id {
-                                if !seen.insert(id_str.clone()) {
-                                    continue;
+                        for val in left.into_iter().chain(right) {
+                            if let Some(ref v) = val {
+                                if let Some(id_str) = extract_id(v) {
+                                    if !seen.insert(id_str.to_string()) {
+                                        continue;
+                                    }
                                 }
                             }
-                            result.push((id, val));
+                            result.push(val);
                         }
                         result
                     }
                     LogicalOp::And => {
-                        let right_set: HashSet<String> =
-                            right.iter().filter_map(|(id, _)| id.clone()).collect();
+                        let right_set: HashSet<String> = right
+                            .iter()
+                            .filter_map(|val| val.as_ref().and_then(extract_id).map(str::to_string))
+                            .collect();
                         left.into_iter()
-                            .filter(|(id, _)| id.as_ref().map_or(false, |s| right_set.contains(s)))
+                            .filter(|val| {
+                                val.as_ref()
+                                    .and_then(extract_id)
+                                    .map(|id| right_set.contains(id))
+                                    .unwrap_or(false)
+                            })
                             .collect()
                     }
                 };
 
                 Ok(Box::new(
-                    merged
-                        .into_iter()
-                        .map(|(id, val)| Ok((id, val.map(RawValue::Owned)))),
+                    merged.into_iter().map(|val| Ok(val.map(RawValue::Owned))),
                 ))
             }
 
@@ -317,7 +326,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
 
                 Ok(Box::new(source.filter_map(move |result| match result {
                     Err(e) => Some(Err(e)),
-                    Ok((id, Some(val))) => {
+                    Ok(Some(val)) => {
                         let raw = match val.as_document() {
                             Some(r) => r,
                             None => {
@@ -326,14 +335,13 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                                 )));
                             }
                         };
-                        let id_str = id.as_deref().unwrap_or("");
-                        match exec::raw_matches_group(raw, id_str, predicate) {
-                            Ok(true) => Some(Ok((id, Some(val)))),
+                        match exec::raw_matches_group(raw, predicate) {
+                            Ok(true) => Some(Ok(Some(val))),
                             Ok(false) => None,
                             Err(e) => Some(Err(e)),
                         }
                     }
-                    Ok((_, None)) => None,
+                    Ok(None) => None,
                 })))
             }
 
@@ -342,14 +350,13 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
 
                 // Peek first item — if it's an array (from Distinct), sort its elements
                 match source.next() {
-                    Some(Ok((id, Some(RawValue::Owned(RawBson::Array(arr)))))) => {
+                    Some(Ok(Some(RawValue::Owned(RawBson::Array(arr))))) => {
                         let sort = match sorts.first() {
                             Some(s) => s,
                             None => {
-                                return Ok(Box::new(std::iter::once(Ok((
-                                    id,
-                                    Some(RawValue::Owned(RawBson::Array(arr))),
-                                )))));
+                                return Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
+                                    RawBson::Array(arr),
+                                ))))));
                             }
                         };
                         let mut elements: Vec<RawBson> = arr
@@ -380,35 +387,27 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         for elem in &elements {
                             exec::push_raw(&mut buf, elem.as_raw_bson_ref());
                         }
-                        return Ok(Box::new(std::iter::once(Ok((
-                            id,
-                            Some(RawValue::Owned(RawBson::Array(buf))),
-                        )))));
+                        return Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
+                            RawBson::Array(buf),
+                        ))))));
                     }
                     Some(first) => {
                         // Not an array — collect all records for sorting
-                        let mut records: Vec<(Option<String>, Option<RawValue<'c>>)> =
-                            std::iter::once(first)
-                                .chain(source)
-                                .collect::<Result<Vec<_>, _>>()?;
+                        let mut records: Vec<Option<RawValue<'c>>> = std::iter::once(first)
+                            .chain(source)
+                            .collect::<Result<Vec<_>, _>>()?;
 
-                        records.sort_by(|(a_id, a_opt), (b_id, b_opt)| {
+                        records.sort_by(|a_opt, b_opt| {
                             for sort in sorts {
-                                let ord = if sort.field == "_id" {
-                                    let a_str = a_id.as_deref().unwrap_or("");
-                                    let b_str = b_id.as_deref().unwrap_or("");
-                                    a_str.cmp(b_str)
-                                } else {
-                                    let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
-                                    let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
-                                    let a_field = a_raw.and_then(|r| {
-                                        exec::raw_get_path(r, &sort.field).ok().flatten()
-                                    });
-                                    let b_field = b_raw.and_then(|r| {
-                                        exec::raw_get_path(r, &sort.field).ok().flatten()
-                                    });
-                                    exec::raw_compare_field_values(a_field, b_field)
-                                };
+                                let a_raw = a_opt.as_ref().and_then(|v| v.as_document());
+                                let b_raw = b_opt.as_ref().and_then(|v| v.as_document());
+                                let a_field = a_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                let b_field = b_raw.and_then(|r| {
+                                    exec::raw_get_path(r, &sort.field).ok().flatten()
+                                });
+                                let ord = exec::raw_compare_field_values(a_field, b_field);
                                 let ord = match sort.direction {
                                     SortDirection::Asc => ord,
                                     SortDirection::Desc => ord.reverse(),
@@ -420,7 +419,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                             std::cmp::Ordering::Equal
                         });
 
-                        Ok(Box::new(records.into_iter().map(|(id, val)| Ok((id, val)))))
+                        Ok(Box::new(records.into_iter().map(|val| Ok(val))))
                     }
                     None => Ok(Box::new(std::iter::empty())),
                 }
@@ -431,7 +430,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
 
                 // Check first item — if it's a single array (from Distinct), slice its elements
                 match source.next() {
-                    Some(Ok((id, Some(RawValue::Owned(RawBson::Array(arr)))))) => {
+                    Some(Ok(Some(RawValue::Owned(RawBson::Array(arr))))) => {
                         let take_n = take.unwrap_or(usize::MAX);
                         let mut buf = RawArrayBuf::new();
                         for elem in arr.into_iter().skip(*skip).take(take_n) {
@@ -439,10 +438,9 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                                 exec::push_raw(&mut buf, val);
                             }
                         }
-                        Ok(Box::new(std::iter::once(Ok((
-                            id,
-                            Some(RawValue::Owned(RawBson::Array(buf))),
-                        )))))
+                        Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
+                            RawBson::Array(buf),
+                        ))))))
                     }
                     Some(first) => {
                         // Not an array — chain first item back and apply normal skip/take
@@ -477,31 +475,17 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let first_col = columns.as_ref().and_then(|c| c.first().cloned());
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, opt_val) = result?;
+                    let opt_val = result?;
                     let val =
                         opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
 
-                    // No columns specified: prepend _id, pass through all fields
+                    // No columns specified: pass through as-is (_id already in doc)
                     let km = match key_map {
                         Some(ref km) => km,
-                        None => {
-                            if let Some(ref id_str) = id {
-                                if let Some(raw) = val.as_document() {
-                                    let mut buf = raw.to_raw_document_buf();
-                                    buf.append("_id", id_str.as_str());
-                                    return Ok((id, Some(RawValue::Owned(RawBson::Document(buf)))));
-                                }
-                            }
-                            return Ok((id, Some(val)));
-                        }
+                        None => return Ok(Some(val)),
                     };
 
                     let mut buf = RawDocumentBuf::new();
-
-                    // Inject _id from the tuple
-                    if let Some(ref id_str) = id {
-                        buf.append("_id", id_str.as_str());
-                    }
 
                     if let Some(raw) = val.as_document() {
                         raw_project_document(raw, km, &mut buf)?;
@@ -512,7 +496,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         }
                     }
 
-                    Ok((id, Some(RawValue::Owned(RawBson::Document(buf)))))
+                    Ok(Some(RawValue::Owned(RawBson::Document(buf))))
                 })))
             }
 
@@ -522,7 +506,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let mut buf = bson::RawArrayBuf::new();
 
                 for result in source {
-                    let (_id, opt_val) = result?;
+                    let opt_val = result?;
                     let val = match opt_val {
                         Some(v) => v,
                         None => continue,
@@ -539,10 +523,9 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                     })?;
                 }
 
-                Ok(Box::new(std::iter::once(Ok((
-                    None,
-                    Some(RawValue::Owned(RawBson::Array(buf))),
-                )))))
+                Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
+                    RawBson::Array(buf),
+                ))))))
             }
 
             // ── Mutation nodes ──────────────────────────────────────
@@ -555,27 +538,29 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let cf = self.cf;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, opt_val) = result?;
-                    if let (Some(id_str), Some(val)) = (&id, &opt_val) {
+                    let opt_val = result?;
+                    if let Some(ref val) = opt_val {
                         if let Some(raw) = val.as_document() {
-                            for field in indexed_fields {
-                                for value in exec::raw_get_path_values(raw, field)? {
-                                    let idx_key = encoding::raw_index_key(field, value, id_str);
+                            if let Some(id_str) = exec::raw_extract_id(raw)? {
+                                for field in indexed_fields {
+                                    for value in exec::raw_get_path_values(raw, field)? {
+                                        let idx_key = encoding::raw_index_key(field, value, id_str);
+                                        txn.delete(cf, &idx_key)?;
+                                    }
+                                }
+                                // TTL index
+                                if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
+                                    let idx_key = encoding::raw_index_key(
+                                        "ttl",
+                                        bson::raw::RawBsonRef::DateTime(dt),
+                                        id_str,
+                                    );
                                     txn.delete(cf, &idx_key)?;
                                 }
                             }
-                            // TTL index
-                            if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
-                                let idx_key = encoding::raw_index_key(
-                                    "ttl",
-                                    bson::raw::RawBsonRef::DateTime(dt),
-                                    id_str,
-                                );
-                                txn.delete(cf, &idx_key)?;
-                            }
                         }
                     }
-                    Ok((id, opt_val))
+                    Ok(opt_val)
                 })))
             }
 
@@ -585,12 +570,16 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let cf = self.cf;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, _opt_val) = result?;
-                    if let Some(ref id_str) = id {
-                        let key = encoding::record_key(id_str);
-                        txn.delete(cf, &key)?;
+                    let opt_val = result?;
+                    if let Some(ref val) = opt_val {
+                        if let Some(raw) = val.as_document() {
+                            if let Some(id_str) = exec::raw_extract_id(raw)? {
+                                let key = encoding::record_key(id_str);
+                                txn.delete(cf, &key)?;
+                            }
+                        }
                     }
-                    Ok((id, None))
+                    Ok(None)
                 })))
             }
 
@@ -600,26 +589,27 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let cf = self.cf;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, opt_val) = result?;
-                    let id_str = match &id {
-                        Some(s) => s,
-                        None => return Ok((id, None)),
-                    };
+                    let opt_val = result?;
                     let old_raw = match &opt_val {
                         Some(val) => match val.as_document() {
                             Some(r) => r,
-                            None => return Ok((id, None)),
+                            None => return Ok(None),
                         },
-                        None => return Ok((id, None)),
+                        None => return Ok(None),
+                    };
+
+                    let id_str = match exec::raw_extract_id(old_raw)? {
+                        Some(s) => s.to_string(),
+                        None => return Ok(None),
                     };
 
                     let (merged, changed) = exec::raw_merge_doc(old_raw, update)?;
                     if changed {
-                        let key = encoding::record_key(id_str);
+                        let key = encoding::record_key(&id_str);
                         txn.put(cf, &key, merged.as_bytes())?;
-                        Ok((id, Some(RawValue::Owned(RawBson::Document(merged)))))
+                        Ok(Some(RawValue::Owned(RawBson::Document(merged))))
                     } else {
-                        Ok((id, None))
+                        Ok(None)
                     }
                 })))
             }
@@ -628,19 +618,36 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let source = self.execute_node(input)?;
                 let txn = self.txn;
                 let cf = self.cf;
-                // Pre-serialize the replacement once
-                let replacement_bytes =
-                    bson::to_vec(replacement).map_err(|e| DbError::Serialization(e.to_string()))?;
+                // Pre-serialize the replacement (without _id — will be prepended per record)
+                let replacement_raw = RawDocumentBuf::from_document(replacement)
+                    .map_err(|e| DbError::Serialization(e.to_string()))?;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, _opt_val) = result?;
-                    if let Some(ref id_str) = id {
-                        let key = encoding::record_key(id_str);
-                        txn.put(cf, &key, &replacement_bytes)?;
+                    let opt_val = result?;
+                    let id_str = match &opt_val {
+                        Some(val) => match val.as_document() {
+                            Some(raw) => exec::raw_extract_id(raw)?.map(str::to_string),
+                            None => None,
+                        },
+                        None => None,
+                    };
+
+                    if let Some(ref id) = id_str {
+                        // Build replacement with _id prepended
+                        let mut buf = RawDocumentBuf::new();
+                        buf.append("_id", id.as_str());
+                        for entry in replacement_raw.iter() {
+                            let (k, v) = entry?;
+                            if k != "_id" {
+                                buf.append_ref(k, v);
+                            }
+                        }
+                        let key = encoding::record_key(id);
+                        txn.put(cf, &key, buf.as_bytes())?;
+                        Ok(Some(RawValue::Owned(RawBson::Document(buf))))
+                    } else {
+                        Ok(None)
                     }
-                    let raw = RawDocumentBuf::from_bytes(replacement_bytes.clone())
-                        .map_err(|e| DbError::from(e))?;
-                    Ok((id, Some(RawValue::Owned(RawBson::Document(raw)))))
                 })))
             }
 
@@ -653,31 +660,33 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let cf = self.cf;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (id, opt_val) = result?;
-                    if let (Some(id_str), Some(val)) = (&id, &opt_val) {
+                    let opt_val = result?;
+                    if let Some(ref val) = opt_val {
                         if let Some(raw) = val.as_document() {
-                            for field in indexed_fields {
-                                for value in exec::raw_get_path_values(raw, field)? {
-                                    let idx_key = encoding::raw_index_key(field, value, id_str);
-                                    let type_byte = encoding::raw_bson_ref_type_byte(value);
+                            if let Some(id_str) = exec::raw_extract_id(raw)? {
+                                for field in indexed_fields {
+                                    for value in exec::raw_get_path_values(raw, field)? {
+                                        let idx_key = encoding::raw_index_key(field, value, id_str);
+                                        let type_byte = encoding::raw_bson_ref_type_byte(value);
+                                        txn.put(cf, &idx_key, &type_byte)?;
+                                    }
+                                }
+                                // TTL index
+                                if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
+                                    let idx_key = encoding::raw_index_key(
+                                        "ttl",
+                                        bson::raw::RawBsonRef::DateTime(dt),
+                                        id_str,
+                                    );
+                                    let type_byte = encoding::raw_bson_ref_type_byte(
+                                        bson::raw::RawBsonRef::DateTime(dt),
+                                    );
                                     txn.put(cf, &idx_key, &type_byte)?;
                                 }
                             }
-                            // TTL index
-                            if let Some(bson::raw::RawBsonRef::DateTime(dt)) = raw.get("ttl")? {
-                                let idx_key = encoding::raw_index_key(
-                                    "ttl",
-                                    bson::raw::RawBsonRef::DateTime(dt),
-                                    id_str,
-                                );
-                                let type_byte = encoding::raw_bson_ref_type_byte(
-                                    bson::raw::RawBsonRef::DateTime(dt),
-                                );
-                                txn.put(cf, &idx_key, &type_byte)?;
-                            }
                         }
                     }
-                    Ok((id, opt_val))
+                    Ok(opt_val)
                 })))
             }
 
@@ -687,7 +696,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let cf = self.cf;
 
                 Ok(Box::new(source.map(move |result| {
-                    let (_id, opt_val) = result?;
+                    let opt_val = result?;
                     let val = match &opt_val {
                         Some(v) => v,
                         None => {
@@ -702,10 +711,20 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
 
                     // Extract _id from doc if present, otherwise generate one
-                    let id_str = match raw.get("_id")? {
-                        Some(RawBsonRef::String(s)) => s.to_string(),
-                        Some(other) => format!("{:?}", other),
-                        None => uuid::Uuid::new_v4().to_string(),
+                    let (id_str, doc_to_write) = match raw.get("_id")? {
+                        Some(RawBsonRef::String(s)) => (s.to_string(), None),
+                        Some(other) => (format!("{:?}", other), None),
+                        None => {
+                            let id = uuid::Uuid::new_v4().to_string();
+                            // Build a new doc with _id prepended
+                            let mut buf = RawDocumentBuf::new();
+                            buf.append("_id", id.as_str());
+                            for entry in raw.iter() {
+                                let (k, v) = entry?;
+                                buf.append_ref(k, v);
+                            }
+                            (id, Some(buf))
+                        }
                     };
 
                     // Duplicate key check
@@ -714,20 +733,24 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         return Err(DbError::DuplicateKey(id_str));
                     }
 
-                    // Write doc bytes as-is
-                    txn.put(cf, &key, raw.as_bytes())?;
+                    // Write doc bytes (with _id included)
+                    match &doc_to_write {
+                        Some(buf) => txn.put(cf, &key, buf.as_bytes())?,
+                        None => txn.put(cf, &key, raw.as_bytes())?,
+                    }
 
-                    Ok((Some(id_str), opt_val))
+                    match doc_to_write {
+                        Some(buf) => Ok(Some(RawValue::Owned(RawBson::Document(buf)))),
+                        None => Ok(opt_val),
+                    }
                 })))
             }
 
-            PlanNode::Values { docs } => Ok(Box::new(docs.iter().map(|raw| {
-                let id = raw.get("_id").ok().flatten().and_then(|v| match v {
-                    RawBsonRef::String(s) => Some(s.to_string()),
-                    _ => None,
-                });
-                Ok((id, Some(RawValue::Borrowed(RawBsonRef::Document(raw)))))
-            }))),
+            PlanNode::Values { docs } => {
+                Ok(Box::new(docs.iter().map(|raw| {
+                    Ok(Some(RawValue::Borrowed(RawBsonRef::Document(raw))))
+                })))
+            }
         }
     }
 
@@ -736,22 +759,37 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         if matches!(input, PlanNode::Scan { .. }) {
             let source = self.execute_node(input)?;
             return Ok(Box::new(source.filter_map(|result| match result {
-                Ok((id, Some(val))) => Some(Ok((id, Some(val)))),
-                Ok((_, None)) => None,
+                Ok(Some(val)) => Some(Ok(Some(val))),
+                Ok(None) => None,
                 Err(e) => Some(Err(e)),
             })));
         }
 
-        // IndexScan/IndexMerge path: stream IDs directly into record fetches.
+        // IndexScan/IndexMerge path: extract _id from doc, fetch full record.
         let source = self.execute_node(input)?;
         let txn = self.txn;
         let cf = self.cf;
 
         Ok(Box::new(source.filter_map(move |result| {
-            let id = match result {
-                Ok((Some(id), _)) => id,
-                Ok((None, _)) => return None,
+            let opt_val = match result {
+                Ok(v) => v,
                 Err(e) => return Some(Err(e)),
+            };
+            let val = match opt_val {
+                Some(v) => v,
+                None => return None,
+            };
+            // Accept bare String id (from IndexScan) or Document with _id.
+            let id = match &val {
+                RawValue::Owned(RawBson::String(s)) => s.clone(),
+                _ => match val.as_document() {
+                    Some(raw) => match exec::raw_extract_id(raw) {
+                        Ok(Some(s)) => s.to_string(),
+                        Ok(None) => return None,
+                        Err(e) => return Some(Err(e)),
+                    },
+                    None => return None,
+                },
             };
             let key = encoding::record_key(&id);
             match txn.get(cf, &key) {
@@ -760,10 +798,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                         Ok(r) => r,
                         Err(e) => return Some(Err(DbError::from(e))),
                     };
-                    Some(Ok((
-                        Some(id),
-                        Some(RawValue::Owned(RawBson::Document(raw))),
-                    )))
+                    Some(Ok(Some(RawValue::Owned(RawBson::Document(raw)))))
                 }
                 Ok(None) => None, // dangling index entry
                 Err(e) => Some(Err(DbError::Store(e))),
@@ -788,6 +823,7 @@ fn apply_limit<'a, T: 'a>(
 // ── Raw projection ──────────────────────────────────────────────
 
 /// Project selected columns from `src` into `dest` using a pre-built key map.
+/// Projects selected fields from `src` into `dest`. Always includes `_id`.
 fn raw_project_document<S: AsRef<str>>(
     src: &RawDocument,
     key_map: &HashMap<String, Vec<S>>,
@@ -795,6 +831,10 @@ fn raw_project_document<S: AsRef<str>>(
 ) -> Result<(), DbError> {
     for result in src.iter() {
         let (key, raw_val) = result?;
+        if key == "_id" {
+            dest.append_ref("_id", raw_val);
+            continue;
+        }
         if let Some(sub_paths) = key_map.get(key) {
             if sub_paths.is_empty() {
                 dest.append_ref(key, raw_val);
