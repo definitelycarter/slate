@@ -47,19 +47,6 @@ where
     walk_inner(doc, tree, &mut visitor, true);
 }
 
-/// Walk a document once, visiting every field that matches the tree.
-///
-/// **Does NOT expand arrays**: if a Leaf field is an array, the visitor
-/// is called once with the whole `RawBsonRef::Array`. Branch arrays
-/// of documents are still recursed into. Use this for Filter and Sort,
-/// where the operator/comparison logic handles arrays itself.
-pub(crate) fn walk_raw<'a, F>(doc: &'a RawDocument, tree: &HashMap<&str, FieldTree>, mut visitor: F)
-where
-    F: FnMut(&str, RawBsonRef<'a>),
-{
-    walk_inner(doc, tree, &mut visitor, false);
-}
-
 fn walk_inner<'a, F>(
     doc: &'a RawDocument,
     tree: &HashMap<&str, FieldTree>,
@@ -277,22 +264,6 @@ mod tests {
 
         assert_eq!(visited.len(), 2);
         assert!(visited.iter().all(|p| p == "items.name"));
-    }
-
-    #[test]
-    fn walk_raw_preserves_arrays() {
-        let doc = rawdoc! { "tags": ["a", "b", "c"] };
-        let paths = vec!["tags".into()];
-        let tree = FieldTree::from_paths(&paths);
-
-        let mut visited = Vec::new();
-        walk_raw(&doc, &tree, |path, val| {
-            visited.push((path.to_string(), format!("{val:?}")));
-        });
-
-        // walk_raw does NOT expand — one call with the whole array
-        assert_eq!(visited.len(), 1);
-        assert_eq!(visited[0].0, "tags");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_db::bench::{ExecutionResult, Executor, PlanNode, executor_v2};
+use slate_db::bench::{ExecutionResult, Executor, PlanNode};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_store::{MemoryStore, Store, StoreError, Transaction};
 
@@ -129,15 +129,9 @@ fn bench_values(c: &mut Criterion) {
         let docs = generate_docs(n);
         let plan = PlanNode::Values { docs };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
     }
@@ -154,15 +148,9 @@ fn bench_projection(c: &mut Criterion) {
             input: Box::new(PlanNode::Values { docs: docs.clone() }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("select", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
 
@@ -172,21 +160,11 @@ fn bench_projection(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("v1/passthrough", n),
+            BenchmarkId::new("passthrough", n),
             &plan_passthrough,
             |b, plan| {
                 let txn = NoopTransaction;
                 let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("v2/passthrough", n),
-            &plan_passthrough,
-            |b, plan| {
-                let txn = NoopTransaction;
-                let exec = executor_v2::Executor::new(&txn, &());
                 b.iter(|| consume_rows(exec.execute(plan).unwrap()))
             },
         );
@@ -204,25 +182,11 @@ fn bench_limit(c: &mut Criterion) {
         input: Box::new(PlanNode::Values { docs: docs.clone() }),
     };
 
-    group.bench_with_input(
-        BenchmarkId::new("v1/skip+take", 10_000),
-        &plan,
-        |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("v2/skip+take", 10_000),
-        &plan,
-        |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &plan, |b, plan| {
+        let txn = NoopTransaction;
+        let exec = Executor::new(&txn, &());
+        b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+    });
 
     let plan_take = PlanNode::Limit {
         skip: 0,
@@ -230,25 +194,11 @@ fn bench_limit(c: &mut Criterion) {
         input: Box::new(PlanNode::Values { docs }),
     };
 
-    group.bench_with_input(
-        BenchmarkId::new("v1/take", 10_000),
-        &plan_take,
-        |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        },
-    );
-
-    group.bench_with_input(
-        BenchmarkId::new("v2/take", 10_000),
-        &plan_take,
-        |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("take", 10_000), &plan_take, |b, plan| {
+        let txn = NoopTransaction;
+        let exec = Executor::new(&txn, &());
+        b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+    });
 
     group.finish();
 }
@@ -266,15 +216,9 @@ fn bench_sort(c: &mut Criterion) {
             input: Box::new(PlanNode::Values { docs: docs.clone() }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("single", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
 
@@ -292,15 +236,9 @@ fn bench_sort(c: &mut Criterion) {
             input: Box::new(PlanNode::Values { docs }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/multi", n), &plan_multi, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("multi", n), &plan_multi, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/multi", n), &plan_multi, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
     }
@@ -320,15 +258,9 @@ fn bench_distinct(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("low_card", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
 
@@ -346,15 +278,9 @@ fn bench_distinct(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/sorted", n), &plan_sort, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("sorted", n), &plan_sort, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/sorted", n), &plan_sort, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
 
@@ -373,21 +299,11 @@ fn bench_distinct(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("v1/sorted_hc", n),
+            BenchmarkId::new("sorted_hc", n),
             &plan_sort_hc,
             |b, plan| {
                 let txn = NoopTransaction;
                 let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("v2/sorted_hc", n),
-            &plan_sort_hc,
-            |b, plan| {
-                let txn = NoopTransaction;
-                let exec = executor_v2::Executor::new(&txn, &());
                 b.iter(|| consume_rows(exec.execute(plan).unwrap()))
             },
         );
@@ -412,15 +328,9 @@ fn bench_filter(c: &mut Criterion) {
             input: Box::new(PlanNode::Values { docs: docs.clone() }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/eq", n), &plan_eq, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/eq", n), &plan_eq, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
 
@@ -443,15 +353,9 @@ fn bench_filter(c: &mut Criterion) {
             input: Box::new(PlanNode::Values { docs }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/and", n), &plan_and, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/and", n), &plan_and, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = executor_v2::Executor::new(&txn, &());
             b.iter(|| consume_rows(exec.execute(plan).unwrap()))
         });
     }
@@ -468,16 +372,10 @@ fn bench_scan(c: &mut Criterion) {
             collection: "test".into(),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
     }
     group.finish();
@@ -498,16 +396,10 @@ fn bench_index_scan(c: &mut Criterion) {
             complete_groups: false,
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/eq", n), &plan_eq, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/eq", n), &plan_eq, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
 
         // Full column scan (no value filter)
@@ -520,16 +412,10 @@ fn bench_index_scan(c: &mut Criterion) {
             complete_groups: false,
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/full", n), &plan_full, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("full", n), &plan_full, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/full", n), &plan_full, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
 
         // Desc with limit
@@ -543,24 +429,12 @@ fn bench_index_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(
-            BenchmarkId::new("v1/desc_limit", n),
+            BenchmarkId::new("desc_limit", n),
             &plan_desc_limit,
             |b, plan| {
                 let mut txn = db.store().begin(true).unwrap();
                 let cf = txn.cf("test").unwrap();
                 b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("v2/desc_limit", n),
-            &plan_desc_limit,
-            |b, plan| {
-                let mut txn = db.store().begin(true).unwrap();
-                let cf = txn.cf("test").unwrap();
-                b.iter(|| {
-                    consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap())
-                })
             },
         );
     }
@@ -579,16 +453,10 @@ fn bench_read_record(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/scan", n), &plan_scan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("scan", n), &plan_scan, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/scan", n), &plan_scan, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
 
         // ReadRecord over IndexScan (fetches full doc by id)
@@ -603,16 +471,10 @@ fn bench_read_record(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/index", n), &plan_idx, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("index", n), &plan_idx, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/index", n), &plan_idx, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
     }
     group.finish();
@@ -644,16 +506,10 @@ fn bench_index_merge(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/or", n), &plan_or, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("or", n), &plan_or, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/or", n), &plan_or, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
 
         // AND merge: status="active" AND contacts_count=50
@@ -677,16 +533,10 @@ fn bench_index_merge(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1/and", n), &plan_and, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
             let mut txn = db.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2/and", n), &plan_and, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
     }
     group.finish();
@@ -722,7 +572,7 @@ fn bench_insert(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
                     let mut txn = db.store().begin(false).unwrap();
@@ -731,24 +581,6 @@ fn bench_insert(c: &mut Criterion) {
                 },
                 |(txn, cf)| {
                     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
-                    match result {
-                        ExecutionResult::Insert { ids } => ids.len(),
-                        _ => panic!("expected Insert"),
-                    }
-                },
-                BatchSize::SmallInput,
-            )
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            b.iter_batched(
-                || {
-                    let mut txn = db.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
-                },
-                |(txn, cf)| {
-                    let result = executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap();
                     match result {
                         ExecutionResult::Insert { ids } => ids.len(),
                         _ => panic!("expected Insert"),
@@ -779,7 +611,7 @@ fn bench_update(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
                     let mut txn = db.store().begin(false).unwrap();
@@ -788,24 +620,6 @@ fn bench_update(c: &mut Criterion) {
                 },
                 |(txn, cf)| {
                     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
-                    match result {
-                        ExecutionResult::Update { modified, .. } => modified,
-                        _ => panic!("expected Update"),
-                    }
-                },
-                BatchSize::SmallInput,
-            )
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            b.iter_batched(
-                || {
-                    let mut txn = db.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
-                },
-                |(txn, cf)| {
-                    let result = executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap();
                     match result {
                         ExecutionResult::Update { modified, .. } => modified,
                         _ => panic!("expected Update"),
@@ -835,7 +649,7 @@ fn bench_delete(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
                     let mut txn = db.store().begin(false).unwrap();
@@ -844,24 +658,6 @@ fn bench_delete(c: &mut Criterion) {
                 },
                 |(txn, cf)| {
                     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
-                    match result {
-                        ExecutionResult::Delete { deleted } => deleted,
-                        _ => panic!("expected Delete"),
-                    }
-                },
-                BatchSize::SmallInput,
-            )
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            b.iter_batched(
-                || {
-                    let mut txn = db.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
-                },
-                |(txn, cf)| {
-                    let result = executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap();
                     match result {
                         ExecutionResult::Delete { deleted } => deleted,
                         _ => panic!("expected Delete"),
@@ -896,7 +692,7 @@ fn bench_replace(c: &mut Criterion) {
             }),
         };
 
-        group.bench_with_input(BenchmarkId::new("v1", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
                     let mut txn = db.store().begin(false).unwrap();
@@ -905,24 +701,6 @@ fn bench_replace(c: &mut Criterion) {
                 },
                 |(txn, cf)| {
                     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
-                    match result {
-                        ExecutionResult::Update { modified, .. } => modified,
-                        _ => panic!("expected Update"),
-                    }
-                },
-                BatchSize::SmallInput,
-            )
-        });
-
-        group.bench_with_input(BenchmarkId::new("v2", n), &plan, |b, plan| {
-            b.iter_batched(
-                || {
-                    let mut txn = db.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
-                },
-                |(txn, cf)| {
-                    let result = executor_v2::Executor::new(&txn, &cf).execute(plan).unwrap();
                     match result {
                         ExecutionResult::Update { modified, .. } => modified,
                         _ => panic!("expected Update"),

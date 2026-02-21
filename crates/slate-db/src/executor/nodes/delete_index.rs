@@ -5,7 +5,7 @@ use crate::encoding;
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
-use crate::executor_v2::field_tree::{FieldTree, walk};
+use crate::executor::field_tree::{FieldTree, walk};
 
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
@@ -35,8 +35,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                             }
                         }
                         let idx_key = encoding::raw_index_key(path, value, id_str);
-                        let type_byte = encoding::raw_bson_ref_type_byte(value);
-                        if let Err(e) = txn.put(cf, &idx_key, &type_byte) {
+                        if let Err(e) = txn.delete(cf, &idx_key) {
                             err = Some(DbError::Store(e));
                         }
                     });

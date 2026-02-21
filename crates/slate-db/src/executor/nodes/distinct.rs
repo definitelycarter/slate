@@ -4,8 +4,8 @@ use bson::raw::{RawBson, RawBsonRef};
 
 use crate::error::DbError;
 use crate::executor::exec;
+use crate::executor::field_tree::{FieldTree, walk};
 use crate::executor::{RawIter, RawValue};
-use crate::executor_v2::field_tree::{FieldTree, walk};
 
 pub(crate) fn execute<'a>(field: &'a str, source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
     let paths = vec![field.to_string()];

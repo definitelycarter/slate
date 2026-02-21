@@ -4,8 +4,8 @@ use bson::raw::{RawArrayBuf, RawBson, RawBsonRef};
 use bson::{RawDocument, RawDocumentBuf};
 
 use crate::error::DbError;
+use crate::executor::field_tree::FieldTree;
 use crate::executor::{RawIter, RawValue};
-use crate::executor_v2::field_tree::FieldTree;
 
 pub(crate) fn execute<'a>(
     columns: &'a Option<Vec<String>>,

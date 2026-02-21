@@ -1,4 +1,6 @@
 use super::*;
+use crate::encoding;
+use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, Sort, SortDirection};
 use slate_store::{Store, StoreError, Transaction};

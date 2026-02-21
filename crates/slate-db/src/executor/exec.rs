@@ -188,61 +188,6 @@ fn raw_get_path_in_doc<'a>(
     }
 }
 
-/// Walk a dot-separated path through raw BSON, calling `f` for each leaf value found.
-/// Recursively descends into documents and iterates array elements mid-path.
-pub(crate) fn raw_walk_path<'a>(
-    doc: &'a RawDocument,
-    path: &str,
-    f: &mut impl FnMut(RawBsonRef<'a>) -> Result<(), DbError>,
-) -> Result<(), DbError> {
-    raw_walk(doc, path, f)
-}
-
-fn raw_walk<'a>(
-    doc: &'a RawDocument,
-    path: &str,
-    f: &mut impl FnMut(RawBsonRef<'a>) -> Result<(), DbError>,
-) -> Result<(), DbError> {
-    let (first, rest) = match path.split_once('.') {
-        Some((f, r)) => (f, Some(r)),
-        None => (path, None),
-    };
-
-    match doc.get(first)? {
-        Some(RawBsonRef::Null) | None => {}
-        Some(RawBsonRef::Array(arr)) => match rest {
-            Some(rest) => {
-                for elem in arr.into_iter() {
-                    if let RawBsonRef::Document(sub) = elem? {
-                        raw_walk(sub, rest, f)?;
-                    }
-                }
-            }
-            None => {
-                for elem in arr.into_iter() {
-                    let val = elem?;
-                    if !matches!(val, RawBsonRef::Null) {
-                        f(val)?;
-                    }
-                }
-            }
-        },
-        Some(RawBsonRef::Document(sub)) => {
-            if let Some(rest) = rest {
-                raw_walk(sub, rest, f)?;
-            } else {
-                f(RawBsonRef::Document(sub))?;
-            }
-        }
-        Some(val) => {
-            if rest.is_none() {
-                f(val)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Walk a dot-separated path through raw BSON, collecting all reachable values.
 /// Unlike `raw_get_path` (which returns a single value), this flattens arrays:
 /// - Scalar field → `vec![value]`
