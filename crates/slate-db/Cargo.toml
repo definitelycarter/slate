@@ -6,6 +6,8 @@ edition = "2024"
 [features]
 default = ["rocksdb"]
 rocksdb = ["slate-store/rocksdb"]
+v2 = []
+bench-internals = []
 
 [dependencies]
 slate-store = { path = "../slate-store", default-features = false }
@@ -15,6 +17,12 @@ bson = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 bson = "2"
 slate-store = { path = "../slate-store", features = ["memory"] }
+
+[[bench]]
+name = "executor"
+harness = false
+required-features = ["bench-internals"]

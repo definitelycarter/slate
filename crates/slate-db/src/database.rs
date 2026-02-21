@@ -12,8 +12,9 @@ use crate::catalog::Catalog;
 use crate::collection::CollectionConfig;
 use crate::encoding;
 use crate::error::DbError;
-use crate::executor;
 use crate::executor::exec;
+use crate::executor::{ExecutionResult, RawValue};
+use crate::executor_v2;
 use crate::planner;
 use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 
@@ -44,8 +45,8 @@ pub struct Database<S: Store> {
 }
 
 impl<S: Store> Database<S> {
-    #[cfg(test)]
-    pub(crate) fn store(&self) -> &S {
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub fn store(&self) -> &S {
         &self.inner.store
     }
 
@@ -229,8 +230,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
 
         let stmt = planner::Statement::Insert { docs: raw_docs };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let ids = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Insert { ids } => ids,
+        let ids = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Insert { ids } => ids,
             _ => unreachable!(),
         };
 
@@ -247,10 +248,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ) -> Result<Vec<RawDocumentBuf>, DbError> {
         let stmt = planner::Statement::Find(query.clone());
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Rows(iter) => iter
+        match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Rows(iter) => iter
                 .map(|r| {
-                    let opt_val = r?;
+                    let opt_val: Option<RawValue> = r?;
                     let val =
                         opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
                     val.into_document_buf()
@@ -312,8 +313,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             limit: Some(1),
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Update { matched, modified } => (matched, modified),
+        let (matched, modified) = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
 
@@ -346,8 +347,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             limit: None,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Update { matched, modified } => (matched, modified),
+        let (matched, modified) = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
         Ok(UpdateResult {
@@ -369,8 +370,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             replacement,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Update { matched, modified } => (matched, modified),
+        let (matched, modified) = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
         Ok(UpdateResult {
@@ -393,8 +394,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             limit: Some(1),
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Delete { deleted } => deleted,
+        let deleted = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
         Ok(DeleteResult { deleted })
@@ -411,8 +412,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             limit: None,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Delete { deleted } => deleted,
+        let deleted = match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
         Ok(DeleteResult { deleted })
@@ -498,8 +499,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
             columns: None,
         });
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Rows(iter) => {
+        match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Rows(iter) => {
                 let mut n = 0u64;
                 for result in iter {
                     result?;
@@ -519,10 +520,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ) -> Result<bson::RawBson, DbError> {
         let stmt = planner::Statement::Distinct(query.clone());
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            executor::ExecutionResult::Rows(mut iter) => match iter.next() {
+        match executor_v2::Executor::new(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
-                    let opt_val = result?;
+                    let opt_val: Option<RawValue> = result?;
                     opt_val
                         .ok_or_else(|| DbError::InvalidQuery("expected value".into()))?
                         .into_raw_bson()

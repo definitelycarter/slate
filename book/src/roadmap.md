@@ -220,6 +220,60 @@ plan node.
 
 ---
 
+## Document Walker (Single-Pass Field Extraction)
+
+### Problem
+
+Multiple executor nodes need to read fields from BSON documents by dot-notation paths:
+Filter calls `raw_get_path` per predicate field, Sort calls it per sort key per comparison
+(n*log(n) times), Projection iterates the doc and checks a key map, Distinct walks paths
+to extract values. Each node walks the document independently, and some walk it repeatedly
+(Sort re-walks on every comparison).
+
+### Idea
+
+A single-pass document walker that yields `(path, scalar_value)` pairs, guided by a
+`FieldTree` to skip irrelevant subtrees:
+
+```rust
+fn walk_fields<'a>(
+    doc: &'a RawDocument,
+    tree: &HashMap<&str, FieldTree>,
+) -> Vec<(&'a str, RawBsonRef<'a>)>
+```
+
+For `{ _id: "1", status: "active", address: { city: "Austin", zip: 78701 } }` with
+tree `{ "status": Leaf, "address": Branch({ "city": Leaf }) }`, yields:
+
+```
+("status", String("active"))
+("address.city", String("Austin"))
+```
+
+Each node consumes the extracted fields differently:
+- **Projection**: write matched fields to output doc (preserving nesting structure)
+- **Filter**: check values against predicate operators
+- **Sort**: pre-extract sort keys once per doc, compare extracted keys during sort
+- **Distinct**: grab the target field value for dedup
+
+### Benefits
+
+- **One walk per document** instead of N walks for N fields
+- **FieldTree-guided pruning** — skip entire subtrees that no node cares about
+- **Reuses `FieldTree`** already built for projection
+- **Eliminates per-comparison path walks** in Sort (already done via pre-extraction,
+  but this generalizes it)
+
+### Considerations
+
+- Projection needs to preserve document structure (nested docs, arrays), not just flat
+  scalars — the walker needs to emit structural values too
+- Filter needs to handle array element matching (`tags = 'foo'` matches if any element
+  equals `'foo'`), which is more complex than scalar extraction
+- May be better as a visitor/callback pattern than a collected vec, to avoid allocation
+
+---
+
 ## Route Upserts/Merges Through Planner
 
 ### Problem

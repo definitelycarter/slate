@@ -20,14 +20,14 @@ use crate::planner::PlanNode;
 // RocksDB. Downstream nodes call `.as_document()` to get a uniform
 // `&RawDocument` view without redundant `from_bytes` calls.
 
-pub(crate) enum RawValue<'a> {
+pub enum RawValue<'a> {
     Borrowed(RawBsonRef<'a>),
     Owned(RawBson),
 }
 
 impl<'a> RawValue<'a> {
     /// Uniform borrowed view regardless of ownership.
-    pub(crate) fn as_ref(&self) -> RawBsonRef<'_> {
+    pub fn as_ref(&self) -> RawBsonRef<'_> {
         match self {
             Self::Borrowed(r) => *r,
             Self::Owned(b) => b.as_raw_bson_ref(),
@@ -35,7 +35,7 @@ impl<'a> RawValue<'a> {
     }
 
     /// Extract `&RawDocument` if this value is a document.
-    pub(crate) fn as_document(&self) -> Option<&RawDocument> {
+    pub fn as_document(&self) -> Option<&RawDocument> {
         match self {
             Self::Borrowed(RawBsonRef::Document(d)) => Some(d),
             Self::Owned(RawBson::Document(d)) => Some(d),
@@ -44,7 +44,7 @@ impl<'a> RawValue<'a> {
     }
 
     /// Convert to owned `RawBson`, dropping the lifetime.
-    pub(crate) fn into_raw_bson(self) -> Option<RawBson> {
+    pub fn into_raw_bson(self) -> Option<RawBson> {
         match self {
             Self::Owned(b) => Some(b),
             Self::Borrowed(r) => exec::to_raw_bson(r),
@@ -52,7 +52,7 @@ impl<'a> RawValue<'a> {
     }
 
     /// Extract as `RawDocumentBuf`, moving owned data without copying.
-    pub(crate) fn into_document_buf(self) -> Option<RawDocumentBuf> {
+    pub fn into_document_buf(self) -> Option<RawDocumentBuf> {
         match self {
             Self::Owned(RawBson::Document(buf)) => Some(buf),
             Self::Borrowed(RawBsonRef::Document(d)) => Some(d.to_raw_document_buf()),
@@ -61,7 +61,7 @@ impl<'a> RawValue<'a> {
     }
 }
 
-pub(crate) type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
+pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
 
 /// Typed result from executing a plan.
 pub enum ExecutionResult<'a> {

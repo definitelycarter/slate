@@ -536,7 +536,7 @@ pub(crate) fn raw_merge_doc(
     Ok((merged, true))
 }
 
-fn raw_compare_values(
+pub(crate) fn raw_compare_values(
     field_value: Option<&RawBsonRef>,
     query_val: &Bson,
     predicate: fn(Ordering) -> bool,
