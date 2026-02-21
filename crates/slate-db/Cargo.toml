@@ -17,3 +17,4 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 tempfile = "3"
 bson = "2"
+slate-store = { path = "../slate-store", features = ["memory"] }

@@ -12,8 +12,8 @@ use crate::catalog::Catalog;
 use crate::collection::CollectionConfig;
 use crate::encoding;
 use crate::error::DbError;
-use crate::exec;
 use crate::executor;
+use crate::executor::exec;
 use crate::planner;
 use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 
@@ -44,6 +44,11 @@ pub struct Database<S: Store> {
 }
 
 impl<S: Store> Database<S> {
+    #[cfg(test)]
+    pub(crate) fn store(&self) -> &S {
+        &self.inner.store
+    }
+
     pub fn begin(&self, read_only: bool) -> Result<DatabaseTransaction<'_, S>, DbError> {
         let txn = self.inner.store.begin(read_only)?;
         Ok(DatabaseTransaction {
@@ -253,7 +258,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan(collection, &indexed_fields, query);
-        match executor::execute(&self.txn, &cf, &plan)? {
+        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => iter
                 .map(|r| {
                     let (_id, opt_val) = r?;
@@ -319,7 +324,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan =
             planner::plan_update(collection, &indexed_fields, filter, update.clone(), Some(1));
-        let (matched, modified) = match executor::execute(&self.txn, &cf, &plan)? {
+        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -351,7 +356,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_update(collection, &indexed_fields, filter, update, None);
-        let (matched, modified) = match executor::execute(&self.txn, &cf, &plan)? {
+        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -373,7 +378,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_replace(collection, &indexed_fields, filter, replacement);
-        let (matched, modified) = match executor::execute(&self.txn, &cf, &plan)? {
+        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -396,7 +401,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_delete(collection, &indexed_fields, filter, Some(1));
-        let deleted = match executor::execute(&self.txn, &cf, &plan)? {
+        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
@@ -413,7 +418,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_delete(collection, &indexed_fields, filter, None);
-        let deleted = match executor::execute(&self.txn, &cf, &plan)? {
+        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
@@ -503,7 +508,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan(collection, &indexed_fields, &query);
-        match executor::execute(&self.txn, &cf, &plan)? {
+        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(iter) => {
                 let mut n = 0u64;
                 for result in iter {
@@ -526,7 +531,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
         let plan = planner::plan_distinct(collection, &indexed_fields, query);
-        match executor::execute(&self.txn, &cf, &plan)? {
+        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
             executor::ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
                     let (_id, opt_val) = result?;

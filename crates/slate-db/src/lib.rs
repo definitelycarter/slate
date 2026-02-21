@@ -3,7 +3,6 @@ mod collection;
 mod database;
 mod encoding;
 mod error;
-mod exec;
 mod executor;
 mod planner;
 mod result;

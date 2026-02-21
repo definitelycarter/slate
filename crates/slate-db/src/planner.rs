@@ -106,6 +106,10 @@ pub enum PlanNode {
         indexed_fields: Vec<String>,
         input: Box<PlanNode>,
     },
+
+    /// Caller-provided documents. Each document must contain an `_id` field.
+    /// Source node for insert/upsert pipelines and executor tests.
+    Values { docs: Vec<bson::RawDocumentBuf> },
 }
 
 /// Build a query plan from a collection name and its indexed fields.
