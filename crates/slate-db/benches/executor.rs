@@ -398,6 +398,7 @@ fn bench_index_scan(c: &mut Criterion) {
             direction: slate_query::SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         };
 
         group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
@@ -414,6 +415,7 @@ fn bench_index_scan(c: &mut Criterion) {
             direction: slate_query::SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         };
 
         group.bench_with_input(BenchmarkId::new("full", n), &plan_full, |b, plan| {
@@ -430,6 +432,7 @@ fn bench_index_scan(c: &mut Criterion) {
             direction: slate_query::SortDirection::Desc,
             limit: Some(50),
             complete_groups: false,
+            covered: false,
         };
 
         group.bench_with_input(
@@ -472,6 +475,7 @@ fn bench_read_record(c: &mut Criterion) {
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
+                covered: false,
             }),
         };
 
@@ -499,6 +503,7 @@ fn bench_index_merge(c: &mut Criterion) {
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
+                covered: false,
             }),
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
@@ -507,6 +512,7 @@ fn bench_index_merge(c: &mut Criterion) {
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
+                covered: false,
             }),
         };
 
@@ -526,6 +532,7 @@ fn bench_index_merge(c: &mut Criterion) {
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
+                covered: false,
             }),
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
@@ -534,6 +541,7 @@ fn bench_index_merge(c: &mut Criterion) {
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
+                covered: false,
             }),
         };
 

@@ -190,6 +190,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 direction,
                 limit,
                 complete_groups,
+                covered,
                 ..
             } => nodes::index_scan::execute(
                 self.txn,
@@ -199,6 +200,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 *direction,
                 *limit,
                 *complete_groups,
+                *covered,
             ),
             PlanNode::IndexMerge { logical, lhs, rhs } => {
                 let left = self.execute_node(lhs)?;

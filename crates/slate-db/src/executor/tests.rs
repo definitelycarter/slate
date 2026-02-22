@@ -157,7 +157,7 @@ impl Transaction for MockTransaction {
 
 // ── Helpers ─────────────────────────────────────────────────
 
-/// Collect bare string ids from an IndexScan/IndexMerge result.
+/// Collect bare string IDs from an IndexScan/IndexMerge result.
 fn collect_ids(result: ExecutionResult) -> Vec<String> {
     match result {
         ExecutionResult::Rows(iter) => iter
@@ -772,6 +772,7 @@ fn index_scan_eq_filter() {
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
+        covered: false,
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(ids.len(), 2);
@@ -793,6 +794,7 @@ fn index_scan_full_column() {
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
+        covered: false,
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     // score order: 70 (id=1), 80 (id=3), 90 (id=2)
@@ -812,6 +814,7 @@ fn index_scan_desc() {
         direction: SortDirection::Desc,
         limit: None,
         complete_groups: false,
+        covered: false,
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     // Descending score: 90 (id=2), 80 (id=3), 70 (id=1)
@@ -831,6 +834,7 @@ fn index_scan_with_limit() {
         direction: SortDirection::Asc,
         limit: Some(2),
         complete_groups: false,
+        covered: false,
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
@@ -852,6 +856,7 @@ fn index_merge_or() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
@@ -860,6 +865,7 @@ fn index_merge_or() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
@@ -886,6 +892,7 @@ fn index_merge_and() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
@@ -894,6 +901,7 @@ fn index_merge_and() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
     };
     let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
@@ -915,6 +923,7 @@ fn read_record_fetches_docs_from_index_scan() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
@@ -951,6 +960,7 @@ fn read_record_skips_dangling_index() {
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
+            covered: false,
         }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());

@@ -54,6 +54,8 @@ pub enum PlanNode {
     /// `limit` caps the number of index entries to read (pushed down from Limit).
     /// `complete_groups: true` reads past the limit to finish the last value group,
     /// ensuring complete groups for downstream sub-sorting by secondary fields.
+    /// `covered: true` yields `{ _id, column: value }` documents directly
+    /// (for index-covered projections); `false` yields bare `String` IDs.
     IndexScan {
         collection: String,
         column: String,
@@ -61,6 +63,7 @@ pub enum PlanNode {
         direction: SortDirection,
         limit: Option<usize>,
         complete_groups: bool,
+        covered: bool,
     },
 
     /// Combines ID sets from two child nodes using AND (intersect) or OR (union).
@@ -211,19 +214,52 @@ fn plan_find(collection: &str, indexed_fields: &[String], query: &Query) -> Plan
     let id_is_scan = matches!(id_node, PlanNode::Scan { .. });
     let has_residual_filter = residual_filter.is_some();
 
-    // Step 2: ReadRecord — always fetch full documents.
-    // TODO: Add CoverProject node to skip ReadRecord when the index covers the projection.
-    let node = PlanNode::ReadRecord {
-        input: Box::new(id_node),
-    };
+    // Step 2: Check if the index covers the projection (skip ReadRecord entirely).
+    // CoverProject applies when: IndexScan has an equality value, projection only
+    // requests _id and/or the indexed column, and there's no residual filter.
+    let no_residual = residual_filter
+        .as_ref()
+        .map_or(true, |g| g.children.is_empty());
+    let covered = no_residual
+        && matches!(
+            &id_node,
+            PlanNode::IndexScan {
+                column,
+                value: Some(_),
+                ..
+            } if query.columns.as_ref().is_some_and(|cols|
+                cols.iter().all(|c| c == "_id" || c == column)
+            )
+        );
 
-    // Step 3: Wrap with residual filter if any conditions remain
-    let node = match residual_filter {
-        Some(group) if !group.children.is_empty() => PlanNode::Filter {
-            predicate: group,
-            input: Box::new(node),
-        },
-        _ => node,
+    // Set covered flag on the IndexScan so it yields { _id, column: value } documents.
+    let mut id_node = id_node;
+    if covered {
+        if let PlanNode::IndexScan {
+            covered: ref mut c, ..
+        } = id_node
+        {
+            *c = true;
+        }
+    }
+
+    let node = if covered {
+        // Index covers the projection — IndexScan yields finished docs.
+        // Skip ReadRecord + Filter + Projection.
+        id_node
+    } else {
+        // Standard path: ReadRecord → optional Filter.
+        let node = PlanNode::ReadRecord {
+            input: Box::new(id_node),
+        };
+
+        match residual_filter {
+            Some(group) if !group.children.is_empty() => PlanNode::Filter {
+                predicate: group,
+                input: Box::new(node),
+            },
+            _ => node,
+        }
     };
 
     // Step 4: Sort
@@ -297,13 +333,15 @@ fn plan_find(collection: &str, indexed_fields: &[String], query: &Query) -> Plan
         node
     };
 
-    // Step 6: Projection — always emitted, injects _id
-    let node = PlanNode::Projection {
-        columns: query.columns.clone(),
-        input: Box::new(node),
-    };
-
-    node
+    // Step 6: Projection — skip when CoverProject already handles it
+    if covered {
+        node
+    } else {
+        PlanNode::Projection {
+            columns: query.columns.clone(),
+            input: Box::new(node),
+        }
+    }
 }
 
 /// Build a plan for a distinct query, reusing the filter planning logic.
@@ -397,6 +435,7 @@ fn replace_scan_with_index_order(
                     direction,
                     limit,
                     complete_groups,
+                    covered: false,
                 }),
             }
         }
@@ -503,6 +542,7 @@ fn find_best_and_child(
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
+                        covered: false,
                     };
                     return Some((node, i));
                 }
@@ -578,6 +618,7 @@ fn try_or_index_merge(
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
+                        covered: false,
                     });
                 } else {
                     // Non-indexed condition in OR — can't use indexes for this OR
@@ -881,6 +922,7 @@ mod tests {
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
+                        covered: false,
                     }
                 );
             }
