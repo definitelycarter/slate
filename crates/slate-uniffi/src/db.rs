@@ -92,8 +92,7 @@ impl SlateDatabase {
 impl SlateDatabase {
     // --- Insert ---
 
-    pub fn insert_one(&self, collection: String, doc_json: String) -> Result<String, SlateError> {
-        let doc: bson::Document = serde_json::from_str(&doc_json)?;
+    pub fn insert_one(&self, collection: String, doc: Vec<u8>) -> Result<String, SlateError> {
         self.write(|txn| {
             let result = txn.insert_one(&collection, doc)?;
             Ok(result.id)
@@ -103,9 +102,8 @@ impl SlateDatabase {
     pub fn insert_many(
         &self,
         collection: String,
-        docs_json: String,
+        docs: Vec<Vec<u8>>,
     ) -> Result<Vec<String>, SlateError> {
-        let docs: Vec<bson::Document> = serde_json::from_str(&docs_json)?;
         self.write(|txn| {
             let results = txn.insert_many(&collection, docs)?;
             Ok(results.into_iter().map(|r| r.id).collect())
@@ -114,20 +112,14 @@ impl SlateDatabase {
 
     // --- Query ---
 
-    pub fn find(&self, collection: String, query_json: String) -> Result<Vec<String>, SlateError> {
+    pub fn find(&self, collection: String, query_json: String) -> Result<Vec<Vec<u8>>, SlateError> {
         let query: Query = serde_json::from_str(&query_json)?;
         self.read(|txn| {
-            let raw_records: Vec<_> = txn
+            let results: Vec<Vec<u8>> = txn
                 .find(&collection, &query)?
                 .iter()?
+                .map(|r| r.map(|doc| doc.into_bytes()))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut results = Vec::with_capacity(raw_records.len());
-            for raw in &raw_records {
-                let doc = raw.to_document().map_err(DbError::from)?;
-                let json = serde_json::to_string(&doc)
-                    .map_err(|e| DbError::Serialization(e.to_string()))?;
-                results.push(json);
-            }
             Ok(results)
         })
     }
@@ -136,19 +128,11 @@ impl SlateDatabase {
         &self,
         collection: String,
         query_json: String,
-    ) -> Result<Option<String>, SlateError> {
+    ) -> Result<Option<Vec<u8>>, SlateError> {
         let query: Query = serde_json::from_str(&query_json)?;
         self.read(|txn| {
             let raw = txn.find_one(&collection, &query)?;
-            match raw {
-                Some(r) => {
-                    let doc = r.to_document().map_err(DbError::from)?;
-                    let json = serde_json::to_string(&doc)
-                        .map_err(|e| DbError::Serialization(e.to_string()))?;
-                    Ok(Some(json))
-                }
-                None => Ok(None),
-            }
+            Ok(raw.map(|r| r.into_bytes()))
         })
     }
 
@@ -157,7 +141,7 @@ impl SlateDatabase {
         collection: String,
         id: String,
         columns: Option<Vec<String>>,
-    ) -> Result<Option<String>, SlateError> {
+    ) -> Result<Option<Vec<u8>>, SlateError> {
         self.read(|txn| {
             let cols: Option<Vec<&str>> = columns
                 .as_ref()
@@ -165,9 +149,8 @@ impl SlateDatabase {
             let doc = txn.find_by_id(&collection, &id, cols.as_deref())?;
             match doc {
                 Some(d) => {
-                    let json = serde_json::to_string(&d)
-                        .map_err(|e| DbError::Serialization(e.to_string()))?;
-                    Ok(Some(json))
+                    let raw = bson::RawDocumentBuf::from_document(&d).map_err(DbError::from)?;
+                    Ok(Some(raw.into_bytes()))
                 }
                 None => Ok(None),
             }
@@ -180,11 +163,10 @@ impl SlateDatabase {
         &self,
         collection: String,
         filter_json: String,
-        update_json: String,
+        update: Vec<u8>,
         upsert: bool,
     ) -> Result<SlateUpdateResult, SlateError> {
         let filter: FilterGroup = serde_json::from_str(&filter_json)?;
-        let update: bson::Document = serde_json::from_str(&update_json)?;
         self.write(|txn| {
             let result = txn.update_one(&collection, &filter, update, upsert)?;
             Ok(SlateUpdateResult {
@@ -199,10 +181,9 @@ impl SlateDatabase {
         &self,
         collection: String,
         filter_json: String,
-        update_json: String,
+        update: Vec<u8>,
     ) -> Result<SlateUpdateResult, SlateError> {
         let filter: FilterGroup = serde_json::from_str(&filter_json)?;
-        let update: bson::Document = serde_json::from_str(&update_json)?;
         self.write(|txn| {
             let result = txn.update_many(&collection, &filter, update)?;
             Ok(SlateUpdateResult {
@@ -217,12 +198,11 @@ impl SlateDatabase {
         &self,
         collection: String,
         filter_json: String,
-        doc_json: String,
+        replacement: Vec<u8>,
     ) -> Result<SlateUpdateResult, SlateError> {
         let filter: FilterGroup = serde_json::from_str(&filter_json)?;
-        let doc: bson::Document = serde_json::from_str(&doc_json)?;
         self.write(|txn| {
-            let result = txn.replace_one(&collection, &filter, doc)?;
+            let result = txn.replace_one(&collection, &filter, replacement)?;
             Ok(SlateUpdateResult {
                 matched: result.matched,
                 modified: result.modified,
@@ -271,9 +251,8 @@ impl SlateDatabase {
     pub fn upsert_many(
         &self,
         collection: String,
-        docs_json: String,
+        docs: Vec<Vec<u8>>,
     ) -> Result<SlateUpsertResult, SlateError> {
-        let docs: Vec<bson::Document> = serde_json::from_str(&docs_json)?;
         self.write(|txn| {
             let result = txn.upsert_many(&collection, docs)?;
             Ok(SlateUpsertResult {
@@ -286,9 +265,8 @@ impl SlateDatabase {
     pub fn merge_many(
         &self,
         collection: String,
-        docs_json: String,
+        docs: Vec<Vec<u8>>,
     ) -> Result<SlateUpsertResult, SlateError> {
-        let docs: Vec<bson::Document> = serde_json::from_str(&docs_json)?;
         self.write(|txn| {
             let result = txn.merge_many(&collection, docs)?;
             Ok(SlateUpsertResult {

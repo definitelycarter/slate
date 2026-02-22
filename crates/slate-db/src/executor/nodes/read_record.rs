@@ -6,23 +6,12 @@ use crate::encoding;
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::{RawIter, RawValue};
-use crate::planner::PlanNode;
 
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    input: &'a PlanNode,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
-    // Scan already yields full documents — just pass through
-    if matches!(input, PlanNode::Scan { .. }) {
-        return Ok(Box::new(source.filter_map(|result| match result {
-            Ok(Some(val)) => Some(Ok(Some(val))),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
-        })));
-    }
-
     // IndexScan/IndexMerge path: extract _id, fetch full record
     Ok(Box::new(source.filter_map(move |result| {
         let opt_val = match result {

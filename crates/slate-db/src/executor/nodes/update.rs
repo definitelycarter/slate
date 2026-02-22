@@ -1,4 +1,5 @@
 use bson::RawBson;
+use bson::raw::RawDocumentBuf;
 use slate_store::Transaction;
 
 use crate::encoding;
@@ -9,7 +10,7 @@ use crate::executor::{RawIter, RawValue};
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    update: &'a bson::Document,
+    update: &'a RawDocumentBuf,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {

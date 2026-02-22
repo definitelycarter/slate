@@ -1,8 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
-use std::thread;
-use std::time::Duration;
 
 use bson::RawDocumentBuf;
 use slate_query::{DistinctQuery, FilterGroup, Query};
@@ -10,6 +6,7 @@ use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
 use crate::collection::CollectionConfig;
+use crate::convert::IntoRawDocumentBuf;
 use crate::cursor::Cursor;
 use crate::encoding;
 use crate::error::DbError;
@@ -18,6 +15,7 @@ use crate::executor::exec;
 use crate::executor::{ExecutionResult, RawValue};
 use crate::planner;
 use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
+use crate::sweep::{self, StoreInner, TtlHandle};
 
 const SYS_CF: &str = "_sys";
 
@@ -29,14 +27,9 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            ttl_sweep_interval_secs: 10,
+            ttl_sweep_interval_secs: u64::MAX,
         }
     }
-}
-
-struct StoreInner<S: Store> {
-    store: S,
-    catalog: Catalog,
 }
 
 pub struct Database<S: Store> {
@@ -60,7 +53,7 @@ impl<S: Store> Database<S> {
 
     /// Purge expired documents from a collection.
     pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
-        purge_expired_inner(&self.inner, collection)
+        sweep::purge_expired(&self.inner, collection)
     }
 
     /// Gracefully stop background tasks.
@@ -79,122 +72,9 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
             catalog: Catalog,
         });
 
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let notify = Arc::new((Mutex::new(()), Condvar::new()));
-        let sweep_inner = Arc::clone(&inner);
-        let sweep_flag = Arc::clone(&shutdown);
-        let sweep_notify = Arc::clone(&notify);
-        let interval_secs = config.ttl_sweep_interval_secs;
-        let handle = thread::spawn(move || {
-            let interval = Duration::from_secs(interval_secs);
-            loop {
-                let (lock, cvar) = &*sweep_notify;
-                let guard = lock.lock().unwrap();
-                let _ = cvar.wait_timeout(guard, interval).unwrap();
-                if sweep_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-                let collections = match sweep_inner.store.begin(true) {
-                    Ok(mut txn) => match txn.cf(SYS_CF) {
-                        Ok(sys) => match Catalog.list_collections(&txn, &sys) {
-                            Ok(c) => {
-                                let _ = txn.rollback();
-                                c
-                            }
-                            Err(_) => continue,
-                        },
-                        Err(_) => continue,
-                    },
-                    Err(_) => continue,
-                };
-                for col in &collections {
-                    let _ = purge_expired_inner(&sweep_inner, col);
-                }
-            }
-        });
+        let ttl_handle = sweep::spawn(Arc::clone(&inner), config.ttl_sweep_interval_secs);
 
-        Self {
-            inner,
-            ttl_handle: Some(TtlHandle {
-                shutdown,
-                notify,
-                handle: Some(handle),
-            }),
-        }
-    }
-}
-
-/// Standalone purge function that works with Arc<StoreInner> for the sweep thread.
-fn purge_expired_inner<S: Store>(inner: &StoreInner<S>, collection: &str) -> Result<u64, DbError> {
-    let mut txn = inner.store.begin(false).map_err(DbError::Store)?;
-    let now_bytes = encoding::encode_datetime_millis(bson::DateTime::now().timestamp_millis());
-
-    let cf = txn.cf(collection).map_err(DbError::Store)?;
-    let prefix = encoding::index_scan_field_prefix("ttl");
-    let val_start = prefix.len();
-    let val_end = val_start + 8;
-    let id_start = val_end + 1;
-
-    let mut entries: Vec<(Vec<u8>, String)> = Vec::new();
-    for result in txn.scan_prefix(&cf, &prefix).map_err(DbError::Store)? {
-        let (key, _) = result.map_err(DbError::Store)?;
-        if key.len() < id_start {
-            continue;
-        }
-        let value_bytes = &key[val_start..val_end];
-        if value_bytes >= now_bytes.as_slice() {
-            break;
-        }
-        let record_id = match std::str::from_utf8(&key[id_start..]) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        entries.push((key.to_vec(), record_id.to_string()));
-    }
-
-    let mut deleted = 0u64;
-    let sys = txn.cf(SYS_CF).map_err(DbError::Store)?;
-    let indexed_fields = inner.catalog.list_indexes(&txn, &sys, collection)?;
-
-    for (ttl_key, record_id) in &entries {
-        let data_key = encoding::record_key(record_id);
-        if let Some(bytes) = txn.get(&cf, &data_key).map_err(DbError::Store)? {
-            let raw = bson::RawDocument::from_bytes(&bytes)?;
-            for field in &indexed_fields {
-                for value in exec::raw_get_path_values(raw, field)? {
-                    let idx_key = encoding::raw_index_key(field, value, record_id);
-                    txn.delete(&cf, &idx_key).map_err(DbError::Store)?;
-                }
-            }
-            txn.delete(&cf, &data_key).map_err(DbError::Store)?;
-        }
-        txn.delete(&cf, ttl_key).map_err(DbError::Store)?;
-        deleted += 1;
-    }
-
-    txn.commit().map_err(DbError::Store)?;
-    Ok(deleted)
-}
-
-struct TtlHandle {
-    shutdown: Arc<AtomicBool>,
-    notify: Arc<(Mutex<()>, Condvar)>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl TtlHandle {
-    fn stop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.notify.1.notify_one();
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for TtlHandle {
-    fn drop(&mut self) {
-        self.stop();
+        Self { inner, ttl_handle }
     }
 }
 
@@ -211,9 +91,10 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn insert_one(
         &mut self,
         collection: &str,
-        doc: bson::Document,
+        doc: impl IntoRawDocumentBuf,
     ) -> Result<InsertResult, DbError> {
-        let mut results = self.insert_many(collection, vec![doc])?;
+        let raw = doc.into_raw_document_buf()?;
+        let mut results = self.insert_many(collection, vec![raw])?;
         Ok(results.remove(0))
     }
 
@@ -221,11 +102,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn insert_many(
         &mut self,
         collection: &str,
-        docs: impl IntoIterator<Item = bson::Document>,
+        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<Vec<InsertResult>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| Ok(RawDocumentBuf::from_document(&doc)?))
+            .map(|doc| doc.into_raw_document_buf())
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::Insert { docs: raw_docs };
@@ -292,12 +173,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         &mut self,
         collection: &str,
         filter: &FilterGroup,
-        update: bson::Document,
+        update: impl IntoRawDocumentBuf,
         upsert: bool,
     ) -> Result<UpdateResult, DbError> {
+        let raw = update.into_raw_document_buf()?;
         let stmt = planner::Statement::Update {
             filter: filter.clone(),
-            update: update.clone(),
+            update: raw.clone(),
             limit: Some(1),
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
@@ -307,7 +189,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         };
 
         if matched == 0 && upsert {
-            let result = self.insert_one(collection, update)?;
+            let result = self.insert_one(collection, raw)?;
             Ok(UpdateResult {
                 matched: 0,
                 modified: 0,
@@ -327,11 +209,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         &mut self,
         collection: &str,
         filter: &FilterGroup,
-        update: bson::Document,
+        update: impl IntoRawDocumentBuf,
     ) -> Result<UpdateResult, DbError> {
+        let raw = update.into_raw_document_buf()?;
         let stmt = planner::Statement::Update {
             filter: filter.clone(),
-            update,
+            update: raw,
             limit: None,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
@@ -351,11 +234,12 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         &mut self,
         collection: &str,
         filter: &FilterGroup,
-        replacement: bson::Document,
+        replacement: impl IntoRawDocumentBuf,
     ) -> Result<UpdateResult, DbError> {
+        let raw = replacement.into_raw_document_buf()?;
         let stmt = planner::Statement::Replace {
             filter: filter.clone(),
-            replacement,
+            replacement: raw,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
         let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
@@ -415,11 +299,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn upsert_many(
         &mut self,
         collection: &str,
-        docs: impl IntoIterator<Item = bson::Document>,
+        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<UpsertResult, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| Ok(RawDocumentBuf::from_document(&doc)?))
+            .map(|doc| doc.into_raw_document_buf())
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::UpsertMany { docs: raw_docs };
@@ -437,11 +321,11 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn merge_many(
         &mut self,
         collection: &str,
-        docs: impl IntoIterator<Item = bson::Document>,
+        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<UpsertResult, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| Ok(RawDocumentBuf::from_document(&doc)?))
+            .map(|doc| doc.into_raw_document_buf())
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::MergeMany { docs: raw_docs };

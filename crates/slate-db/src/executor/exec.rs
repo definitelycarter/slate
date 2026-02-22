@@ -404,23 +404,25 @@ pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
 /// `_id` fields in the update are ignored (ID is stored externally).
 pub(crate) fn raw_merge_doc(
     old_raw: &RawDocument,
-    update: &bson::Document,
+    update: &RawDocument,
 ) -> Result<Option<bson::RawDocumentBuf>, DbError> {
     let update_keys: std::collections::HashSet<&str> = update
-        .keys()
-        .filter(|k| *k != "_id")
-        .map(|k| k.as_str())
+        .iter()
+        .filter_map(|r| r.ok())
+        .filter(|(k, _)| *k != "_id")
+        .map(|(k, _)| k)
         .collect();
 
     // Check if anything actually changed
     let mut changed = false;
-    for (ukey, uval) in update {
+    for result in update.iter() {
+        let (ukey, uval) = result?;
         if ukey == "_id" {
             continue;
         }
         match old_raw.get(ukey)? {
             Some(old_val) => {
-                if !raw_values_eq(&old_val, uval) {
+                if old_val != uval {
                     changed = true;
                     break;
                 }
@@ -448,13 +450,12 @@ pub(crate) fn raw_merge_doc(
     }
 
     // Append update fields
-    for (ukey, uval) in update {
+    for result in update.iter() {
+        let (ukey, uval) = result?;
         if ukey == "_id" {
             continue;
         }
-        let raw_val = bson::RawBson::try_from(uval.clone())
-            .map_err(|e| DbError::Serialization(e.to_string()))?;
-        merged.append(ukey, raw_val);
+        merged.append_ref(ukey, uval);
     }
 
     Ok(Some(merged))

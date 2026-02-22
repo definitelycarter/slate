@@ -12,13 +12,13 @@ pub enum Statement {
     /// Update documents matching a filter (merge semantics).
     Update {
         filter: FilterGroup,
-        update: bson::Document,
+        update: bson::RawDocumentBuf,
         limit: Option<usize>,
     },
     /// Replace the first document matching a filter entirely.
     Replace {
         filter: FilterGroup,
-        replacement: bson::Document,
+        replacement: bson::RawDocumentBuf,
     },
     /// Delete documents matching a filter.
     Delete {
@@ -130,7 +130,7 @@ pub enum PlanNode {
     /// Side effect: writes the merged document to the CF.
     /// Yields (id, Some(new_doc)) if changed, (id, None) if unchanged.
     Update {
-        update: bson::Document,
+        update: bson::RawDocumentBuf,
         input: Box<PlanNode>,
     },
 
@@ -138,7 +138,7 @@ pub enum PlanNode {
     /// Side effect: writes the replacement document to the CF.
     /// Yields (id, Some(replacement)).
     Replace {
-        replacement: bson::Document,
+        replacement: bson::RawDocumentBuf,
         input: Box<PlanNode>,
     },
 
@@ -248,9 +248,15 @@ fn plan_find(collection: &str, indexed_fields: &[String], query: &Query) -> Plan
         // Skip ReadRecord + Filter + Projection.
         id_node
     } else {
-        // Standard path: ReadRecord → optional Filter.
-        let node = PlanNode::ReadRecord {
-            input: Box::new(id_node),
+        // Standard path: optional ReadRecord → optional Filter.
+        // Scan already yields full documents, so ReadRecord is only
+        // needed for IndexScan/IndexMerge (which yield bare IDs).
+        let node = if id_is_scan {
+            id_node
+        } else {
+            PlanNode::ReadRecord {
+                input: Box::new(id_node),
+            }
         };
 
         match residual_filter {
@@ -364,9 +370,13 @@ fn plan_distinct(collection: &str, indexed_fields: &[String], query: &DistinctQu
         ),
     };
 
-    // Step 2: ReadRecord
-    let node = PlanNode::ReadRecord {
-        input: Box::new(id_node),
+    // Step 2: ReadRecord (only for index paths — Scan already yields documents)
+    let node = if matches!(id_node, PlanNode::Scan { .. }) {
+        id_node
+    } else {
+        PlanNode::ReadRecord {
+            input: Box::new(id_node),
+        }
     };
 
     // Step 3: Wrap with residual filter if any
@@ -426,19 +436,17 @@ fn replace_scan_with_index_order(
     complete_groups: bool,
 ) -> PlanNode {
     match node {
-        PlanNode::ReadRecord { input } if matches!(*input, PlanNode::Scan { .. }) => {
-            PlanNode::ReadRecord {
-                input: Box::new(PlanNode::IndexScan {
-                    collection: collection.to_string(),
-                    column: sort_field.to_string(),
-                    value: None,
-                    direction,
-                    limit,
-                    complete_groups,
-                    covered: false,
-                }),
-            }
-        }
+        PlanNode::Scan { .. } => PlanNode::ReadRecord {
+            input: Box::new(PlanNode::IndexScan {
+                collection: collection.to_string(),
+                column: sort_field.to_string(),
+                value: None,
+                direction,
+                limit,
+                complete_groups,
+                covered: false,
+            }),
+        },
         PlanNode::Filter { predicate, input } => PlanNode::Filter {
             predicate,
             input: Box::new(replace_scan_with_index_order(
@@ -679,8 +687,13 @@ fn build_filtered_source(
 ) -> PlanNode {
     let (id_node, residual_filter) = plan_filter(collection, indexed_fields, filter);
 
-    let node = PlanNode::ReadRecord {
-        input: Box::new(id_node),
+    // Scan already yields full documents — only wrap in ReadRecord for index paths.
+    let node = if matches!(id_node, PlanNode::Scan { .. }) {
+        id_node
+    } else {
+        PlanNode::ReadRecord {
+            input: Box::new(id_node),
+        }
     };
 
     let node = match residual_filter {
@@ -729,7 +742,7 @@ fn plan_update(
     collection: &str,
     indexed_fields: Vec<String>,
     filter: &FilterGroup,
-    update: bson::Document,
+    update: bson::RawDocumentBuf,
     take: Option<usize>,
 ) -> PlanNode {
     let source = build_filtered_source(collection, &indexed_fields, filter, take);
@@ -757,7 +770,7 @@ fn plan_replace(
     collection: &str,
     indexed_fields: Vec<String>,
     filter: &FilterGroup,
-    replacement: bson::Document,
+    replacement: bson::RawDocumentBuf,
 ) -> PlanNode {
     let source = build_filtered_source(collection, &indexed_fields, filter, Some(1));
 
@@ -877,12 +890,7 @@ mod tests {
         let p = plan("p1", vec![], Statement::Find(empty_query()));
         let (cols, inner) = unwrap_projection(p);
         assert_eq!(cols, None);
-        assert!(matches!(
-            inner,
-            PlanNode::ReadRecord {
-                input,
-            } if matches!(*input, PlanNode::Scan { .. })
-        ));
+        assert!(matches!(inner, PlanNode::Scan { .. }));
     }
 
     #[test]
@@ -895,7 +903,7 @@ mod tests {
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+                assert!(matches!(*input, PlanNode::Scan { .. }));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }
@@ -977,7 +985,7 @@ mod tests {
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Sort { input, .. } => {
-                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+                assert!(matches!(*input, PlanNode::Scan { .. }));
             }
             _ => panic!("expected Sort, got {:?}", inner),
         }
@@ -1016,7 +1024,7 @@ mod tests {
             PlanNode::Limit { skip, take, input } => {
                 assert_eq!(skip, 10);
                 assert_eq!(take, Some(5));
-                assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+                assert!(matches!(*input, PlanNode::Scan { .. }));
             }
             _ => panic!("expected Limit, got {:?}", inner),
         }
@@ -1031,7 +1039,7 @@ mod tests {
         let p = plan("p1", vec![], Statement::Find(q));
         let (cols, inner) = unwrap_projection(p);
         assert_eq!(cols, Some(vec!["name".to_string(), "status".to_string()]));
-        assert!(matches!(inner, PlanNode::ReadRecord { .. }));
+        assert!(matches!(inner, PlanNode::Scan { .. }));
     }
 
     #[test]
@@ -1161,12 +1169,9 @@ mod tests {
         let p = plan("p1", indexed, Statement::Find(q));
         let (_, inner) = unwrap_projection(p);
         match inner {
-            PlanNode::Filter { input, .. } => match *input {
-                PlanNode::ReadRecord { input, .. } => {
-                    assert!(matches!(*input, PlanNode::Scan { .. }));
-                }
-                _ => panic!("expected ReadRecord"),
-            },
+            PlanNode::Filter { input, .. } => {
+                assert!(matches!(*input, PlanNode::Scan { .. }));
+            }
             _ => panic!("expected Filter, got {:?}", inner),
         }
     }
@@ -1404,12 +1409,9 @@ mod tests {
         let p = plan("p1", indexed, Statement::Find(q));
         let (_, inner) = unwrap_projection(p);
         match inner {
-            PlanNode::Filter { input, .. } => match *input {
-                PlanNode::ReadRecord { input, .. } => {
-                    assert!(matches!(*input, PlanNode::Scan { .. }));
-                }
-                _ => panic!("expected ReadRecord"),
-            },
+            PlanNode::Filter { input, .. } => {
+                assert!(matches!(*input, PlanNode::Scan { .. }));
+            }
             _ => panic!("expected Filter, got {:?}", inner),
         }
     }
@@ -1426,12 +1428,9 @@ mod tests {
         let p = plan("p1", vec![], Statement::Find(q));
         let (_, inner) = unwrap_projection(p);
         match inner {
-            PlanNode::Filter { input, .. } => match *input {
-                PlanNode::ReadRecord { input, .. } => {
-                    assert!(matches!(*input, PlanNode::Scan { .. }));
-                }
-                _ => panic!("expected ReadRecord"),
-            },
+            PlanNode::Filter { input, .. } => {
+                assert!(matches!(*input, PlanNode::Scan { .. }));
+            }
             _ => panic!("expected Filter, got {:?}", inner),
         }
     }
@@ -1904,7 +1903,7 @@ mod tests {
             take: None,
         };
         let p = plan("col", vec![], Statement::Distinct(q));
-        // Distinct → Projection([status]) → ReadRecord → Scan
+        // Distinct → Projection([status]) → Scan
         match p {
             PlanNode::Distinct { field, input } => {
                 assert_eq!(field, "status");
@@ -1912,13 +1911,10 @@ mod tests {
                     PlanNode::Projection { columns, input } => {
                         assert_eq!(columns, Some(vec!["status".to_string()]));
                         match *input {
-                            PlanNode::ReadRecord { input } => match *input {
-                                PlanNode::Scan { collection } => {
-                                    assert_eq!(collection, "col");
-                                }
-                                _ => panic!("expected Scan"),
-                            },
-                            _ => panic!("expected ReadRecord"),
+                            PlanNode::Scan { collection } => {
+                                assert_eq!(collection, "col");
+                            }
+                            _ => panic!("expected Scan"),
                         }
                     }
                     _ => panic!("expected Projection"),
@@ -1938,7 +1934,7 @@ mod tests {
             take: None,
         };
         let p = plan("col", vec![], Statement::Distinct(q));
-        // Sort → Distinct → Projection([status]) → Filter → ReadRecord → Scan
+        // Sort → Distinct → Projection([status]) → Filter → Scan
         match p {
             PlanNode::Sort { sorts, input } => {
                 assert_eq!(sorts.len(), 1);
@@ -1953,7 +1949,7 @@ mod tests {
                                 match *input {
                                     PlanNode::Filter { predicate, input } => {
                                         assert_eq!(predicate.children.len(), 1);
-                                        assert!(matches!(*input, PlanNode::ReadRecord { .. }));
+                                        assert!(matches!(*input, PlanNode::Scan { .. }));
                                     }
                                     _ => panic!("expected Filter"),
                                 }

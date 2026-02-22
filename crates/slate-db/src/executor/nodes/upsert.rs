@@ -145,10 +145,7 @@ fn build_doc(
             }
             Ok(Some(buf))
         }
-        UpsertMode::Merge => {
-            let update: bson::Document = bson::from_slice(new_raw.as_bytes())?;
-            Ok(exec::raw_merge_doc(old_raw, &update)?)
-        }
+        UpsertMode::Merge => Ok(exec::raw_merge_doc(old_raw, new_raw)?),
     }
 }
 

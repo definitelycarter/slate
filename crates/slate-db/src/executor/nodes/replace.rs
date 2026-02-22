@@ -10,11 +10,10 @@ use crate::executor::{RawIter, RawValue};
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    replacement: &'a bson::Document,
+    replacement: &'a RawDocumentBuf,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
-    let replacement_raw = RawDocumentBuf::from_document(replacement)
-        .map_err(|e| DbError::Serialization(e.to_string()))?;
+    let replacement_raw = replacement;
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;

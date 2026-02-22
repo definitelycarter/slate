@@ -520,7 +520,7 @@ fn update_writes_merged_doc() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec![],
         input: Box::new(PlanNode::Update {
-            update: bson::doc! { "score": 100 },
+            update: rawdoc! { "score": 100 },
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "score": 70 }],
             }),
@@ -550,7 +550,7 @@ fn update_unchanged_skips_write() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec![],
         input: Box::new(PlanNode::Update {
-            update: bson::doc! { "status": "active" },
+            update: rawdoc! { "status": "active" },
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
             }),
@@ -573,7 +573,7 @@ fn replace_writes_replacement() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec![],
         input: Box::new(PlanNode::Replace {
-            replacement: bson::doc! { "replaced": true },
+            replacement: rawdoc! { "replaced": true },
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
             }),
@@ -670,7 +670,7 @@ fn full_update_pipeline() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec!["status".into()],
         input: Box::new(PlanNode::Update {
-            update: bson::doc! { "status": "archived" },
+            update: rawdoc! { "status": "archived" },
             input: Box::new(PlanNode::DeleteIndex {
                 indexed_fields: vec!["status".into()],
                 input: Box::new(PlanNode::Values {

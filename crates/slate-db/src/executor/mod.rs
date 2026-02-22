@@ -209,7 +209,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
             }
             PlanNode::ReadRecord { input } => {
                 let source = self.execute_node(input)?;
-                nodes::read_record::execute(self.txn, self.cf, input, source)
+                nodes::read_record::execute(self.txn, self.cf, source)
             }
             PlanNode::Delete { input } => {
                 let source = self.execute_node(input)?;
