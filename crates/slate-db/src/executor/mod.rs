@@ -186,7 +186,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
             PlanNode::Scan { .. } => nodes::scan::execute(self.txn, self.cf),
             PlanNode::IndexScan {
                 column,
-                value,
+                filter,
                 direction,
                 limit,
                 complete_groups,
@@ -196,7 +196,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 self.txn,
                 self.cf,
                 column,
-                value.as_ref(),
+                filter.as_ref(),
                 *direction,
                 *limit,
                 *complete_groups,

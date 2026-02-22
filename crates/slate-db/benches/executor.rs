@@ -5,7 +5,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use slate_db::bench::{ExecutionResult, Executor, PlanNode};
+use slate_db::bench::{ExecutionResult, Executor, IndexFilter, PlanNode};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::*;
 use slate_store::{MemoryStore, Store, StoreError, Transaction};
@@ -394,7 +394,7 @@ fn bench_index_scan(c: &mut Criterion) {
         let plan_eq = PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("active".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
             direction: slate_query::SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -411,7 +411,7 @@ fn bench_index_scan(c: &mut Criterion) {
         let plan_full = PlanNode::IndexScan {
             collection: "test".into(),
             column: "contacts_count".into(),
-            value: None,
+            filter: None,
             direction: slate_query::SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -428,7 +428,7 @@ fn bench_index_scan(c: &mut Criterion) {
         let plan_desc_limit = PlanNode::IndexScan {
             collection: "test".into(),
             column: "contacts_count".into(),
-            value: None,
+            filter: None,
             direction: slate_query::SortDirection::Desc,
             limit: Some(50),
             complete_groups: false,
@@ -471,7 +471,7 @@ fn bench_read_record(c: &mut Criterion) {
             input: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                value: Some(bson::Bson::String("active".into())),
+                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -499,7 +499,7 @@ fn bench_index_merge(c: &mut Criterion) {
             lhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                value: Some(bson::Bson::String("active".into())),
+                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -508,7 +508,7 @@ fn bench_index_merge(c: &mut Criterion) {
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "contacts_count".into(),
-                value: Some(bson::Bson::Int32(50)),
+                filter: Some(IndexFilter::Eq(bson::Bson::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -528,7 +528,7 @@ fn bench_index_merge(c: &mut Criterion) {
             lhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                value: Some(bson::Bson::String("active".into())),
+                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -537,7 +537,7 @@ fn bench_index_merge(c: &mut Criterion) {
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "contacts_count".into(),
-                value: Some(bson::Bson::Int32(50)),
+                filter: Some(IndexFilter::Eq(bson::Bson::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -614,7 +614,7 @@ fn bench_update(c: &mut Criterion) {
         let plan = PlanNode::InsertIndex {
             indexed_fields: vec!["status".into(), "contacts_count".into()],
             input: Box::new(PlanNode::Update {
-                update: bson::doc! { "$set": { "status": "updated" } },
+                update: bson::rawdoc! { "$set": { "status": "updated" } },
                 input: Box::new(PlanNode::ReadRecord {
                     input: Box::new(PlanNode::Scan {
                         collection: "test".into(),
@@ -691,7 +691,7 @@ fn bench_replace(c: &mut Criterion) {
         let plan = PlanNode::InsertIndex {
             indexed_fields: vec!["status".into(), "contacts_count".into()],
             input: Box::new(PlanNode::Replace {
-                replacement: bson::doc! {
+                replacement: bson::rawdoc! {
                     "name": "Replaced",
                     "status": "replaced",
                     "contacts_count": 0,
@@ -1423,6 +1423,113 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Range filter benchmarks ─────────────────────────────────
+//
+// These capture the before/after for index range scans.
+// Before: range predicates on indexed fields fall back to Scan + Filter.
+// After: planner pushes them into IndexScan with range bounds.
+
+fn bench_query_indexed_range(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_range");
+    for n in [1_000, 10_000] {
+        let db = realistic_seeded_db(n);
+        // contacts_count > 50 on indexed field
+        let query = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![FilterNode::Condition(Filter {
+                    field: "contacts_count".into(),
+                    operator: Operator::Gt,
+                    value: bson::Bson::Int32(50),
+                })],
+            }),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
+            b.iter(|| {
+                let mut txn = db.begin(true).unwrap();
+                txn.find("bench", query).unwrap().iter().unwrap().count()
+            })
+        });
+    }
+    group.finish();
+}
+
+fn bench_query_indexed_range_dual(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_range_dual");
+    for n in [1_000, 10_000] {
+        let db = realistic_seeded_db(n);
+        // contacts_count > 20 AND contacts_count < 80 on indexed field
+        let query = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    FilterNode::Condition(Filter {
+                        field: "contacts_count".into(),
+                        operator: Operator::Gt,
+                        value: bson::Bson::Int32(20),
+                    }),
+                    FilterNode::Condition(Filter {
+                        field: "contacts_count".into(),
+                        operator: Operator::Lt,
+                        value: bson::Bson::Int32(80),
+                    }),
+                ],
+            }),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
+            b.iter(|| {
+                let mut txn = db.begin(true).unwrap();
+                txn.find("bench", query).unwrap().iter().unwrap().count()
+            })
+        });
+    }
+    group.finish();
+}
+
+fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_eq_plus_range");
+    for n in [1_000, 10_000] {
+        let db = realistic_seeded_db(n);
+        // status = "active" AND contacts_count > 50 (Eq wins index, range is residual)
+        let query = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    FilterNode::Condition(Filter {
+                        field: "status".into(),
+                        operator: Operator::Eq,
+                        value: bson::Bson::String("active".into()),
+                    }),
+                    FilterNode::Condition(Filter {
+                        field: "contacts_count".into(),
+                        operator: Operator::Gt,
+                        value: bson::Bson::Int32(50),
+                    }),
+                ],
+            }),
+            sort: vec![],
+            skip: None,
+            take: None,
+            columns: None,
+        };
+        group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
+            b.iter(|| {
+                let mut txn = db.begin(true).unwrap();
+                txn.find("bench", query).unwrap().iter().unwrap().count()
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Executor node benchmarks (store-free)
@@ -1463,5 +1570,9 @@ criterion_group!(
     bench_distinct_indexed_high,
     bench_distinct_non_indexed,
     bench_distinct_with_filter,
+    // Range filter benchmarks
+    bench_query_indexed_range,
+    bench_query_indexed_range_dual,
+    bench_query_indexed_eq_plus_range,
 );
 criterion_main!(benches);

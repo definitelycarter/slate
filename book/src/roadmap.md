@@ -11,63 +11,39 @@ pipeline with `O(1)` memory.
 
 ---
 
-## Index Range Scans
+## ~~Index Range Scans~~ (Done)
 
-### Problem
-
-`IndexScan` currently only supports exact-value lookups (`Eq`) or full column scans. Range
-predicates (`Lt`, `Gt`, `Lte`, `Gte`) on indexed fields fall back to a full `Scan` with a
-residual `Filter`, which reads every record in the collection.
-
-This matters for:
-
-- **TTL purge**: the `purge_expired_inner` function manually walks the `ttl` index prefix
-  and stops at `now`. With range scan support, this becomes a simple
-  `Statement::Delete { filter: ttl < now }` that the planner routes through
-  `IndexScan(ttl, Asc, upper_bound=now)`.
-- **General range queries**: `find({ age: { $gt: 18 } })` on an indexed `age` field should
-  use the index instead of scanning all records.
-
-### Approach
-
-Add optional `lower_bound` / `upper_bound` fields to `IndexScan`:
+`IndexScan` now supports range predicates (`Gt`, `Gte`, `Lt`, `Lte`) on indexed fields
+via the `IndexFilter` enum, replacing the old `value: Option<Bson>` field:
 
 ```rust
-IndexScan {
-    collection: String,
-    column: String,
-    value: Option<bson::Bson>,       // existing: exact Eq match
-    range: Option<IndexRange>,       // new: range bounds
-    direction: SortDirection,
-    limit: Option<usize>,
-    complete_groups: bool,
-}
-
-struct IndexRange {
-    lower: Option<(bson::Bson, bool)>,  // (value, inclusive)
-    upper: Option<(bson::Bson, bool)>,  // (value, inclusive)
+enum IndexFilter {
+    Eq(Bson),
+    Gt(Bson), Gte(Bson), Lt(Bson), Lte(Bson),
+    Range { lower: IndexBound, upper: IndexBound },
 }
 ```
 
-The executor walks the index prefix and uses the sortable encoded bytes to skip entries
-outside the range bounds, stopping early when the upper bound is exceeded (ascending) or
-lower bound is exceeded (descending).
+The planner detects range conditions on indexed fields and pushes them into `IndexScan`
+with priority order: Eq > OR sub-group > Range. Dual bounds on the same field (e.g.
+`score >= 50 AND score <= 90`) are merged into a single `Range` filter, consuming both
+AND children. Non-indexed range predicates remain as residual filters.
 
-The planner pushes range predicates (`Lt`, `Gt`, `Lte`, `Gte`) on indexed fields into
-`IndexScan.range` instead of leaving them as residual filters.
+The executor does byte-level comparison against pre-encoded bounds with early termination:
+ascending scans skip below the lower bound and stop at the upper bound; descending scans
+skip above the upper bound and stop at the lower bound. Range bounds are boxed behind
+`Option<Box<RangeBounds>>` to keep the Eq/None closure at zero overhead (8 bytes vs 56
+bytes inlined).
 
 ### Unlocks
 
-- **TTL purge through planner**: `purge_expired_inner` becomes a `Statement::Delete`
-  with `filter: ttl < DateTime(now)`, eliminating 50 lines of manual index walking.
-- **TTL as a regular index**: once range scans work, the implicit `ttl` index can be
-  declared as a normal index in `CollectionConfig`, removing all special-cased TTL
-  handling from the executor and database.
+- **TTL purge through planner**: `purge_expired_inner` can become a `Statement::Delete`
+  with `filter: ttl < DateTime(now)`, eliminating manual index walking.
 - **Efficient range queries**: any indexed field benefits from range predicates.
 
 ---
 
-## Route Inserts Through Planner
+## ~~Route Inserts Through Planner~~ (Done)
 
 ### Problem
 

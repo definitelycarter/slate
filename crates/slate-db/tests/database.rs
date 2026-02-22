@@ -3266,3 +3266,122 @@ fn merge_many_mixed_insert_and_merge() {
     let m2 = txn.find_by_id(COLLECTION, "m2", None).unwrap().unwrap();
     assert_eq!(m2.get_str("name").unwrap(), "Bob");
 }
+
+// ── Range scan integration tests ────────────────────────────
+
+#[test]
+fn find_gt_on_indexed_field() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "scores".into(),
+        indexes: vec!["score".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "scores",
+        vec![
+            doc! { "_id": "1", "name": "Alice", "score": 70 },
+            doc! { "_id": "2", "name": "Bob", "score": 90 },
+            doc! { "_id": "3", "name": "Charlie", "score": 80 },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    let query = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "score".into(),
+                operator: Operator::Gt,
+                value: Bson::Int32(75),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn
+        .find("scores", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| {
+            let doc = RawDocument::from_bytes(r.as_bytes()).unwrap();
+            doc.get_str("name").unwrap()
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert!(names.contains(&"Bob"));
+    assert!(names.contains(&"Charlie"));
+}
+
+#[test]
+fn find_gte_lte_on_indexed_field() {
+    let (db, _dir) = temp_db();
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "scores".into(),
+        indexes: vec!["score".to_string()],
+    })
+    .unwrap();
+    txn.insert_many(
+        "scores",
+        vec![
+            doc! { "_id": "1", "name": "Alice", "score": 70 },
+            doc! { "_id": "2", "name": "Bob", "score": 90 },
+            doc! { "_id": "3", "name": "Charlie", "score": 80 },
+            doc! { "_id": "4", "name": "Diana", "score": 60 },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    // score >= 70 AND score <= 80
+    let query = Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![
+                FilterNode::Condition(Filter {
+                    field: "score".into(),
+                    operator: Operator::Gte,
+                    value: Bson::Int32(70),
+                }),
+                FilterNode::Condition(Filter {
+                    field: "score".into(),
+                    operator: Operator::Lte,
+                    value: Bson::Int32(80),
+                }),
+            ],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn
+        .find("scores", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let names: Vec<&str> = results
+        .iter()
+        .map(|r| {
+            let doc = RawDocument::from_bytes(r.as_bytes()).unwrap();
+            doc.get_str("name").unwrap()
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Charlie"));
+}

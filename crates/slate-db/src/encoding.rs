@@ -212,6 +212,20 @@ pub fn index_key_value_prefix(key: &[u8]) -> Option<&[u8]> {
     Some(&key[..prefix_len])
 }
 
+/// Extract just the value bytes from an index key.
+///
+/// Given `i:{column}\x00{value_bytes}\x00{record_id}`, returns `{value_bytes}`.
+pub fn index_key_value_bytes(key: &[u8]) -> Option<&[u8]> {
+    if !key.starts_with(INDEX_PREFIX) {
+        return None;
+    }
+    let rest = &key[INDEX_PREFIX.len()..];
+    let first_sep = rest.iter().position(|&b| b == SEP)?;
+    let after_first = &rest[first_sep + 1..];
+    let second_sep = after_first.iter().rposition(|&b| b == SEP)?;
+    Some(&after_first[..second_sep])
+}
+
 /// Parse an index key back into (column, record_id).
 ///
 /// Expected format: `i:{column}\x00{value_bytes}\x00{record_id}`
@@ -291,6 +305,39 @@ mod tests {
         let k3 = index_key("score", &bson::Bson::Int64(-5), "rec-1");
         assert!(k3 < k1); // -5 < 10
         assert!(k1 < k2); // 10 < 20
+    }
+
+    #[test]
+    fn index_key_value_bytes_roundtrip() {
+        // Int64
+        let key = index_key("score", &bson::Bson::Int64(42), "rec-1");
+        let val_bytes = index_key_value_bytes(&key).unwrap();
+        assert_eq!(val_bytes, encode_value(&bson::Bson::Int64(42)));
+
+        // String
+        let key = index_key("status", &bson::Bson::String("active".into()), "rec-1");
+        let val_bytes = index_key_value_bytes(&key).unwrap();
+        assert_eq!(
+            val_bytes,
+            encode_value(&bson::Bson::String("active".into()))
+        );
+
+        // Double
+        let key = index_key("rating", &bson::Bson::Double(3.14), "rec-1");
+        let val_bytes = index_key_value_bytes(&key).unwrap();
+        assert_eq!(val_bytes, encode_value(&bson::Bson::Double(3.14)));
+
+        // DateTime
+        let dt = bson::DateTime::from_millis(1700000000000);
+        let key = index_key("created", &bson::Bson::DateTime(dt), "rec-1");
+        let val_bytes = index_key_value_bytes(&key).unwrap();
+        assert_eq!(val_bytes, encode_value(&bson::Bson::DateTime(dt)));
+    }
+
+    #[test]
+    fn index_key_value_bytes_rejects_non_index() {
+        let key = record_key("rec-1");
+        assert!(index_key_value_bytes(&key).is_none());
     }
 
     #[test]

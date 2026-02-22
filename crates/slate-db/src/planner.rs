@@ -42,24 +42,53 @@ pub enum UpsertMode {
     Merge,
 }
 
+/// A single bound for an index range scan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexBound {
+    pub value: bson::Bson,
+    pub inclusive: bool,
+}
+
+/// Controls how an `IndexScan` filters index entries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexFilter {
+    /// Exact equality — uses narrow prefix scan `i:{column}\x00{value}\x00`.
+    Eq(bson::Bson),
+    /// Exclusive lower bound — `column > value`.
+    Gt(bson::Bson),
+    /// Inclusive lower bound — `column >= value`.
+    Gte(bson::Bson),
+    /// Exclusive upper bound — `column < value`.
+    Lt(bson::Bson),
+    /// Inclusive upper bound — `column <= value`.
+    Lte(bson::Bson),
+    /// Both lower and upper bounds — `lower <[=] column <[=] upper`.
+    Range {
+        lower: IndexBound,
+        upper: IndexBound,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode {
     /// Full scan — yields all record IDs in a collection.
     Scan { collection: String },
 
     /// Index scan — yields record IDs from an index.
-    /// `value: Some(v)` filters to entries matching `v` (Eq lookup).
-    /// `value: None` scans the entire column index (ordered scan).
+    /// `filter: Some(Eq(v))` filters to entries matching `v` (Eq lookup).
+    /// `filter: Some(Gt/Gte/Lt/Lte/Range)` applies range bounds.
+    /// `filter: None` scans the entire column index (ordered scan).
     /// `direction` controls iteration order (Asc = forward, Desc = reverse).
     /// `limit` caps the number of index entries to read (pushed down from Limit).
     /// `complete_groups: true` reads past the limit to finish the last value group,
     /// ensuring complete groups for downstream sub-sorting by secondary fields.
     /// `covered: true` yields `{ _id, column: value }` documents directly
     /// (for index-covered projections); `false` yields bare `String` IDs.
+    /// Covered mode only works with `Eq` filter.
     IndexScan {
         collection: String,
         column: String,
-        value: Option<bson::Bson>,
+        filter: Option<IndexFilter>,
         direction: SortDirection,
         limit: Option<usize>,
         complete_groups: bool,
@@ -225,7 +254,7 @@ fn plan_find(collection: &str, indexed_fields: &[String], query: &Query) -> Plan
             &id_node,
             PlanNode::IndexScan {
                 column,
-                value: Some(_),
+                filter: Some(IndexFilter::Eq(_)),
                 ..
             } if query.columns.as_ref().is_some_and(|cols|
                 cols.iter().all(|c| c == "_id" || c == column)
@@ -440,7 +469,7 @@ fn replace_scan_with_index_order(
             input: Box::new(PlanNode::IndexScan {
                 collection: collection.to_string(),
                 column: sort_field.to_string(),
-                value: None,
+                filter: None,
                 direction,
                 limit,
                 complete_groups,
@@ -493,13 +522,13 @@ fn plan_and_group(
     let best = find_best_and_child(collection, indexed_fields, group);
 
     match best {
-        Some((id_node, consumed_index)) => {
-            // Build residual: all children except the consumed one
+        Some((id_node, consumed_indices)) => {
+            // Build residual: all children except the consumed ones
             let remaining: Vec<FilterNode> = group
                 .children
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i != consumed_index)
+                .filter(|(i, _)| !consumed_indices.contains(i))
                 .map(|(_, c)| c.clone())
                 .collect();
 
@@ -531,14 +560,15 @@ fn plan_and_group(
 /// Iterates indexed_fields in priority order. For each field, checks:
 /// 1. Is there a direct Eq condition on this field? → IndexScan
 /// 2. Is there a fully-indexable OR sub-group that uses this field? → IndexMerge(Or)
+/// 3. Are there range conditions (Gt/Gte/Lt/Lte) on this field? → IndexScan with range
 ///
-/// Returns the ID-tier node and the index of the consumed child.
+/// Returns the ID-tier node and the indices of consumed children.
 fn find_best_and_child(
     collection: &str,
     indexed_fields: &[String],
     group: &FilterGroup,
-) -> Option<(PlanNode, usize)> {
-    // Priority pass: iterate indexed fields in order, find first matching Eq condition
+) -> Option<(PlanNode, Vec<usize>)> {
+    // Priority pass 1: Eq conditions (most selective)
     for field in indexed_fields {
         for (i, child) in group.children.iter().enumerate() {
             if let FilterNode::Condition(filter) = child {
@@ -546,26 +576,97 @@ fn find_best_and_child(
                     let node = PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: Some(filter.value.clone()),
+                        filter: Some(IndexFilter::Eq(filter.value.clone())),
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
                         covered: false,
                     };
-                    return Some((node, i));
+                    return Some((node, vec![i]));
                 }
             }
         }
     }
 
-    // Second pass: check for fully-indexable OR sub-groups
+    // Priority pass 2: fully-indexable OR sub-groups
     for (i, child) in group.children.iter().enumerate() {
         if let FilterNode::Group(sub_group) = child {
             if sub_group.logical == LogicalOp::Or {
                 if let Some(id_node) = try_or_index_merge(collection, indexed_fields, sub_group) {
-                    return Some((id_node, i));
+                    return Some((id_node, vec![i]));
                 }
             }
+        }
+    }
+
+    // Priority pass 3: range conditions (Gt/Gte/Lt/Lte) on indexed fields
+    for field in indexed_fields {
+        let mut lower: Option<(usize, IndexFilter)> = None;
+        let mut upper: Option<(usize, IndexFilter)> = None;
+
+        for (i, child) in group.children.iter().enumerate() {
+            if let FilterNode::Condition(filter) = child {
+                if &filter.field == field {
+                    match filter.operator {
+                        Operator::Gt => {
+                            lower = Some((i, IndexFilter::Gt(filter.value.clone())));
+                        }
+                        Operator::Gte => {
+                            lower = Some((i, IndexFilter::Gte(filter.value.clone())));
+                        }
+                        Operator::Lt => {
+                            upper = Some((i, IndexFilter::Lt(filter.value.clone())));
+                        }
+                        Operator::Lte => {
+                            upper = Some((i, IndexFilter::Lte(filter.value.clone())));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if lower.is_some() || upper.is_some() {
+            let (index_filter, consumed) = match (lower, upper) {
+                (Some((li, _lf)), Some((ui, _uf))) => {
+                    // Both bounds → Range
+                    let lower_bound = match &group.children[li] {
+                        FilterNode::Condition(f) => IndexBound {
+                            value: f.value.clone(),
+                            inclusive: f.operator == Operator::Gte,
+                        },
+                        _ => unreachable!(),
+                    };
+                    let upper_bound = match &group.children[ui] {
+                        FilterNode::Condition(f) => IndexBound {
+                            value: f.value.clone(),
+                            inclusive: f.operator == Operator::Lte,
+                        },
+                        _ => unreachable!(),
+                    };
+                    (
+                        IndexFilter::Range {
+                            lower: lower_bound,
+                            upper: upper_bound,
+                        },
+                        vec![li, ui],
+                    )
+                }
+                (Some((li, lf)), None) => (lf, vec![li]),
+                (None, Some((ui, uf))) => (uf, vec![ui]),
+                (None, None) => unreachable!(),
+            };
+
+            let node = PlanNode::IndexScan {
+                collection: collection.to_string(),
+                column: field.clone(),
+                filter: Some(index_filter),
+                direction: SortDirection::Asc,
+                limit: None,
+                complete_groups: false,
+                covered: false,
+            };
+            return Some((node, consumed));
         }
     }
 
@@ -622,7 +723,7 @@ fn try_or_index_merge(
                     id_nodes.push(PlanNode::IndexScan {
                         collection: collection.to_string(),
                         column: filter.field.clone(),
-                        value: Some(filter.value.clone()),
+                        filter: Some(IndexFilter::Eq(filter.value.clone())),
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
@@ -874,6 +975,30 @@ mod tests {
         })
     }
 
+    fn gte_condition(field: &str, value: Bson) -> FilterNode {
+        FilterNode::Condition(Filter {
+            field: field.into(),
+            operator: Operator::Gte,
+            value,
+        })
+    }
+
+    fn lt_condition(field: &str, value: Bson) -> FilterNode {
+        FilterNode::Condition(Filter {
+            field: field.into(),
+            operator: Operator::Lt,
+            value,
+        })
+    }
+
+    fn lte_condition(field: &str, value: Bson) -> FilterNode {
+        FilterNode::Condition(Filter {
+            field: field.into(),
+            operator: Operator::Lte,
+            value,
+        })
+    }
+
     /// Unwrap the outermost Projection node (always present in plan output).
     /// Returns (columns, inner_node).
     fn unwrap_projection(node: PlanNode) -> (Option<Vec<String>>, PlanNode) {
@@ -926,7 +1051,7 @@ mod tests {
                     PlanNode::IndexScan {
                         collection: "p1".into(),
                         column: "status".into(),
-                        value: Some(Bson::String("active".into())),
+                        filter: Some(IndexFilter::Eq(Bson::String("active".into()))),
                         direction: SortDirection::Asc,
                         limit: None,
                         complete_groups: false,
@@ -1494,13 +1619,13 @@ mod tests {
                 PlanNode::ReadRecord { input } => match *input {
                     PlanNode::IndexScan {
                         column,
-                        value,
+                        filter,
                         direction,
                         limit,
                         ..
                     } => {
                         assert_eq!(column, "score");
-                        assert_eq!(value, None);
+                        assert_eq!(filter, None);
                         assert_eq!(direction, SortDirection::Desc);
                         assert_eq!(limit, Some(5));
                     }
@@ -1530,12 +1655,12 @@ mod tests {
                 PlanNode::ReadRecord { input } => match *input {
                     PlanNode::IndexScan {
                         direction,
-                        value,
+                        filter,
                         limit,
                         ..
                     } => {
                         assert_eq!(direction, SortDirection::Asc);
-                        assert_eq!(value, None);
+                        assert_eq!(filter, None);
                         assert_eq!(limit, Some(10));
                     }
                     _ => panic!("expected IndexScan"),
@@ -1569,13 +1694,13 @@ mod tests {
                     PlanNode::ReadRecord { input } => match *input {
                         PlanNode::IndexScan {
                             column,
-                            value,
+                            filter,
                             direction,
                             limit,
                             ..
                         } => {
                             assert_eq!(column, "score");
-                            assert_eq!(value, None);
+                            assert_eq!(filter, None);
                             assert_eq!(direction, SortDirection::Desc);
                             assert_eq!(limit, None);
                         }
@@ -1643,9 +1768,9 @@ mod tests {
             PlanNode::Limit { input, .. } => match *input {
                 PlanNode::Sort { input, .. } => match *input {
                     PlanNode::ReadRecord { input } => match *input {
-                        PlanNode::IndexScan { column, value, .. } => {
+                        PlanNode::IndexScan { column, filter, .. } => {
                             assert_eq!(column, "status");
-                            assert!(value.is_some());
+                            assert!(filter.is_some());
                         }
                         _ => panic!("expected IndexScan"),
                     },
@@ -1689,14 +1814,14 @@ mod tests {
                         PlanNode::ReadRecord { input } => match *input {
                             PlanNode::IndexScan {
                                 column,
-                                value,
+                                filter,
                                 direction,
                                 limit,
                                 complete_groups,
                                 ..
                             } => {
                                 assert_eq!(column, "score");
-                                assert_eq!(value, None);
+                                assert_eq!(filter, None);
                                 assert_eq!(direction, SortDirection::Desc);
                                 assert_eq!(limit, Some(200));
                                 assert!(complete_groups);
@@ -1980,9 +2105,9 @@ mod tests {
             PlanNode::Distinct { input, .. } => match *input {
                 PlanNode::Projection { input, .. } => match *input {
                     PlanNode::ReadRecord { input } => match *input {
-                        PlanNode::IndexScan { column, value, .. } => {
+                        PlanNode::IndexScan { column, filter, .. } => {
                             assert_eq!(column, "priority");
-                            assert_eq!(value, Some(Bson::String("high".into())));
+                            assert_eq!(filter, Some(IndexFilter::Eq(Bson::String("high".into()))));
                         }
                         _ => panic!("expected IndexScan"),
                     },
@@ -1991,6 +2116,200 @@ mod tests {
                 _ => panic!("expected Projection"),
             },
             _ => panic!("expected Distinct"),
+        }
+    }
+
+    // ── Range scan planner tests ────────────────────────────────
+
+    #[test]
+    fn plan_single_gt_on_indexed_field() {
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![gt_condition("score", Bson::Int64(50))],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        // IndexScan(Gt) — condition consumed, no residual
+        match inner {
+            PlanNode::ReadRecord { input } => match *input {
+                PlanNode::IndexScan { column, filter, .. } => {
+                    assert_eq!(column, "score");
+                    assert_eq!(filter, Some(IndexFilter::Gt(Bson::Int64(50))));
+                }
+                _ => panic!("expected IndexScan"),
+            },
+            _ => panic!("expected ReadRecord, got {:?}", inner),
+        }
+    }
+
+    #[test]
+    fn plan_single_lt_on_indexed_field() {
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![lt_condition("score", Bson::Int64(90))],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        match inner {
+            PlanNode::ReadRecord { input } => match *input {
+                PlanNode::IndexScan { column, filter, .. } => {
+                    assert_eq!(column, "score");
+                    assert_eq!(filter, Some(IndexFilter::Lt(Bson::Int64(90))));
+                }
+                _ => panic!("expected IndexScan"),
+            },
+            _ => panic!("expected ReadRecord, got {:?}", inner),
+        }
+    }
+
+    #[test]
+    fn plan_dual_range_on_indexed_field() {
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    gte_condition("score", Bson::Int64(50)),
+                    lte_condition("score", Bson::Int64(90)),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        // Both conditions consumed into Range, no residual
+        match inner {
+            PlanNode::ReadRecord { input } => match *input {
+                PlanNode::IndexScan { column, filter, .. } => {
+                    assert_eq!(column, "score");
+                    assert_eq!(
+                        filter,
+                        Some(IndexFilter::Range {
+                            lower: IndexBound {
+                                value: Bson::Int64(50),
+                                inclusive: true,
+                            },
+                            upper: IndexBound {
+                                value: Bson::Int64(90),
+                                inclusive: true,
+                            },
+                        })
+                    );
+                }
+                _ => panic!("expected IndexScan"),
+            },
+            _ => panic!("expected ReadRecord, got {:?}", inner),
+        }
+    }
+
+    #[test]
+    fn plan_range_plus_residual() {
+        let indexed = vec!["score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    gt_condition("score", Bson::Int64(50)),
+                    eq_condition("name", Bson::String("Alice".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        // Filter(name=Alice) → ReadRecord → IndexScan(Gt(50))
+        match inner {
+            PlanNode::Filter { predicate, input } => {
+                assert_eq!(predicate.children.len(), 1);
+                match &predicate.children[0] {
+                    FilterNode::Condition(f) => assert_eq!(f.field, "name"),
+                    _ => panic!("expected condition"),
+                }
+                match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::IndexScan { column, filter, .. } => {
+                            assert_eq!(column, "score");
+                            assert_eq!(filter, Some(IndexFilter::Gt(Bson::Int64(50))));
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Filter, got {:?}", inner),
+        }
+    }
+
+    #[test]
+    fn plan_eq_preferred_over_range() {
+        let indexed = vec!["status".to_string(), "score".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![
+                    gt_condition("score", Bson::Int64(50)),
+                    eq_condition("status", Bson::String("active".into())),
+                ],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        // Eq wins: IndexScan(status=active) with score>50 as residual
+        match inner {
+            PlanNode::Filter { predicate, input } => {
+                assert_eq!(predicate.children.len(), 1);
+                match &predicate.children[0] {
+                    FilterNode::Condition(f) => {
+                        assert_eq!(f.field, "score");
+                        assert_eq!(f.operator, Operator::Gt);
+                    }
+                    _ => panic!("expected condition"),
+                }
+                match *input {
+                    PlanNode::ReadRecord { input } => match *input {
+                        PlanNode::IndexScan { column, filter, .. } => {
+                            assert_eq!(column, "status");
+                            assert_eq!(
+                                filter,
+                                Some(IndexFilter::Eq(Bson::String("active".into())))
+                            );
+                        }
+                        _ => panic!("expected IndexScan"),
+                    },
+                    _ => panic!("expected ReadRecord"),
+                }
+            }
+            _ => panic!("expected Filter, got {:?}", inner),
+        }
+    }
+
+    #[test]
+    fn plan_range_on_non_indexed_field_falls_back_to_scan() {
+        let indexed = vec!["status".to_string()];
+        let q = Query {
+            filter: Some(FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![gt_condition("score", Bson::Int64(50))],
+            }),
+            ..empty_query()
+        };
+        let p = plan("p1", indexed, Statement::Find(q));
+        let (_, inner) = unwrap_projection(p);
+        // score is not indexed → Filter → Scan (Scan yields full docs, no ReadRecord)
+        match inner {
+            PlanNode::Filter { input, .. } => {
+                assert!(matches!(*input, PlanNode::Scan { .. }));
+            }
+            _ => panic!("expected Filter, got {:?}", inner),
         }
     }
 }

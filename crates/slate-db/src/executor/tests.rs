@@ -1,5 +1,6 @@
 use super::*;
 use crate::encoding;
+use crate::planner::IndexFilter;
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, Sort, SortDirection};
@@ -768,7 +769,7 @@ fn index_scan_eq_filter() {
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "status".into(),
-        value: Some(bson::Bson::String("active".into())),
+        filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
@@ -786,11 +787,11 @@ fn index_scan_full_column() {
     let mut txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
-    // Scan entire "score" index (value: None) in ascending order
+    // Scan entire "score" index (filter: None) in ascending order
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        value: None,
+        filter: None,
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
@@ -810,7 +811,7 @@ fn index_scan_desc() {
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        value: None,
+        filter: None,
         direction: SortDirection::Desc,
         limit: None,
         complete_groups: false,
@@ -830,7 +831,7 @@ fn index_scan_with_limit() {
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        value: None,
+        filter: None,
         direction: SortDirection::Asc,
         limit: Some(2),
         complete_groups: false,
@@ -852,7 +853,7 @@ fn index_merge_or() {
         lhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("active".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -861,7 +862,7 @@ fn index_merge_or() {
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("inactive".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("inactive".into()))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -888,7 +889,7 @@ fn index_merge_and() {
         lhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("active".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -897,7 +898,7 @@ fn index_merge_and() {
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "score".into(),
-            value: Some(bson::Bson::Int32(80)),
+            filter: Some(IndexFilter::Eq(bson::Bson::Int32(80))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -919,7 +920,7 @@ fn read_record_fetches_docs_from_index_scan() {
         input: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("active".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -956,7 +957,7 @@ fn read_record_skips_dangling_index() {
         input: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            value: Some(bson::Bson::String("inactive".into())),
+            filter: Some(IndexFilter::Eq(bson::Bson::String("inactive".into()))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -987,7 +988,7 @@ fn read_record_over_scan() {
 
 // ── Tier 4: Upsert node tests ───────────────────────────────
 
-use crate::planner::UpsertMode;
+use crate::planner::{IndexBound, UpsertMode};
 
 #[test]
 fn upsert_replace_insert_new() {
@@ -1178,4 +1179,207 @@ fn upsert_replace_cleans_old_indexes() {
     assert_eq!(results2.len(), 1);
     let doc = bson::RawDocument::from_bytes(results2[0].as_bytes()).unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "1");
+}
+
+// ── Tier 5: Range scan tests ────────────────────────────────
+//
+// seeded_db: Alice(id=1,score=70), Bob(id=2,score=90), Charlie(id=3,score=80)
+// score index order ascending: 70(1), 80(3), 90(2)
+
+#[test]
+fn index_scan_gt() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score > 70 → Bob(90), Charlie(80)
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Gt(bson::Bson::Int32(70))),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["3", "2"]); // score 80, 90
+}
+
+#[test]
+fn index_scan_gte() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score >= 80 → Charlie(80), Bob(90)
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Gte(bson::Bson::Int32(80))),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["3", "2"]); // score 80, 90
+}
+
+#[test]
+fn index_scan_lt() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score < 90 → Alice(70), Charlie(80)
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Lt(bson::Bson::Int32(90))),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["1", "3"]); // score 70, 80
+}
+
+#[test]
+fn index_scan_lte() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score <= 80 → Alice(70), Charlie(80)
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Lte(bson::Bson::Int32(80))),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["1", "3"]); // score 70, 80
+}
+
+#[test]
+fn index_scan_range() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score > 70 AND score < 90 → Charlie(80) only
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Range {
+            lower: IndexBound {
+                value: bson::Bson::Int32(70),
+                inclusive: false,
+            },
+            upper: IndexBound {
+                value: bson::Bson::Int32(90),
+                inclusive: false,
+            },
+        }),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["3"]); // score 80 only
+}
+
+#[test]
+fn index_scan_range_desc() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score >= 70 AND score <= 90, descending
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Range {
+            lower: IndexBound {
+                value: bson::Bson::Int32(70),
+                inclusive: true,
+            },
+            upper: IndexBound {
+                value: bson::Bson::Int32(90),
+                inclusive: true,
+            },
+        }),
+        direction: SortDirection::Desc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["2", "3", "1"]); // descending: 90, 80, 70
+}
+
+#[test]
+fn index_scan_range_with_limit() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score >= 70, limit 2
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Gte(bson::Bson::Int32(70))),
+        direction: SortDirection::Asc,
+        limit: Some(2),
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["1", "3"]); // score 70, 80
+}
+
+#[test]
+fn index_scan_range_empty_result() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score > 100 → nothing
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Gt(bson::Bson::Int32(100))),
+        direction: SortDirection::Asc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert!(ids.is_empty());
+}
+
+#[test]
+fn index_scan_gt_desc() {
+    let db = seeded_db();
+    let mut txn = db.store().begin(true).unwrap();
+    let cf = txn.cf("test").unwrap();
+
+    // score > 70, descending → Bob(90), Charlie(80)
+    let plan = PlanNode::IndexScan {
+        collection: "test".into(),
+        column: "score".into(),
+        filter: Some(IndexFilter::Gt(bson::Bson::Int32(70))),
+        direction: SortDirection::Desc,
+        limit: None,
+        complete_groups: false,
+        covered: false,
+    };
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    assert_eq!(ids, vec!["2", "3"]); // descending: 90, 80
 }
