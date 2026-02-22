@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["rocksdb"]
+default = ["memory"]
 rocksdb = ["dep:rocksdb"]
 memory = ["dep:imbl", "dep:arc-swap"]
 redb = ["dep:redb"]

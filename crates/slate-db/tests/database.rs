@@ -4,7 +4,7 @@ use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::{
     DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
 };
-use slate_store::RocksStore;
+use slate_store::MemoryStore;
 
 trait HasKey {
     fn get_check(&self, key: &str) -> bool;
@@ -34,9 +34,9 @@ fn to_bson_vec(raw: RawBson) -> Vec<Bson> {
 
 const COLLECTION: &str = "accounts";
 
-fn temp_db() -> (Database<RocksStore>, tempfile::TempDir) {
+fn temp_db() -> (Database<MemoryStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let store = RocksStore::open(dir.path()).unwrap();
+    let store = MemoryStore::new();
     let db = Database::open(store, DatabaseConfig::default());
     (db, dir)
 }
@@ -62,7 +62,7 @@ fn eq_filter(field: &str, value: Bson) -> FilterGroup {
     }
 }
 
-fn create_collection(db: &Database<RocksStore>, name: &str) {
+fn create_collection(db: &Database<MemoryStore>, name: &str) {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: name.to_string(),
@@ -73,7 +73,7 @@ fn create_collection(db: &Database<RocksStore>, name: &str) {
 }
 
 /// Insert 5 seed records.
-fn seed_records(db: &Database<RocksStore>) {
+fn seed_records(db: &Database<MemoryStore>) {
     create_collection(db, COLLECTION);
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
@@ -1900,7 +1900,7 @@ fn gt_condition(field: &str, value: Bson) -> FilterNode {
 }
 
 /// Create a collection with indexes and seed data for OR/AND tests.
-fn seed_or_test_data(db: &Database<RocksStore>) {
+fn seed_or_test_data(db: &Database<MemoryStore>) {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "orders".to_string(),
