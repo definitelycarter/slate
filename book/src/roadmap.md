@@ -50,6 +50,48 @@ plan node.
 
 ---
 
+## Dedicated TTL Keyspace
+
+### Problem
+
+TTL is currently stored in two places: the record envelope prefix (for O(1) expiry checks
+on reads) and as a regular index (`i:ttl:{millis}:{id}`) for purge scans. The regular
+index format is keyed by value, not by ID — so there's no way to answer "what's the TTL
+for document X?" without reading the record envelope.
+
+This forces the covered projection path to do a `txn.get` on the record key just to check
+TTL, adding ~53% overhead to what was previously a zero-read path. It also means TTL
+occupies space in the regular index keyspace alongside user-queryable fields.
+
+### Approach
+
+Replace the regular TTL index with a dedicated keyspace: `t:{id}` → `[8-byte LE millis]`.
+
+- **O(1) point lookup by ID** — covered `IndexScan` checks `txn.get(ttl_key(id))`, reads
+  8 bytes, compares. No record read needed.
+- **Purge** — scan prefix `t:`, check each millis < now, delete record + indexes.
+  Same efficiency as the current `IndexScan(Lt(now))` approach.
+- **Record envelope simplified** — TTL check can use the dedicated keyspace instead of
+  the envelope prefix, or both can coexist for defense-in-depth.
+
+### Impact
+
+- Restores covered projections to zero-record-read performance (~77% faster than non-covered)
+- Removes TTL from the regular index keyspace (cleaner separation of system vs user data)
+- Write overhead: one extra `txn.put` per TTL document (the `t:{id}` entry)
+
+### Files affected
+
+- `encoding.rs` — add `ttl_key(id)` helper
+- `insert_record.rs`, `upsert.rs` — write `t:{id}` entry alongside record
+- `delete.rs` — delete `t:{id}` entry
+- `index_scan.rs` — covered path checks `t:{id}` instead of record envelope
+- `engine.rs` — `purge_expired` scans `t:` prefix instead of TTL index
+- `planner.rs` — `FlushExpired` uses dedicated scan instead of `IndexScan`
+- Remove auto-added `ttl` index from `ensure_indexes`
+
+---
+
 ## Test Coverage
 
 ### Error paths
