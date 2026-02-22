@@ -117,7 +117,10 @@ impl SlateDatabase {
     pub fn find(&self, collection: String, query_json: String) -> Result<Vec<String>, SlateError> {
         let query: Query = serde_json::from_str(&query_json)?;
         self.read(|txn| {
-            let raw_records = txn.find(&collection, &query)?;
+            let raw_records: Vec<_> = txn
+                .find(&collection, &query)?
+                .iter()?
+                .collect::<Result<Vec<_>, _>>()?;
             let mut results = Vec::with_capacity(raw_records.len());
             for raw in &raw_records {
                 let doc = raw.to_document().map_err(DbError::from)?;

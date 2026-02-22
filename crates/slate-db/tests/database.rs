@@ -151,7 +151,13 @@ fn insert_one_auto_generated_id() {
     assert!(result.id.contains('-')); // UUID format
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), result.id);
 }
@@ -177,7 +183,13 @@ fn insert_many_batch() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let all = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let all = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(all.len(), 2);
 }
 
@@ -189,7 +201,13 @@ fn find_no_filters() {
     seed_records(&db);
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 5);
 }
 
@@ -206,7 +224,13 @@ fn find_eq_filter() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -230,7 +254,13 @@ fn find_gt_filter() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2); // Umbrella (95k) and Stark (200k)
 }
 
@@ -264,7 +294,13 @@ fn find_isnull_filter() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-x");
 }
@@ -296,7 +332,13 @@ fn find_or_filter() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -318,7 +360,13 @@ fn find_sort_asc() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 5);
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-3"); // Initech 12k
     assert_eq!(results[4].get_str("_id").unwrap(), "acct-5"); // Stark 200k
@@ -340,7 +388,13 @@ fn find_sort_desc() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-5"); // Stark 200k
     assert_eq!(results[4].get_str("_id").unwrap(), "acct-3"); // Initech 12k
 }
@@ -363,7 +417,13 @@ fn find_skip_and_take() {
         take: Some(2),
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-1"); // Acme 50k (skipped Initech 12k)
     assert_eq!(results[1].get_str("_id").unwrap(), "acct-2"); // Globex 80k
@@ -385,7 +445,13 @@ fn find_filter_sort_paginate() {
         take: Some(1),
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-4"); // Umbrella 95k
 }
@@ -405,7 +471,13 @@ fn find_with_projection() {
         take: None,
         columns: Some(vec!["name".into(), "status".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 5);
     for record in &results {
         assert!(record.get_check("name"));
@@ -428,7 +500,13 @@ fn find_projection_includes_filter_columns() {
         take: None,
         columns: Some(vec!["name".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 3);
     for record in &results {
         assert!(record.get_check("name"));
@@ -452,7 +530,13 @@ fn find_projection_includes_sort_columns() {
         }],
         columns: Some(vec!["name".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].get_str("_id").unwrap(), "acct-5"); // Stark 200k
     assert_eq!(results[1].get_str("_id").unwrap(), "acct-4"); // Umbrella 95k
@@ -487,7 +571,13 @@ fn update_one_merge() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("status").unwrap(), "rejected");
     assert_eq!(results[0].get_str("name").unwrap(), "Acme"); // unchanged
@@ -528,7 +618,13 @@ fn update_one_upsert() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "Upserted");
 }
@@ -555,7 +651,13 @@ fn update_many_multiple() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -584,7 +686,13 @@ fn replace_one_full_replacement() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "New Corp");
     // Old fields should be gone (replaced, not merged)
@@ -614,7 +722,13 @@ fn delete_one_removes_record() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 }
 
@@ -630,7 +744,13 @@ fn delete_many_removes_matching() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -686,7 +806,13 @@ fn create_and_use_index() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -754,7 +880,9 @@ fn drop_collection() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let result = txn.find(COLLECTION, &no_filter_query());
+    let result = txn
+        .find(COLLECTION, &no_filter_query())
+        .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
@@ -779,11 +907,23 @@ fn collection_isolation() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let contacts = txn.find("contacts", &no_filter_query()).unwrap();
+    let contacts = txn
+        .find("contacts", &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
-    let accounts = txn.find("accounts", &no_filter_query()).unwrap();
+    let accounts = txn
+        .find("accounts", &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0].get_str("name").unwrap(), "Acme");
 }
@@ -819,7 +959,13 @@ fn index_maintained_on_insert() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("name").unwrap(), "Alice");
 }
@@ -854,7 +1000,13 @@ fn index_maintained_on_update() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 
     // New index value should match
@@ -865,7 +1017,13 @@ fn index_maintained_on_update() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
 }
 
@@ -897,7 +1055,13 @@ fn index_maintained_on_delete() {
         take: None,
         columns: None,
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 }
 
@@ -925,7 +1089,13 @@ fn nested_doc_write_and_read() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("nested", &no_filter_query()).unwrap();
+    let results = txn
+        .find("nested", &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     let record = &results[0];
     assert_eq!(record.get_str("name").unwrap(), "Alice");
@@ -960,7 +1130,13 @@ fn dot_notation_filter_eq() {
         take: None,
         columns: None,
     };
-    let results = txn.find("nested", &query).unwrap();
+    let results = txn
+        .find("nested", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -998,7 +1174,13 @@ fn dot_notation_sort() {
         take: None,
         columns: None,
     };
-    let results = txn.find("nested", &query).unwrap();
+    let results = txn
+        .find("nested", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].get_str("name").unwrap(), "Bob"); // Austin
     assert_eq!(results[1].get_str("name").unwrap(), "Charlie"); // Denver
@@ -1034,7 +1216,13 @@ fn dot_notation_projection() {
         take: None,
         columns: Some(vec!["name".into(), "address.city".into()]),
     };
-    let results = txn.find("nested", &query).unwrap();
+    let results = txn
+        .find("nested", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     let record = &results[0];
     assert_eq!(record.get_str("name").unwrap(), "Alice");
@@ -1077,7 +1265,13 @@ fn dot_notation_projection_multiple_subfields() {
             "address.zip".into(),
         ]),
     };
-    let results = txn.find("nested", &query).unwrap();
+    let results = txn
+        .find("nested", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     let record = &results[0];
     let addr = record.get_document("address").unwrap();
@@ -1116,7 +1310,13 @@ fn dot_notation_isnull_missing_parent() {
         take: None,
         columns: None,
     };
-    let results = txn.find("nested", &query).unwrap();
+    let results = txn
+        .find("nested", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "r2");
 }
@@ -1145,7 +1345,13 @@ fn dot_notation_deep_nesting() {
         take: None,
         columns: None,
     };
-    let results = txn.find("deep", &query).unwrap();
+    let results = txn
+        .find("deep", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "r1");
 }
@@ -1163,7 +1369,13 @@ fn projection_only_uses_selective_read() {
         take: None,
         columns: Some(vec!["name".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 5);
     for record in &results {
         assert!(record.get_check("_id"));
@@ -1258,7 +1470,13 @@ fn index_on_nested_path() {
         take: None,
         columns: None,
     };
-    let results = txn.find("nested_idx", &query).unwrap();
+    let results = txn
+        .find("nested_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -1297,7 +1515,13 @@ fn index_on_array_of_scalars() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_idx", &query).unwrap();
+    let results = txn
+        .find("tags_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -1314,7 +1538,13 @@ fn index_on_array_of_scalars() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_idx", &query).unwrap();
+    let results = txn
+        .find("tags_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -1353,7 +1583,13 @@ fn index_on_array_of_objects() {
         take: None,
         columns: None,
     };
-    let results = txn.find("items_idx", &query).unwrap();
+    let results = txn
+        .find("items_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut ids: Vec<_> = results
         .iter()
@@ -1370,7 +1606,13 @@ fn index_on_array_of_objects() {
         take: None,
         columns: None,
     };
-    let results = txn.find("items_idx", &query).unwrap();
+    let results = txn
+        .find("items_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut ids: Vec<_> = results
         .iter()
@@ -1409,7 +1651,13 @@ fn multikey_index_maintained_on_update() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_upd", &query).unwrap();
+    let results = txn
+        .find("tags_upd", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 
     // New tags should match
@@ -1420,7 +1668,13 @@ fn multikey_index_maintained_on_update() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_upd", &query).unwrap();
+    let results = txn
+        .find("tags_upd", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "r1");
 }
@@ -1453,7 +1707,13 @@ fn multikey_index_maintained_on_delete() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_del", &query).unwrap();
+    let results = txn
+        .find("tags_del", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 }
 
@@ -1489,7 +1749,13 @@ fn multikey_index_backfill() {
         take: None,
         columns: None,
     };
-    let results = txn.find("backfill", &query).unwrap();
+    let results = txn
+        .find("backfill", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut ids: Vec<_> = results
         .iter()
@@ -1528,7 +1794,16 @@ fn multikey_index_replace_one() {
         take: None,
         columns: None,
     };
-    assert_eq!(txn.find("tags_rep", &query).unwrap().len(), 0);
+    assert_eq!(
+        txn.find("tags_rep", &query)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len(),
+        0
+    );
 
     // New tags present
     let query = Query {
@@ -1538,7 +1813,13 @@ fn multikey_index_replace_one() {
         take: None,
         columns: None,
     };
-    let results = txn.find("tags_rep", &query).unwrap();
+    let results = txn
+        .find("tags_rep", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "r1");
 }
@@ -1590,7 +1871,13 @@ fn create_collection_idempotent() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("idem", &no_filter_query()).unwrap();
+    let results = txn
+        .find("idem", &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
 }
 
@@ -1661,7 +1948,13 @@ fn find_with_or_indexed() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // abc: o1, o3, o5. active: o1, o4, o5. Union: o1, o3, o4, o5
     assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o4", "o5"]);
 }
@@ -1683,7 +1976,13 @@ fn find_with_or_same_field() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // active: o1, o4, o5. archived: o2, o3. Union: o1, o2, o3, o4, o5
     assert_eq!(sorted_ids(&results), vec!["o1", "o2", "o3", "o4", "o5"]);
 }
@@ -1705,7 +2004,13 @@ fn find_with_or_fallback_scan() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // abc: o1, o3, o5. score > 50: o1(80), o3(90), o6(60). Union: o1, o3, o5, o6
     assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o5", "o6"]);
 }
@@ -1728,7 +2033,13 @@ fn find_with_and_priority() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // abc AND active: o1, o5
     assert_eq!(sorted_ids(&results), vec!["o1", "o5"]);
 }
@@ -1762,7 +2073,13 @@ fn find_with_nested_and_or() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // (abc AND active): o1, o5. (xyz AND archived): o2. Union: o1, o2, o5
     assert_eq!(sorted_ids(&results), vec!["o1", "o2", "o5"]);
 }
@@ -1785,7 +2102,13 @@ fn find_with_or_three_values() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // All users — all 6 records
     assert_eq!(
         sorted_ids(&results),
@@ -1817,7 +2140,13 @@ fn find_with_or_partial_index_per_branch() {
         ..no_filter_query()
     };
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find("orders", &q).unwrap();
+    let results = txn
+        .find("orders", &q)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     // (abc AND score > 50): o1(80), o3(90). pending: o6. Union: o1, o3, o6
     assert_eq!(sorted_ids(&results), vec!["o1", "o3", "o6"]);
 }
@@ -1855,7 +2184,13 @@ fn ttl_expired_docs_visible_before_purge() {
 
     // Expired docs are visible until purge runs
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 3);
 
     let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
@@ -1887,7 +2222,13 @@ fn ttl_purge_makes_expired_docs_invisible() {
     assert_eq!(deleted, 1);
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -1928,7 +2269,13 @@ fn ttl_purge_deletes_expired_docs() {
     // Expired doc is physically gone
     let mut txn = db.begin(true).unwrap();
     // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 2);
     let mut names: Vec<_> = results
         .iter()
@@ -1990,7 +2337,13 @@ fn ttl_purge_cleans_user_indexes() {
         take: None,
         columns: None,
     };
-    let results = txn.find("purge_idx", &query).unwrap();
+    let results = txn
+        .find("purge_idx", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "b");
 }
@@ -2021,7 +2374,13 @@ fn ttl_index_maintained_on_update() {
     assert_eq!(purged, 1);
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 0);
 }
 
@@ -2047,7 +2406,13 @@ fn ttl_purge_multiple_expired() {
     assert_eq!(purged, 3);
 
     let mut txn = db.begin(true).unwrap();
-    let results = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "d");
 }
@@ -2515,7 +2880,13 @@ fn index_covered_preserves_int32_type() {
         take: None,
         columns: Some(vec!["score".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     // Should preserve the stored Int32 type, not the query's Int64
     let score = results[0].get("score").unwrap().unwrap();
@@ -2547,7 +2918,13 @@ fn index_covered_preserves_string_type() {
         take: None,
         columns: Some(vec!["status".into()]),
     };
-    let results = txn.find(COLLECTION, &query).unwrap();
+    let results = txn
+        .find(COLLECTION, &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results.len(), 1);
     let status = results[0].get("status").unwrap().unwrap();
     assert!(
@@ -2573,7 +2950,13 @@ fn upsert_many_inserts_new() {
     assert_eq!(result.inserted, 2);
     assert_eq!(result.updated, 0);
 
-    let found = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let found = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(found.len(), 2);
 }
 
@@ -2623,7 +3006,13 @@ fn upsert_many_mixed() {
     assert_eq!(result.inserted, 1);
     assert_eq!(result.updated, 1);
 
-    let found = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let found = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(found.len(), 2);
 }
 
@@ -2652,6 +3041,10 @@ fn upsert_many_updates_indexes() {
                 columns: None,
             },
         )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(active.len(), 1);
 
@@ -2674,6 +3067,10 @@ fn upsert_many_updates_indexes() {
                 columns: None,
             },
         )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(active.len(), 0);
 
@@ -2689,6 +3086,10 @@ fn upsert_many_updates_indexes() {
                 columns: None,
             },
         )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(inactive.len(), 1);
 }
@@ -2709,7 +3110,13 @@ fn merge_many_inserts_new() {
     assert_eq!(result.inserted, 2);
     assert_eq!(result.updated, 0);
 
-    let found = txn.find(COLLECTION, &no_filter_query()).unwrap();
+    let found = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(found.len(), 2);
 }
 
@@ -2766,6 +3173,10 @@ fn merge_many_index_maintenance() {
                 columns: None,
             },
         )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(active.len(), 0);
 
@@ -2781,6 +3192,10 @@ fn merge_many_index_maintenance() {
                 columns: None,
             },
         )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(inactive.len(), 1);
 }

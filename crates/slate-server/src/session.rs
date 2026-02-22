@@ -25,7 +25,10 @@ impl<S: Store> Session<S> {
                 Ok(Response::Inserts(results))
             }),
             Request::Find { collection, query } => self.read(|txn| {
-                let raw_records = txn.find(&collection, &query)?;
+                let raw_records: Vec<_> =
+                    txn.find(&collection, &query)?
+                        .iter()?
+                        .collect::<Result<Vec<_>, _>>()?;
                 let records: Result<Vec<bson::Document>, _> =
                     raw_records.iter().map(|r| r.to_document()).collect();
                 let records = records.map_err(slate_db::DbError::from)?;

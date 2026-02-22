@@ -10,6 +10,7 @@ use slate_store::{Store, Transaction};
 
 use crate::catalog::Catalog;
 use crate::collection::CollectionConfig;
+use crate::cursor::Cursor;
 use crate::encoding;
 use crate::error::DbError;
 use crate::executor;
@@ -220,7 +221,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn insert_many(
         &mut self,
         collection: &str,
-        docs: Vec<bson::Document>,
+        docs: impl IntoIterator<Item = bson::Document>,
     ) -> Result<Vec<InsertResult>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
@@ -240,25 +241,13 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     // ── Query operations ────────────────────────────────────────
 
     /// Find documents matching a query (filter, sort, skip, take, projection).
-    pub fn find(
-        &mut self,
-        collection: &str,
-        query: &Query,
-    ) -> Result<Vec<RawDocumentBuf>, DbError> {
+    ///
+    /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
+    /// without materializing the entire result set.
+    pub fn find(&mut self, collection: &str, query: &Query) -> Result<Cursor<'db, '_, S>, DbError> {
         let stmt = planner::Statement::Find(query.clone());
         let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            ExecutionResult::Rows(iter) => iter
-                .map(|r| {
-                    let opt_val: Option<RawValue> = r?;
-                    let val =
-                        opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
-                    val.into_document_buf()
-                        .ok_or_else(|| DbError::InvalidQuery("expected document".into()))
-                })
-                .collect(),
-            _ => unreachable!(),
-        }
+        Ok(Cursor::new(&self.txn, cf, plan))
     }
 
     /// Get a single document by `_id`. Direct key lookup — O(1).
@@ -292,8 +281,8 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     ) -> Result<Option<RawDocumentBuf>, DbError> {
         let mut q = query.clone();
         q.take = Some(1);
-        let results = self.find(collection, &q)?;
-        Ok(results.into_iter().next())
+        let cursor = self.find(collection, &q)?;
+        cursor.iter()?.next().transpose()
     }
 
     // ── Update operations ───────────────────────────────────────
@@ -426,7 +415,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn upsert_many(
         &mut self,
         collection: &str,
-        docs: Vec<bson::Document>,
+        docs: impl IntoIterator<Item = bson::Document>,
     ) -> Result<UpsertResult, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
@@ -448,7 +437,7 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
     pub fn merge_many(
         &mut self,
         collection: &str,
-        docs: Vec<bson::Document>,
+        docs: impl IntoIterator<Item = bson::Document>,
     ) -> Result<UpsertResult, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
@@ -472,25 +461,20 @@ impl<'db, S: Store + 'db> DatabaseTransaction<'db, S> {
         collection: &str,
         filter: Option<&FilterGroup>,
     ) -> Result<u64, DbError> {
-        let stmt = planner::Statement::Find(Query {
+        let query = Query {
             filter: filter.cloned(),
             sort: vec![],
             skip: None,
             take: None,
             columns: None,
-        });
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
-            ExecutionResult::Rows(iter) => {
-                let mut n = 0u64;
-                for result in iter {
-                    result?;
-                    n += 1;
-                }
-                Ok(n)
-            }
-            _ => unreachable!(),
+        };
+        let cursor = self.find(collection, &query)?;
+        let mut n = 0u64;
+        for result in cursor.iter()? {
+            result?;
+            n += 1;
         }
+        Ok(n)
     }
 
     /// Return distinct values for a field, with optional filter and sort.

@@ -1136,7 +1136,13 @@ fn upsert_replace_cleans_old_indexes() {
         take: None,
         columns: None,
     };
-    let results = txn.find("test", &query).unwrap();
+    let results: Vec<_> = txn
+        .find("test", &query)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     let active_ids: Vec<&str> = results
         .iter()
         .map(|r| {
@@ -1162,7 +1168,13 @@ fn upsert_replace_cleans_old_indexes() {
         take: None,
         columns: None,
     };
-    let results2 = txn.find("test", &query2).unwrap();
+    let results2: Vec<_> = txn
+        .find("test", &query2)
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(results2.len(), 1);
     let doc = bson::RawDocument::from_bytes(results2[0].as_bytes()).unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "1");

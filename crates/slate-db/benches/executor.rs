@@ -1008,7 +1008,7 @@ fn bench_query_scan(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1036,7 +1036,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1064,7 +1064,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1104,7 +1104,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1132,7 +1132,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1163,7 +1163,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1187,7 +1187,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1217,7 +1217,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1248,7 +1248,7 @@ fn bench_query_pagination(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1295,7 +1295,7 @@ fn bench_query_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
@@ -1323,7 +1323,7 @@ fn bench_query_array_match(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let mut txn = db.begin(true).unwrap();
-                txn.find("bench", query).unwrap().len()
+                txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
     }
