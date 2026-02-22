@@ -25,6 +25,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     limit: Option<usize>,
     complete_groups: bool,
     covered: bool,
+    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     // Eq uses a narrow prefix; everything else scans the whole column.
     let prefix = match filter {
@@ -174,7 +175,22 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                         Some((_, record_id)) => {
                             count += 1;
                             if let Some(ref rv) = raw_value {
-                                // Covered path: yield { _id, column: coerced_value }
+                                // Covered path: TTL check via record envelope prefix.
+                                // Reads the record but only inspects the envelope header —
+                                // still avoids full BSON decode + projection.
+                                let rec_key = encoding::record_key(record_id);
+                                match txn.get(cf, &rec_key) {
+                                    Ok(Some(bytes)) => {
+                                        if encoding::is_record_expired(&bytes, now_millis) {
+                                            continue;
+                                        }
+                                    }
+                                    Ok(None) => continue, // dangling index entry
+                                    Err(e) => {
+                                        done = true;
+                                        return Some(Err(DbError::Store(e)));
+                                    }
+                                }
                                 let coerced = encoding::coerce_to_stored_type(rv, &stored_value);
                                 let mut doc = RawDocumentBuf::new();
                                 doc.append("_id", RawBson::String(record_id.to_string()));

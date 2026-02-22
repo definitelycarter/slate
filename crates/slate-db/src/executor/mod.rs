@@ -219,6 +219,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 *limit,
                 *complete_groups,
                 *covered,
+                self.now_millis,
             ),
             PlanNode::IndexMerge { logical, lhs, rhs } => {
                 let left = self.execute_node(lhs)?;
