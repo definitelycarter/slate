@@ -35,7 +35,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                 }
             }
             let key = encoding::record_key(id);
-            txn.put(cf, &key, buf.as_bytes())?;
+            txn.put(cf, &key, &encoding::encode_record(buf.as_bytes()))?;
             Ok(Some(RawValue::Owned(RawBson::Document(buf))))
         } else {
             Ok(None)

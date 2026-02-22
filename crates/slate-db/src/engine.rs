@@ -1,5 +1,5 @@
 use bson::RawDocumentBuf;
-use slate_query::{DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query};
+use slate_query::{DistinctQuery, FilterGroup, Query};
 use slate_store::{Store, Transaction as StoreTxn};
 
 use crate::catalog::Catalog;
@@ -16,7 +16,7 @@ use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 
 const SYS_CF: &str = "_sys";
 
-pub(crate) struct Engine<S: Store> {
+pub struct Engine<S: Store> {
     store: S,
     catalog: Catalog,
 }
@@ -119,7 +119,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             None => return Ok(None),
         };
 
-        let mut doc: bson::Document = bson::from_slice(&bytes)?;
+        // O(1) TTL check on envelope prefix
+        if encoding::is_record_expired(&bytes, bson::DateTime::now().timestamp_millis()) {
+            return Ok(None);
+        }
+
+        let (_, bson_slice) = encoding::decode_record(&bytes)?;
+        let mut doc: bson::Document = bson::from_slice(bson_slice)?;
+
         if let Some(wanted) = columns {
             let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
             exec::apply_projection(&mut doc, &cols);
@@ -361,18 +368,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── TTL operations ──────────────────────────────────────────
 
     /// Purge expired documents from a collection.
+    /// Uses `FlushExpired` which retains the TTL index for efficient scanning.
     pub fn purge_expired(&mut self, collection: &str) -> Result<u64, DbError> {
-        let now = bson::DateTime::now();
-        let filter = FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "ttl".to_string(),
-                operator: Operator::Lt,
-                value: bson::Bson::DateTime(now),
-            })],
+        let stmt = planner::Statement::FlushExpired;
+        let (plan, cf) = self.plan_statement(collection, stmt)?;
+        // Use no-TTL-filter executor so the delete pipeline can read expired docs
+        let deleted = match executor::Executor::new_no_ttl_filter(&self.txn, &cf).execute(&plan)? {
+            ExecutionResult::Delete { deleted } => deleted,
+            _ => unreachable!(),
         };
-        let result = self.delete_many(collection, &filter)?;
-        Ok(result.deleted)
+        Ok(deleted)
     }
 
     // ── Index operations ────────────────────────────────────────
@@ -397,7 +402,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
                 Some(id) => id.to_string(),
                 None => continue,
             };
-            let doc: bson::Document = bson::from_slice(&value)?;
+            let (_, bson_slice) = encoding::decode_record(&value)?;
+            let doc: bson::Document = bson::from_slice(bson_slice)?;
             for val in exec::get_path_values(&doc, field) {
                 let idx_key = encoding::index_key(field, val, &record_id);
                 self.txn
@@ -488,7 +494,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Private helpers ─────────────────────────────────────────
 
-    /// Resolve catalog metadata and plan a statement through the planner.
+    /// Plan a statement. TTL filtering is handled at the executor level
+    /// (Scan and ReadRecord nodes check TTL inline via fast byte-level scan)
+    /// rather than by injecting filter predicates here.
     fn plan_statement(
         &mut self,
         collection: &str,

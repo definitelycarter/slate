@@ -11,6 +11,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
     source: RawIter<'a>,
+    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     // IndexScan/IndexMerge path: extract _id, fetch full record
     Ok(Box::new(source.filter_map(move |result| {
@@ -35,16 +36,20 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             },
         };
         let key = encoding::record_key(&id);
-        match txn.get(cf, &key) {
+        match exec::get_record_if_alive(txn, cf, &key, now_millis) {
             Ok(Some(bytes)) => {
-                let raw = match RawDocumentBuf::from_bytes(bytes.into_owned()) {
+                let (_, bson_slice) = match encoding::decode_record(&bytes) {
+                    Ok(pair) => pair,
+                    Err(e) => return Some(Err(e)),
+                };
+                let raw = match RawDocumentBuf::from_bytes(bson_slice.to_vec()) {
                     Ok(r) => r,
                     Err(e) => return Some(Err(DbError::from(e))),
                 };
                 Some(Ok(Some(RawValue::Owned(RawBson::Document(raw)))))
             }
-            Ok(None) => None, // dangling index entry
-            Err(e) => Some(Err(DbError::Store(e))),
+            Ok(None) => None, // missing or expired
+            Err(e) => Some(Err(e)),
         }
     })))
 }

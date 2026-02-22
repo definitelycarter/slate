@@ -1,5 +1,5 @@
 use slate_query::{
-    DistinctQuery, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
+    DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
 };
 
 /// Represents a database operation to be planned.
@@ -31,6 +31,8 @@ pub enum Statement {
     UpsertMany { docs: Vec<bson::RawDocumentBuf> },
     /// Merge (insert-or-patch) a batch of partial documents by `_id`.
     MergeMany { docs: Vec<bson::RawDocumentBuf> },
+    /// Internal: purge expired documents. Retains TTL index for efficient scan.
+    FlushExpired,
 }
 
 /// Controls the behavior of the Upsert node when a document already exists.
@@ -221,6 +223,18 @@ pub fn plan(collection: &str, indexed_fields: Vec<String>, statement: Statement)
         Statement::Insert { docs } => plan_insert(indexed_fields, docs),
         Statement::UpsertMany { docs } => plan_upsert(indexed_fields, docs, UpsertMode::Replace),
         Statement::MergeMany { docs } => plan_upsert(indexed_fields, docs, UpsertMode::Merge),
+        Statement::FlushExpired => {
+            let now = bson::DateTime::now();
+            let filter = FilterGroup {
+                logical: LogicalOp::And,
+                children: vec![FilterNode::Condition(Filter {
+                    field: "ttl".to_string(),
+                    operator: Operator::Lt,
+                    value: bson::Bson::DateTime(now),
+                })],
+            };
+            plan_delete(collection, indexed_fields, &filter, None)
+        }
     }
 }
 
@@ -589,11 +603,13 @@ fn find_best_and_child(
     }
 
     // Priority pass 2: fully-indexable OR sub-groups
-    for (i, child) in group.children.iter().enumerate() {
+    // The OR child stays in the residual (empty consumed list) because each
+    // IndexScan branch may over-fetch — the full OR must be rechecked.
+    for (_i, child) in group.children.iter().enumerate() {
         if let FilterNode::Group(sub_group) = child {
             if sub_group.logical == LogicalOp::Or {
                 if let Some(id_node) = try_or_index_merge(collection, indexed_fields, sub_group) {
-                    return Some((id_node, vec![i]));
+                    return Some((id_node, vec![]));
                 }
             }
         }
@@ -1583,8 +1599,13 @@ mod tests {
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { predicate, input } => {
-                assert_eq!(predicate.children.len(), 1);
+                // OR stays in residual for recheck + score condition
+                assert_eq!(predicate.children.len(), 2);
                 match &predicate.children[0] {
+                    FilterNode::Group(g) => assert_eq!(g.logical, LogicalOp::Or),
+                    _ => panic!("expected OR group in residual"),
+                }
+                match &predicate.children[1] {
                     FilterNode::Condition(f) => assert_eq!(f.field, "score"),
                     _ => panic!("expected score condition"),
                 }

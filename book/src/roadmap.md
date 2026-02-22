@@ -120,27 +120,62 @@ produces `IndexScan(Lt(now))` with early termination. Special TTL handling remov
 
 ---
 
-## TTL Read Filtering
+## ~~TTL Read Filtering~~ (Done)
 
-### Problem
+Expired documents are now immediately invisible to all reads and mutations, without
+waiting for the background sweep. TTL is stored in a **record envelope** — a fixed-offset
+prefix on every stored value — enabling O(1) expiry checks (~0.5ns/doc) with zero BSON
+parsing.
 
-Expired documents (where `ttl < now`) remain visible to queries until the background
-sweep runs `purge_expired`. A `find({ status: "active" })` on a collection with 300
-live documents and 100k expired ones will return expired docs in results.
+### On-Disk Format
 
-### Approach
+Every record value is wrapped in a thin envelope before storage:
 
-Inject a residual TTL filter into read queries so expired documents are invisible
-regardless of sweep timing. The filter should be: `ttl >= now OR ttl does not exist`
-(documents without a `ttl` field are permanent).
+```
+No TTL:   [0x00][BSON bytes...]
+Has TTL:  [0x01][8-byte LE i64 millis][BSON bytes...]
+```
 
-The planner should **not** use `IndexScan` on the TTL index for this — if the query
-already has a more selective index (e.g. `status = "active"` with 300 matches), scanning
-100k TTL entries first would be far worse. Instead, add a `Filter(ttl >= now OR ttl is null)`
-node after the main query's source, as a residual predicate.
+The tag byte is extensible — future tags (0x02, 0x03...) can add more fixed-size metadata
+fields (e.g. `created_at`, `updated_at`) before the BSON payload. The `ttl` field is kept
+in the BSON document as well (duplicate data) to avoid stripping/injecting it on reads.
 
-For `purge_expired` specifically, the TTL index scan remains the right choice since the
-*goal* is to find all expired documents.
+### Envelope Helpers (`encoding.rs`)
+
+- `encode_record(bson_bytes)` — scans BSON for `ttl` DateTime field at write time (~12ns),
+  prepends `[0x01][millis]` or `[0x00]`
+- `decode_record(data)` — reads tag byte, returns `(Option<ttl_millis>, bson_slice)`
+- `is_record_expired(data, now_millis)` — O(1): read tag byte, if `0x01` compare 8-byte millis
+- `record_bson_offset(data)` — returns byte offset where BSON starts (avoids borrow issues in scan)
+
+### Performance
+
+| Approach | With TTL | Without TTL |
+|---|---|---|
+| `RawDocument::get` (full BSON parse) | 57.4ns | 48.0ns |
+| Byte walker (scan raw BSON fields) | 12.3ns | 10.1ns |
+| **Record envelope (current)** | **0.5ns** | **0.4ns** |
+
+The byte walker (~12ns) is still used at write time inside `encode_record` to extract the
+TTL millis from the BSON payload. This cost is negligible relative to the `txn.put` overhead.
+
+### Where Checks Happen
+
+TTL checks happen inline at the two data-yielding executor nodes:
+
+- **`Scan`** — calls `is_record_expired` on raw bytes before any BSON parsing
+- **`ReadRecord`** — calls `get_record_if_alive` (wraps `txn.get()` + TTL check)
+
+These two nodes never appear together in the same pipeline, so every document is checked
+exactly once. The `Executor` struct carries `now_millis` — normal queries use
+`DateTime::now()`, while `purge_expired` uses `i64::MIN` to disable filtering so the
+delete pipeline can read expired docs.
+
+- `find`, `count`, `distinct` — expired docs filtered at Scan/ReadRecord
+- `find_by_id` — envelope TTL check before deserialization
+- `update`, `replace`, `delete` — expired docs filtered at source nodes
+- `upsert`/`merge` — expired existing docs treated as non-existent (old indexes cleaned, insert path taken)
+- `purge_expired` — uses `Statement::FlushExpired` with TTL index for efficient scanning; TTL filtering disabled via `Executor::new_no_ttl_filter`
 
 ---
 

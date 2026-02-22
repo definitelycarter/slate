@@ -48,8 +48,8 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
         }
 
         match &doc_to_write {
-            Some(buf) => txn.put(cf, &key, buf.as_bytes())?,
-            None => txn.put(cf, &key, raw.as_bytes())?,
+            Some(buf) => txn.put(cf, &key, &encoding::encode_record(buf.as_bytes()))?,
+            None => txn.put(cf, &key, &encoding::encode_record(raw.as_bytes()))?,
         }
 
         match doc_to_write {

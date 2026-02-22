@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -6,8 +7,32 @@ use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
 use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator};
+use slate_store::Transaction;
 
 use crate::error::DbError;
+
+// ── TTL helpers ────────────────────────────────────────────────
+
+/// Fast O(1) TTL check on an enveloped record value.
+/// Delegates to `encoding::is_record_expired` which reads the fixed-offset
+/// prefix — no BSON field walking needed.
+#[inline]
+pub(crate) fn is_ttl_expired(data: &[u8], now_millis: i64) -> bool {
+    crate::encoding::is_record_expired(data, now_millis)
+}
+
+/// Fetch a record by key and check TTL. Returns `None` if missing or expired.
+pub(crate) fn get_record_if_alive<'a, T: Transaction>(
+    txn: &'a T,
+    cf: &'a T::Cf,
+    key: &[u8],
+    now_millis: i64,
+) -> Result<Option<Cow<'a, [u8]>>, DbError> {
+    match txn.get(cf, key)? {
+        Some(bytes) if is_ttl_expired(&bytes, now_millis) => Ok(None),
+        other => Ok(other),
+    }
+}
 
 // ── Multi-key path resolution (for indexing) ───────────────────
 
@@ -1499,5 +1524,51 @@ mod tests {
             value: Bson::String("anything".into()),
         };
         assert!(!raw_matches_filter(&raw, &filter).unwrap());
+    }
+
+    // ── is_ttl_expired ──────────────────────────────────────────
+
+    #[test]
+    fn ttl_expired_returns_true() {
+        let past = bson::DateTime::from_millis(1_000);
+        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": past }).unwrap();
+        let envelope = crate::encoding::encode_record(&bson_bytes);
+        let now = bson::DateTime::now().timestamp_millis();
+        assert!(is_ttl_expired(&envelope, now));
+    }
+
+    #[test]
+    fn ttl_future_returns_false() {
+        let future = bson::DateTime::from_millis(i64::MAX - 1);
+        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": future }).unwrap();
+        let envelope = crate::encoding::encode_record(&bson_bytes);
+        let now = bson::DateTime::now().timestamp_millis();
+        assert!(!is_ttl_expired(&envelope, now));
+    }
+
+    #[test]
+    fn ttl_missing_returns_false() {
+        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "name": "Alice" }).unwrap();
+        let envelope = crate::encoding::encode_record(&bson_bytes);
+        let now = bson::DateTime::now().timestamp_millis();
+        assert!(!is_ttl_expired(&envelope, now));
+    }
+
+    #[test]
+    fn ttl_non_datetime_returns_false() {
+        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": "not-a-date" }).unwrap();
+        let envelope = crate::encoding::encode_record(&bson_bytes);
+        let now = bson::DateTime::now().timestamp_millis();
+        assert!(!is_ttl_expired(&envelope, now));
+    }
+
+    #[test]
+    fn ttl_equal_to_now_returns_false() {
+        let now_millis = 1_700_000_000_000_i64;
+        let dt = bson::DateTime::from_millis(now_millis);
+        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": dt }).unwrap();
+        let envelope = crate::encoding::encode_record(&bson_bytes);
+        // ttl == now → not expired (< is strict)
+        assert!(!is_ttl_expired(&envelope, now_millis));
     }
 }

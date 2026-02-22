@@ -21,6 +21,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     source: RawIter<'a>,
     inserted: Rc<Cell<u64>>,
     updated: Rc<Cell<u64>>,
+    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     let mut paths: Vec<String> = indexed_fields.to_vec();
     if !paths.iter().any(|p| p == "ttl") {
@@ -50,28 +51,54 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
         let record_key = encoding::record_key(&id_str);
         let old_bytes = txn.get(cf, &record_key)?;
 
+        // Check if existing doc is expired (ttl < now)
+        let expired = old_bytes
+            .as_ref()
+            .map_or(false, |data| exec::is_ttl_expired(data, now_millis));
+
         if let Some(ref old_data) = old_bytes {
-            let old_raw = RawDocument::from_bytes(old_data)?;
+            let (_, bson_slice) = encoding::decode_record(old_data)?;
+            let old_raw = RawDocument::from_bytes(bson_slice)?;
             delete_old_indexes(txn, cf, old_raw, &tree, &id_str)?;
 
-            let written = build_doc(mode, &id_str, new_raw_ref, old_raw)?;
-            let written = match written {
-                Some(doc) => doc,
-                None => {
-                    // Merge no-op: doc unchanged, still counts as matched.
-                    updated.set(updated.get() + 1);
-                    return Ok(Some(RawValue::Owned(RawBson::Document(
-                        old_raw.to_raw_document_buf(),
-                    ))));
-                }
-            };
+            if expired {
+                // Expired doc — clean up old indexes, then treat as fresh insert
+                let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
+                txn.put(
+                    cf,
+                    &record_key,
+                    &encoding::encode_record(doc_to_write.as_bytes()),
+                )?;
+                inserted.set(inserted.get() + 1);
+                Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
+            } else {
+                let written = build_doc(mode, &id_str, new_raw_ref, old_raw)?;
+                let written = match written {
+                    Some(doc) => doc,
+                    None => {
+                        // Merge no-op: doc unchanged, still counts as matched.
+                        updated.set(updated.get() + 1);
+                        return Ok(Some(RawValue::Owned(RawBson::Document(
+                            old_raw.to_raw_document_buf(),
+                        ))));
+                    }
+                };
 
-            txn.put(cf, &record_key, written.as_bytes())?;
-            updated.set(updated.get() + 1);
-            Ok(Some(RawValue::Owned(RawBson::Document(written))))
+                txn.put(
+                    cf,
+                    &record_key,
+                    &encoding::encode_record(written.as_bytes()),
+                )?;
+                updated.set(updated.get() + 1);
+                Ok(Some(RawValue::Owned(RawBson::Document(written))))
+            }
         } else {
             let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
-            txn.put(cf, &record_key, doc_to_write.as_bytes())?;
+            txn.put(
+                cf,
+                &record_key,
+                &encoding::encode_record(doc_to_write.as_bytes()),
+            )?;
             inserted.set(inserted.get() + 1);
             Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
         }

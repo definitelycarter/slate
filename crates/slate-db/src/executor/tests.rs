@@ -539,8 +539,9 @@ fn update_writes_merged_doc() {
     let puts = txn.puts.borrow();
     assert_eq!(puts.len(), 1);
     assert_eq!(puts[0].0, encoding::record_key("1"));
-    // Verify the written bytes decode to the merged doc
-    let written = bson::RawDocument::from_bytes(&puts[0].1).unwrap();
+    // Verify the written bytes decode to the merged doc (strip envelope first)
+    let (_, bson_slice) = encoding::decode_record(&puts[0].1).unwrap();
+    let written = bson::RawDocument::from_bytes(bson_slice).unwrap();
     assert_eq!(written.get_str("name").unwrap(), "Alice");
     assert_eq!(written.get_i32("score").unwrap(), 100);
 }
@@ -591,7 +592,8 @@ fn replace_writes_replacement() {
     let puts = txn.puts.borrow();
     assert_eq!(puts.len(), 1);
     assert_eq!(puts[0].0, encoding::record_key("1"));
-    let written: bson::Document = bson::from_slice(&puts[0].1).unwrap();
+    let (_, bson_slice) = encoding::decode_record(&puts[0].1).unwrap();
+    let written: bson::Document = bson::from_slice(bson_slice).unwrap();
     assert_eq!(written.get_bool("replaced").unwrap(), true);
 }
 
@@ -700,9 +702,10 @@ fn full_update_pipeline() {
     let puts = txn.puts.borrow();
     // Update writes the merged doc + InsertIndex writes the new index key
     assert_eq!(puts.len(), 2);
-    // First put: the merged document
+    // First put: the merged document (strip envelope first)
     assert_eq!(puts[0].0, encoding::record_key("1"));
-    let written = bson::RawDocument::from_bytes(&puts[0].1).unwrap();
+    let (_, bson_slice) = encoding::decode_record(&puts[0].1).unwrap();
+    let written = bson::RawDocument::from_bytes(bson_slice).unwrap();
     assert_eq!(written.get_str("status").unwrap(), "archived");
     // Second put: new index entry
     assert_eq!(
@@ -1016,7 +1019,8 @@ fn upsert_replace_insert_new() {
     // Record write + index write
     assert_eq!(puts.len(), 2);
     assert_eq!(puts[0].0, encoding::record_key("1"));
-    let written = bson::RawDocument::from_bytes(&puts[0].1).unwrap();
+    let (_, bson_slice) = encoding::decode_record(&puts[0].1).unwrap();
+    let written = bson::RawDocument::from_bytes(bson_slice).unwrap();
     assert_eq!(written.get_str("name").unwrap(), "Alice");
 }
 

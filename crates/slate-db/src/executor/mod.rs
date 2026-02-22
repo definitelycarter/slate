@@ -59,11 +59,28 @@ pub enum ExecutionResult<'a> {
 pub struct Executor<'c, T: Transaction> {
     txn: &'c T,
     cf: &'c T::Cf,
+    now_millis: i64,
 }
 
 impl<'c, T: Transaction + 'c> Executor<'c, T> {
     pub fn new(txn: &'c T, cf: &'c T::Cf) -> Self {
-        Self { txn, cf }
+        Self {
+            txn,
+            cf,
+            now_millis: bson::DateTime::now().timestamp_millis(),
+        }
+    }
+
+    /// Create an executor that skips TTL filtering.
+    /// Used by `purge_expired` so the delete pipeline can read expired docs.
+    /// Sets `now_millis` to `i64::MIN` so `is_ttl_expired` always returns `false`
+    /// (no timestamp is less than `i64::MIN`).
+    pub fn new_no_ttl_filter(txn: &'c T, cf: &'c T::Cf) -> Self {
+        Self {
+            txn,
+            cf,
+            now_millis: i64::MIN,
+        }
     }
 
     pub fn execute(&self, node: &'c PlanNode) -> Result<ExecutionResult<'c>, DbError> {
@@ -154,6 +171,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                     source,
                     Rc::clone(inserted),
                     Rc::clone(updated),
+                    self.now_millis,
                 )
             }
             _ => self.execute_node(node),
@@ -183,7 +201,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let source = self.execute_node(input)?;
                 nodes::filter::execute(predicate, source)
             }
-            PlanNode::Scan { .. } => nodes::scan::execute(self.txn, self.cf),
+            PlanNode::Scan { .. } => nodes::scan::execute(self.txn, self.cf, self.now_millis),
             PlanNode::IndexScan {
                 column,
                 filter,
@@ -209,7 +227,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
             }
             PlanNode::ReadRecord { input } => {
                 let source = self.execute_node(input)?;
-                nodes::read_record::execute(self.txn, self.cf, source)
+                nodes::read_record::execute(self.txn, self.cf, source, self.now_millis)
             }
             PlanNode::Delete { input } => {
                 let source = self.execute_node(input)?;
@@ -258,6 +276,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                     source,
                     inserted,
                     updated,
+                    self.now_millis,
                 )
             }
         }

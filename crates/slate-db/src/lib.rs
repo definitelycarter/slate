@@ -4,7 +4,10 @@ mod convert;
 mod cursor;
 mod database;
 mod encoding;
+#[cfg(not(feature = "bench-internals"))]
 pub(crate) mod engine;
+#[cfg(feature = "bench-internals")]
+pub mod engine;
 mod error;
 mod executor;
 mod planner;

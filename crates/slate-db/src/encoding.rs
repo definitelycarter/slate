@@ -250,6 +250,154 @@ pub fn parse_index_key(key: &[u8]) -> Option<(&str, &str)> {
     Some((column, record_id))
 }
 
+// ── Record value envelope ────────────────────────────────────────
+//
+// Every record value is stored with a 1-byte tag prefix:
+//   0x00 → no TTL, BSON follows immediately          [0x00][BSON...]
+//   0x01 → has TTL, 8-byte LE millis then BSON       [0x01][i64 LE][BSON...]
+//
+// The tag byte makes the format extensible: future versions can add
+// new tags (e.g. 0x02 for TTL + created_at timestamp) without breaking
+// existing data.
+
+const ENVELOPE_TAG_NO_TTL: u8 = 0x00;
+const ENVELOPE_TAG_TTL: u8 = 0x01;
+const ENVELOPE_TTL_SIZE: usize = 8;
+
+/// Wrap raw BSON bytes in a record envelope.
+///
+/// Scans the BSON payload for a `ttl` DateTime field. If found, prepends
+/// `[0x01][8-byte LE millis]`. Otherwise prepends `[0x00]`.
+/// The BSON payload is included verbatim (TTL stays duplicated in BSON).
+pub fn encode_record(bson_bytes: &[u8]) -> Vec<u8> {
+    match extract_ttl_millis(bson_bytes) {
+        Some(millis) => {
+            let mut buf = Vec::with_capacity(1 + ENVELOPE_TTL_SIZE + bson_bytes.len());
+            buf.push(ENVELOPE_TAG_TTL);
+            buf.extend_from_slice(&millis.to_le_bytes());
+            buf.extend_from_slice(bson_bytes);
+            buf
+        }
+        None => {
+            let mut buf = Vec::with_capacity(1 + bson_bytes.len());
+            buf.push(ENVELOPE_TAG_NO_TTL);
+            buf.extend_from_slice(bson_bytes);
+            buf
+        }
+    }
+}
+
+/// Decode a record envelope, returning the TTL (if present) and a slice
+/// of the raw BSON payload.
+pub fn decode_record(data: &[u8]) -> Result<(Option<i64>, &[u8]), crate::error::DbError> {
+    if data.is_empty() {
+        return Err(crate::error::DbError::InvalidQuery(
+            "empty record envelope".into(),
+        ));
+    }
+    match data[0] {
+        ENVELOPE_TAG_NO_TTL => Ok((None, &data[1..])),
+        ENVELOPE_TAG_TTL => {
+            let header_len = 1 + ENVELOPE_TTL_SIZE;
+            if data.len() < header_len {
+                return Err(crate::error::DbError::InvalidQuery(
+                    "truncated TTL envelope".into(),
+                ));
+            }
+            let millis = i64::from_le_bytes(data[1..1 + ENVELOPE_TTL_SIZE].try_into().unwrap());
+            Ok((Some(millis), &data[header_len..]))
+        }
+        tag => Err(crate::error::DbError::InvalidQuery(format!(
+            "unknown record envelope tag: 0x{:02X}",
+            tag
+        ))),
+    }
+}
+
+/// Return the byte offset where the BSON payload begins in an enveloped record.
+/// Useful when you need to slice a `Cow<[u8]>` without an intermediate borrow.
+#[inline]
+pub fn record_bson_offset(data: &[u8]) -> usize {
+    if !data.is_empty() && data[0] == ENVELOPE_TAG_TTL {
+        1 + ENVELOPE_TTL_SIZE
+    } else {
+        1
+    }
+}
+
+/// Fast O(1) TTL check on an enveloped record.
+/// Returns `true` if the record has a TTL that is less than `now_millis`.
+#[inline]
+pub fn is_record_expired(data: &[u8], now_millis: i64) -> bool {
+    if data.len() >= 1 + ENVELOPE_TTL_SIZE && data[0] == ENVELOPE_TAG_TTL {
+        let millis = i64::from_le_bytes(data[1..1 + ENVELOPE_TTL_SIZE].try_into().unwrap());
+        millis < now_millis
+    } else {
+        false
+    }
+}
+
+/// Scan raw BSON bytes for a `ttl` DateTime field and return its millis.
+fn extract_ttl_millis(bytes: &[u8]) -> Option<i64> {
+    let mut pos = 4; // skip BSON document length
+    while pos < bytes.len() {
+        let type_byte = bytes[pos];
+        if type_byte == 0x00 {
+            break;
+        }
+        pos += 1;
+
+        let name_start = pos;
+        while pos < bytes.len() && bytes[pos] != 0x00 {
+            pos += 1;
+        }
+        let name = &bytes[name_start..pos];
+        pos += 1; // skip null terminator
+
+        if name == b"ttl" && type_byte == 0x09 {
+            if pos + 8 <= bytes.len() {
+                return Some(i64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()));
+            }
+            return None;
+        }
+
+        match type_byte {
+            0x01 => pos += 8,
+            0x02 => {
+                if pos + 4 > bytes.len() {
+                    break;
+                }
+                let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4 + len;
+            }
+            0x03 | 0x04 => {
+                if pos + 4 > bytes.len() {
+                    break;
+                }
+                let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += len;
+            }
+            0x05 => {
+                if pos + 4 > bytes.len() {
+                    break;
+                }
+                let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 5 + len;
+            }
+            0x07 => pos += 12,
+            0x08 => pos += 1,
+            0x09 => pos += 8,
+            0x0A => {}
+            0x10 => pos += 4,
+            0x11 => pos += 8,
+            0x12 => pos += 8,
+            0x13 => pos += 16,
+            _ => break,
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +492,54 @@ mod tests {
         );
         assert_eq!(bson_type_byte(&bson::Bson::Int32(1)), [0x10]);
         assert_eq!(bson_type_byte(&bson::Bson::Int64(1)), [0x12]);
+    }
+
+    // ── Record envelope ─────────────────────────────────────────
+
+    #[test]
+    fn encode_decode_no_ttl() {
+        let bson = bson::to_vec(&bson::doc! { "_id": "a", "name": "test" }).unwrap();
+        let encoded = encode_record(&bson);
+        assert_eq!(encoded[0], ENVELOPE_TAG_NO_TTL);
+        let (ttl, bson_slice) = decode_record(&encoded).unwrap();
+        assert!(ttl.is_none());
+        assert_eq!(bson_slice, &bson[..]);
+    }
+
+    #[test]
+    fn encode_decode_with_ttl() {
+        let dt = bson::DateTime::from_millis(1_700_000_000_000);
+        let bson = bson::to_vec(&bson::doc! { "_id": "a", "ttl": dt }).unwrap();
+        let encoded = encode_record(&bson);
+        assert_eq!(encoded[0], ENVELOPE_TAG_TTL);
+        let (ttl, bson_slice) = decode_record(&encoded).unwrap();
+        assert_eq!(ttl, Some(1_700_000_000_000));
+        assert_eq!(bson_slice, &bson[..]);
+    }
+
+    #[test]
+    fn is_record_expired_with_ttl() {
+        let dt = bson::DateTime::from_millis(1_000);
+        let bson = bson::to_vec(&bson::doc! { "_id": "a", "ttl": dt }).unwrap();
+        let encoded = encode_record(&bson);
+        assert!(is_record_expired(&encoded, 2_000));
+        assert!(!is_record_expired(&encoded, 500));
+    }
+
+    #[test]
+    fn is_record_expired_no_ttl() {
+        let bson = bson::to_vec(&bson::doc! { "_id": "a", "name": "test" }).unwrap();
+        let encoded = encode_record(&bson);
+        assert!(!is_record_expired(&encoded, i64::MAX));
+    }
+
+    #[test]
+    fn decode_record_empty_errors() {
+        assert!(decode_record(&[]).is_err());
+    }
+
+    #[test]
+    fn decode_record_unknown_tag_errors() {
+        assert!(decode_record(&[0xFF, 0x00]).is_err());
     }
 }

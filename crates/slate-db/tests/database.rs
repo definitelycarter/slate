@@ -2167,7 +2167,7 @@ fn future_ttl() -> bson::DateTime {
 }
 
 #[test]
-fn ttl_expired_docs_visible_before_purge() {
+fn ttl_expired_docs_hidden_before_purge() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
@@ -2183,7 +2183,7 @@ fn ttl_expired_docs_visible_before_purge() {
     .unwrap();
     txn.commit().unwrap();
 
-    // Expired docs are visible until purge runs
+    // Expired docs are immediately invisible (TTL read filtering)
     let mut txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
@@ -2192,13 +2192,13 @@ fn ttl_expired_docs_visible_before_purge() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 2);
 
     let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
-    assert!(result.is_some());
+    assert!(result.is_none());
 
     let count = txn.count(COLLECTION, None).unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, 2);
 }
 
 #[test]
@@ -2416,6 +2416,119 @@ fn ttl_purge_multiple_expired() {
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].get_str("_id").unwrap(), "d");
+}
+
+#[test]
+fn ttl_find_by_id_hides_expired() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "x", "name": "Expired", "ttl": past_ttl() },
+    )
+    .unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "y", "name": "Fresh", "ttl": future_ttl() },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(true).unwrap();
+    assert!(txn.find_by_id(COLLECTION, "x", None).unwrap().is_none());
+    assert!(txn.find_by_id(COLLECTION, "y", None).unwrap().is_some());
+}
+
+#[test]
+fn ttl_update_skips_expired() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "a", "status": "old", "ttl": past_ttl() },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // update_one should match 0 — expired doc is invisible
+    let mut txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("a".into()));
+    let result = txn
+        .update_one(COLLECTION, &filter, doc! { "status": "new" }, false)
+        .unwrap();
+    assert_eq!(result.modified, 0);
+}
+
+#[test]
+fn ttl_merge_into_expired_inserts_fresh() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "a", "old_field": true, "ttl": past_ttl() },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Merge with same _id — expired doc treated as non-existent, takes insert path
+    let mut txn = db.begin(false).unwrap();
+    let result = txn
+        .merge_many(
+            COLLECTION,
+            vec![doc! { "_id": "a", "new_field": true, "ttl": future_ttl() }],
+        )
+        .unwrap();
+    assert_eq!(result.inserted, 1);
+    assert_eq!(result.updated, 0);
+    txn.commit().unwrap();
+
+    // The new doc should be visible and should NOT contain old_field
+    let mut txn = db.begin(true).unwrap();
+    let doc = txn.find_by_id(COLLECTION, "a", None).unwrap().unwrap();
+    assert!(doc.get("new_field").is_some());
+    assert!(doc.get("old_field").is_none());
+}
+
+#[test]
+fn ttl_no_ttl_field_always_visible() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "name": "Permanent1" },
+            doc! { "_id": "b", "name": "Permanent2" },
+        ],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Docs without ttl are always visible
+    let mut txn = db.begin(true).unwrap();
+    let results = txn
+        .find(COLLECTION, &no_filter_query())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(results.len(), 2);
+
+    // purge_expired should not touch them
+    let purged = db.purge_expired(COLLECTION).unwrap();
+    assert_eq!(purged, 0);
+
+    let mut txn = db.begin(true).unwrap();
+    let count = txn.count(COLLECTION, None).unwrap();
+    assert_eq!(count, 2);
 }
 
 // ── Distinct tests ──────────────────────────────────────────────
