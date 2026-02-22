@@ -4,6 +4,9 @@ mod nodes;
 #[cfg(test)]
 mod tests;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use bson::RawDocument;
 use bson::raw::{RawBson, RawBsonRef};
 use slate_store::Transaction;
@@ -50,6 +53,7 @@ pub enum ExecutionResult<'a> {
     Delete { deleted: u64 },
     Update { matched: u64, modified: u64 },
     Insert { ids: Vec<String> },
+    Upsert { inserted: u64, updated: u64 },
 }
 
 pub struct Executor<'c, T: Transaction> {
@@ -89,6 +93,18 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 }
                 Ok(ExecutionResult::Insert { ids })
             }
+            PlanNode::InsertIndex { input, .. } if matches!(**input, PlanNode::Upsert { .. }) => {
+                let inserted = Rc::new(Cell::new(0u64));
+                let updated = Rc::new(Cell::new(0u64));
+                let iter = self.execute_upsert_pipeline(node, &inserted, &updated)?;
+                for result in iter {
+                    result?;
+                }
+                Ok(ExecutionResult::Upsert {
+                    inserted: inserted.get(),
+                    updated: updated.get(),
+                })
+            }
             PlanNode::InsertIndex { .. } => {
                 let iter = self.execute_node(node)?;
                 let mut matched = 0u64;
@@ -106,6 +122,41 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let iter = self.execute_node(node)?;
                 Ok(ExecutionResult::Rows(iter))
             }
+        }
+    }
+
+    /// Execute the full upsert pipeline, threading shared counters through the Upsert node.
+    fn execute_upsert_pipeline(
+        &self,
+        node: &'c PlanNode,
+        inserted: &Rc<Cell<u64>>,
+        updated: &Rc<Cell<u64>>,
+    ) -> Result<RawIter<'c>, DbError> {
+        match node {
+            PlanNode::InsertIndex {
+                indexed_fields,
+                input,
+            } => {
+                let source = self.execute_upsert_pipeline(input, inserted, updated)?;
+                nodes::insert_index::execute(self.txn, self.cf, indexed_fields, source)
+            }
+            PlanNode::Upsert {
+                mode,
+                indexed_fields,
+                input,
+            } => {
+                let source = self.execute_node(input)?;
+                nodes::upsert::execute(
+                    self.txn,
+                    self.cf,
+                    mode,
+                    indexed_fields,
+                    source,
+                    Rc::clone(inserted),
+                    Rc::clone(updated),
+                )
+            }
+            _ => self.execute_node(node),
         }
     }
 
@@ -187,6 +238,25 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
             } => {
                 let source = self.execute_node(input)?;
                 nodes::delete_index::execute(self.txn, self.cf, indexed_fields, source)
+            }
+            PlanNode::Upsert {
+                mode,
+                indexed_fields,
+                input,
+            } => {
+                let source = self.execute_node(input)?;
+                // Standalone execute_node — counters are discarded.
+                let inserted = Rc::new(Cell::new(0u64));
+                let updated = Rc::new(Cell::new(0u64));
+                nodes::upsert::execute(
+                    self.txn,
+                    self.cf,
+                    mode,
+                    indexed_fields,
+                    source,
+                    inserted,
+                    updated,
+                )
             }
         }
     }

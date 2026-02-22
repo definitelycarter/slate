@@ -974,3 +974,186 @@ fn read_record_over_scan() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
 }
+
+// ── Tier 4: Upsert node tests ───────────────────────────────
+
+use crate::planner::UpsertMode;
+
+#[test]
+fn upsert_replace_insert_new() {
+    // MockTransaction returns None for get() → insert path
+    let (txn, cf) = mock_executor();
+    let plan = PlanNode::InsertIndex {
+        indexed_fields: vec!["status".into()],
+        input: Box::new(PlanNode::Upsert {
+            mode: UpsertMode::Replace,
+            indexed_fields: vec!["status".into()],
+            input: Box::new(PlanNode::Values {
+                docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
+            }),
+        }),
+    };
+    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    match result {
+        ExecutionResult::Upsert { inserted, updated } => {
+            assert_eq!(inserted, 1);
+            assert_eq!(updated, 0);
+        }
+        _ => panic!("expected Upsert"),
+    }
+    let puts = txn.puts.borrow();
+    // Record write + index write
+    assert_eq!(puts.len(), 2);
+    assert_eq!(puts[0].0, encoding::record_key("1"));
+    let written = bson::RawDocument::from_bytes(&puts[0].1).unwrap();
+    assert_eq!(written.get_str("name").unwrap(), "Alice");
+}
+
+#[test]
+fn upsert_merge_insert_new() {
+    let (txn, cf) = mock_executor();
+    let plan = PlanNode::InsertIndex {
+        indexed_fields: vec![],
+        input: Box::new(PlanNode::Upsert {
+            mode: UpsertMode::Merge,
+            indexed_fields: vec![],
+            input: Box::new(PlanNode::Values {
+                docs: vec![rawdoc! { "_id": "1", "name": "Alice" }],
+            }),
+        }),
+    };
+    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    match result {
+        ExecutionResult::Upsert { inserted, updated } => {
+            assert_eq!(inserted, 1);
+            assert_eq!(updated, 0);
+        }
+        _ => panic!("expected Upsert"),
+    }
+    let puts = txn.puts.borrow();
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].0, encoding::record_key("1"));
+}
+
+#[test]
+fn upsert_replace_existing() {
+    let db = seeded_db();
+    let mut txn = db.begin(false).unwrap();
+
+    let result = txn
+        .upsert_many(
+            "test",
+            vec![bson::doc! { "_id": "1", "name": "Alicia", "status": "archived", "score": 99 }],
+        )
+        .unwrap();
+    assert_eq!(result.inserted, 0);
+    assert_eq!(result.updated, 1);
+
+    // Verify the record was replaced
+    let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    assert_eq!(doc.get_str("name").unwrap(), "Alicia");
+    assert_eq!(doc.get_str("status").unwrap(), "archived");
+    assert_eq!(doc.get_i32("score").unwrap(), 99);
+}
+
+#[test]
+fn upsert_merge_existing() {
+    let db = seeded_db();
+    let mut txn = db.begin(false).unwrap();
+
+    // Merge into Alice (id=1): update score, keep name and status
+    let result = txn
+        .merge_many("test", vec![bson::doc! { "_id": "1", "score": 99 }])
+        .unwrap();
+    assert_eq!(result.inserted, 0);
+    assert_eq!(result.updated, 1);
+
+    // Verify: name and status preserved, score updated
+    let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    assert_eq!(doc.get_str("name").unwrap(), "Alice");
+    assert_eq!(doc.get_str("status").unwrap(), "active");
+    assert_eq!(doc.get_i32("score").unwrap(), 99);
+}
+
+#[test]
+fn upsert_mixed_insert_and_update() {
+    let db = seeded_db();
+    let mut txn = db.begin(false).unwrap();
+
+    let result = txn
+        .upsert_many(
+            "test",
+            vec![
+                bson::doc! { "_id": "1", "name": "Alicia", "status": "archived", "score": 99 },
+                bson::doc! { "_id": "99", "name": "New", "status": "pending", "score": 50 },
+            ],
+        )
+        .unwrap();
+    assert_eq!(result.inserted, 1);
+    assert_eq!(result.updated, 1);
+
+    let doc1 = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    assert_eq!(doc1.get_str("name").unwrap(), "Alicia");
+
+    let doc99 = txn.find_by_id("test", "99", None).unwrap().unwrap();
+    assert_eq!(doc99.get_str("name").unwrap(), "New");
+}
+
+#[test]
+fn upsert_replace_cleans_old_indexes() {
+    let db = seeded_db();
+    let mut txn = db.begin(false).unwrap();
+
+    // Alice has status="active". Replace with status="archived".
+    txn.upsert_many(
+        "test",
+        vec![bson::doc! { "_id": "1", "name": "Alice", "status": "archived", "score": 70 }],
+    )
+    .unwrap();
+
+    // Query by old index value should not find Alice
+    let query = slate_query::Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "status".into(),
+                operator: Operator::Eq,
+                value: bson::Bson::String("active".into()),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results = txn.find("test", &query).unwrap();
+    let active_ids: Vec<&str> = results
+        .iter()
+        .map(|r| {
+            let doc = bson::RawDocument::from_bytes(r.as_bytes()).unwrap();
+            doc.get_str("_id").unwrap()
+        })
+        .collect();
+    // Only Charlie (id=3) should remain active
+    assert_eq!(active_ids, vec!["3"]);
+
+    // Query by new index value should find Alice
+    let query2 = slate_query::Query {
+        filter: Some(FilterGroup {
+            logical: LogicalOp::And,
+            children: vec![FilterNode::Condition(Filter {
+                field: "status".into(),
+                operator: Operator::Eq,
+                value: bson::Bson::String("archived".into()),
+            })],
+        }),
+        sort: vec![],
+        skip: None,
+        take: None,
+        columns: None,
+    };
+    let results2 = txn.find("test", &query2).unwrap();
+    assert_eq!(results2.len(), 1);
+    let doc = bson::RawDocument::from_bytes(results2[0].as_bytes()).unwrap();
+    assert_eq!(doc.get_str("_id").unwrap(), "1");
+}

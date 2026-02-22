@@ -17,7 +17,6 @@ slate/
   ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
   ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
   ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
-  ├── slate-bench            → DB-level benchmark suite (embedded + TCP, both backends)
   └── slate-store-bench      → Store-level stress test (500k records, race conditions, data integrity)
 ```
 

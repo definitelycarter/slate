@@ -2328,18 +2328,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
-name = "slate-bench"
-version = "0.1.0"
-dependencies = [
- "bson",
- "rand 0.8.5",
- "slate-db",
- "slate-query",
- "slate-store",
- "tempfile",
-]
-
-[[package]]
 name = "slate-client"
 version = "0.1.0"
 dependencies = [
@@ -2393,6 +2381,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "criterion",
+ "rand 0.8.5",
  "serde",
  "slate-query",
  "slate-store",

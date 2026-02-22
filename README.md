@@ -27,7 +27,6 @@ slate/
   ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
   ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
   ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
-  ├── slate-bench            → Database-level benchmark suite (embedded + TCP, both backends)
   └── slate-store-bench      → Store-level benchmark suite (raw read/write throughput)
 ```
 
@@ -40,8 +39,8 @@ cargo build
 # Run tests
 cargo test --workspace
 
-# Run database benchmarks (3 users x 100k records each)
-cargo run --release -p slate-bench
+# Run database benchmarks (criterion suite)
+cargo bench -p slate-db --features bench-internals
 
 # Run store benchmarks (500k x 10KB records)
 cargo run --release -p slate-store-bench

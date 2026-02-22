@@ -13,4 +13,5 @@ pub(crate) mod replace;
 pub(crate) mod scan;
 pub(crate) mod sort;
 pub(crate) mod update;
+pub(crate) mod upsert;
 pub(crate) mod values;

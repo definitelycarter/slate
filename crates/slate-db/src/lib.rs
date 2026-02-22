@@ -16,5 +16,5 @@ pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 #[cfg(feature = "bench-internals")]
 pub mod bench {
     pub use crate::executor::{ExecutionResult, Executor, RawIter, RawValue};
-    pub use crate::planner::PlanNode;
+    pub use crate::planner::{PlanNode, UpsertMode};
 }

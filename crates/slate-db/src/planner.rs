@@ -27,6 +27,19 @@ pub enum Statement {
     },
     /// Insert documents from caller-supplied values.
     Insert { docs: Vec<bson::RawDocumentBuf> },
+    /// Upsert (insert-or-replace) a batch of documents by `_id`.
+    UpsertMany { docs: Vec<bson::RawDocumentBuf> },
+    /// Merge (insert-or-patch) a batch of partial documents by `_id`.
+    MergeMany { docs: Vec<bson::RawDocumentBuf> },
+}
+
+/// Controls the behavior of the Upsert node when a document already exists.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpsertMode {
+    /// Full replacement — existing doc is discarded.
+    Replace,
+    /// Partial merge — update fields are merged into the existing doc.
+    Merge,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +152,15 @@ pub enum PlanNode {
     /// Yields (id, Some(doc)) for each inserted record.
     InsertRecord { input: Box<PlanNode> },
 
+    /// Upsert: for each doc from input, look up by `_id`, clean old indexes,
+    /// write (replace or merge), and emit the written doc for InsertIndex.
+    /// Handles DeleteIndex behavior internally to avoid pipeline ordering issues.
+    Upsert {
+        mode: UpsertMode,
+        indexed_fields: Vec<String>,
+        input: Box<PlanNode>,
+    },
+
     /// Caller-provided documents. Each document must contain an `_id` field.
     /// Source node for insert/upsert pipelines and executor tests.
     Values { docs: Vec<bson::RawDocumentBuf> },
@@ -165,6 +187,8 @@ pub fn plan(collection: &str, indexed_fields: Vec<String>, statement: Statement)
             plan_delete(collection, indexed_fields, &filter, limit)
         }
         Statement::Insert { docs } => plan_insert(indexed_fields, docs),
+        Statement::UpsertMany { docs } => plan_upsert(indexed_fields, docs, UpsertMode::Replace),
+        Statement::MergeMany { docs } => plan_upsert(indexed_fields, docs, UpsertMode::Merge),
     }
 }
 
@@ -719,6 +743,31 @@ fn plan_insert(indexed_fields: Vec<String>, docs: Vec<bson::RawDocumentBuf>) -> 
     let node = PlanNode::Values { docs };
 
     let node = PlanNode::InsertRecord {
+        input: Box::new(node),
+    };
+
+    PlanNode::InsertIndex {
+        indexed_fields,
+        input: Box::new(node),
+    }
+}
+
+/// Plan an upsert operation (insert-or-replace / insert-or-merge).
+///
+/// Pipeline: `InsertIndex → Upsert(mode, indexed_fields) → Values`
+///
+/// The Upsert node handles old-doc lookup and old-index cleanup internally,
+/// so no separate DeleteIndex node is needed.
+fn plan_upsert(
+    indexed_fields: Vec<String>,
+    docs: Vec<bson::RawDocumentBuf>,
+    mode: UpsertMode,
+) -> PlanNode {
+    let node = PlanNode::Values { docs };
+
+    let node = PlanNode::Upsert {
+        mode,
+        indexed_fields: indexed_fields.clone(),
         input: Box::new(node),
     };
 

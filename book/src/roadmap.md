@@ -3,10 +3,11 @@
 ## ~~Streaming Mutations~~ (Done)
 
 Streaming mutation pipelines are fully implemented. All mutation operations (`delete_one`,
-`delete_many`, `update_one`, `update_many`, `replace_one`) go through composable pipeline
-nodes (`DeleteIndex → Delete`, `InsertIndex → Update → DeleteIndex`, etc.) via the
-`Statement` enum and unified `planner::plan()` entry point. The executor streams one record
-at a time through the pipeline with `O(1)` memory.
+`delete_many`, `update_one`, `update_many`, `replace_one`, `upsert_many`, `merge_many`)
+go through composable pipeline nodes (`DeleteIndex → Delete`, `InsertIndex → Update →
+DeleteIndex`, `InsertIndex → Upsert → Values`, etc.) via the `Statement` enum and unified
+`planner::plan()` entry point. The executor streams one record at a time through the
+pipeline with `O(1)` memory.
 
 ---
 
@@ -274,44 +275,37 @@ Each node consumes the extracted fields differently:
 
 ---
 
-## Route Upserts/Merges Through Planner
+## ~~Route Upserts/Merges Through Planner~~ (Done)
 
-### Problem
+Upsert and merge operations now go through the planner and executor pipeline. Two new
+`Statement` variants (`UpsertMany`, `MergeMany`) route through `planner::plan()`, which
+builds a streaming pipeline:
 
-`upsert_many` and `merge_many` do per-document conditional logic (check if exists, then
-branch to insert or update) with manual store operations. This duplicates executor logic
-in `database.rs` with different (worse) performance characteristics.
+```
+InsertIndex → Upsert → Values
+```
 
-Four functions in `database.rs` bypass the executor and do manual index work:
+The `PlanNode::Upsert` node handles the full per-document lifecycle in a single streaming
+pass:
 
-- **`delete_raw_index_entries()`** — deletes index keys during updates/deletes by calling
-  `exec::raw_get_path_values()` per field per document
-- **`purge_expired_inner()`** — TTL purge, scans all indexes per expired doc via
-  `exec::raw_get_path_values()`
-- **`raw_merge_update()` (old values)** — collects old index values for diff via
-  `exec::raw_get_path_values()`
-- **`raw_merge_update()` (new values)** — collects new index values for diff via
-  `exec::raw_get_path_values()`
+1. **Extract `_id`** from the input doc (or generate a UUID if missing)
+2. **Look up existing doc** via `txn.get()` on the record key
+3. **If exists**: delete old index entries via `FieldTree::walk()`, then either replace
+   the full document (`UpsertMode::Replace`) or merge fields via
+   `RawDocumentBuf::append_ref()` (`UpsertMode::Merge`)
+4. **If new**: normalize the document (ensure `_id` is first field) and insert
+5. **Emit the written doc** downstream so `InsertIndex` can write new index entries
 
-These calls use `raw_get_path_values()` which allocates a `String` on every invocation to
-strip `[]` array markers — even for simple paths like `"status"` that have no `[]`. The
-executor pipeline uses `FieldTree::walk()` instead, which builds the tree once and walks
-each document with zero per-document allocations.
+`UpsertMode` controls the update behavior:
+- **`Replace`** — full document swap (like MongoDB's `replaceOne` with `upsert: true`)
+- **`Merge`** — partial update, unchanged fields are zero-copy via `append_ref()` (like
+  MongoDB's `$set`-style merge). Returns `None` (no-op) when all fields already match,
+  avoiding unnecessary writes
 
-Routing these operations through the planner eliminates the parallel implementation
-entirely. The executor's `DeleteIndex` / `InsertIndex` nodes handle index maintenance
-via `FieldTree::walk()`, and the streaming pipeline gives `O(1)` memory.
-
-### Approach
-
-- **TTL purge** becomes `Statement::Delete { filter: ttl < now }` once index range scans
-  are implemented (see above). The planner routes it through
-  `Delete → DeleteIndex → ReadRecord → IndexScan(ttl, range)`.
-- **merge_many / upsert_many**: introduce a `PlanNode::Merge` node that applies the
-  merge and returns the merged doc if changed, `None` if unchanged. The pipeline becomes
-  `InsertIndex → Merge → DeleteIndex → ReadRecord → source`. Per-document branching
-  (insert vs update) can stay in `database.rs`, calling `plan()` for each branch.
-- Defer until inserts and range scans are proven stable.
+Old index cleanup uses `FieldTree::walk()` (zero per-document allocations) instead of the
+previous `raw_get_path_values()` approach that allocated a `String` per invocation. TTL
+index entries are cleaned up when the old value is a `DateTime`; non-DateTime TTL values
+are skipped (no delete needed since they were never indexed).
 
 ---
 

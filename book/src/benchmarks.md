@@ -1,6 +1,6 @@
 # Benchmarks
 
-Snapshot from `slate-bench` — run on Apple Silicon (M-series) in release mode. Each record has 8 fields (6 required, 2 nullable). Two dataset sizes: 10k and 100k records per user, 3 users each.
+Snapshot from the criterion benchmark suite (`cargo bench -p slate-db --features bench-internals`) — run on Apple Silicon (M-series) in release mode. Each record has 8 fields (6 required, 2 nullable). Two dataset sizes: 10k and 100k records.
 
 All benchmarks use the **embedded MemoryStore** backend — no persistence layer, no TCP overhead. This isolates query engine performance from storage-specific noise (RocksDB compaction, block cache warmup, etc.), making benchmark-to-benchmark comparisons reliable. For raw storage throughput across all three backends (MemoryStore, RocksDB, redb), see `slate-store-bench`.
 
