@@ -5,8 +5,8 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use slate_db::bench::{ExecutionResult, Executor, IndexFilter, PlanNode};
-use slate_db::{CollectionConfig, Database, DatabaseConfig};
+use slate_db::CollectionConfig;
+use slate_db::bench::{Engine, ExecutionResult, Executor, IndexFilter, PlanNode};
 use slate_query::*;
 use slate_store::{MemoryStore, Store, StoreError, Transaction};
 
@@ -99,11 +99,11 @@ fn consume_rows(result: ExecutionResult) -> usize {
     }
 }
 
-/// Create a seeded MemoryStore-backed Database with `n` documents and indexes
+/// Create a seeded MemoryStore-backed Engine with `n` documents and indexes
 /// on `status` and `contacts_count`.
-fn seeded_db(n: usize) -> Database<MemoryStore> {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
-    let mut txn = db.begin(false).unwrap();
+fn seeded_engine(n: usize) -> Engine<MemoryStore> {
+    let engine = Engine::new(MemoryStore::new());
+    let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         indexes: vec!["status".into(), "contacts_count".into()],
@@ -122,7 +122,7 @@ fn seeded_db(n: usize) -> Database<MemoryStore> {
         .collect();
     txn.insert_many("test", docs).unwrap();
     txn.commit().unwrap();
-    db
+    engine
 }
 
 // ── Store-free benchmarks ───────────────────────────────────
@@ -371,13 +371,13 @@ fn bench_filter(c: &mut Criterion) {
 fn bench_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan");
     for n in [100, 1_000, 10_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
         let plan = PlanNode::Scan {
             collection: "test".into(),
         };
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -388,7 +388,7 @@ fn bench_scan(c: &mut Criterion) {
 fn bench_index_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_scan");
     for n in [100, 1_000, 10_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // Eq scan: status = "active" (~50% match)
         let plan_eq = PlanNode::IndexScan {
@@ -402,7 +402,7 @@ fn bench_index_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -419,7 +419,7 @@ fn bench_index_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("full", n), &plan_full, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -439,7 +439,7 @@ fn bench_index_scan(c: &mut Criterion) {
             BenchmarkId::new("desc_limit", n),
             &plan_desc_limit,
             |b, plan| {
-                let mut txn = db.store().begin(true).unwrap();
+                let mut txn = engine.store().begin(true).unwrap();
                 let cf = txn.cf("test").unwrap();
                 b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
             },
@@ -451,7 +451,7 @@ fn bench_index_scan(c: &mut Criterion) {
 fn bench_read_record(c: &mut Criterion) {
     let mut group = c.benchmark_group("read_record");
     for n in [100, 1_000, 10_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // ReadRecord over Scan (passthrough — Scan already yields full docs)
         let plan_scan = PlanNode::ReadRecord {
@@ -461,7 +461,7 @@ fn bench_read_record(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("scan", n), &plan_scan, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -480,7 +480,7 @@ fn bench_read_record(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("index", n), &plan_idx, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -491,7 +491,7 @@ fn bench_read_record(c: &mut Criterion) {
 fn bench_index_merge(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_merge");
     for n in [100, 1_000, 10_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // OR merge: status="active" OR contacts_count=50
         let plan_or = PlanNode::IndexMerge {
@@ -517,7 +517,7 @@ fn bench_index_merge(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("or", n), &plan_or, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -546,7 +546,7 @@ fn bench_index_merge(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
-            let mut txn = db.store().begin(true).unwrap();
+            let mut txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
             b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
         });
@@ -563,17 +563,17 @@ fn bench_index_merge(c: &mut Criterion) {
 fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert");
     for n in [100, 1_000] {
-        // Empty db with collection + indexes, docs inserted per iteration
-        let db = {
-            let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
-            let mut txn = db.begin(false).unwrap();
+        // Empty engine with collection + indexes, docs inserted per iteration
+        let engine = {
+            let engine = Engine::new(MemoryStore::new());
+            let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
             })
             .unwrap();
             txn.commit().unwrap();
-            db
+            engine
         };
 
         let docs = generate_docs(n);
@@ -587,7 +587,7 @@ fn bench_insert(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
@@ -608,7 +608,7 @@ fn bench_insert(c: &mut Criterion) {
 fn bench_update(c: &mut Criterion) {
     let mut group = c.benchmark_group("update");
     for n in [100, 1_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // Update: set status = "updated" for all docs via Scan → ReadRecord → Update
         let plan = PlanNode::InsertIndex {
@@ -626,7 +626,7 @@ fn bench_update(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
@@ -647,7 +647,7 @@ fn bench_update(c: &mut Criterion) {
 fn bench_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete");
     for n in [100, 1_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // Delete all docs: Scan → ReadRecord → DeleteIndex → Delete
         let plan = PlanNode::Delete {
@@ -664,7 +664,7 @@ fn bench_delete(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
@@ -685,7 +685,7 @@ fn bench_delete(c: &mut Criterion) {
 fn bench_replace(c: &mut Criterion) {
     let mut group = c.benchmark_group("replace");
     for n in [100, 1_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
 
         // Replace all docs with a new document
         let plan = PlanNode::InsertIndex {
@@ -707,7 +707,7 @@ fn bench_replace(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
@@ -732,7 +732,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
     let indexed = vec!["status".into(), "contacts_count".into()];
 
     for n in [100, 1_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
         let raw_docs: Vec<bson::RawDocumentBuf> = (0..n)
             .map(|i| {
                 rawdoc! {
@@ -747,7 +747,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -782,7 +782,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
     let indexed = vec!["status".into(), "contacts_count".into()];
 
     for n in [100, 1_000] {
-        let db = seeded_db(n);
+        let engine = seeded_engine(n);
         let raw_docs: Vec<bson::RawDocumentBuf> = (0..n)
             .map(|i| {
                 rawdoc! {
@@ -795,7 +795,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -831,16 +831,16 @@ fn bench_upsert_insert(c: &mut Criterion) {
 
     for n in [100, 1_000] {
         // Empty collection — upsert acts as pure insert
-        let db = {
-            let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
-            let mut txn = db.begin(false).unwrap();
+        let engine = {
+            let engine = Engine::new(MemoryStore::new());
+            let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
             })
             .unwrap();
             txn.commit().unwrap();
-            db
+            engine
         };
 
         let raw_docs: Vec<bson::RawDocumentBuf> = (0..n)
@@ -857,7 +857,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = db.store().begin(false).unwrap();
+                    let mut txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -885,9 +885,9 @@ fn bench_upsert_insert(c: &mut Criterion) {
     group.finish();
 }
 
-// ── Database API benchmarks ─────────────────────────────────
+// ── Engine API benchmarks ───────────────────────────────────
 //
-// These benchmark the full Database API path: db.begin() → txn.find() / txn.insert_many() etc.
+// These benchmark the full Engine API path: engine.begin() → txn.find() / txn.insert_many() etc.
 // They use realistic data with nullable fields, arrays, and multiple indexed fields.
 
 const STATUSES: &[&str] = &["active", "rejected"];
@@ -941,9 +941,9 @@ fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
         .collect()
 }
 
-fn realistic_seeded_db(n: usize) -> Database<MemoryStore> {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
-    let mut txn = db.begin(false).unwrap();
+fn realistic_seeded_engine(n: usize) -> Engine<MemoryStore> {
+    let engine = Engine::new(MemoryStore::new());
+    let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
         indexes: vec!["status".into(), "contacts_count".into()],
@@ -954,7 +954,7 @@ fn realistic_seeded_db(n: usize) -> Database<MemoryStore> {
         txn.insert_many("bench", chunk.to_vec()).unwrap();
     }
     txn.commit().unwrap();
-    db
+    engine
 }
 
 // ── Bulk Insert ─────────────────────────────────────────────
@@ -962,28 +962,28 @@ fn realistic_seeded_db(n: usize) -> Database<MemoryStore> {
 fn bench_bulk_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulk_insert");
     for n in [1_000, 10_000] {
-        let db = {
-            let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
-            let mut txn = db.begin(false).unwrap();
+        let engine = {
+            let engine = Engine::new(MemoryStore::new());
+            let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
             })
             .unwrap();
             txn.commit().unwrap();
-            db
+            engine
         };
         let docs = generate_realistic_batch(n);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = db.begin(false).unwrap();
+                    let txn = engine.begin(false).unwrap();
                     (txn, docs.clone())
                 },
                 |(mut txn, docs)| {
                     txn.insert_many("bench", docs).unwrap();
-                    // Don't commit — let txn drop so db stays empty for next iteration
+                    // Don't commit — let txn drop so engine stays empty for next iteration
                 },
                 BatchSize::PerIteration,
             )
@@ -997,7 +997,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
 fn bench_query_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_scan");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: None,
             sort: vec![],
@@ -1007,7 +1007,7 @@ fn bench_query_scan(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1018,7 +1018,7 @@ fn bench_query_scan(c: &mut Criterion) {
 fn bench_query_indexed_eq(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_eq");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1035,7 +1035,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1046,7 +1046,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
 fn bench_query_indexed_eq_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_eq_proj");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1063,7 +1063,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1074,7 +1074,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
 fn bench_query_multi_field_and(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_multi_and");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1103,7 +1103,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1114,7 +1114,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
 fn bench_query_null_filter(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_null_filter");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1131,7 +1131,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1142,7 +1142,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
 fn bench_query_sort_indexed(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_sort_indexed");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1162,7 +1162,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1173,7 +1173,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
 fn bench_query_sort_indexed_take(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_sort_indexed_take");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: None,
             sort: vec![Sort {
@@ -1186,7 +1186,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1197,7 +1197,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
 fn bench_query_sort_multi(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_sort_multi");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: None,
             sort: vec![
@@ -1216,7 +1216,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1227,7 +1227,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
 fn bench_query_pagination(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_pagination");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1247,7 +1247,7 @@ fn bench_query_pagination(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1258,7 +1258,7 @@ fn bench_query_pagination(c: &mut Criterion) {
 fn bench_query_point_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_point_lookup");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         // Pick 100 evenly-spaced IDs to look up
         let ids: Vec<String> = (0..n)
             .step_by(n / 100)
@@ -1267,7 +1267,7 @@ fn bench_query_point_lookup(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 let mut found = 0usize;
                 for id in ids {
                     if txn.find_by_id("bench", id, None).unwrap().is_some() {
@@ -1284,7 +1284,7 @@ fn bench_query_point_lookup(c: &mut Criterion) {
 fn bench_query_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_projection");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: None,
             sort: vec![],
@@ -1294,7 +1294,7 @@ fn bench_query_projection(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1305,7 +1305,7 @@ fn bench_query_projection(c: &mut Criterion) {
 fn bench_query_array_match(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_array_match");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = Query {
             filter: Some(FilterGroup {
                 logical: LogicalOp::And,
@@ -1322,7 +1322,7 @@ fn bench_query_array_match(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1335,7 +1335,7 @@ fn bench_query_array_match(c: &mut Criterion) {
 fn bench_distinct_indexed_low(c: &mut Criterion) {
     let mut group = c.benchmark_group("distinct_indexed_low");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = DistinctQuery {
             field: "status".into(),
             filter: None,
@@ -1345,7 +1345,7 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1356,7 +1356,7 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
 fn bench_distinct_indexed_high(c: &mut Criterion) {
     let mut group = c.benchmark_group("distinct_indexed_high");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = DistinctQuery {
             field: "contacts_count".into(),
             filter: None,
@@ -1366,7 +1366,7 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1377,7 +1377,7 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
 fn bench_distinct_non_indexed(c: &mut Criterion) {
     let mut group = c.benchmark_group("distinct_non_indexed");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = DistinctQuery {
             field: "product_recommendation1".into(),
             filter: None,
@@ -1387,7 +1387,7 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1398,7 +1398,7 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
 fn bench_distinct_with_filter(c: &mut Criterion) {
     let mut group = c.benchmark_group("distinct_with_filter");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         let query = DistinctQuery {
             field: "product_recommendation1".into(),
             filter: Some(FilterGroup {
@@ -1415,7 +1415,7 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1432,7 +1432,7 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
 fn bench_query_indexed_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_range");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         // contacts_count > 50 on indexed field
         let query = Query {
             filter: Some(FilterGroup {
@@ -1450,7 +1450,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1461,7 +1461,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
 fn bench_query_indexed_range_dual(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_range_dual");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         // contacts_count > 20 AND contacts_count < 80 on indexed field
         let query = Query {
             filter: Some(FilterGroup {
@@ -1486,7 +1486,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1497,7 +1497,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
 fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_eq_plus_range");
     for n in [1_000, 10_000] {
-        let db = realistic_seeded_db(n);
+        let engine = realistic_seeded_engine(n);
         // status = "active" AND contacts_count > 50 (Eq wins index, range is residual)
         let query = Query {
             filter: Some(FilterGroup {
@@ -1522,7 +1522,7 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = db.begin(true).unwrap();
+                let mut txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1552,7 +1552,7 @@ criterion_group!(
     bench_upsert_replace,
     bench_upsert_merge,
     bench_upsert_insert,
-    // Database API benchmarks
+    // Engine API benchmarks
     bench_bulk_insert,
     bench_query_scan,
     bench_query_indexed_eq,

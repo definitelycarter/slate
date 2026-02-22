@@ -249,13 +249,14 @@ fn index_operations() {
     client.create_index(COLLECTION, "status").unwrap();
 
     // List indexes
-    let indexes = client.list_indexes(COLLECTION).unwrap();
-    assert_eq!(indexes, vec!["status"]);
+    let mut indexes = client.list_indexes(COLLECTION).unwrap();
+    indexes.sort();
+    assert_eq!(indexes, vec!["status", "ttl"]);
 
     // Drop index
     client.drop_index(COLLECTION, "status").unwrap();
     let indexes = client.list_indexes(COLLECTION).unwrap();
-    assert!(indexes.is_empty());
+    assert_eq!(indexes, vec!["ttl"]);
 }
 
 #[test]

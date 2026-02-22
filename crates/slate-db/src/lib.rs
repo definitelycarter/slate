@@ -4,6 +4,7 @@ mod convert;
 mod cursor;
 mod database;
 mod encoding;
+pub(crate) mod engine;
 mod error;
 mod executor;
 mod planner;
@@ -14,12 +15,14 @@ pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
 pub use convert::IntoRawDocumentBuf;
 pub use cursor::{Cursor, CursorIter};
-pub use database::{Database, DatabaseConfig, DatabaseTransaction};
+pub use database::{Database, DatabaseConfig};
+pub use engine::Transaction as DatabaseTransaction;
 pub use error::DbError;
 pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 
 #[cfg(feature = "bench-internals")]
 pub mod bench {
+    pub use crate::engine::Engine;
     pub use crate::executor::{ExecutionResult, Executor, RawIter, RawValue};
     pub use crate::planner::{IndexBound, IndexFilter, PlanNode, UpsertMode};
 }

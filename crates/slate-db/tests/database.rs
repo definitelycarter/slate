@@ -832,8 +832,9 @@ fn drop_index() {
     txn.commit().unwrap();
 
     let mut txn = db.begin(true).unwrap();
-    let indexes = txn.list_indexes(COLLECTION).unwrap();
-    assert_eq!(indexes, vec!["status"]);
+    let mut indexes = txn.list_indexes(COLLECTION).unwrap();
+    indexes.sort();
+    assert_eq!(indexes, vec!["status", "ttl"]);
 
     let mut txn = db.begin(false).unwrap();
     txn.drop_index(COLLECTION, "status").unwrap();
@@ -841,7 +842,7 @@ fn drop_index() {
 
     let mut txn = db.begin(true).unwrap();
     let indexes = txn.list_indexes(COLLECTION).unwrap();
-    assert!(indexes.is_empty());
+    assert_eq!(indexes, vec!["ttl"]);
 }
 
 // ── Collection tests ────────────────────────────────────────────
@@ -1839,7 +1840,7 @@ fn create_collection_with_indexes() {
     let mut txn = db.begin(true).unwrap();
     let mut indexes = txn.list_indexes("configured").unwrap();
     indexes.sort();
-    assert_eq!(indexes, vec!["status", "tags.[]"]);
+    assert_eq!(indexes, vec!["status", "tags.[]", "ttl"]);
 }
 
 #[test]

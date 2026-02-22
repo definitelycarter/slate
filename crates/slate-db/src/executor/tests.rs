@@ -493,7 +493,7 @@ fn delete_index_with_ttl() {
     let (txn, cf) = mock_executor();
     let dt = bson::DateTime::from_millis(1700000000000);
     let plan = PlanNode::DeleteIndex {
-        indexed_fields: vec!["status".into()],
+        indexed_fields: vec!["status".into(), "ttl".into()],
         input: Box::new(PlanNode::Values {
             docs: vec![rawdoc! { "_id": "1", "status": "active", "ttl": dt }],
         }),

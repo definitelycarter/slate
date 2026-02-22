@@ -1,4 +1,3 @@
-use bson::raw::RawBsonRef;
 use slate_store::Transaction;
 
 use crate::encoding;
@@ -13,11 +12,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     indexed_fields: &'a [String],
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
-    let mut paths: Vec<String> = indexed_fields.to_vec();
-    if !paths.iter().any(|p| p == "ttl") {
-        paths.push("ttl".into());
-    }
-    let tree = FieldTree::from_paths(&paths);
+    let tree = FieldTree::from_paths(indexed_fields);
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -28,11 +23,6 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                     walk(raw, &tree, |path, value| {
                         if err.is_some() {
                             return;
-                        }
-                        if path == "ttl" {
-                            if !matches!(value, RawBsonRef::DateTime(_)) {
-                                return;
-                            }
                         }
                         let idx_key = encoding::raw_index_key(path, value, id_str);
                         if let Err(e) = txn.delete(cf, &idx_key) {

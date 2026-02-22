@@ -37,8 +37,7 @@ bytes inlined).
 
 ### Unlocks
 
-- **TTL purge through planner**: `purge_expired_inner` can become a `Statement::Delete`
-  with `filter: ttl < DateTime(now)`, eliminating manual index walking.
+- ~~**TTL purge through planner**~~: Done — see Engine/Client Split below.
 - **Efficient range queries**: any indexed field benefits from range predicates.
 
 ---
@@ -95,6 +94,53 @@ The non-covered path is unchanged — bare `String` IDs with zero overhead.
 
 **Benchmarks**: ~77% faster on indexed equality + projection queries. No regression on
 non-covered queries.
+
+---
+
+## ~~Engine/Client Split + TTL Purge via Planner~~ (Done)
+
+Split the monolithic `database.rs` into a layered architecture:
+
+- **`Engine<S>`** (`engine.rs`) — core engine holding `store` + `catalog`. Provides
+  `begin()` → `Transaction` with all query/mutation/index logic. No background threads.
+- **`Transaction`** (renamed from `DatabaseTransaction`) — all planner/executor operations.
+- **`Database<S>`** (`database.rs`) — thin embedded client wrapping `Arc<Engine<S>>`.
+  Adds TTL sweep thread, delegates everything else to the engine.
+
+The sweep thread holds its own `Arc<Engine<S>>` and calls `engine.purge_expired()`
+directly — no circular ownership. `purge_expired` is now a single `delete_many(ttl < now)`
+through the planner pipeline, replacing ~50 lines of manual index walking, byte comparison,
+and record deletion.
+
+"ttl" is auto-added as an index on every collection via `ensure_indexes`, so the planner
+produces `IndexScan(Lt(now))` with early termination. Special TTL handling removed from
+`InsertIndex`/`DeleteIndex` — TTL is now a regular indexed field.
+
+`DatabaseTransaction` is re-exported as a type alias for backwards compatibility.
+
+---
+
+## TTL Read Filtering
+
+### Problem
+
+Expired documents (where `ttl < now`) remain visible to queries until the background
+sweep runs `purge_expired`. A `find({ status: "active" })` on a collection with 300
+live documents and 100k expired ones will return expired docs in results.
+
+### Approach
+
+Inject a residual TTL filter into read queries so expired documents are invisible
+regardless of sweep timing. The filter should be: `ttl >= now OR ttl does not exist`
+(documents without a `ttl` field are permanent).
+
+The planner should **not** use `IndexScan` on the TTL index for this — if the query
+already has a more selective index (e.g. `status = "active"` with 300 matches), scanning
+100k TTL entries first would be far worse. Instead, add a `Filter(ttl >= now OR ttl is null)`
+node after the main query's source, as a residual predicate.
+
+For `purge_expired` specifically, the TTL index scan remains the right choice since the
+*goal* is to find all expired documents.
 
 ---
 
@@ -204,9 +250,7 @@ pass:
   avoiding unnecessary writes
 
 Old index cleanup uses `FieldTree::walk()` (zero per-document allocations) instead of the
-previous `raw_get_path_values()` approach that allocated a `String` per invocation. TTL
-index entries are cleaned up when the old value is a `DateTime`; non-DateTime TTL values
-are skipped (no delete needed since they were never indexed).
+previous `raw_get_path_values()` approach that allocated a `String` per invocation.
 
 ---
 
