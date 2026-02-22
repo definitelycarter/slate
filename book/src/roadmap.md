@@ -89,85 +89,36 @@ building the `Statement`), or move into a `PlanNode::CheckDuplicate` node.
 
 ---
 
-## CoverProject (Index-Covered Queries)
+## ~~Index-Covered Projection~~ (Done)
 
-### Problem
+When a query projects only `_id` and/or the indexed field, and uses an equality match
+with no residual filter, `IndexScan` now operates in **covered mode** — it yields finished
+`{ _id, field: value }` documents directly, bypassing `ReadRecord`, `Filter`, and
+`Projection` entirely.
 
-When a query's projection only requests fields that exist in an index, the executor still
-fetches the full document from the record store via `ReadRecord`. This is wasteful — the
-index already contains enough data to satisfy the query without touching the main store.
+```
+IndexScan [status, covered=true]    ← yields { _id, status } docs directly
+```
 
-For example, `find({ status: 'active' }, { projection: { status: 1 } })` on a collection
-with a `status` index currently runs:
+vs the standard path:
 
 ```
 Projection [status]
   Filter [status = 'active']
-    ReadRecord              ← unnecessary store fetch
-      IndexScan [status]
+    ReadRecord
+      IndexScan [status]            ← yields bare _id strings
 ```
 
-The `ReadRecord` fetches the full document just so `Projection` can extract `status` — a
-value that was already available in the index key.
+The implementation lives in `IndexScan` itself via a `covered: bool` flag on `PlanNode::IndexScan`.
+When covered, `IndexScan` coerces the query value back to its stored BSON type using the
+type byte from the index entry (e.g. the query may use `Int64(100)` but the document stored
+`Int32(100)` — the type byte ensures fidelity). The coerced value is converted to `RawBson`
+once and reused across all matching records.
 
-### Background
+The non-covered path is unchanged — bare `String` IDs with zero overhead.
 
-`IndexScan` returns bare `_id` strings (`RawBson::String`), and `ReadRecord` uses that id
-to fetch the full document from the store. This is the correct default path — most queries
-need fields beyond what the index covers.
-
-Previously, the planner had an `index_covered` optimization that skipped `ReadRecord` when
-the index covered the projection. This was removed because `IndexScan` no longer carries
-field values (it returns only the record id). `CoverProject` restores this optimization
-with a cleaner architecture.
-
-### Approach
-
-Add a `PlanNode::CoverProject` that replaces `ReadRecord → Projection` when the planner
-detects all projected fields exist in the index:
-
-```rust
-PlanNode::CoverProject {
-    input: Box<PlanNode>,       // IndexScan
-    column: String,             // indexed field name
-    columns: Vec<String>,       // projected field names (subset of index)
-}
-```
-
-The pipeline becomes:
-
-```
-CoverProject [status]       ← constructs doc from index key data
-  Filter [status = 'active']
-    IndexScan [status]       ← returns bare _id string
-```
-
-`CoverProject` would re-scan the index key for the covered fields, or the planner could
-teach `IndexScan` to return structured key data (id + field value) when a `CoverProject`
-follows it. The simplest approach: `CoverProject` takes the `_id` from `IndexScan`, looks
-up the index key to extract the field value, and constructs a minimal
-`RawDocumentBuf { _id, field: value }`.
-
-### Planner detection
-
-The planner already knows the projected columns and which fields are indexed. Detection
-logic:
-
-1. Query uses an `IndexScan` on field `F`
-2. Projection requests only `_id` and/or `F`
-3. Replace `Projection → ReadRecord` with `CoverProject`
-
-For compound indexes (future), extend to check that all projected fields are covered by
-the index key.
-
-### Benefits
-
-- **Skip store fetches entirely** for index-covered queries
-- **Large wins on selective indexed queries** — the `status='active' projection [status]`
-  benchmark regressed from ~8ms to ~35ms when the old covered path was removed; this
-  restores that performance
-- **Clean separation** — `IndexScan` stays simple (bare ids), `CoverProject` handles
-  document construction from index data
+**Benchmarks**: ~77% faster on indexed equality + projection queries. No regression on
+non-covered queries.
 
 ---
 
