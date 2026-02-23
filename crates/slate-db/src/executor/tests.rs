@@ -204,13 +204,12 @@ fn mock_executor() -> (MockTransaction, ()) {
 #[test]
 fn values_yields_all_docs() {
     let (txn, cf) = noop_executor();
-    let plan = PlanNode::Values {
-        docs: vec![
-            rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
-            rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
-            rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
-        ],
-    };
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
+        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
+        rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
+    ];
+    let plan = PlanNode::Values { docs: &docs };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
@@ -227,15 +226,14 @@ fn values_yields_all_docs() {
 #[test]
 fn filter_on_values() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
+        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
+        rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
+    ];
     let plan = PlanNode::Filter {
         predicate: Expression::Eq("status", RawBsonRef::String("active")),
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
-                rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
-                rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
@@ -246,14 +244,13 @@ fn filter_on_values() {
 #[test]
 fn filter_empty_result() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
+        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
+    ];
     let plan = PlanNode::Filter {
         predicate: Expression::Eq("status", RawBsonRef::String("nope")),
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
-                rawdoc! { "_id": "2", "name": "Bob", "status": "inactive" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 0);
@@ -262,18 +259,17 @@ fn filter_empty_result() {
 #[test]
 fn sort_on_values() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "score": 70 },
+        rawdoc! { "_id": "2", "name": "Bob", "score": 90 },
+        rawdoc! { "_id": "3", "name": "Charlie", "score": 80 },
+    ];
     let plan = PlanNode::Sort {
         sorts: vec![Sort {
             field: "score".into(),
             direction: SortDirection::Desc,
         }],
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice", "score": 70 },
-                rawdoc! { "_id": "2", "name": "Bob", "score": 90 },
-                rawdoc! { "_id": "3", "name": "Charlie", "score": 80 },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
@@ -285,17 +281,16 @@ fn sort_on_values() {
 #[test]
 fn limit_skip_take() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice" },
+        rawdoc! { "_id": "2", "name": "Bob" },
+        rawdoc! { "_id": "3", "name": "Charlie" },
+        rawdoc! { "_id": "4", "name": "Diana" },
+    ];
     let plan = PlanNode::Limit {
         skip: 1,
         take: Some(2),
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice" },
-                rawdoc! { "_id": "2", "name": "Bob" },
-                rawdoc! { "_id": "3", "name": "Charlie" },
-                rawdoc! { "_id": "4", "name": "Diana" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
@@ -306,15 +301,14 @@ fn limit_skip_take() {
 #[test]
 fn limit_take_only() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice" },
+        rawdoc! { "_id": "2", "name": "Bob" },
+    ];
     let plan = PlanNode::Limit {
         skip: 0,
         take: Some(1),
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice" },
-                rawdoc! { "_id": "2", "name": "Bob" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 1);
@@ -324,14 +318,13 @@ fn limit_take_only() {
 #[test]
 fn projection_on_values() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
+        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 90 },
+    ];
     let plan = PlanNode::Projection {
         columns: Some(vec!["name".into()]),
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
-                rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 90 },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
@@ -345,18 +338,17 @@ fn projection_on_values() {
 #[test]
 fn distinct_on_values() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "status": "active" },
+        rawdoc! { "_id": "2", "status": "inactive" },
+        rawdoc! { "_id": "3", "status": "active" },
+        rawdoc! { "_id": "4", "status": "inactive" },
+    ];
     let plan = PlanNode::Distinct {
         field: "status".into(),
         input: Box::new(PlanNode::Projection {
             columns: Some(vec!["status".into()]),
-            input: Box::new(PlanNode::Values {
-                docs: vec![
-                    rawdoc! { "_id": "1", "status": "active" },
-                    rawdoc! { "_id": "2", "status": "inactive" },
-                    rawdoc! { "_id": "3", "status": "active" },
-                    rawdoc! { "_id": "4", "status": "inactive" },
-                ],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -386,6 +378,12 @@ fn distinct_on_values() {
 #[test]
 fn composed_filter_sort_limit() {
     let (txn, cf) = noop_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
+        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 95 },
+        rawdoc! { "_id": "3", "name": "Charlie", "status": "active", "score": 90 },
+        rawdoc! { "_id": "4", "name": "Diana", "status": "active", "score": 80 },
+    ];
     let plan = PlanNode::Limit {
         skip: 0,
         take: Some(2),
@@ -396,14 +394,7 @@ fn composed_filter_sort_limit() {
             }],
             input: Box::new(PlanNode::Filter {
                 predicate: Expression::Eq("status", RawBsonRef::String("active")),
-                input: Box::new(PlanNode::Values {
-                    docs: vec![
-                        rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
-                        rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 95 },
-                        rawdoc! { "_id": "3", "name": "Charlie", "status": "active", "score": 90 },
-                        rawdoc! { "_id": "4", "name": "Diana", "status": "active", "score": 80 },
-                    ],
-                }),
+                input: Box::new(PlanNode::Values { docs: &docs }),
             }),
         }),
     };
@@ -421,13 +412,12 @@ fn composed_filter_sort_limit() {
 #[test]
 fn delete_removes_records() {
     let (txn, cf) = mock_executor();
+    let docs = vec![
+        rawdoc! { "_id": "1", "name": "Alice" },
+        rawdoc! { "_id": "2", "name": "Bob" },
+    ];
     let plan = PlanNode::Delete {
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "name": "Alice" },
-                rawdoc! { "_id": "2", "name": "Bob" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
@@ -444,14 +434,13 @@ fn delete_removes_records() {
 fn delete_index_removes_index_keys() {
     let (txn, cf) = mock_executor();
     let fields = vec!["status".into()];
+    let docs = vec![
+        rawdoc! { "_id": "1", "status": "active" },
+        rawdoc! { "_id": "2", "status": "inactive" },
+    ];
     let plan = PlanNode::DeleteIndex {
         indexed_fields: &fields,
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "status": "active" },
-                rawdoc! { "_id": "2", "status": "inactive" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     // DeleteIndex passes through as Rows
@@ -475,11 +464,10 @@ fn delete_index_with_ttl() {
     let (txn, cf) = mock_executor();
     let dt = bson::DateTime::from_millis(1700000000000);
     let fields = vec!["status".into(), "ttl".into()];
+    let docs = vec![rawdoc! { "_id": "1", "status": "active", "ttl": dt }];
     let plan = PlanNode::DeleteIndex {
         indexed_fields: &fields,
-        input: Box::new(PlanNode::Values {
-            docs: vec![rawdoc! { "_id": "1", "status": "active", "ttl": dt }],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 1);
@@ -501,14 +489,13 @@ fn delete_index_with_ttl() {
 fn update_writes_merged_doc() {
     let (txn, cf) = mock_executor();
     let fields: Vec<String> = vec![];
+    let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "score": 70 }];
     // Wrap Update in InsertIndex so execute() returns Update variant
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
         input: Box::new(PlanNode::Update {
             mutation: slate_query::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
-            input: Box::new(PlanNode::Values {
-                docs: vec![rawdoc! { "_id": "1", "name": "Alice", "score": 70 }],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -534,13 +521,12 @@ fn update_writes_merged_doc() {
 fn update_unchanged_skips_write() {
     let (txn, cf) = mock_executor();
     let fields: Vec<String> = vec![];
+    let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }];
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
         input: Box::new(PlanNode::Update {
             mutation: slate_query::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
-            input: Box::new(PlanNode::Values {
-                docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -558,13 +544,12 @@ fn update_unchanged_skips_write() {
 fn replace_writes_replacement() {
     let (txn, cf) = mock_executor();
     let fields: Vec<String> = vec![];
+    let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }];
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
         input: Box::new(PlanNode::Replace {
             replacement: rawdoc! { "replaced": true },
-            input: Box::new(PlanNode::Values {
-                docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -587,14 +572,13 @@ fn replace_writes_replacement() {
 fn insert_index_writes_keys() {
     let (txn, cf) = mock_executor();
     let fields = vec!["status".into()];
+    let docs = vec![
+        rawdoc! { "_id": "1", "status": "active" },
+        rawdoc! { "_id": "2", "status": "inactive" },
+    ];
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
-        input: Box::new(PlanNode::Values {
-            docs: vec![
-                rawdoc! { "_id": "1", "status": "active" },
-                rawdoc! { "_id": "2", "status": "inactive" },
-            ],
-        }),
+        input: Box::new(PlanNode::Values { docs: &docs }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
@@ -620,15 +604,14 @@ fn insert_index_writes_keys() {
 fn full_delete_pipeline() {
     let (txn, cf) = mock_executor();
     let fields = vec!["status".into()];
+    let docs = vec![
+        rawdoc! { "_id": "1", "status": "active" },
+        rawdoc! { "_id": "2", "status": "inactive" },
+    ];
     let plan = PlanNode::Delete {
         input: Box::new(PlanNode::DeleteIndex {
             indexed_fields: &fields,
-            input: Box::new(PlanNode::Values {
-                docs: vec![
-                    rawdoc! { "_id": "1", "status": "active" },
-                    rawdoc! { "_id": "2", "status": "inactive" },
-                ],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -658,6 +641,7 @@ fn full_delete_pipeline() {
 fn full_update_pipeline() {
     let (txn, cf) = mock_executor();
     let fields = vec!["status".into()];
+    let docs = vec![rawdoc! { "_id": "1", "status": "active" }];
     // InsertIndex → Update → DeleteIndex → Values
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
@@ -665,9 +649,7 @@ fn full_update_pipeline() {
             mutation: slate_query::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
             input: Box::new(PlanNode::DeleteIndex {
                 indexed_fields: &fields,
-                input: Box::new(PlanNode::Values {
-                    docs: vec![rawdoc! { "_id": "1", "status": "active" }],
-                }),
+                input: Box::new(PlanNode::Values { docs: &docs }),
             }),
         }),
     };
@@ -973,14 +955,13 @@ fn upsert_replace_insert_new() {
     // MockTransaction returns None for get() → insert path
     let (txn, cf) = mock_executor();
     let fields = vec!["status".into()];
+    let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }];
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
         input: Box::new(PlanNode::Upsert {
             mode: UpsertMode::Replace,
             indexed_fields: &fields,
-            input: Box::new(PlanNode::Values {
-                docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
-            }),
+            input: Box::new(PlanNode::Values { docs: &docs }),
         }),
     };
     let result = Executor::new(&txn, &cf).execute(plan).unwrap();
@@ -1004,13 +985,14 @@ fn upsert_replace_insert_new() {
 fn upsert_merge_insert_new() {
     let (txn, cf) = mock_executor();
     let fields: Vec<String> = vec![];
+    let docs = vec![rawdoc! { "_id": "1", "name": "Alice" }];
     let plan = PlanNode::InsertIndex {
         indexed_fields: &fields,
         input: Box::new(PlanNode::Upsert {
             mode: UpsertMode::Merge,
             indexed_fields: &fields,
             input: Box::new(PlanNode::Values {
-                docs: vec![rawdoc! { "_id": "1", "name": "Alice" }],
+                docs: &docs,
             }),
         }),
     };

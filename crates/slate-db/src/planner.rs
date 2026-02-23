@@ -168,7 +168,7 @@ pub enum PlanNode<'a> {
 
     /// Caller-provided documents.
     Values {
-        docs: Vec<bson::RawDocumentBuf>,
+        docs: &'a [bson::RawDocumentBuf],
     },
 }
 
@@ -207,15 +207,11 @@ pub fn plan<'a>(prepared: &'a PreparedStatement) -> Result<PlanNode<'a>, DbError
             let expr = parse_raw_filter(filter)?;
             Ok(plan_delete(indexed_fields, &expr, *limit))
         }
-        Statement::Insert { docs } => Ok(plan_insert(indexed_fields, docs.clone())),
-        Statement::UpsertMany { docs } => Ok(plan_upsert(
-            indexed_fields,
-            docs.clone(),
-            UpsertMode::Replace,
-        )),
-        Statement::MergeMany { docs } => {
-            Ok(plan_upsert(indexed_fields, docs.clone(), UpsertMode::Merge))
+        Statement::Insert { docs } => Ok(plan_insert(indexed_fields, docs)),
+        Statement::UpsertMany { docs } => {
+            Ok(plan_upsert(indexed_fields, docs, UpsertMode::Replace))
         }
+        Statement::MergeMany { docs } => Ok(plan_upsert(indexed_fields, docs, UpsertMode::Merge)),
         Statement::FlushExpired { filter } => {
             let expr = parse_raw_filter(filter)?;
             Ok(plan_delete(indexed_fields, &expr, None))
@@ -234,8 +230,8 @@ fn parse_optional_filter<'a>(
     raw: Option<&'a bson::RawDocumentBuf>,
 ) -> Result<Option<Expression<'a>>, DbError> {
     match raw {
-        _ => Ok(None), // Some(r) => parse_raw_filter(r).map(Some),
-                       // None => Ok(None),
+        Some(r) => parse_raw_filter(r).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -923,7 +919,7 @@ fn plan_replace<'a>(
 /// Plan an insert operation.
 ///
 /// Pipeline: `InsertIndex → InsertRecord → Values`
-fn plan_insert<'a>(indexed_fields: &'a [String], docs: Vec<bson::RawDocumentBuf>) -> PlanNode<'a> {
+fn plan_insert<'a>(indexed_fields: &'a [String], docs: &'a [bson::RawDocumentBuf]) -> PlanNode<'a> {
     let node = PlanNode::Values { docs };
 
     let node = PlanNode::InsertRecord {
@@ -944,7 +940,7 @@ fn plan_insert<'a>(indexed_fields: &'a [String], docs: Vec<bson::RawDocumentBuf>
 /// so no separate DeleteIndex node is needed.
 fn plan_upsert<'a>(
     indexed_fields: &'a [String],
-    docs: Vec<bson::RawDocumentBuf>,
+    docs: &'a [bson::RawDocumentBuf],
     mode: UpsertMode,
 ) -> PlanNode<'a> {
     let node = PlanNode::Values { docs };
