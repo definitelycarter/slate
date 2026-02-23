@@ -135,9 +135,15 @@ fn bench_values(c: &mut Criterion) {
         let plan = PlanNode::Values { docs };
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -154,9 +160,15 @@ fn bench_projection(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("select", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         let plan_passthrough = PlanNode::Projection {
@@ -168,9 +180,15 @@ fn bench_projection(c: &mut Criterion) {
             BenchmarkId::new("passthrough", n),
             &plan_passthrough,
             |b, plan| {
-                let txn = NoopTransaction;
-                let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+                b.iter_batched(
+                    || plan.clone(),
+                    |plan| {
+                        let txn = NoopTransaction;
+                        let exec = Executor::new(&txn, &());
+                        consume_rows(exec.execute(plan).unwrap())
+                    },
+                    BatchSize::SmallInput,
+                )
             },
         );
     }
@@ -188,9 +206,15 @@ fn bench_limit(c: &mut Criterion) {
     };
 
     group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &plan, |b, plan| {
-        let txn = NoopTransaction;
-        let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+        b.iter_batched(
+            || plan.clone(),
+            |plan| {
+                let txn = NoopTransaction;
+                let exec = Executor::new(&txn, &());
+                consume_rows(exec.execute(plan).unwrap())
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     let plan_take = PlanNode::Limit {
@@ -200,9 +224,15 @@ fn bench_limit(c: &mut Criterion) {
     };
 
     group.bench_with_input(BenchmarkId::new("take", 10_000), &plan_take, |b, plan| {
-        let txn = NoopTransaction;
-        let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+        b.iter_batched(
+            || plan.clone(),
+            |plan| {
+                let txn = NoopTransaction;
+                let exec = Executor::new(&txn, &());
+                consume_rows(exec.execute(plan).unwrap())
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -222,9 +252,15 @@ fn bench_sort(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("single", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         let plan_multi = PlanNode::Sort {
@@ -242,9 +278,15 @@ fn bench_sort(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("multi", n), &plan_multi, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -264,9 +306,15 @@ fn bench_distinct(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("low_card", n), &plan, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         let plan_sort = PlanNode::Sort {
@@ -284,9 +332,15 @@ fn bench_distinct(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("sorted", n), &plan_sort, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         let plan_sort_hc = PlanNode::Sort {
@@ -307,9 +361,15 @@ fn bench_distinct(c: &mut Criterion) {
             BenchmarkId::new("sorted_hc", n),
             &plan_sort_hc,
             |b, plan| {
-                let txn = NoopTransaction;
-                let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+                b.iter_batched(
+                    || plan.clone(),
+                    |plan| {
+                        let txn = NoopTransaction;
+                        let exec = Executor::new(&txn, &());
+                        consume_rows(exec.execute(plan).unwrap())
+                    },
+                    BatchSize::SmallInput,
+                )
             },
         );
     }
@@ -327,9 +387,15 @@ fn bench_filter(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         let plan_and = PlanNode::Filter {
@@ -341,9 +407,15 @@ fn bench_filter(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
-            let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            b.iter_batched(
+                || plan.clone(),
+                |plan| {
+                    let txn = NoopTransaction;
+                    let exec = Executor::new(&txn, &());
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
