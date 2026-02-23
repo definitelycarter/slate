@@ -19,14 +19,16 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
         if let Some(ref val) = opt_val {
             if let Some(raw) = val.as_document() {
                 if let Some(id_str) = exec::raw_extract_id(raw)? {
+                    let ttl_millis = encoding::extract_ttl_millis_from_raw(raw);
                     let mut err: Option<DbError> = None;
                     walk(raw, &tree, |path, value| {
                         if err.is_some() {
                             return;
                         }
                         let idx_key = encoding::raw_index_key(path, value, id_str);
-                        let type_byte = encoding::raw_bson_ref_type_byte(value);
-                        if let Err(e) = txn.put(cf, &idx_key, &type_byte) {
+                        let type_byte = encoding::raw_bson_ref_type_byte(value)[0];
+                        let idx_val = encoding::encode_index_value(type_byte, ttl_millis);
+                        if let Err(e) = txn.put(cf, &idx_key, &idx_val) {
                             err = Some(DbError::Store(e));
                         }
                     });

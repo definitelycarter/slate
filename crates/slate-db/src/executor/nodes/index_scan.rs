@@ -175,21 +175,10 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                         Some((_, record_id)) => {
                             count += 1;
                             if let Some(ref rv) = raw_value {
-                                // Covered path: TTL check via record envelope prefix.
-                                // Reads the record but only inspects the envelope header —
-                                // still avoids full BSON decode + projection.
-                                let rec_key = encoding::record_key(record_id);
-                                match txn.get(cf, &rec_key) {
-                                    Ok(Some(bytes)) => {
-                                        if encoding::is_record_expired(&bytes, now_millis) {
-                                            continue;
-                                        }
-                                    }
-                                    Ok(None) => continue, // dangling index entry
-                                    Err(e) => {
-                                        done = true;
-                                        return Some(Err(DbError::Store(e)));
-                                    }
+                                // Covered path: O(1) TTL check from inline millis
+                                // in the index entry value — no extra txn.get needed.
+                                if encoding::is_index_entry_expired(&stored_value, now_millis) {
+                                    continue;
                                 }
                                 let coerced = encoding::coerce_to_stored_type(rv, &stored_value);
                                 let mut doc = RawDocumentBuf::new();

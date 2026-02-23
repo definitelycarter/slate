@@ -404,10 +404,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             };
             let (_, bson_slice) = encoding::decode_record(&value)?;
             let doc: bson::Document = bson::from_slice(bson_slice)?;
+            let ttl_millis = doc.get_datetime("ttl").ok().map(|dt| dt.timestamp_millis());
             for val in exec::get_path_values(&doc, field) {
                 let idx_key = encoding::index_key(field, val, &record_id);
-                self.txn
-                    .put(&cf, &idx_key, &encoding::bson_type_byte(val))?;
+                let idx_val =
+                    encoding::encode_index_value(encoding::bson_type_byte(val)[0], ttl_millis);
+                self.txn.put(&cf, &idx_key, &idx_val)?;
             }
         }
 

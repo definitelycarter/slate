@@ -264,9 +264,8 @@ fn plan_find(collection: &str, indexed_fields: &[String], query: &Query) -> Plan
         .as_ref()
         .map_or(true, |g| g.children.is_empty());
     // Covered projections: IndexScan yields { _id, column: value } directly,
-    // skipping ReadRecord + Filter + Projection. The covered path does a
-    // lightweight txn.get to check the record envelope TTL prefix — avoids
-    // full BSON decode but still requires a record read for TTL correctness.
+    // skipping ReadRecord + Filter + Projection. TTL is checked inline from
+    // millis stored in the index entry value — zero extra lookups.
     let covered = no_residual
         && matches!(
             &id_node,

@@ -337,6 +337,56 @@ pub fn is_record_expired(data: &[u8], now_millis: i64) -> bool {
     }
 }
 
+// ── Index entry value encoding ──────────────────────────────────
+//
+// Index entry values store a BSON type byte, optionally followed by
+// 8-byte LE TTL millis when the document has a `ttl` field:
+//
+//   No TTL:    [type_byte]                         (1 byte)
+//   With TTL:  [type_byte][8-byte LE i64 millis]   (9 bytes)
+
+const INDEX_VALUE_TTL_OFFSET: usize = 1;
+const INDEX_VALUE_TTL_LEN: usize = 8;
+const INDEX_VALUE_WITH_TTL_SIZE: usize = INDEX_VALUE_TTL_OFFSET + INDEX_VALUE_TTL_LEN;
+
+/// Encode an index entry value: `[type_byte]` or `[type_byte][8-byte LE millis]`.
+pub fn encode_index_value(type_byte: u8, ttl_millis: Option<i64>) -> Vec<u8> {
+    match ttl_millis {
+        Some(millis) => {
+            let mut buf = Vec::with_capacity(INDEX_VALUE_WITH_TTL_SIZE);
+            buf.push(type_byte);
+            buf.extend_from_slice(&millis.to_le_bytes());
+            buf
+        }
+        None => vec![type_byte],
+    }
+}
+
+/// Fast O(1) TTL check on an index entry value.
+/// Returns `true` if the value has inline TTL millis and millis < `now_millis`.
+#[inline]
+pub fn is_index_entry_expired(value: &[u8], now_millis: i64) -> bool {
+    if value.len() >= INDEX_VALUE_WITH_TTL_SIZE {
+        let millis = i64::from_le_bytes(
+            value[INDEX_VALUE_TTL_OFFSET..INDEX_VALUE_WITH_TTL_SIZE]
+                .try_into()
+                .unwrap(),
+        );
+        millis < now_millis
+    } else {
+        false
+    }
+}
+
+/// Extract TTL millis from a `RawDocument` by looking up the `ttl` field.
+/// Returns `Some(millis)` if the field exists and is a DateTime.
+pub fn extract_ttl_millis_from_raw(raw: &bson::raw::RawDocument) -> Option<i64> {
+    match raw.get("ttl") {
+        Ok(Some(bson::raw::RawBsonRef::DateTime(dt))) => Some(dt.timestamp_millis()),
+        _ => None,
+    }
+}
+
 /// Scan raw BSON bytes for a `ttl` DateTime field and return its millis.
 fn extract_ttl_millis(bytes: &[u8]) -> Option<i64> {
     let mut pos = 4; // skip BSON document length
@@ -541,5 +591,48 @@ mod tests {
     #[test]
     fn decode_record_unknown_tag_errors() {
         assert!(decode_record(&[0xFF, 0x00]).is_err());
+    }
+
+    // ── Index entry value encoding ──────────────────────────────
+
+    #[test]
+    fn encode_index_value_no_ttl() {
+        let val = encode_index_value(0x02, None);
+        assert_eq!(val, vec![0x02]);
+    }
+
+    #[test]
+    fn encode_index_value_with_ttl() {
+        let millis = 1_700_000_000_000_i64;
+        let val = encode_index_value(0x02, Some(millis));
+        assert_eq!(val.len(), 9);
+        assert_eq!(val[0], 0x02);
+        assert_eq!(i64::from_le_bytes(val[1..9].try_into().unwrap()), millis);
+    }
+
+    #[test]
+    fn is_index_entry_expired_with_ttl() {
+        let val = encode_index_value(0x02, Some(1_000));
+        assert!(is_index_entry_expired(&val, 2_000));
+        assert!(!is_index_entry_expired(&val, 500));
+    }
+
+    #[test]
+    fn is_index_entry_expired_no_ttl() {
+        let val = encode_index_value(0x02, None);
+        assert!(!is_index_entry_expired(&val, i64::MAX));
+    }
+
+    #[test]
+    fn extract_ttl_millis_from_raw_doc() {
+        let dt = bson::DateTime::from_millis(1_700_000_000_000);
+        let bson = bson::rawdoc! { "_id": "a", "ttl": dt, "status": "active" };
+        assert_eq!(extract_ttl_millis_from_raw(&bson), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn extract_ttl_millis_from_raw_doc_no_ttl() {
+        let bson = bson::rawdoc! { "_id": "a", "status": "active" };
+        assert_eq!(extract_ttl_millis_from_raw(&bson), None);
     }
 }

@@ -1,4 +1,5 @@
 /target
 /book/book
+/scratch
 .DS_Store
 *.xcframework
