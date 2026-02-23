@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
+use crate::expression::LogicalOp;
 use bson::RawBson;
-use slate_query::LogicalOp;
 
 use crate::error::DbError;
 use crate::executor::exec;

@@ -239,6 +239,77 @@ pub(crate) fn field_to_raw_bson_ref<'a>(
     }
 }
 
+// ── Document / Array element iteration ──────────────────────────
+
+/// An element yielded by [`ElementIter`].
+pub(crate) struct Element<'a> {
+    pub type_byte: u8,
+    pub key: &'a str,
+    pub value_start: usize,
+    pub value_end: usize,
+}
+
+/// Iterates the elements of a BSON document (or array) starting at byte
+/// offset `base`. Yields one [`Element`] per field with zero allocation.
+pub(crate) struct ElementIter<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> ElementIter<'a> {
+    /// Create an iterator over a BSON document/array whose length header
+    /// starts at `base`.
+    pub fn new(bytes: &'a [u8], base: usize) -> Option<Self> {
+        if base + 4 > bytes.len() {
+            return None;
+        }
+        let doc_len = i32::from_le_bytes(bytes[base..base + 4].try_into().ok()?) as usize;
+        Some(Self {
+            bytes,
+            pos: base + 4,
+            end: base + doc_len,
+        })
+    }
+}
+
+impl<'a> Iterator for ElementIter<'a> {
+    type Item = Element<'a>;
+
+    fn next(&mut self) -> Option<Element<'a>> {
+        if self.pos >= self.end {
+            return None;
+        }
+        let type_byte = self.bytes[self.pos];
+        if type_byte == 0x00 {
+            return None;
+        }
+        self.pos += 1;
+
+        // Read null-terminated field name
+        let name_start = self.pos;
+        while self.pos < self.end && self.bytes[self.pos] != 0x00 {
+            self.pos += 1;
+        }
+        if self.pos >= self.end {
+            return None;
+        }
+        let key = std::str::from_utf8(&self.bytes[name_start..self.pos]).ok()?;
+        self.pos += 1; // skip null terminator
+
+        let value_start = self.pos;
+        let value_end = skip_bson_value(type_byte, self.bytes, value_start)?;
+        self.pos = value_end;
+
+        Some(Element {
+            type_byte,
+            key,
+            value_start,
+            value_end,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

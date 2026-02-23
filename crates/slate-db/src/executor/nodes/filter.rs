@@ -1,4 +1,4 @@
-use slate_query::Expression;
+use crate::expression::Expression;
 
 use crate::error::DbError;
 use crate::executor::RawIter;

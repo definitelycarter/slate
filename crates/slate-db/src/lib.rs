@@ -10,6 +10,8 @@ pub(crate) mod engine;
 pub mod engine;
 mod error;
 mod executor;
+pub(crate) mod expression;
+pub(crate) mod parse_filter;
 mod planner;
 mod result;
 mod sweep;
@@ -27,5 +29,6 @@ pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 pub mod bench {
     pub use crate::engine::Engine;
     pub use crate::executor::{ExecutionResult, Executor, RawIter, RawValue};
+    pub use crate::expression::{Expression, LogicalOp};
     pub use crate::planner::{IndexBound, IndexFilter, PlanNode, UpsertMode};
 }

@@ -6,4 +6,3 @@ edition = "2024"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 bson = "2"
-regex = "1"

@@ -3,7 +3,9 @@ use crate::encoding;
 use crate::planner::IndexFilter;
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
-use slate_query::{Expression, LogicalOp, Sort, SortDirection};
+use slate_query::{Sort, SortDirection};
+
+use crate::expression::{Expression, LogicalOp};
 use slate_store::{Store, StoreError, Transaction};
 use std::borrow::Cow;
 use std::cell::RefCell;

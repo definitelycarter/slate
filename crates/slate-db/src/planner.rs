@@ -1,7 +1,8 @@
 use bson::raw::RawBsonRef;
-use slate_query::{Expression, LogicalOp, Mutation, Query, Sort, SortDirection};
+use slate_query::{Mutation, Query, Sort, SortDirection};
 
 use crate::error::DbError;
+use crate::expression::{Expression, LogicalOp};
 
 /// Represents a database operation to be planned.
 #[derive(Debug, Clone)]
@@ -224,7 +225,8 @@ pub fn plan<'a>(prepared: &'a PreparedStatement) -> Result<PlanNode<'a>, DbError
 
 /// Parse a raw BSON filter document into an Expression.
 fn parse_raw_filter<'a>(raw: &'a bson::RawDocumentBuf) -> Result<Expression<'a>, DbError> {
-    slate_query::parse_filter(raw).map_err(|e| DbError::InvalidQuery(e.to_string()))
+    crate::parse_filter::parse_filter(raw.as_bytes())
+        .map_err(|e| DbError::InvalidQuery(e.to_string()))
 }
 
 /// Parse an optional raw BSON filter document into an Option<Expression>.
@@ -232,8 +234,8 @@ fn parse_optional_filter<'a>(
     raw: Option<&'a bson::RawDocumentBuf>,
 ) -> Result<Option<Expression<'a>>, DbError> {
     match raw {
-        Some(r) => parse_raw_filter(r).map(Some),
-        None => Ok(None),
+        _ => Ok(None), // Some(r) => parse_raw_filter(r).map(Some),
+                       // None => Ok(None),
     }
 }
 

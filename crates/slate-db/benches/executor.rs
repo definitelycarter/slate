@@ -7,7 +7,9 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::CollectionConfig;
-use slate_db::bench::{Engine, ExecutionResult, Executor, IndexFilter, PlanNode};
+use slate_db::bench::{
+    Engine, ExecutionResult, Executor, Expression, IndexFilter, LogicalOp, PlanNode,
+};
 use slate_query::*;
 use slate_store::{MemoryStore, Store, StoreError, Transaction};
 
@@ -542,7 +544,7 @@ fn bench_index_merge(c: &mut Criterion) {
 
         // OR merge: status="active" OR contacts_count=50
         let plan_or = PlanNode::IndexMerge {
-            logical: slate_query::LogicalOp::Or,
+            logical: LogicalOp::Or,
             lhs: Box::new(PlanNode::IndexScan {
                 column: "status".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
@@ -569,7 +571,7 @@ fn bench_index_merge(c: &mut Criterion) {
 
         // AND merge: status="active" AND contacts_count=50
         let plan_and = PlanNode::IndexMerge {
-            logical: slate_query::LogicalOp::And,
+            logical: LogicalOp::And,
             lhs: Box::new(PlanNode::IndexScan {
                 column: "status".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),

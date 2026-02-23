@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
-use slate_query::Expression;
+use crate::expression::Expression;
 use slate_store::Transaction;
 
 use crate::error::DbError;
