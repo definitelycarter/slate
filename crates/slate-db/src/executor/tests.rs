@@ -521,7 +521,7 @@ fn update_writes_merged_doc() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec![],
         input: Box::new(PlanNode::Update {
-            update: rawdoc! { "score": 100 },
+            mutation: slate_query::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "score": 70 }],
             }),
@@ -552,7 +552,7 @@ fn update_unchanged_skips_write() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec![],
         input: Box::new(PlanNode::Update {
-            update: rawdoc! { "status": "active" },
+            mutation: slate_query::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
             }),
@@ -673,7 +673,7 @@ fn full_update_pipeline() {
     let plan = PlanNode::InsertIndex {
         indexed_fields: vec!["status".into()],
         input: Box::new(PlanNode::Update {
-            update: rawdoc! { "status": "archived" },
+            mutation: slate_query::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
             input: Box::new(PlanNode::DeleteIndex {
                 indexed_fields: vec!["status".into()],
                 input: Box::new(PlanNode::Values {

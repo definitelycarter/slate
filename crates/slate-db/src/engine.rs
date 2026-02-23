@@ -158,9 +158,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         upsert: bool,
     ) -> Result<UpdateResult, DbError> {
         let raw = update.into_raw_document_buf()?;
+        let mutation = slate_query::parse_mutation(&raw)?;
         let stmt = planner::Statement::Update {
             filter: filter.clone(),
-            update: raw.clone(),
+            mutation,
             limit: Some(1),
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;
@@ -193,9 +194,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         update: impl IntoRawDocumentBuf,
     ) -> Result<UpdateResult, DbError> {
         let raw = update.into_raw_document_buf()?;
+        let mutation = slate_query::parse_mutation(&raw)?;
         let stmt = planner::Statement::Update {
             filter: filter.clone(),
-            update: raw,
+            mutation,
             limit: None,
         };
         let (plan, cf) = self.plan_statement(collection, stmt)?;

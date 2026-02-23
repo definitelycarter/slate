@@ -1,6 +1,9 @@
 pub(crate) mod exec;
 pub(crate) mod field_tree;
+pub(crate) mod mutation_ops;
 mod nodes;
+pub(crate) mod raw_bson;
+pub(crate) mod raw_mutation;
 #[cfg(test)]
 mod tests;
 
@@ -234,9 +237,9 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let source = self.execute_node(input)?;
                 nodes::delete::execute(self.txn, self.cf, source)
             }
-            PlanNode::Update { update, input } => {
+            PlanNode::Update { mutation, input } => {
                 let source = self.execute_node(input)?;
-                nodes::update::execute(self.txn, self.cf, update, source)
+                nodes::mutate::execute(self.txn, self.cf, mutation, source)
             }
             PlanNode::Replace { replacement, input } => {
                 let source = self.execute_node(input)?;

@@ -10,6 +10,7 @@ use crate::encoding;
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::field_tree::{FieldTree, walk};
+use crate::executor::raw_mutation;
 use crate::executor::{RawIter, RawValue};
 use crate::planner::UpsertMode;
 
@@ -172,7 +173,7 @@ fn build_doc(
             }
             Ok(Some(buf))
         }
-        UpsertMode::Merge => Ok(exec::raw_merge_doc(old_raw, new_raw)?),
+        UpsertMode::Merge => Ok(raw_mutation::raw_merge(old_raw, new_raw)?),
     }
 }
 

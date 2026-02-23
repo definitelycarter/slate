@@ -1,5 +1,6 @@
 use slate_query::{
-    DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
+    DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Mutation, Operator, Query, Sort,
+    SortDirection,
 };
 
 /// Represents a database operation to be planned.
@@ -12,7 +13,7 @@ pub enum Statement {
     /// Update documents matching a filter (merge semantics).
     Update {
         filter: FilterGroup,
-        update: bson::RawDocumentBuf,
+        mutation: Mutation,
         limit: Option<usize>,
     },
     /// Replace the first document matching a filter entirely.
@@ -161,7 +162,7 @@ pub enum PlanNode {
     /// Side effect: writes the merged document to the CF.
     /// Yields (id, Some(new_doc)) if changed, (id, None) if unchanged.
     Update {
-        update: bson::RawDocumentBuf,
+        mutation: Mutation,
         input: Box<PlanNode>,
     },
 
@@ -210,9 +211,9 @@ pub fn plan(collection: &str, indexed_fields: Vec<String>, statement: Statement)
         Statement::Distinct(query) => plan_distinct(collection, &indexed_fields, &query),
         Statement::Update {
             filter,
-            update,
+            mutation,
             limit,
-        } => plan_update(collection, indexed_fields, &filter, update, limit),
+        } => plan_update(collection, indexed_fields, &filter, mutation, limit),
         Statement::Replace {
             filter,
             replacement,
@@ -862,7 +863,7 @@ fn plan_update(
     collection: &str,
     indexed_fields: Vec<String>,
     filter: &FilterGroup,
-    update: bson::RawDocumentBuf,
+    mutation: Mutation,
     take: Option<usize>,
 ) -> PlanNode {
     let source = build_filtered_source(collection, &indexed_fields, filter, take);
@@ -873,7 +874,7 @@ fn plan_update(
     };
 
     let node = PlanNode::Update {
-        update,
+        mutation,
         input: Box::new(node),
     };
 

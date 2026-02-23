@@ -52,3 +52,9 @@ impl From<bson::raw::Error> for DbError {
         DbError::Serialization(e.to_string())
     }
 }
+
+impl From<slate_query::ParseError> for DbError {
+    fn from(e: slate_query::ParseError) -> Self {
+        DbError::InvalidQuery(e.to_string())
+    }
+}

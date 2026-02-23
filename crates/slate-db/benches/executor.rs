@@ -598,7 +598,7 @@ fn bench_insert(c: &mut Criterion) {
                         _ => panic!("expected Insert"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
@@ -614,7 +614,10 @@ fn bench_update(c: &mut Criterion) {
         let plan = PlanNode::InsertIndex {
             indexed_fields: vec!["status".into(), "contacts_count".into()],
             input: Box::new(PlanNode::Update {
-                update: bson::rawdoc! { "$set": { "status": "updated" } },
+                mutation: slate_query::parse_mutation(
+                    &bson::rawdoc! { "$set": { "status": "updated" } },
+                )
+                .unwrap(),
                 input: Box::new(PlanNode::ReadRecord {
                     input: Box::new(PlanNode::Scan {
                         collection: "test".into(),
@@ -637,7 +640,7 @@ fn bench_update(c: &mut Criterion) {
                         _ => panic!("expected Update"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
@@ -675,7 +678,7 @@ fn bench_delete(c: &mut Criterion) {
                         _ => panic!("expected Delete"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
@@ -718,7 +721,7 @@ fn bench_replace(c: &mut Criterion) {
                         _ => panic!("expected Update"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
@@ -768,7 +771,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
                         _ => panic!("expected Upsert"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
@@ -816,7 +819,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
                         _ => panic!("expected Upsert"),
                     }
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }

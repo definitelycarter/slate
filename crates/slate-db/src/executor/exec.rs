@@ -165,15 +165,28 @@ pub(crate) fn apply_projection(doc: &mut bson::Document, columns: &[String]) {
 /// Extract `_id` from a raw document as a zero-copy `&str` borrow.
 /// Returns `Ok(None)` if `_id` is missing or not a string.
 pub(crate) fn raw_extract_id(raw: &RawDocument) -> Result<Option<&str>, DbError> {
-    match raw.get("_id")? {
-        Some(RawBsonRef::String(s)) => Ok(Some(s)),
+    let bytes = raw.as_bytes();
+    match super::raw_bson::find_field(bytes, "_id") {
+        Some(loc) if loc.type_byte == 0x02 => {
+            let len = i32::from_le_bytes(
+                bytes[loc.value_start..loc.value_start + 4]
+                    .try_into()
+                    .map_err(|_| DbError::Serialization("truncated _id".into()))?,
+            ) as usize;
+            std::str::from_utf8(&bytes[loc.value_start + 4..loc.value_start + 4 + len - 1])
+                .map(Some)
+                .map_err(|_| DbError::Serialization("invalid _id utf8".into()))
+        }
         _ => Ok(None),
     }
 }
 
 // ── Raw BSON filter matching ────────────────────────────────────
 //
-// Filter matching operates on RawDocument / RawBsonRef to avoid full deserialization.
+// Filter matching operates on raw byte scanning to avoid the overhead of
+// `RawDocument::get()` (which constructs RawElement objects and wraps every
+// step in Result). Field values are materialized to `RawBsonRef` only when
+// needed for comparison.
 
 /// Walk a dot-separated path through raw BSON bytes.
 /// Returns None if the path is missing or Null.
@@ -181,36 +194,15 @@ pub(crate) fn raw_get_path<'a>(
     raw: &'a RawDocument,
     path: &str,
 ) -> Result<Option<RawBsonRef<'a>>, DbError> {
-    if !path.contains('.') {
-        return match raw.get(path)? {
-            Some(RawBsonRef::Null) | None => Ok(None),
-            some => Ok(some),
-        };
+    let bytes = raw.as_bytes();
+    let loc = match super::raw_bson::find_field_path(bytes, path) {
+        Some(loc) => loc,
+        None => return Ok(None),
+    };
+    if loc.type_byte == 0x0A {
+        return Ok(None); // Null → None (existing behavior)
     }
-
-    let (first, rest) = path.split_once('.').unwrap();
-    match raw.get(first)? {
-        Some(RawBsonRef::Document(sub)) => raw_get_path_in_doc(sub, rest),
-        _ => Ok(None),
-    }
-}
-
-fn raw_get_path_in_doc<'a>(
-    doc: &'a RawDocument,
-    path: &str,
-) -> Result<Option<RawBsonRef<'a>>, DbError> {
-    if !path.contains('.') {
-        return match doc.get(path)? {
-            Some(RawBsonRef::Null) | None => Ok(None),
-            some => Ok(some),
-        };
-    }
-
-    let (first, rest) = path.split_once('.').unwrap();
-    match doc.get(first)? {
-        Some(RawBsonRef::Document(sub)) => raw_get_path_in_doc(sub, rest),
-        _ => Ok(None),
-    }
+    Ok(super::raw_bson::field_to_raw_bson_ref(bytes, &loc))
 }
 
 pub(crate) fn raw_matches_group(raw: &RawDocument, group: &FilterGroup) -> Result<bool, DbError> {
@@ -353,40 +345,86 @@ pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
     }
 }
 
-/// Merge update fields into an existing raw document, producing a new raw document.
-/// Returns `None` if the update is a no-op (all values unchanged).
+/// Apply a pre-parsed Mutation to a raw document.
 ///
-/// Fields in `update` overwrite corresponding fields in `old_raw`.
-/// Fields in `old_raw` not present in `update` are preserved as raw bytes.
-/// `_id` fields in the update are ignored (ID is stored externally).
-pub(crate) fn raw_merge_doc(
+/// Fast path: the raw byte-level mutation engine handles flat-field operators
+/// (`$set`, `$unset`, `$inc`, `$push`, `$pop`) by splicing/overwriting bytes
+/// directly — no deserialization. Falls back to full `bson::Document` round-trip
+/// for dot-paths, `$rename`, `$lpush`, and Document/Array `$set` values.
+pub(crate) fn apply_mutation(
     old_raw: &RawDocument,
-    update: &RawDocument,
+    mutation: &slate_query::Mutation,
 ) -> Result<Option<bson::RawDocumentBuf>, DbError> {
-    let update_keys: std::collections::HashSet<&str> = update
-        .iter()
-        .filter_map(|r| r.ok())
-        .filter(|(k, _)| *k != "_id")
-        .map(|(k, _)| k)
-        .collect();
+    // Fast path: raw byte-level mutation engine
+    match super::raw_mutation::raw_apply_mutation(old_raw, mutation)? {
+        super::raw_mutation::RawMutationResult::Applied(buf) => return Ok(Some(buf)),
+        super::raw_mutation::RawMutationResult::Unchanged => return Ok(None),
+        super::raw_mutation::RawMutationResult::Fallback => { /* continue to slow path */ }
+    }
 
-    // Check if anything actually changed
+    // Slow path: full deserialization
+    let mut doc: bson::Document = bson::from_slice(old_raw.as_bytes())?;
     let mut changed = false;
-    for result in update.iter() {
-        let (ukey, uval) = result?;
-        if ukey == "_id" {
-            continue;
-        }
-        match old_raw.get(ukey)? {
-            Some(old_val) => {
-                if old_val != uval {
-                    changed = true;
-                    break;
+
+    for fm in &mutation.ops {
+        // Determine whether this op should create intermediate sub-documents
+        let creates = matches!(
+            fm.op,
+            slate_query::MutationOp::Set(_)
+                | slate_query::MutationOp::Inc(_)
+                | slate_query::MutationOp::Push(_)
+                | slate_query::MutationOp::LPush(_)
+        );
+
+        match &fm.op {
+            slate_query::MutationOp::Set(val) => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                {
+                    changed |= super::mutation_ops::op_set(parent, leaf, val)?;
                 }
             }
-            None => {
-                changed = true;
-                break;
+            slate_query::MutationOp::Unset => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                {
+                    changed |= super::mutation_ops::op_unset(parent, leaf)?;
+                }
+            }
+            slate_query::MutationOp::Inc(amount) => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                {
+                    changed |= super::mutation_ops::op_inc(parent, leaf, amount)?;
+                }
+            }
+            slate_query::MutationOp::Rename(new_name) => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                {
+                    changed |= super::mutation_ops::op_rename(parent, leaf, new_name)?;
+                }
+            }
+            slate_query::MutationOp::Push(val) => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                {
+                    changed |= super::mutation_ops::op_push(parent, leaf, val)?;
+                }
+            }
+            slate_query::MutationOp::LPush(val) => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                {
+                    changed |= super::mutation_ops::op_lpush(parent, leaf, val)?;
+                }
+            }
+            slate_query::MutationOp::Pop => {
+                if let Some((parent, leaf)) =
+                    super::mutation_ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                {
+                    changed |= super::mutation_ops::op_pop(parent, leaf)?;
+                }
             }
         }
     }
@@ -395,27 +433,8 @@ pub(crate) fn raw_merge_doc(
         return Ok(None);
     }
 
-    // Build merged document
-    let mut merged = bson::RawDocumentBuf::new();
-
-    // Copy old fields not in the update
-    for result in old_raw.iter() {
-        let (field_key, field_val) = result?;
-        if !update_keys.contains(field_key) {
-            merged.append_ref(field_key, field_val);
-        }
-    }
-
-    // Append update fields
-    for result in update.iter() {
-        let (ukey, uval) = result?;
-        if ukey == "_id" {
-            continue;
-        }
-        merged.append_ref(ukey, uval);
-    }
-
-    Ok(Some(merged))
+    let raw = bson::RawDocumentBuf::from_document(&doc)?;
+    Ok(Some(raw))
 }
 
 pub(crate) fn raw_compare_values(
@@ -1570,5 +1589,50 @@ mod tests {
         let envelope = crate::encoding::encode_record(&bson_bytes);
         // ttl == now → not expired (< is strict)
         assert!(!is_ttl_expired(&envelope, now_millis));
+    }
+
+    // ── raw_extract_id ──────────────────────────────────────────
+
+    #[test]
+    fn raw_extract_id_string() {
+        let raw = make_raw(&doc! { "_id": "doc123", "name": "test" });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, Some("doc123"));
+    }
+
+    #[test]
+    fn raw_extract_id_missing() {
+        let raw = make_raw(&doc! { "name": "test" });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn raw_extract_id_non_string() {
+        // ObjectId _id should return None (we only extract string _ids)
+        let raw = make_raw(&doc! { "_id": bson::oid::ObjectId::new(), "name": "test" });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn raw_extract_id_int_returns_none() {
+        let raw = make_raw(&doc! { "_id": 42_i32 });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn raw_extract_id_empty_string() {
+        let raw = make_raw(&doc! { "_id": "", "name": "test" });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, Some(""));
+    }
+
+    #[test]
+    fn raw_extract_id_unicode() {
+        let raw = make_raw(&doc! { "_id": "日本語キー", "name": "test" });
+        let id = raw_extract_id(&raw).unwrap();
+        assert_eq!(id, Some("日本語キー"));
     }
 }
