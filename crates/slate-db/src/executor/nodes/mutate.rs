@@ -10,7 +10,7 @@ use crate::executor::{RawIter, RawValue};
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    mutation: &'a Mutation,
+    mutation: Mutation,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
@@ -28,7 +28,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             None => return Ok(None),
         };
 
-        match exec::apply_mutation(old_raw, mutation)? {
+        match exec::apply_mutation(old_raw, &mutation)? {
             Some(mutated) => {
                 let key = encoding::record_key(&id_str);
                 txn.put(cf, &key, &encoding::encode_record(mutated.as_bytes()))?;

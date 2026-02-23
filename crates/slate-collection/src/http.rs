@@ -1,7 +1,6 @@
 use http::{Method, Request, Response, StatusCode};
 use serde::Deserialize;
 use slate_client::ClientPool;
-use slate_query::{DistinctQuery, FilterGroup, Query};
 
 use crate::error::CollectionHttpError;
 use crate::request::{DistinctRequest, DistinctResponse, QueryRequest, QueryResponse};
@@ -69,16 +68,16 @@ impl CollectionHttp {
         let total = self
             .pool
             .get()?
-            .count(&self.collection, request.filters.as_ref())?;
+            .count(&self.collection, request.filters.clone())?;
 
-        let query = Query {
-            filter: request.filters.clone(),
-            sort: request.sort.clone(),
-            skip: request.skip,
-            take: request.take,
-            columns: request.columns.clone(),
-        };
-        let records = self.pool.get()?.find(&self.collection, &query)?;
+        let records = self.pool.get()?.find(
+            &self.collection,
+            request.filters.clone(),
+            request.sort.clone(),
+            request.skip,
+            request.take,
+            request.columns.clone(),
+        )?;
 
         Ok(QueryResponse { records, total })
     }
@@ -87,14 +86,14 @@ impl CollectionHttp {
         &self,
         request: &DistinctRequest,
     ) -> Result<DistinctResponse, CollectionHttpError> {
-        let query = DistinctQuery {
-            field: request.field.clone(),
-            filter: request.filters.clone(),
-            sort: request.sort,
-            skip: request.skip,
-            take: request.take,
-        };
-        let values = self.pool.get()?.distinct(&self.collection, &query)?;
+        let values = self.pool.get()?.distinct(
+            &self.collection,
+            &request.field,
+            request.filters.clone(),
+            request.sort,
+            request.skip,
+            request.take,
+        )?;
 
         Ok(DistinctResponse { values })
     }
@@ -165,7 +164,7 @@ impl CollectionHttp {
         match self
             .pool
             .get()
-            .and_then(|mut c| Ok(c.delete_many(&self.collection, &body.filter)?))
+            .and_then(|mut c| Ok(c.delete_many(&self.collection, body.filter)?))
         {
             Ok(result) => match serde_json::to_vec(&result) {
                 Ok(b) => json_response(StatusCode::OK, b),
@@ -178,7 +177,7 @@ impl CollectionHttp {
 
 #[derive(Deserialize)]
 struct DeleteBody {
-    filter: FilterGroup,
+    filter: bson::Document,
 }
 
 fn json_response(status: StatusCode, body: impl Into<Vec<u8>>) -> Response<Vec<u8>> {

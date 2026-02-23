@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
-use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator};
+use slate_query::Expression;
 use slate_store::Transaction;
 
 use crate::error::DbError;
@@ -205,140 +205,118 @@ pub(crate) fn raw_get_path<'a>(
     Ok(super::raw_bson::field_to_raw_bson_ref(bytes, &loc))
 }
 
-pub(crate) fn raw_matches_group(raw: &RawDocument, group: &FilterGroup) -> Result<bool, DbError> {
-    match group.logical {
-        LogicalOp::And => {
-            for child in &group.children {
-                if !raw_matches_node(raw, child)? {
+// ── Expression-based filter matching ─────────────────────────────
+
+pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Result<bool, DbError> {
+    match expr {
+        Expression::And(children) => {
+            for child in children {
+                if !raw_matches_expr(raw, child)? {
                     return Ok(false);
                 }
             }
             Ok(true)
         }
-        LogicalOp::Or => {
-            for child in &group.children {
-                if raw_matches_node(raw, child)? {
+        Expression::Or(children) => {
+            for child in children {
+                if raw_matches_expr(raw, child)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-    }
-}
-
-fn raw_matches_node(raw: &RawDocument, node: &FilterNode) -> Result<bool, DbError> {
-    match node {
-        FilterNode::Condition(filter) => raw_matches_filter(raw, filter),
-        FilterNode::Group(group) => raw_matches_group(raw, group),
-    }
-}
-
-/// Zero-allocation case-insensitive substring search (ASCII only).
-fn ascii_icontains(haystack: &str, needle: &str) -> bool {
-    let h = haystack.as_bytes();
-    let n = needle.as_bytes();
-    if n.len() > h.len() {
-        return false;
-    }
-    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
-}
-
-fn raw_matches_filter(raw: &RawDocument, filter: &Filter) -> Result<bool, DbError> {
-    let field_value = raw_get_path(raw, &filter.field)?;
-
-    match filter.operator {
-        Operator::IsNull => match &filter.value {
-            Bson::Boolean(true) => Ok(field_value.is_none()),
-            Bson::Boolean(false) => Ok(field_value.is_some()),
-            _ => Ok(field_value.is_none()),
-        },
-        Operator::Eq => match field_value {
-            Some(RawBsonRef::Array(arr)) => {
-                for elem in arr.into_iter().flatten() {
-                    if raw_values_eq(&elem, &filter.value) {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
+        Expression::Eq(field, val) => {
+            // $eq: null matches both missing fields and explicit null values
+            if matches!(val, RawBsonRef::Null) {
+                return Ok(raw_get_path(raw, field)?.is_none());
             }
-            Some(v) => Ok(raw_values_eq(&v, &filter.value)),
-            None => Ok(false),
-        },
-        Operator::IContains => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => {
-                Ok(ascii_icontains(haystack, needle))
-            }
-            _ => Ok(false),
-        },
-        Operator::IStartsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => Ok(haystack.len()
-                >= needle.len()
-                && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())),
-            _ => Ok(false),
-        },
-        Operator::IEndsWith => match (field_value, &filter.value) {
-            (Some(RawBsonRef::String(haystack)), Bson::String(needle)) => Ok(haystack.len()
-                >= needle.len()
-                && haystack.as_bytes()[haystack.len() - needle.len()..]
-                    .eq_ignore_ascii_case(needle.as_bytes())),
-            _ => Ok(false),
-        },
-        Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte => {
-            let predicate: fn(Ordering) -> bool = match filter.operator {
-                Operator::Gt => |o| o == Ordering::Greater,
-                Operator::Gte => |o| o != Ordering::Less,
-                Operator::Lt => |o| o == Ordering::Less,
-                Operator::Lte => |o| o != Ordering::Greater,
-                _ => unreachable!(),
-            };
-            match field_value {
+            match raw_get_path(raw, field)? {
                 Some(RawBsonRef::Array(arr)) => {
                     for elem in arr.into_iter().flatten() {
-                        if raw_compare_values(Some(&elem), &filter.value, predicate)? {
+                        if raw_values_eq(&elem, val) {
                             return Ok(true);
                         }
                     }
                     Ok(false)
                 }
-                _ => raw_compare_values(field_value.as_ref(), &filter.value, predicate),
+                Some(v) => Ok(raw_values_eq(&v, val)),
+                None => Ok(false),
             }
+        }
+        Expression::Gt(field, val)
+        | Expression::Gte(field, val)
+        | Expression::Lt(field, val)
+        | Expression::Lte(field, val) => {
+            let predicate: fn(Ordering) -> bool = match expr {
+                Expression::Gt(..) => |o| o == Ordering::Greater,
+                Expression::Gte(..) => |o| o != Ordering::Less,
+                Expression::Lt(..) => |o| o == Ordering::Less,
+                Expression::Lte(..) => |o| o != Ordering::Greater,
+                _ => unreachable!(),
+            };
+            let field_value = raw_get_path(raw, field)?;
+            match field_value {
+                Some(RawBsonRef::Array(arr)) => {
+                    for elem in arr.into_iter().flatten() {
+                        if raw_compare_values(Some(&elem), val, predicate)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                }
+                _ => raw_compare_values(field_value.as_ref(), val, predicate),
+            }
+        }
+        Expression::Regex(field, re) => match raw_get_path(raw, field)? {
+            Some(RawBsonRef::String(s)) => Ok(re.is_match(s)),
+            _ => Ok(false),
+        },
+        Expression::Exists(field, expected) => {
+            // $exists checks physical presence — even a null value counts as "exists"
+            let bytes = raw.as_bytes();
+            let present = super::raw_bson::find_field_path(bytes, field).is_some();
+            Ok(*expected == present)
         }
     }
 }
 
-pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &Bson) -> bool {
+pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &RawBsonRef) -> bool {
     match (store_val, query_val) {
         // ── Direct type matches ─────────────────────────────────
-        (RawBsonRef::String(a), Bson::String(b)) => *a == b.as_str(),
-        (RawBsonRef::Int32(a), Bson::Int32(b)) => *a == *b,
-        (RawBsonRef::Int32(a), Bson::Int64(b)) => (*a as i64) == *b,
-        (RawBsonRef::Int64(a), Bson::Int64(b)) => *a == *b,
-        (RawBsonRef::Int64(a), Bson::Int32(b)) => *a == (*b as i64),
-        (RawBsonRef::Double(a), Bson::Double(b)) => *a == *b,
-        (RawBsonRef::Double(a), Bson::Int64(b)) => *a == (*b as f64),
-        (RawBsonRef::Double(a), Bson::Int32(b)) => *a == (*b as f64),
-        (RawBsonRef::Int64(a), Bson::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Int32(a), Bson::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Boolean(a), Bson::Boolean(b)) => *a == *b,
-        (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
+        (RawBsonRef::String(a), RawBsonRef::String(b)) => *a == *b,
+        (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => *a == *b,
+        (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => (*a as i64) == *b,
+        (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => *a == *b,
+        (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => *a == (*b as i64),
+        (RawBsonRef::Double(a), RawBsonRef::Double(b)) => *a == *b,
+        (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => *a == (*b as f64),
+        (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => *a == (*b as f64),
+        (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Boolean(a), RawBsonRef::Boolean(b)) => *a == *b,
+        (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
             a.timestamp_millis() == b.timestamp_millis()
         }
 
-        // ── Cross-type coercion: Bson::String → stored type ─────
-        (RawBsonRef::Int32(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| (*a as i64) == b),
-        (RawBsonRef::Int64(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Double(a), Bson::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Boolean(a), Bson::String(s)) => match s.as_str() {
+        // ── Cross-type coercion: RawBsonRef::String → stored type ─
+        (RawBsonRef::Int32(a), RawBsonRef::String(s)) => {
+            s.parse::<i64>().is_ok_and(|b| (*a as i64) == b)
+        }
+        (RawBsonRef::Int64(a), RawBsonRef::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Double(a), RawBsonRef::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Boolean(a), RawBsonRef::String(s)) => match *s {
             "true" => *a,
             "false" => !*a,
             _ => false,
         },
-        (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+        (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => bson::DateTime::parse_rfc3339_str(s)
             .is_ok_and(|dt| a.timestamp_millis() == dt.timestamp_millis()),
 
-        // ── Cross-type coercion: Bson::Int → DateTime (epoch seconds) ─
-        (RawBsonRef::DateTime(a), Bson::Int64(b)) => a.timestamp_millis() == (*b * 1000),
-        (RawBsonRef::DateTime(a), Bson::Int32(b)) => a.timestamp_millis() == (*b as i64 * 1000),
+        // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
+        (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => a.timestamp_millis() == (*b * 1000),
+        (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
+            a.timestamp_millis() == (*b as i64 * 1000)
+        }
 
         // ── Incompatible types: silent exclusion ────────────────
         _ => false,
@@ -439,54 +417,56 @@ pub(crate) fn apply_mutation(
 
 pub(crate) fn raw_compare_values(
     field_value: Option<&RawBsonRef>,
-    query_val: &Bson,
+    query_val: &RawBsonRef,
     predicate: fn(Ordering) -> bool,
 ) -> Result<bool, DbError> {
     match field_value {
         Some(store_val) => Ok(match (store_val, query_val) {
             // ── Direct type matches ─────────────────────────────
-            (RawBsonRef::Int32(a), Bson::Int32(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int32(a), Bson::Int64(b)) => predicate((*a as i64).cmp(b)),
-            (RawBsonRef::Int64(a), Bson::Int64(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int64(a), Bson::Int32(b)) => predicate(a.cmp(&(*b as i64))),
-            (RawBsonRef::Double(a), Bson::Double(b)) => {
+            (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => predicate((*a as i64).cmp(b)),
+            (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => predicate(a.cmp(&(*b as i64))),
+            (RawBsonRef::Double(a), RawBsonRef::Double(b)) => {
                 predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), Bson::Int64(b)) => {
+            (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), Bson::Int32(b)) => {
+            (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int64(a), Bson::Double(b)) => {
+            (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int32(a), Bson::Double(b)) => {
+            (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
+            (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
                 predicate(a.timestamp_millis().cmp(&b.timestamp_millis()))
             }
-            (RawBsonRef::String(a), Bson::String(b)) => predicate((*a).cmp(b.as_str())),
+            (RawBsonRef::String(a), RawBsonRef::String(b)) => predicate((*a).cmp(*b)),
 
-            // ── Cross-type coercion: Bson::String → stored type ─
-            (RawBsonRef::Int32(a), Bson::String(s)) => s
+            // ── Cross-type coercion: RawBsonRef::String → stored type ─
+            (RawBsonRef::Int32(a), RawBsonRef::String(s)) => s
                 .parse::<i64>()
                 .is_ok_and(|b| predicate((*a as i64).cmp(&b))),
-            (RawBsonRef::Int64(a), Bson::String(s)) => {
+            (RawBsonRef::Int64(a), RawBsonRef::String(s)) => {
                 s.parse::<i64>().is_ok_and(|b| predicate(a.cmp(&b)))
             }
-            (RawBsonRef::Double(a), Bson::String(s)) => s
+            (RawBsonRef::Double(a), RawBsonRef::String(s)) => s
                 .parse::<f64>()
                 .is_ok_and(|b| predicate(a.partial_cmp(&b).unwrap_or(Ordering::Equal))),
-            (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
-                .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis()))),
+            (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => {
+                bson::DateTime::parse_rfc3339_str(s)
+                    .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis())))
+            }
 
-            // ── Cross-type coercion: Bson::Int → DateTime (epoch seconds) ─
-            (RawBsonRef::DateTime(a), Bson::Int64(b)) => {
+            // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
+            (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b * 1000)))
             }
-            (RawBsonRef::DateTime(a), Bson::Int32(b)) => {
+            (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b as i64 * 1000)))
             }
 
@@ -785,766 +765,6 @@ mod tests {
         let val = raw_get_path(&raw, "_id").unwrap();
         assert_eq!(val, Some(RawBsonRef::String("abc123")));
     }
-
-    #[test]
-    fn raw_matches_group_and() {
-        let raw = make_raw(&doc! { "status": "active", "score": 80 });
-        let group = FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![
-                FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: Bson::String("active".into()),
-                }),
-                FilterNode::Condition(Filter {
-                    field: "score".into(),
-                    operator: Operator::Gt,
-                    value: Bson::Int64(50),
-                }),
-            ],
-        };
-        assert!(raw_matches_group(&raw, &group).unwrap());
-    }
-
-    #[test]
-    fn raw_matches_group_and_short_circuit() {
-        let raw = make_raw(&doc! { "status": "rejected", "score": 80 });
-        let group = FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![
-                FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: Bson::String("active".into()),
-                }),
-                FilterNode::Condition(Filter {
-                    field: "score".into(),
-                    operator: Operator::Gt,
-                    value: Bson::Int64(50),
-                }),
-            ],
-        };
-        assert!(!raw_matches_group(&raw, &group).unwrap());
-    }
-
-    #[test]
-    fn raw_matches_group_or() {
-        let raw = make_raw(&doc! { "status": "rejected", "score": 80 });
-        let group = FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: Bson::String("active".into()),
-                }),
-                FilterNode::Condition(Filter {
-                    field: "score".into(),
-                    operator: Operator::Gt,
-                    value: Bson::Int64(50),
-                }),
-            ],
-        };
-        assert!(raw_matches_group(&raw, &group).unwrap());
-    }
-
-    #[test]
-    fn raw_matches_filter_id_eq() {
-        let raw = make_raw(&doc! { "_id": "abc123", "name": "test" });
-        let filter = Filter {
-            field: "_id".into(),
-            operator: Operator::Eq,
-            value: Bson::String("abc123".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_miss = Filter {
-            field: "_id".into(),
-            operator: Operator::Eq,
-            value: Bson::String("xyz".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_miss).unwrap());
-    }
-
-    #[test]
-    fn raw_matches_filter_is_null() {
-        let raw = make_raw(&doc! { "name": "test" });
-        let filter = Filter {
-            field: "missing".into(),
-            operator: Operator::IsNull,
-            value: Bson::Boolean(true),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_not_null = Filter {
-            field: "name".into(),
-            operator: Operator::IsNull,
-            value: Bson::Boolean(true),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_not_null).unwrap());
-    }
-
-    #[test]
-    fn raw_matches_filter_icontains() {
-        let raw = make_raw(&doc! { "name": "Hello World" });
-        let filter = Filter {
-            field: "name".into(),
-            operator: Operator::IContains,
-            value: Bson::String("hello".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn raw_compare_field_values_basic() {
-        use std::cmp::Ordering;
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Int32(10)), Some(RawBsonRef::Int32(20))),
-            Ordering::Less
-        );
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::String("b")), Some(RawBsonRef::String("a"))),
-            Ordering::Greater
-        );
-        assert_eq!(raw_compare_field_values(None, None), Ordering::Equal);
-        assert_eq!(
-            raw_compare_field_values(None, Some(RawBsonRef::Int32(1))),
-            Ordering::Less
-        );
-    }
-
-    #[test]
-    fn raw_compare_field_values_cross_int() {
-        use std::cmp::Ordering;
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Int32(10)), Some(RawBsonRef::Int64(10))),
-            Ordering::Equal
-        );
-    }
-
-    // ── Cross-type: Double ↔ Int field comparison ─────────────────
-
-    #[test]
-    fn raw_compare_field_values_double_vs_int64() {
-        use std::cmp::Ordering;
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Double(10.0)), Some(RawBsonRef::Int64(10))),
-            Ordering::Equal
-        );
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Double(10.5)), Some(RawBsonRef::Int64(10))),
-            Ordering::Greater
-        );
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Int64(10)), Some(RawBsonRef::Double(10.5))),
-            Ordering::Less
-        );
-    }
-
-    #[test]
-    fn raw_compare_field_values_double_vs_int32() {
-        use std::cmp::Ordering;
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Double(5.0)), Some(RawBsonRef::Int32(5))),
-            Ordering::Equal
-        );
-        assert_eq!(
-            raw_compare_field_values(Some(RawBsonRef::Int32(5)), Some(RawBsonRef::Double(4.9))),
-            Ordering::Greater
-        );
-    }
-
-    // ── Cross-type coercion: Double ↔ Int filter eq ─────────────
-
-    #[test]
-    fn coerce_double_to_int64_eq() {
-        let raw = make_raw(&doc! { "score": 50.0_f64 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Eq,
-            value: Bson::Int64(50),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_int64_to_double_eq() {
-        let raw = make_raw(&doc! { "score": 50_i64 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Eq,
-            value: Bson::Double(50.0),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_double_to_int32_eq() {
-        let raw = make_raw(&doc! { "price": 10.0_f64 });
-        let filter = Filter {
-            field: "price".into(),
-            operator: Operator::Eq,
-            value: Bson::Int32(10),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_int32_to_double_eq() {
-        let raw = make_raw(&doc! { "price": 10_i32 });
-        let filter = Filter {
-            field: "price".into(),
-            operator: Operator::Eq,
-            value: Bson::Double(10.0),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Cross-type coercion: Double ↔ Int filter comparison ─────
-
-    #[test]
-    fn coerce_double_to_int64_gt() {
-        let raw = make_raw(&doc! { "score": 50.5_f64 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Gt,
-            value: Bson::Int64(50),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_int32_to_double_lt() {
-        let raw = make_raw(&doc! { "score": 9_i32 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Lt,
-            value: Bson::Double(9.5),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Cross-type coercion: eq ─────────────────────────────────
-
-    #[test]
-    fn coerce_string_to_int32_eq() {
-        let raw = make_raw(&doc! { "score": 50_i32 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Eq,
-            value: Bson::String("50".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_int64_eq() {
-        let raw = make_raw(&doc! { "score": 50_i64 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Eq,
-            value: Bson::String("50".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_double_eq() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let filter = Filter {
-            field: "price".into(),
-            operator: Operator::Eq,
-            value: Bson::String("19.99".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_bool_eq() {
-        let raw = make_raw(&doc! { "active": true });
-        let filter = Filter {
-            field: "active".into(),
-            operator: Operator::Eq,
-            value: Bson::String("true".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_false = Filter {
-            field: "active".into(),
-            operator: Operator::Eq,
-            value: Bson::String("false".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_false).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_datetime_eq() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-01-15T00:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "created_at": dt });
-        let filter = Filter {
-            field: "created_at".into(),
-            operator: Operator::Eq,
-            value: Bson::String("2024-01-15T00:00:00Z".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_int_to_datetime_eq() {
-        let dt = bson::DateTime::from_millis(1705276800 * 1000);
-        let raw = make_raw(&doc! { "created_at": dt });
-        let filter = Filter {
-            field: "created_at".into(),
-            operator: Operator::Eq,
-            value: Bson::Int64(1705276800),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Cross-type coercion: comparisons ────────────────────────
-
-    #[test]
-    fn coerce_string_to_int_gt() {
-        let raw = make_raw(&doc! { "score": 80_i64 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Gt,
-            value: Bson::String("50".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_not = Filter {
-            field: "score".into(),
-            operator: Operator::Gt,
-            value: Bson::String("100".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_double_lte() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let filter = Filter {
-            field: "price".into(),
-            operator: Operator::Lte,
-            value: Bson::String("19.99".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_not = Filter {
-            field: "price".into(),
-            operator: Operator::Lte,
-            value: Bson::String("19.98".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_datetime_gte() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "updated_at": dt });
-        let filter = Filter {
-            field: "updated_at".into(),
-            operator: Operator::Gte,
-            value: Bson::String("2024-01-01T00:00:00Z".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-
-        let filter_not = Filter {
-            field: "updated_at".into(),
-            operator: Operator::Gte,
-            value: Bson::String("2025-01-01T00:00:00Z".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_int_to_datetime_lt() {
-        let dt = bson::DateTime::from_millis(1705276800 * 1000);
-        let raw = make_raw(&doc! { "created_at": dt });
-        // epoch seconds after the stored date
-        let filter = Filter {
-            field: "created_at".into(),
-            operator: Operator::Lt,
-            value: Bson::Int64(1705276800 + 86400),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Cross-type coercion: full operator coverage ────────────
-
-    #[test]
-    fn coerce_string_to_int_gte() {
-        let raw = make_raw(&doc! { "score": 80_i64 });
-        let f = |op| Filter {
-            field: "score".into(),
-            operator: op,
-            value: Bson::String("80".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f(Operator::Gte)).unwrap());
-        let f_above = Filter {
-            field: "score".into(),
-            operator: Operator::Gte,
-            value: Bson::String("81".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_above).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_int_lt() {
-        let raw = make_raw(&doc! { "score": 80_i64 });
-        let f = Filter {
-            field: "score".into(),
-            operator: Operator::Lt,
-            value: Bson::String("100".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "score".into(),
-            operator: Operator::Lt,
-            value: Bson::String("80".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_int_lte() {
-        let raw = make_raw(&doc! { "score": 80_i64 });
-        let f = Filter {
-            field: "score".into(),
-            operator: Operator::Lte,
-            value: Bson::String("80".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "score".into(),
-            operator: Operator::Lte,
-            value: Bson::String("79".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_double_gt() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let f = Filter {
-            field: "price".into(),
-            operator: Operator::Gt,
-            value: Bson::String("19.98".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "price".into(),
-            operator: Operator::Gt,
-            value: Bson::String("19.99".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_double_gte() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let f = Filter {
-            field: "price".into(),
-            operator: Operator::Gte,
-            value: Bson::String("19.99".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "price".into(),
-            operator: Operator::Gte,
-            value: Bson::String("20.00".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_double_lt() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let f = Filter {
-            field: "price".into(),
-            operator: Operator::Lt,
-            value: Bson::String("20.00".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "price".into(),
-            operator: Operator::Lt,
-            value: Bson::String("19.99".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_datetime_gt() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Gt,
-            value: Bson::String("2024-06-15T11:00:00Z".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Gt,
-            value: Bson::String("2024-06-15T12:00:00Z".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_datetime_lt() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Lt,
-            value: Bson::String("2024-06-15T13:00:00Z".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Lt,
-            value: Bson::String("2024-06-15T12:00:00Z".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_string_to_datetime_lte() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-06-15T12:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Lte,
-            value: Bson::String("2024-06-15T12:00:00Z".into()),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Lte,
-            value: Bson::String("2024-06-15T11:00:00Z".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_int_to_datetime_gt() {
-        let dt = bson::DateTime::from_millis(1705276800 * 1000);
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Gt,
-            value: Bson::Int64(1705276800 - 1),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Gt,
-            value: Bson::Int64(1705276800),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_int_to_datetime_gte() {
-        let dt = bson::DateTime::from_millis(1705276800 * 1000);
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Gte,
-            value: Bson::Int64(1705276800),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Gte,
-            value: Bson::Int64(1705276800 + 1),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    #[test]
-    fn coerce_int_to_datetime_lte() {
-        let dt = bson::DateTime::from_millis(1705276800 * 1000);
-        let raw = make_raw(&doc! { "ts": dt });
-        let f = Filter {
-            field: "ts".into(),
-            operator: Operator::Lte,
-            value: Bson::Int64(1705276800),
-        };
-        assert!(raw_matches_filter(&raw, &f).unwrap());
-        let f_not = Filter {
-            field: "ts".into(),
-            operator: Operator::Lte,
-            value: Bson::Int64(1705276800 - 1),
-        };
-        assert!(!raw_matches_filter(&raw, &f_not).unwrap());
-    }
-
-    // ── Silent exclusion on failed coercion ─────────────────────
-
-    #[test]
-    fn coerce_invalid_string_to_int_excludes() {
-        let raw = make_raw(&doc! { "score": 50_i32 });
-        let filter = Filter {
-            field: "score".into(),
-            operator: Operator::Eq,
-            value: Bson::String("not_a_number".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_invalid_string_to_double_excludes() {
-        let raw = make_raw(&doc! { "price": 19.99 });
-        let filter = Filter {
-            field: "price".into(),
-            operator: Operator::Gt,
-            value: Bson::String("abc".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_invalid_string_to_bool_excludes() {
-        let raw = make_raw(&doc! { "active": true });
-        let filter = Filter {
-            field: "active".into(),
-            operator: Operator::Eq,
-            value: Bson::String("yes".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn coerce_invalid_string_to_datetime_excludes() {
-        let dt = bson::DateTime::parse_rfc3339_str("2024-01-15T00:00:00Z").unwrap();
-        let raw = make_raw(&doc! { "created_at": dt });
-        let filter = Filter {
-            field: "created_at".into(),
-            operator: Operator::Eq,
-            value: Bson::String("not-a-date".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Incompatible types: silent exclusion ────────────────────
-
-    #[test]
-    fn incompatible_bool_vs_int_excludes() {
-        let raw = make_raw(&doc! { "flag": true });
-        let filter = Filter {
-            field: "flag".into(),
-            operator: Operator::Eq,
-            value: Bson::Int64(1),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn incompatible_string_vs_float_excludes() {
-        let raw = make_raw(&doc! { "name": "hello" });
-        let filter = Filter {
-            field: "name".into(),
-            operator: Operator::Eq,
-            value: Bson::Double(1.0),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    // ── Array element matching ──────────────────────────────────
-
-    #[test]
-    fn array_element_eq() {
-        let raw = make_raw(&doc! { "tags": ["rust", "db", "bson"] });
-        let filter = Filter {
-            field: "tags".into(),
-            operator: Operator::Eq,
-            value: Bson::String("db".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_eq_no_match() {
-        let raw = make_raw(&doc! { "tags": ["rust", "db"] });
-        let filter = Filter {
-            field: "tags".into(),
-            operator: Operator::Eq,
-            value: Bson::String("python".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_eq_numeric() {
-        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
-        let filter = Filter {
-            field: "scores".into(),
-            operator: Operator::Eq,
-            value: Bson::Int32(20),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_gt() {
-        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
-        let filter = Filter {
-            field: "scores".into(),
-            operator: Operator::Gt,
-            value: Bson::Int32(25),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_gt_no_match() {
-        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
-        let filter = Filter {
-            field: "scores".into(),
-            operator: Operator::Gt,
-            value: Bson::Int32(30),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_lte() {
-        let raw = make_raw(&doc! { "scores": [10, 20, 30] });
-        let filter = Filter {
-            field: "scores".into(),
-            operator: Operator::Lte,
-            value: Bson::Int32(15),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_element_cross_type() {
-        let raw = make_raw(&doc! { "values": [1.5, 2.5, 3.5] });
-        let filter = Filter {
-            field: "values".into(),
-            operator: Operator::Eq,
-            value: Bson::String("2.5".into()),
-        };
-        assert!(raw_matches_filter(&raw, &filter).unwrap());
-    }
-
-    #[test]
-    fn array_empty_no_match() {
-        let raw = make_raw(&doc! { "tags": bson::Bson::Array(vec![]) });
-        let filter = Filter {
-            field: "tags".into(),
-            operator: Operator::Eq,
-            value: Bson::String("anything".into()),
-        };
-        assert!(!raw_matches_filter(&raw, &filter).unwrap());
-    }
-
     // ── is_ttl_expired ──────────────────────────────────────────
 
     #[test]

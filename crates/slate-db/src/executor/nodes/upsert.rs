@@ -17,14 +17,14 @@ use crate::planner::UpsertMode;
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    mode: &'a UpsertMode,
-    indexed_fields: &'a [String],
+    mode: UpsertMode,
+    indexed_fields: Vec<String>,
     source: RawIter<'a>,
     inserted: Rc<Cell<u64>>,
     updated: Rc<Cell<u64>>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
-    let mut paths: Vec<String> = indexed_fields.to_vec();
+    let mut paths: Vec<String> = indexed_fields;
     if !paths.iter().any(|p| p == "ttl") {
         paths.push("ttl".into());
     }
@@ -73,7 +73,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                 inserted.set(inserted.get() + 1);
                 Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
             } else {
-                let written = build_doc(mode, &id_str, new_raw_ref, old_raw)?;
+                let written = build_doc(&mode, &id_str, new_raw_ref, old_raw)?;
                 let written = match written {
                     Some(doc) => doc,
                     None => {
@@ -356,7 +356,7 @@ mod tests {
         }
         impl Transaction for DeleteTracker {
             type Cf = ();
-            fn cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
+            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
                 Ok(())
             }
             fn get<'c>(
@@ -464,7 +464,7 @@ mod tests {
         }
         impl slate_store::Transaction for DeleteTracker {
             type Cf = ();
-            fn cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
+            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
                 Ok(())
             }
             fn get<'c>(
@@ -568,7 +568,7 @@ mod tests {
         }
         impl slate_store::Transaction for DeleteTracker {
             type Cf = ();
-            fn cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
+            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
                 Ok(())
             }
             fn get<'c>(

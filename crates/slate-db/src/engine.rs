@@ -1,5 +1,5 @@
 use bson::RawDocumentBuf;
-use slate_query::{DistinctQuery, FilterGroup, Query};
+use slate_query::{DistinctQuery, Query};
 use slate_store::{Store, Transaction as StoreTxn};
 
 use crate::catalog::Catalog;
@@ -84,8 +84,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::Insert { docs: raw_docs };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let ids = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let ids = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Insert { ids } => ids,
             _ => unreachable!(),
         };
@@ -99,15 +98,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ///
     /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
     /// without materializing the entire result set.
-    pub fn find(&mut self, collection: &str, query: &Query) -> Result<Cursor<'db, '_, S>, DbError> {
+    pub fn find(&self, collection: &str, query: &Query) -> Result<Cursor<'db, '_, S>, DbError> {
         let stmt = planner::Statement::Find(query.clone());
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        Ok(Cursor::new(&self.txn, cf, plan))
+        self.prepare_cursor(collection, stmt)
     }
 
     /// Get a single document by `_id`. Direct key lookup — O(1).
     pub fn find_by_id(
-        &mut self,
+        &self,
         collection: &str,
         id: &str,
         columns: Option<&[&str]>,
@@ -137,7 +135,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Find the first document matching a query.
     pub fn find_one(
-        &mut self,
+        &self,
         collection: &str,
         query: &Query,
     ) -> Result<Option<RawDocumentBuf>, DbError> {
@@ -153,19 +151,19 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn update_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
         upsert: bool,
     ) -> Result<UpdateResult, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
         let mutation = slate_query::parse_mutation(&raw)?;
         let stmt = planner::Statement::Update {
-            filter: filter.clone(),
+            filter: filter_raw,
             mutation,
             limit: Some(1),
         };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let (matched, modified) = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -190,18 +188,18 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn update_many(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
     ) -> Result<UpdateResult, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
         let mutation = slate_query::parse_mutation(&raw)?;
         let stmt = planner::Statement::Update {
-            filter: filter.clone(),
+            filter: filter_raw,
             mutation,
             limit: None,
         };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let (matched, modified) = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -216,16 +214,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn replace_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: impl IntoRawDocumentBuf,
         replacement: impl IntoRawDocumentBuf,
     ) -> Result<UpdateResult, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
         let raw = replacement.into_raw_document_buf()?;
         let stmt = planner::Statement::Replace {
-            filter: filter.clone(),
+            filter: filter_raw,
             replacement: raw,
         };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let (matched, modified) = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let (matched, modified) = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Update { matched, modified } => (matched, modified),
             _ => unreachable!(),
         };
@@ -242,14 +240,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn delete_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: impl IntoRawDocumentBuf,
     ) -> Result<DeleteResult, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
         let stmt = planner::Statement::Delete {
-            filter: filter.clone(),
+            filter: filter_raw,
             limit: Some(1),
         };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let deleted = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
@@ -260,14 +258,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn delete_many(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: impl IntoRawDocumentBuf,
     ) -> Result<DeleteResult, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
         let stmt = planner::Statement::Delete {
-            filter: filter.clone(),
+            filter: filter_raw,
             limit: None,
         };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        let deleted = match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        let deleted = match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
@@ -290,8 +288,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::UpsertMany { docs: raw_docs };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Upsert { inserted, updated } => Ok(UpsertResult { inserted, updated }),
             _ => unreachable!(),
         }
@@ -312,8 +309,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = planner::Statement::MergeMany { docs: raw_docs };
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Upsert { inserted, updated } => Ok(UpsertResult { inserted, updated }),
             _ => unreachable!(),
         }
@@ -323,13 +319,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Count documents matching a filter.
     /// Streams results without materializing all documents into memory.
-    pub fn count(
-        &mut self,
-        collection: &str,
-        filter: Option<&FilterGroup>,
-    ) -> Result<u64, DbError> {
+    pub fn count(&self, collection: &str, filter: Option<RawDocumentBuf>) -> Result<u64, DbError> {
         let query = Query {
-            filter: filter.cloned(),
+            filter,
             sort: vec![],
             skip: None,
             take: None,
@@ -346,13 +338,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Return distinct values for a field, with optional filter and sort.
     pub fn distinct(
-        &mut self,
+        &self,
         collection: &str,
         query: &DistinctQuery,
     ) -> Result<bson::RawBson, DbError> {
         let stmt = planner::Statement::Distinct(query.clone());
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
-        match executor::Executor::new(&self.txn, &cf).execute(&plan)? {
+        match self.execute_statement(collection, &stmt)? {
             ExecutionResult::Rows(mut iter) => match iter.next() {
                 Some(result) => {
                     let opt_val: Option<RawValue> = result?;
@@ -372,10 +363,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Purge expired documents from a collection.
     /// Uses `FlushExpired` which retains the TTL index for efficient scanning.
     pub fn purge_expired(&mut self, collection: &str) -> Result<u64, DbError> {
-        let stmt = planner::Statement::FlushExpired;
-        let (plan, cf) = self.plan_statement(collection, stmt)?;
+        let stmt = planner::Statement::FlushExpired {
+            filter: bson::rawdoc! { "ttl": { "$lt": bson::DateTime::now() } },
+        };
+        let cf = self.collection_cf(collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        let plan = planner::plan(collection, indexed_fields, &stmt)?;
         // Use no-TTL-filter executor so the delete pipeline can read expired docs
-        let deleted = match executor::Executor::new_no_ttl_filter(&self.txn, &cf).execute(&plan)? {
+        let deleted = match executor::Executor::new_no_ttl_filter(&self.txn, &cf).execute(plan)? {
             ExecutionResult::Delete { deleted } => deleted,
             _ => unreachable!(),
         };
@@ -437,7 +433,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// List indexed fields for a collection.
-    pub fn list_indexes(&mut self, collection: &str) -> Result<Vec<String>, DbError> {
+    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>, DbError> {
         let sys = self.txn.cf(SYS_CF)?;
         self.catalog.list_indexes(&self.txn, &sys, collection)
     }
@@ -445,7 +441,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Collection operations ───────────────────────────────────
 
     /// List all known collection names.
-    pub fn list_collections(&mut self) -> Result<Vec<String>, DbError> {
+    pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
         let sys = self.txn.cf(SYS_CF)?;
         self.catalog.list_collections(&self.txn, &sys)
     }
@@ -498,30 +494,67 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Private helpers ─────────────────────────────────────────
 
-    /// Plan a statement. TTL filtering is handled at the executor level
-    /// (Scan and ReadRecord nodes check TTL inline via fast byte-level scan)
-    /// rather than by injecting filter predicates here.
-    fn plan_statement(
-        &mut self,
+    /// Plan, execute, and fully drain a statement. Returns the execution result
+    /// with all iterators consumed — no borrowed data escapes.
+    fn execute_statement(
+        &self,
         collection: &str,
-        statement: planner::Statement,
-    ) -> Result<
-        (
-            planner::PlanNode,
-            <S::Txn<'db> as slate_store::Transaction>::Cf,
-        ),
-        DbError,
-    > {
+        statement: &planner::Statement,
+    ) -> Result<ExecutionResult<'static>, DbError> {
         let cf = self.collection_cf(collection)?;
         let sys = self.txn.cf(SYS_CF)?;
         let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
-        let plan = planner::plan(collection, indexed_fields, statement);
-        Ok((plan, cf))
+        let plan = planner::plan(collection, indexed_fields, statement)?;
+        let result = executor::Executor::new(&self.txn, &cf).execute(plan)?;
+        // Drain the result so no borrowed iterators escape.
+        Ok(match result {
+            ExecutionResult::Delete { deleted } => ExecutionResult::Delete { deleted },
+            ExecutionResult::Update { matched, modified } => {
+                ExecutionResult::Update { matched, modified }
+            }
+            ExecutionResult::Insert { ids } => ExecutionResult::Insert { ids },
+            ExecutionResult::Upsert { inserted, updated } => {
+                ExecutionResult::Upsert { inserted, updated }
+            }
+            ExecutionResult::Rows(iter) => {
+                // Collect rows — used only by distinct() which reads a single value.
+                let mut rows: Vec<Option<executor::RawValue<'static>>> = Vec::new();
+                for item in iter {
+                    let opt_val = item?;
+                    rows.push(opt_val.map(|v| match v {
+                        executor::RawValue::Borrowed(r) => {
+                            executor::RawValue::Owned(exec::to_raw_bson(r).unwrap())
+                        }
+                        executor::RawValue::Owned(b) => executor::RawValue::Owned(b),
+                    }));
+                }
+                ExecutionResult::Rows(Box::new(rows.into_iter().map(Ok)))
+            }
+        })
+    }
+
+    /// Prepare a cursor for a query statement. The Cursor owns the statement
+    /// and defers planning to `iter()`.
+    fn prepare_cursor(
+        &self,
+        collection: &str,
+        statement: planner::Statement,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let cf = self.collection_cf(collection)?;
+        let sys = self.txn.cf(SYS_CF)?;
+        let indexed_fields = self.catalog.list_indexes(&self.txn, &sys, collection)?;
+        Ok(Cursor::new(
+            &self.txn,
+            cf,
+            collection.to_string(),
+            indexed_fields,
+            statement,
+        ))
     }
 
     /// Resolve a collection CF, returning CollectionNotFound if it doesn't exist.
     fn collection_cf(
-        &mut self,
+        &self,
         collection: &str,
     ) -> Result<<S::Txn<'db> as slate_store::Transaction>::Cf, DbError> {
         self.txn

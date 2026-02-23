@@ -2382,6 +2382,7 @@ dependencies = [
  "bson",
  "criterion",
  "rand 0.8.5",
+ "regex",
  "serde",
  "slate-query",
  "slate-store",
@@ -2413,6 +2414,7 @@ name = "slate-query"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "regex",
  "serde",
 ]
 
@@ -2466,6 +2468,7 @@ name = "slate-uniffi"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "serde",
  "serde_json",
  "slate-db",
  "slate-query",

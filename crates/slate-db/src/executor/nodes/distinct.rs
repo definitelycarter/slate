@@ -7,8 +7,8 @@ use crate::executor::exec;
 use crate::executor::field_tree::{FieldTree, walk};
 use crate::executor::{RawIter, RawValue};
 
-pub(crate) fn execute<'a>(field: &'a str, source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
-    let paths = vec![field.to_string()];
+pub(crate) fn execute<'a>(field: String, source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
+    let paths = vec![field];
     let tree = FieldTree::from_paths(&paths);
 
     let mut seen = HashSet::new();

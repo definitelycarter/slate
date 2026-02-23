@@ -1,12 +1,9 @@
-use serde::{Deserialize, Serialize};
-
-use crate::filter::FilterGroup;
 use crate::sort::{Sort, SortDirection};
+use bson::RawDocumentBuf;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Query {
-    pub filter: Option<FilterGroup>,
-    #[serde(default)]
+    pub filter: Option<RawDocumentBuf>,
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
@@ -15,10 +12,10 @@ pub struct Query {
     pub columns: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct DistinctQuery {
     pub field: String,
-    pub filter: Option<FilterGroup>,
+    pub filter: Option<RawDocumentBuf>,
     pub sort: Option<SortDirection>,
     pub skip: Option<usize>,
     pub take: Option<usize>,

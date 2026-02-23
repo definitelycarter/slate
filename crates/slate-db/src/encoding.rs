@@ -176,8 +176,8 @@ pub fn index_key(column: &str, value: &bson::Bson, record_id: &str) -> Vec<u8> {
 }
 
 /// Build a prefix to scan all record IDs for a column+value: `i:{column}\x00{value_bytes}\x00`
-pub fn index_scan_prefix(column: &str, value: &bson::Bson) -> Vec<u8> {
-    let value_bytes = encode_value(value);
+pub fn index_scan_prefix(column: &str, value: bson::raw::RawBsonRef) -> Vec<u8> {
+    let value_bytes = encode_raw_value(value);
     let mut key = Vec::with_capacity(INDEX_PREFIX.len() + column.len() + 1 + value_bytes.len() + 1);
     key.extend_from_slice(INDEX_PREFIX);
     key.extend_from_slice(column.as_bytes());
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn index_scan_prefix_matches_keys() {
-        let prefix = index_scan_prefix("status", &bson::Bson::String("active".into()));
+        let prefix = index_scan_prefix("status", bson::raw::RawBsonRef::String("active"));
         let k1 = index_key("status", &bson::Bson::String("active".into()), "rec-1");
         let k2 = index_key("status", &bson::Bson::String("active".into()), "rec-2");
         let k3 = index_key("status", &bson::Bson::String("rejected".into()), "rec-1");

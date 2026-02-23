@@ -84,16 +84,7 @@ fn query_with_filters() {
     let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
-        "filters": {
-            "logical": "and",
-            "children": [{
-                "condition": {
-                    "field": "status",
-                    "operator": "eq",
-                    "value": "active"
-                }
-            }]
-        }
+        "filters": { "status": "active" }
     });
 
     let req = Request::builder()
@@ -301,16 +292,7 @@ fn delete_data_removes_matching_records() {
     let handler = build_handler(&addr);
 
     let body = serde_json::json!({
-        "filter": {
-            "logical": "and",
-            "children": [{
-                "condition": {
-                    "field": "status",
-                    "operator": "eq",
-                    "value": "rejected"
-                }
-            }]
-        }
+        "filter": { "status": "rejected" }
     });
 
     let req = Request::builder()

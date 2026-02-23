@@ -11,6 +11,7 @@ slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
 serde = { version = "1", features = ["derive"] }
 bson = "2"
+regex = "1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

@@ -10,7 +10,7 @@ use crate::executor::{RawIter, RawValue};
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    replacement: &'a RawDocumentBuf,
+    replacement: RawDocumentBuf,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let replacement_raw = replacement;

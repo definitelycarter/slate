@@ -112,7 +112,7 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
             .iter()
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
             .collect();
-        let mut txn = store.begin(false).unwrap();
+        let txn = store.begin(false).unwrap();
         let cf = txn.cf(CF).unwrap();
         txn.put_batch(&cf, &refs).unwrap();
         txn.commit().unwrap();
@@ -126,7 +126,7 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
     let mut corruption = 0usize;
 
     // Read in batches using multi_get (single txn + cf handle for the whole phase)
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     for batch_idx in 0..num_batches {
         let base = batch_idx * BATCH_SIZE;
@@ -155,7 +155,7 @@ fn bench_store<S: Store>(store: &S, name: &str) -> BenchResult {
 
     // -- Scan phase: prefix scan a subset --
     let scan_start = Instant::now();
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let scan_count: usize = txn.scan_prefix(&cf, b"d:rec:").unwrap().count();
     assert_eq!(scan_count, TOTAL_RECORDS, "scan returned wrong count");
@@ -200,7 +200,7 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
             .iter()
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
             .collect();
-        let mut txn = store.begin(false).unwrap();
+        let txn = store.begin(false).unwrap();
         let cf = txn.cf("stress").unwrap();
         txn.put_batch(&cf, &refs).unwrap();
         txn.commit().unwrap();
@@ -229,7 +229,7 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
                     let key = make_key(id);
 
                     match store.begin(true) {
-                        Ok(mut txn) => match txn.cf("stress") {
+                        Ok(txn) => match txn.cf("stress") {
                             Ok(cf) => match txn.get(&cf, &key) {
                                 Ok(Some(data)) => {
                                     if verify_value(id, &data) {
@@ -274,7 +274,7 @@ fn stress_concurrent<S: Store + Sync>(store: &S, name: &str) {
                     let key = make_key(id);
                     let value = make_value(id);
 
-                    let mut txn = store.begin(false).unwrap();
+                    let txn = store.begin(false).unwrap();
                     let cf = txn.cf("stress").unwrap();
                     txn.put(&cf, &key, &value).unwrap();
                     txn.commit().unwrap();
@@ -307,14 +307,14 @@ fn test_rollback_integrity<S: Store>(store: &S, name: &str) {
     store.create_cf("rollback").unwrap();
 
     // Write some baseline data
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("rollback").unwrap();
     txn.put(&cf, b"key1", b"original").unwrap();
     txn.put(&cf, b"key2", b"original").unwrap();
     txn.commit().unwrap();
 
     // Start a write transaction, modify data, then rollback
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("rollback").unwrap();
     txn.put(&cf, b"key1", b"modified").unwrap();
     txn.delete(&cf, b"key2").unwrap();
@@ -322,7 +322,7 @@ fn test_rollback_integrity<S: Store>(store: &S, name: &str) {
     txn.rollback().unwrap();
 
     // Verify nothing changed
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("rollback").unwrap();
     assert_eq!(&*txn.get(&cf, b"key1").unwrap().unwrap(), b"original");
     assert_eq!(&*txn.get(&cf, b"key2").unwrap().unwrap(), b"original");
@@ -345,18 +345,18 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
     store.create_cf("isolation").unwrap();
 
     // Write initial data
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("isolation").unwrap();
     txn.put(&cf, b"key1", b"v1").unwrap();
     txn.commit().unwrap();
 
     // Reader takes a snapshot
-    let mut reader = store.begin(true).unwrap();
+    let reader = store.begin(true).unwrap();
     let cf = reader.cf("isolation").unwrap();
     assert_eq!(&*reader.get(&cf, b"key1").unwrap().unwrap(), b"v1");
 
     // Writer modifies data after reader started
-    let mut writer = store.begin(false).unwrap();
+    let writer = store.begin(false).unwrap();
     let wcf = writer.cf("isolation").unwrap();
     writer.put(&wcf, b"key1", b"v2").unwrap();
     writer.put(&wcf, b"key2", b"new").unwrap();
@@ -367,7 +367,7 @@ fn test_snapshot_isolation(store: &MemoryStore, name: &str) {
     assert!(reader.get(&cf, b"key2").unwrap().is_none());
 
     // New reader should see new data
-    let mut reader2 = store.begin(true).unwrap();
+    let reader2 = store.begin(true).unwrap();
     let cf2 = reader2.cf("isolation").unwrap();
     assert_eq!(&*reader2.get(&cf2, b"key1").unwrap().unwrap(), b"v2");
     assert_eq!(&*reader2.get(&cf2, b"key2").unwrap().unwrap(), b"new");
@@ -393,7 +393,7 @@ fn test_delete_range_integrity<S: Store>(store: &S, name: &str) {
         .iter()
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("delrange").unwrap();
     txn.put_batch(&cf, &refs).unwrap();
     txn.commit().unwrap();
@@ -406,7 +406,7 @@ fn test_delete_range_integrity<S: Store>(store: &S, name: &str) {
         .unwrap();
 
     // Verify: 0-199 present, 200-799 gone, 800-999 present
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("delrange").unwrap();
     let mut present = 0;
     let mut absent = 0;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult, UpsertResult};
-use slate_query::{DistinctQuery, FilterGroup, Query};
+use slate_query::{Sort, SortDirection};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
@@ -14,11 +14,19 @@ pub enum Request {
     },
     Find {
         collection: String,
-        query: Query,
+        filter: Option<bson::Document>,
+        sort: Vec<Sort>,
+        skip: Option<usize>,
+        take: Option<usize>,
+        columns: Option<Vec<String>>,
     },
     FindOne {
         collection: String,
-        query: Query,
+        filter: Option<bson::Document>,
+        sort: Vec<Sort>,
+        skip: Option<usize>,
+        take: Option<usize>,
+        columns: Option<Vec<String>>,
     },
     FindById {
         collection: String,
@@ -27,31 +35,31 @@ pub enum Request {
     },
     UpdateOne {
         collection: String,
-        filter: FilterGroup,
+        filter: bson::Document,
         update: bson::Document,
         upsert: bool,
     },
     UpdateMany {
         collection: String,
-        filter: FilterGroup,
+        filter: bson::Document,
         update: bson::Document,
     },
     ReplaceOne {
         collection: String,
-        filter: FilterGroup,
+        filter: bson::Document,
         doc: bson::Document,
     },
     DeleteOne {
         collection: String,
-        filter: FilterGroup,
+        filter: bson::Document,
     },
     DeleteMany {
         collection: String,
-        filter: FilterGroup,
+        filter: bson::Document,
     },
     Count {
         collection: String,
-        filter: Option<FilterGroup>,
+        filter: Option<bson::Document>,
     },
     CreateIndex {
         collection: String,
@@ -73,7 +81,11 @@ pub enum Request {
     },
     Distinct {
         collection: String,
-        query: DistinctQuery,
+        field: String,
+        filter: Option<bson::Document>,
+        sort: Option<SortDirection>,
+        skip: Option<usize>,
+        take: Option<usize>,
     },
     UpsertMany {
         collection: String,

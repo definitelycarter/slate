@@ -13,12 +13,12 @@ const CF: &str = "test";
 #[test]
 fn put_and_get() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"value1");
@@ -27,7 +27,7 @@ fn put_and_get() {
 #[test]
 fn get_missing_key_returns_none() {
     let store = mem_store();
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"nonexistent").unwrap();
     assert!(result.is_none());
@@ -36,17 +36,17 @@ fn get_missing_key_returns_none() {
 #[test]
 fn put_and_delete() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.delete(&cf, b"key1").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"key1").unwrap();
     assert!(result.is_none());
@@ -55,7 +55,7 @@ fn put_and_delete() {
 #[test]
 fn put_batch() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put_batch(
         &cf,
@@ -68,7 +68,7 @@ fn put_batch() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     assert_eq!(
         &*txn.get(&cf, b"accounts:1:email").unwrap().unwrap(),
@@ -87,7 +87,7 @@ fn put_batch() {
 #[test]
 fn scan_prefix_returns_matching_pairs() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
@@ -95,7 +95,7 @@ fn scan_prefix_returns_matching_pairs() {
     txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(&cf, b"accounts:1:")
@@ -112,12 +112,12 @@ fn scan_prefix_returns_matching_pairs() {
 #[test]
 fn scan_prefix_no_matches() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(&cf, b"contacts:")
@@ -130,7 +130,7 @@ fn scan_prefix_no_matches() {
 #[test]
 fn scan_prefix_broader() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
@@ -139,7 +139,7 @@ fn scan_prefix_broader() {
     txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix(&cf, b"accounts:")
@@ -152,7 +152,7 @@ fn scan_prefix_broader() {
 #[test]
 fn scan_prefix_rev_returns_reverse_order() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.put(&cf, b"accounts:1:name", b"Alice").unwrap();
@@ -160,7 +160,7 @@ fn scan_prefix_rev_returns_reverse_order() {
     txn.put(&cf, b"other:1:foo", b"bar").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix_rev(&cf, b"accounts:1:")
@@ -178,12 +178,12 @@ fn scan_prefix_rev_returns_reverse_order() {
 #[test]
 fn scan_prefix_rev_no_matches() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"accounts:1:email", b"a@test.com").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let entries: Vec<_> = txn
         .scan_prefix_rev(&cf, b"contacts:")
@@ -196,7 +196,7 @@ fn scan_prefix_rev_no_matches() {
 #[test]
 fn read_only_rejects_put() {
     let store = mem_store();
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.put(&cf, b"key1", b"value1");
     assert!(result.is_err());
@@ -205,7 +205,7 @@ fn read_only_rejects_put() {
 #[test]
 fn read_only_rejects_put_batch() {
     let store = mem_store();
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.put_batch(&cf, &[(b"key1" as &[u8], b"value1" as &[u8])]);
     assert!(result.is_err());
@@ -214,7 +214,7 @@ fn read_only_rejects_put_batch() {
 #[test]
 fn read_only_rejects_delete() {
     let store = mem_store();
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.delete(&cf, b"key1");
     assert!(result.is_err());
@@ -223,17 +223,17 @@ fn read_only_rejects_delete() {
 #[test]
 fn overwrite_key() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"old").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"new").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"new");
@@ -242,12 +242,12 @@ fn overwrite_key() {
 #[test]
 fn rollback_discards_writes() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.rollback().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"key1").unwrap();
     assert!(result.is_none());
@@ -256,18 +256,18 @@ fn rollback_discards_writes() {
 #[test]
 fn rollback_does_not_affect_committed_data() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"key2", b"value2").unwrap();
     txn.delete(&cf, b"key1").unwrap();
     txn.rollback().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     assert!(txn.get(&cf, b"key1").unwrap().is_some());
     assert!(txn.get(&cf, b"key2").unwrap().is_none());
@@ -276,12 +276,12 @@ fn rollback_does_not_affect_committed_data() {
 #[test]
 fn empty_value() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"index:key", b"").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let result = txn.get(&cf, b"index:key").unwrap().unwrap();
     assert_eq!(&*result, b"");
@@ -294,12 +294,12 @@ fn create_and_use_cf() {
     let store = MemoryStore::new();
     store.create_cf("accounts").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("accounts").unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("accounts").unwrap();
     let result = txn.get(&cf, b"key1").unwrap().unwrap();
     assert_eq!(&*result, b"value1");
@@ -311,14 +311,14 @@ fn cf_isolation() {
     store.create_cf("cf_a").unwrap();
     store.create_cf("cf_b").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf_a = txn.cf("cf_a").unwrap();
     let cf_b = txn.cf("cf_b").unwrap();
     txn.put(&cf_a, b"key1", b"value_a").unwrap();
     txn.put(&cf_b, b"key1", b"value_b").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf_a = txn.cf("cf_a").unwrap();
     let cf_b = txn.cf("cf_b").unwrap();
     assert_eq!(&*txn.get(&cf_a, b"key1").unwrap().unwrap(), b"value_a");
@@ -329,7 +329,7 @@ fn cf_isolation() {
 fn get_on_missing_cf_returns_error() {
     let store = MemoryStore::new();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let result = txn.cf("nonexistent");
     assert!(result.is_err());
 }
@@ -339,14 +339,14 @@ fn drop_cf_removes_data() {
     let store = MemoryStore::new();
     store.create_cf("temp").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("temp").unwrap();
     txn.put(&cf, b"key1", b"value1").unwrap();
     txn.commit().unwrap();
 
     store.drop_cf("temp").unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let result = txn.cf("temp");
     assert!(result.is_err()); // CF no longer exists
 }
@@ -356,7 +356,7 @@ fn delete_range_clears_matching_keys() {
     let store = MemoryStore::new();
     store.create_cf("data").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("data").unwrap();
     txn.put(&cf, b"a", b"1").unwrap();
     txn.put(&cf, b"b", b"2").unwrap();
@@ -370,7 +370,7 @@ fn delete_range_clears_matching_keys() {
         .delete_range("data", b"b".to_vec()..b"d".to_vec())
         .unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("data").unwrap();
     assert!(txn.get(&cf, b"a").unwrap().is_some());
     assert!(txn.get(&cf, b"b").unwrap().is_none());
@@ -384,7 +384,7 @@ fn delete_range_unbounded_clears_all() {
     let store = MemoryStore::new();
     store.create_cf("cache").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("cache").unwrap();
     txn.put(&cf, b"x", b"1").unwrap();
     txn.put(&cf, b"y", b"2").unwrap();
@@ -393,7 +393,7 @@ fn delete_range_unbounded_clears_all() {
 
     store.delete_range("cache", ..).unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("cache").unwrap();
     assert!(txn.get(&cf, b"x").unwrap().is_none());
     assert!(txn.get(&cf, b"y").unwrap().is_none());
@@ -405,7 +405,7 @@ fn delete_range_inclusive_end() {
     let store = MemoryStore::new();
     store.create_cf("data").unwrap();
 
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf("data").unwrap();
     txn.put(&cf, b"a", b"1").unwrap();
     txn.put(&cf, b"b", b"2").unwrap();
@@ -417,7 +417,7 @@ fn delete_range_inclusive_end() {
         .delete_range("data", b"a".to_vec()..=b"b".to_vec())
         .unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf("data").unwrap();
     assert!(txn.get(&cf, b"a").unwrap().is_none());
     assert!(txn.get(&cf, b"b").unwrap().is_none());
@@ -427,14 +427,14 @@ fn delete_range_inclusive_end() {
 #[test]
 fn multi_get_returns_matching_values() {
     let store = mem_store();
-    let mut txn = store.begin(false).unwrap();
+    let txn = store.begin(false).unwrap();
     let cf = txn.cf(CF).unwrap();
     txn.put(&cf, b"k1", b"v1").unwrap();
     txn.put(&cf, b"k2", b"v2").unwrap();
     txn.put(&cf, b"k3", b"v3").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = store.begin(true).unwrap();
+    let txn = store.begin(true).unwrap();
     let cf = txn.cf(CF).unwrap();
     let keys: Vec<&[u8]> = vec![b"k1", b"k2", b"missing", b"k3"];
     let results = txn.multi_get(&cf, &keys).unwrap();

@@ -9,7 +9,7 @@ use crate::executor::raw_bson::skip_bson_value;
 use crate::executor::{RawIter, RawValue};
 
 pub(crate) fn execute<'a>(
-    columns: &'a Option<Vec<String>>,
+    columns: Option<Vec<String>>,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let tree = columns.as_ref().map(|cols| FieldTree::from_paths(cols));

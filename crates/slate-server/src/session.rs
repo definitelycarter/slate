@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use slate_db::Database;
+use slate_query::{DistinctQuery, Query};
 use slate_store::Store;
 
 use crate::protocol::{Request, Response};
@@ -24,25 +25,65 @@ impl<S: Store> Session<S> {
                 let results = txn.insert_many(&collection, docs)?;
                 Ok(Response::Inserts(results))
             }),
-            Request::Find { collection, query } => self.read(|txn| {
-                let raw_records: Vec<_> =
-                    txn.find(&collection, &query)?
+            Request::Find {
+                collection,
+                filter,
+                sort,
+                skip,
+                take,
+                columns,
+            } => {
+                let raw_filter = match doc_to_raw_optional(filter) {
+                    Ok(f) => f,
+                    Err(resp) => return resp,
+                };
+                let query = Query {
+                    filter: raw_filter,
+                    sort,
+                    skip,
+                    take,
+                    columns,
+                };
+                self.read(|txn| {
+                    let raw_records: Vec<_> = txn
+                        .find(&collection, &query)?
                         .iter()?
                         .collect::<Result<Vec<_>, _>>()?;
-                let records: Result<Vec<bson::Document>, _> =
-                    raw_records.iter().map(|r| r.to_document()).collect();
-                let records = records.map_err(slate_db::DbError::from)?;
-                Ok(Response::Records(records))
-            }),
-            Request::FindOne { collection, query } => self.read(|txn| {
-                let raw = txn.find_one(&collection, &query)?;
-                let record = raw
-                    .as_ref()
-                    .map(|r| r.to_document())
-                    .transpose()
-                    .map_err(slate_db::DbError::from)?;
-                Ok(Response::Record(record))
-            }),
+                    let records: Result<Vec<bson::Document>, _> =
+                        raw_records.iter().map(|r| r.to_document()).collect();
+                    let records = records.map_err(slate_db::DbError::from)?;
+                    Ok(Response::Records(records))
+                })
+            }
+            Request::FindOne {
+                collection,
+                filter,
+                sort,
+                skip,
+                take,
+                columns,
+            } => {
+                let raw_filter = match doc_to_raw_optional(filter) {
+                    Ok(f) => f,
+                    Err(resp) => return resp,
+                };
+                let query = Query {
+                    filter: raw_filter,
+                    sort,
+                    skip,
+                    take,
+                    columns,
+                };
+                self.read(|txn| {
+                    let raw = txn.find_one(&collection, &query)?;
+                    let record = raw
+                        .as_ref()
+                        .map(|r| r.to_document())
+                        .transpose()
+                        .map_err(slate_db::DbError::from)?;
+                    Ok(Response::Record(record))
+                })
+            }
             Request::FindById {
                 collection,
                 id,
@@ -87,10 +128,16 @@ impl<S: Store> Session<S> {
                 let result = txn.delete_many(&collection, &filter)?;
                 Ok(Response::Delete(result))
             }),
-            Request::Count { collection, filter } => self.read(|txn| {
-                let count = txn.count(&collection, filter.as_ref())?;
-                Ok(Response::Count(count))
-            }),
+            Request::Count { collection, filter } => {
+                let raw_filter = match doc_to_raw_optional(filter) {
+                    Ok(f) => f,
+                    Err(resp) => return resp,
+                };
+                self.read(|txn| {
+                    let count = txn.count(&collection, raw_filter)?;
+                    Ok(Response::Count(count))
+                })
+            }
             Request::CreateIndex { collection, field } => self.write(|txn| {
                 txn.create_index(&collection, &field)?;
                 Ok(Response::Ok)
@@ -115,10 +162,30 @@ impl<S: Store> Session<S> {
                 txn.drop_collection(&collection)?;
                 Ok(Response::Ok)
             }),
-            Request::Distinct { collection, query } => self.read(|txn| {
-                let values = txn.distinct(&collection, &query)?;
-                Ok(Response::Values(values))
-            }),
+            Request::Distinct {
+                collection,
+                field,
+                filter,
+                sort,
+                skip,
+                take,
+            } => {
+                let raw_filter = match doc_to_raw_optional(filter) {
+                    Ok(f) => f,
+                    Err(resp) => return resp,
+                };
+                let query = DistinctQuery {
+                    field,
+                    filter: raw_filter,
+                    sort,
+                    skip,
+                    take,
+                };
+                self.read(|txn| {
+                    let values = txn.distinct(&collection, &query)?;
+                    Ok(Response::Values(values))
+                })
+            }
             Request::UpsertMany { collection, docs } => self.write(|txn| {
                 let result = txn.upsert_many(&collection, docs)?;
                 Ok(Response::Upsert(result))
@@ -157,5 +224,17 @@ impl<S: Store> Session<S> {
             },
             Err(e) => Response::Error(e.to_string()),
         }
+    }
+}
+
+/// Convert an optional `bson::Document` filter into `Option<RawDocumentBuf>`.
+fn doc_to_raw_optional(
+    doc: Option<bson::Document>,
+) -> Result<Option<bson::RawDocumentBuf>, Response> {
+    match doc {
+        Some(d) => bson::RawDocumentBuf::from_document(&d)
+            .map(Some)
+            .map_err(|e| Response::Error(e.to_string())),
+        None => Ok(None),
     }
 }

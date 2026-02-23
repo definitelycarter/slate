@@ -3,7 +3,7 @@ use crate::encoding;
 use crate::planner::IndexFilter;
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
-use slate_query::{Filter, FilterGroup, FilterNode, LogicalOp, Operator, Sort, SortDirection};
+use slate_query::{Expression, LogicalOp, Sort, SortDirection};
 use slate_store::{Store, StoreError, Transaction};
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -18,7 +18,7 @@ struct NoopTransaction;
 impl Transaction for NoopTransaction {
     type Cf = ();
 
-    fn cf(&mut self, _name: &str) -> Result<Self::Cf, StoreError> {
+    fn cf(&self, _name: &str) -> Result<Self::Cf, StoreError> {
         panic!("NoopTransaction::cf called");
     }
     fn get<'c>(&self, _cf: &'c Self::Cf, _key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
@@ -95,7 +95,7 @@ impl MockTransaction {
 impl Transaction for MockTransaction {
     type Cf = ();
 
-    fn cf(&mut self, _name: &str) -> Result<Self::Cf, StoreError> {
+    fn cf(&self, _name: &str) -> Result<Self::Cf, StoreError> {
         Ok(())
     }
     fn get<'c>(&self, _cf: &'c Self::Cf, _key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
@@ -209,7 +209,7 @@ fn values_yields_all_docs() {
             rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
         ],
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "2");
@@ -226,14 +226,7 @@ fn values_yields_all_docs() {
 fn filter_on_values() {
     let (txn, cf) = noop_executor();
     let plan = PlanNode::Filter {
-        predicate: FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: bson::Bson::String("active".into()),
-            })],
-        },
+        predicate: Expression::Eq("status", RawBsonRef::String("active")),
         input: Box::new(PlanNode::Values {
             docs: vec![
                 rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
@@ -242,7 +235,7 @@ fn filter_on_values() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
@@ -252,14 +245,7 @@ fn filter_on_values() {
 fn filter_empty_result() {
     let (txn, cf) = noop_executor();
     let plan = PlanNode::Filter {
-        predicate: FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: bson::Bson::String("nope".into()),
-            })],
-        },
+        predicate: Expression::Eq("status", RawBsonRef::String("nope")),
         input: Box::new(PlanNode::Values {
             docs: vec![
                 rawdoc! { "_id": "1", "name": "Alice", "status": "active" },
@@ -267,7 +253,7 @@ fn filter_empty_result() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 0);
 }
 
@@ -287,7 +273,7 @@ fn sort_on_values() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2"); // Bob: 90
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3"); // Charlie: 80
@@ -309,7 +295,7 @@ fn limit_skip_take() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
@@ -328,7 +314,7 @@ fn limit_take_only() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
 }
@@ -345,7 +331,7 @@ fn projection_on_values() {
             ],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     let doc0 = rows[0].as_ref().unwrap();
     assert_eq!(doc0.get_str("_id").unwrap(), "1");
@@ -371,7 +357,7 @@ fn distinct_on_values() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Rows(mut iter) => {
             let val = iter.next().unwrap().unwrap();
@@ -407,14 +393,7 @@ fn composed_filter_sort_limit() {
                 direction: SortDirection::Desc,
             }],
             input: Box::new(PlanNode::Filter {
-                predicate: FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: bson::Bson::String("active".into()),
-                    })],
-                },
+                predicate: Expression::Eq("status", RawBsonRef::String("active")),
                 input: Box::new(PlanNode::Values {
                     docs: vec![
                         rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
@@ -426,7 +405,7 @@ fn composed_filter_sort_limit() {
             }),
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     // Filter: removes Bob (inactive) → Alice(70), Charlie(90), Diana(80)
     // Sort desc by score: Charlie(90), Diana(80), Alice(70)
     // Limit take=2: Charlie, Diana
@@ -448,7 +427,7 @@ fn delete_removes_records() {
             ],
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Delete { deleted } => assert_eq!(deleted, 2),
         _ => panic!("expected Delete"),
@@ -471,7 +450,7 @@ fn delete_index_removes_index_keys() {
             ],
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     // DeleteIndex passes through as Rows
     let rows = collect_docs(result);
     assert_eq!(rows.len(), 2);
@@ -498,7 +477,7 @@ fn delete_index_with_ttl() {
             docs: vec![rawdoc! { "_id": "1", "status": "active", "ttl": dt }],
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 1);
 
     let deletes = txn.deletes.borrow();
@@ -527,7 +506,7 @@ fn update_writes_merged_doc() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Update { matched, modified } => {
             assert_eq!(matched, 1);
@@ -558,7 +537,7 @@ fn update_unchanged_skips_write() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Update { matched, modified } => {
             assert_eq!(matched, 1);
@@ -581,7 +560,7 @@ fn replace_writes_replacement() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Update { matched, modified } => {
             assert_eq!(matched, 1);
@@ -609,7 +588,7 @@ fn insert_index_writes_keys() {
             ],
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Update { matched, modified } => {
             assert_eq!(matched, 2);
@@ -643,7 +622,7 @@ fn full_delete_pipeline() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Delete { deleted } => assert_eq!(deleted, 2),
         _ => panic!("expected Delete"),
@@ -682,7 +661,7 @@ fn full_update_pipeline() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Update { matched, modified } => {
             assert_eq!(matched, 1);
@@ -748,13 +727,13 @@ fn seeded_db() -> Database<MemoryStore> {
 #[test]
 fn scan_yields_all_records() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::Scan {
         collection: "test".into(),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     // Scan yields in key order (record_key is "d:{id}")
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
@@ -766,19 +745,19 @@ fn scan_yields_all_records() {
 #[test]
 fn index_scan_eq_filter() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "status".into(),
-        filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+        filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&"1".to_string())); // Alice
     assert!(ids.contains(&"3".to_string())); // Charlie
@@ -787,7 +766,7 @@ fn index_scan_eq_filter() {
 #[test]
 fn index_scan_full_column() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // Scan entire "score" index (filter: None) in ascending order
@@ -800,7 +779,7 @@ fn index_scan_full_column() {
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     // score order: 70 (id=1), 80 (id=3), 90 (id=2)
     assert_eq!(ids, vec!["1", "3", "2"]);
 }
@@ -808,7 +787,7 @@ fn index_scan_full_column() {
 #[test]
 fn index_scan_desc() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
@@ -820,7 +799,7 @@ fn index_scan_desc() {
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     // Descending score: 90 (id=2), 80 (id=3), 70 (id=1)
     assert_eq!(ids, vec!["2", "3", "1"]);
 }
@@ -828,7 +807,7 @@ fn index_scan_desc() {
 #[test]
 fn index_scan_with_limit() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
@@ -840,14 +819,14 @@ fn index_scan_with_limit() {
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
 #[test]
 fn index_merge_or() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // OR: status="active" | status="inactive" → all 3 records
@@ -856,7 +835,7 @@ fn index_merge_or() {
         lhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -865,14 +844,14 @@ fn index_merge_or() {
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("inactive".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("inactive"))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
             covered: false,
         }),
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids.len(), 3);
     // Union: all three IDs present (deduped)
     assert!(ids.contains(&"1".to_string()));
@@ -883,7 +862,7 @@ fn index_merge_or() {
 #[test]
 fn index_merge_and() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // AND: status="active" & score=80 → only Charlie (id=3)
@@ -892,7 +871,7 @@ fn index_merge_and() {
         lhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -901,21 +880,21 @@ fn index_merge_and() {
         rhs: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "score".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::Int32(80))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::Int32(80))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
             covered: false,
         }),
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["3"]); // Charlie: active AND score=80
 }
 
 #[test]
 fn read_record_fetches_docs_from_index_scan() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // ReadRecord wrapping an IndexScan — should fetch actual documents
@@ -923,14 +902,14 @@ fn read_record_fetches_docs_from_index_scan() {
         input: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
             covered: false,
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     // Verify we got full documents back (not just IDs)
     let names: Vec<&str> = rows
@@ -947,27 +926,27 @@ fn read_record_skips_dangling_index() {
 
     // Delete record "2" but leave its index entries (dangling index)
     {
-        let mut txn = db.store().begin(false).unwrap();
+        let txn = db.store().begin(false).unwrap();
         let cf = txn.cf("test").unwrap();
         txn.delete(&cf, &encoding::record_key("2")).unwrap();
         txn.commit().unwrap();
     }
 
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::ReadRecord {
         input: Box::new(PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("inactive".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("inactive"))),
             direction: SortDirection::Asc,
             limit: None,
             complete_groups: false,
             covered: false,
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     // Index still has Bob's entry but record is gone → skipped
     assert_eq!(rows.len(), 0);
 }
@@ -975,7 +954,7 @@ fn read_record_skips_dangling_index() {
 #[test]
 fn read_record_over_scan() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // ReadRecord wrapping Scan — passthrough path (Scan already yields docs)
@@ -984,7 +963,7 @@ fn read_record_over_scan() {
             collection: "test".into(),
         }),
     };
-    let rows = collect_docs(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
 }
@@ -1007,7 +986,7 @@ fn upsert_replace_insert_new() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Upsert { inserted, updated } => {
             assert_eq!(inserted, 1);
@@ -1037,7 +1016,7 @@ fn upsert_merge_insert_new() {
             }),
         }),
     };
-    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
     match result {
         ExecutionResult::Upsert { inserted, updated } => {
             assert_eq!(inserted, 1);
@@ -1128,14 +1107,7 @@ fn upsert_replace_cleans_old_indexes() {
 
     // Query by old index value should not find Alice
     let query = slate_query::Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: bson::Bson::String("active".into()),
-            })],
-        }),
+        filter: Some(rawdoc! { "status": "active" }),
         sort: vec![],
         skip: None,
         take: None,
@@ -1160,14 +1132,7 @@ fn upsert_replace_cleans_old_indexes() {
 
     // Query by new index value should find Alice
     let query2 = slate_query::Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::Eq,
-                value: bson::Bson::String("archived".into()),
-            })],
-        }),
+        filter: Some(rawdoc! { "status": "archived" }),
         sort: vec![],
         skip: None,
         take: None,
@@ -1193,87 +1158,87 @@ fn upsert_replace_cleans_old_indexes() {
 #[test]
 fn index_scan_gt() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score > 70 → Bob(90), Charlie(80)
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Gt(bson::Bson::Int32(70))),
+        filter: Some(IndexFilter::Gt(RawBsonRef::Int32(70))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["3", "2"]); // score 80, 90
 }
 
 #[test]
 fn index_scan_gte() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score >= 80 → Charlie(80), Bob(90)
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Gte(bson::Bson::Int32(80))),
+        filter: Some(IndexFilter::Gte(RawBsonRef::Int32(80))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["3", "2"]); // score 80, 90
 }
 
 #[test]
 fn index_scan_lt() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score < 90 → Alice(70), Charlie(80)
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Lt(bson::Bson::Int32(90))),
+        filter: Some(IndexFilter::Lt(RawBsonRef::Int32(90))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
 #[test]
 fn index_scan_lte() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score <= 80 → Alice(70), Charlie(80)
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Lte(bson::Bson::Int32(80))),
+        filter: Some(IndexFilter::Lte(RawBsonRef::Int32(80))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
 #[test]
 fn index_scan_range() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score > 70 AND score < 90 → Charlie(80) only
@@ -1282,11 +1247,11 @@ fn index_scan_range() {
         column: "score".into(),
         filter: Some(IndexFilter::Range {
             lower: IndexBound {
-                value: bson::Bson::Int32(70),
+                value: RawBsonRef::Int32(70),
                 inclusive: false,
             },
             upper: IndexBound {
-                value: bson::Bson::Int32(90),
+                value: RawBsonRef::Int32(90),
                 inclusive: false,
             },
         }),
@@ -1295,14 +1260,14 @@ fn index_scan_range() {
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["3"]); // score 80 only
 }
 
 #[test]
 fn index_scan_range_desc() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score >= 70 AND score <= 90, descending
@@ -1311,11 +1276,11 @@ fn index_scan_range_desc() {
         column: "score".into(),
         filter: Some(IndexFilter::Range {
             lower: IndexBound {
-                value: bson::Bson::Int32(70),
+                value: RawBsonRef::Int32(70),
                 inclusive: true,
             },
             upper: IndexBound {
-                value: bson::Bson::Int32(90),
+                value: RawBsonRef::Int32(90),
                 inclusive: true,
             },
         }),
@@ -1324,66 +1289,66 @@ fn index_scan_range_desc() {
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["2", "3", "1"]); // descending: 90, 80, 70
 }
 
 #[test]
 fn index_scan_range_with_limit() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score >= 70, limit 2
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Gte(bson::Bson::Int32(70))),
+        filter: Some(IndexFilter::Gte(RawBsonRef::Int32(70))),
         direction: SortDirection::Asc,
         limit: Some(2),
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
 #[test]
 fn index_scan_range_empty_result() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score > 100 → nothing
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Gt(bson::Bson::Int32(100))),
+        filter: Some(IndexFilter::Gt(RawBsonRef::Int32(100))),
         direction: SortDirection::Asc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert!(ids.is_empty());
 }
 
 #[test]
 fn index_scan_gt_desc() {
     let db = seeded_db();
-    let mut txn = db.store().begin(true).unwrap();
+    let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
     // score > 70, descending → Bob(90), Charlie(80)
     let plan = PlanNode::IndexScan {
         collection: "test".into(),
         column: "score".into(),
-        filter: Some(IndexFilter::Gt(bson::Bson::Int32(70))),
+        filter: Some(IndexFilter::Gt(RawBsonRef::Int32(70))),
         direction: SortDirection::Desc,
         limit: None,
         complete_groups: false,
         covered: false,
     };
-    let ids = collect_ids(Executor::new(&txn, &cf).execute(&plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(ids, vec!["2", "3"]); // descending: 90, 80
 }

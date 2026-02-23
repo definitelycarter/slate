@@ -86,7 +86,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         }
     }
 
-    pub fn execute(&self, node: &'c PlanNode) -> Result<ExecutionResult<'c>, DbError> {
+    pub fn execute(&self, node: PlanNode<'c>) -> Result<ExecutionResult<'c>, DbError> {
         match node {
             PlanNode::Delete { .. } => {
                 let iter = self.execute_node(node)?;
@@ -97,7 +97,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 }
                 Ok(ExecutionResult::Delete { deleted })
             }
-            PlanNode::InsertIndex { input, .. }
+            PlanNode::InsertIndex { ref input, .. }
                 if matches!(**input, PlanNode::InsertRecord { .. }) =>
             {
                 let iter = self.execute_node(node)?;
@@ -113,7 +113,9 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 }
                 Ok(ExecutionResult::Insert { ids })
             }
-            PlanNode::InsertIndex { input, .. } if matches!(**input, PlanNode::Upsert { .. }) => {
+            PlanNode::InsertIndex { ref input, .. }
+                if matches!(**input, PlanNode::Upsert { .. }) =>
+            {
                 let inserted = Rc::new(Cell::new(0u64));
                 let updated = Rc::new(Cell::new(0u64));
                 let iter = self.execute_upsert_pipeline(node, &inserted, &updated)?;
@@ -148,7 +150,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
     /// Execute the full upsert pipeline, threading shared counters through the Upsert node.
     fn execute_upsert_pipeline(
         &self,
-        node: &'c PlanNode,
+        node: PlanNode<'c>,
         inserted: &Rc<Cell<u64>>,
         updated: &Rc<Cell<u64>>,
     ) -> Result<RawIter<'c>, DbError> {
@@ -157,7 +159,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 indexed_fields,
                 input,
             } => {
-                let source = self.execute_upsert_pipeline(input, inserted, updated)?;
+                let source = self.execute_upsert_pipeline(*input, inserted, updated)?;
                 nodes::insert_index::execute(self.txn, self.cf, indexed_fields, source)
             }
             PlanNode::Upsert {
@@ -165,7 +167,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 indexed_fields,
                 input,
             } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::upsert::execute(
                     self.txn,
                     self.cf,
@@ -181,27 +183,27 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         }
     }
 
-    fn execute_node(&self, node: &'c PlanNode) -> Result<RawIter<'c>, DbError> {
+    fn execute_node(&self, node: PlanNode<'c>) -> Result<RawIter<'c>, DbError> {
         match node {
             PlanNode::Values { docs } => nodes::values::execute(docs),
             PlanNode::Projection { columns, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::projection::execute(columns, source)
             }
             PlanNode::Limit { skip, take, input } => {
-                let source = self.execute_node(input)?;
-                nodes::limit::execute(*skip, *take, source)
+                let source = self.execute_node(*input)?;
+                nodes::limit::execute(skip, take, source)
             }
             PlanNode::Sort { sorts, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::sort::execute(sorts, source)
             }
             PlanNode::Distinct { field, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::distinct::execute(field, source)
             }
             PlanNode::Filter { predicate, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::filter::execute(predicate, source)
             }
             PlanNode::Scan { .. } => nodes::scan::execute(self.txn, self.cf, self.now_millis),
@@ -218,49 +220,49 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 self.cf,
                 column,
                 filter.as_ref(),
-                *direction,
-                *limit,
-                *complete_groups,
-                *covered,
+                direction,
+                limit,
+                complete_groups,
+                covered,
                 self.now_millis,
             ),
             PlanNode::IndexMerge { logical, lhs, rhs } => {
-                let left = self.execute_node(lhs)?;
-                let right = self.execute_node(rhs)?;
+                let left = self.execute_node(*lhs)?;
+                let right = self.execute_node(*rhs)?;
                 nodes::index_merge::execute(logical, left, right)
             }
             PlanNode::ReadRecord { input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::read_record::execute(self.txn, self.cf, source, self.now_millis)
             }
             PlanNode::Delete { input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::delete::execute(self.txn, self.cf, source)
             }
             PlanNode::Update { mutation, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::mutate::execute(self.txn, self.cf, mutation, source)
             }
             PlanNode::Replace { replacement, input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::replace::execute(self.txn, self.cf, replacement, source)
             }
             PlanNode::InsertRecord { input } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::insert_record::execute(self.txn, self.cf, source)
             }
             PlanNode::InsertIndex {
                 indexed_fields,
                 input,
             } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::insert_index::execute(self.txn, self.cf, indexed_fields, source)
             }
             PlanNode::DeleteIndex {
                 indexed_fields,
                 input,
             } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 nodes::delete_index::execute(self.txn, self.cf, indexed_fields, source)
             }
             PlanNode::Upsert {
@@ -268,7 +270,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 indexed_fields,
                 input,
             } => {
-                let source = self.execute_node(input)?;
+                let source = self.execute_node(*input)?;
                 // Standalone execute_node — counters are discarded.
                 let inserted = Rc::new(Cell::new(0u64));
                 let updated = Rc::new(Cell::new(0u64));

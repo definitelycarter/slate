@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::Rng;
@@ -20,7 +21,7 @@ struct NoopTransaction;
 impl Transaction for NoopTransaction {
     type Cf = ();
 
-    fn cf(&mut self, _name: &str) -> Result<Self::Cf, StoreError> {
+    fn cf(&self, _name: &str) -> Result<Self::Cf, StoreError> {
         panic!("NoopTransaction::cf called");
     }
     fn get<'c>(&self, _cf: &'c Self::Cf, _key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
@@ -136,7 +137,7 @@ fn bench_values(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -155,7 +156,7 @@ fn bench_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("select", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
 
         let plan_passthrough = PlanNode::Projection {
@@ -169,7 +170,7 @@ fn bench_projection(c: &mut Criterion) {
             |b, plan| {
                 let txn = NoopTransaction;
                 let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
             },
         );
     }
@@ -189,7 +190,7 @@ fn bench_limit(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &plan, |b, plan| {
         let txn = NoopTransaction;
         let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
     });
 
     let plan_take = PlanNode::Limit {
@@ -201,7 +202,7 @@ fn bench_limit(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("take", 10_000), &plan_take, |b, plan| {
         let txn = NoopTransaction;
         let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
     });
 
     group.finish();
@@ -223,7 +224,7 @@ fn bench_sort(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("single", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
 
         let plan_multi = PlanNode::Sort {
@@ -243,7 +244,7 @@ fn bench_sort(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("multi", n), &plan_multi, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -265,7 +266,7 @@ fn bench_distinct(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("low_card", n), &plan, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
 
         let plan_sort = PlanNode::Sort {
@@ -285,7 +286,7 @@ fn bench_distinct(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("sorted", n), &plan_sort, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
 
         let plan_sort_hc = PlanNode::Sort {
@@ -308,7 +309,7 @@ fn bench_distinct(c: &mut Criterion) {
             |b, plan| {
                 let txn = NoopTransaction;
                 let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
             },
         );
     }
@@ -321,46 +322,28 @@ fn bench_filter(c: &mut Criterion) {
         let docs = generate_docs(n);
 
         let plan_eq = PlanNode::Filter {
-            predicate: slate_query::FilterGroup {
-                logical: slate_query::LogicalOp::And,
-                children: vec![slate_query::FilterNode::Condition(slate_query::Filter {
-                    field: "status".into(),
-                    operator: slate_query::Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            },
+            predicate: Expression::Eq("status", RawBsonRef::String("active")),
             input: Box::new(PlanNode::Values { docs: docs.clone() }),
         };
 
         group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
 
         let plan_and = PlanNode::Filter {
-            predicate: slate_query::FilterGroup {
-                logical: slate_query::LogicalOp::And,
-                children: vec![
-                    slate_query::FilterNode::Condition(slate_query::Filter {
-                        field: "status".into(),
-                        operator: slate_query::Operator::Eq,
-                        value: bson::Bson::String("active".into()),
-                    }),
-                    slate_query::FilterNode::Condition(slate_query::Filter {
-                        field: "contacts_count".into(),
-                        operator: slate_query::Operator::Gt,
-                        value: bson::Bson::Int32(50),
-                    }),
-                ],
-            },
+            predicate: Expression::And(vec![
+                Expression::Eq("status", RawBsonRef::String("active")),
+                Expression::Gt("contacts_count", RawBsonRef::Int32(50)),
+            ]),
             input: Box::new(PlanNode::Values { docs }),
         };
 
         group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
             let txn = NoopTransaction;
             let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan).unwrap()))
+            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -377,9 +360,9 @@ fn bench_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -394,7 +377,7 @@ fn bench_index_scan(c: &mut Criterion) {
         let plan_eq = PlanNode::IndexScan {
             collection: "test".into(),
             column: "status".into(),
-            filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+            filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: slate_query::SortDirection::Asc,
             limit: None,
             complete_groups: false,
@@ -402,9 +385,9 @@ fn bench_index_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
 
         // Full column scan (no value filter)
@@ -419,9 +402,9 @@ fn bench_index_scan(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("full", n), &plan_full, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
 
         // Desc with limit
@@ -439,9 +422,9 @@ fn bench_index_scan(c: &mut Criterion) {
             BenchmarkId::new("desc_limit", n),
             &plan_desc_limit,
             |b, plan| {
-                let mut txn = engine.store().begin(true).unwrap();
+                let txn = engine.store().begin(true).unwrap();
                 let cf = txn.cf("test").unwrap();
-                b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+                b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
             },
         );
     }
@@ -461,9 +444,9 @@ fn bench_read_record(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("scan", n), &plan_scan, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
 
         // ReadRecord over IndexScan (fetches full doc by id)
@@ -471,7 +454,7 @@ fn bench_read_record(c: &mut Criterion) {
             input: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -480,9 +463,9 @@ fn bench_read_record(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("index", n), &plan_idx, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -499,7 +482,7 @@ fn bench_index_merge(c: &mut Criterion) {
             lhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -508,7 +491,7 @@ fn bench_index_merge(c: &mut Criterion) {
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "contacts_count".into(),
-                filter: Some(IndexFilter::Eq(bson::Bson::Int32(50))),
+                filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -517,9 +500,9 @@ fn bench_index_merge(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("or", n), &plan_or, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
 
         // AND merge: status="active" AND contacts_count=50
@@ -528,7 +511,7 @@ fn bench_index_merge(c: &mut Criterion) {
             lhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "status".into(),
-                filter: Some(IndexFilter::Eq(bson::Bson::String("active".into()))),
+                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -537,7 +520,7 @@ fn bench_index_merge(c: &mut Criterion) {
             rhs: Box::new(PlanNode::IndexScan {
                 collection: "test".into(),
                 column: "contacts_count".into(),
-                filter: Some(IndexFilter::Eq(bson::Bson::Int32(50))),
+                filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
                 limit: None,
                 complete_groups: false,
@@ -546,9 +529,9 @@ fn bench_index_merge(c: &mut Criterion) {
         };
 
         group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
-            let mut txn = engine.store().begin(true).unwrap();
+            let txn = engine.store().begin(true).unwrap();
             let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan).unwrap()))
+            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
         });
     }
     group.finish();
@@ -587,12 +570,12 @@ fn bench_insert(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
                 |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Insert { ids } => ids.len(),
                         _ => panic!("expected Insert"),
@@ -629,12 +612,12 @@ fn bench_update(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
                 |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Update { modified, .. } => modified,
                         _ => panic!("expected Update"),
@@ -667,12 +650,12 @@ fn bench_delete(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
                 |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Delete { deleted } => deleted,
                         _ => panic!("expected Delete"),
@@ -710,12 +693,12 @@ fn bench_replace(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     (txn, cf)
                 },
                 |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Update { modified, .. } => modified,
                         _ => panic!("expected Update"),
@@ -750,7 +733,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -765,7 +748,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
                     (txn, cf, plan)
                 },
                 |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Upsert { updated, .. } => updated,
                         _ => panic!("expected Upsert"),
@@ -798,7 +781,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -813,7 +796,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
                     (txn, cf, plan)
                 },
                 |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Upsert { updated, .. } => updated,
                         _ => panic!("expected Upsert"),
@@ -860,7 +843,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let mut txn = engine.store().begin(false).unwrap();
+                    let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
                         indexed_fields: indexed.clone(),
@@ -875,7 +858,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
                     (txn, cf, plan)
                 },
                 |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(&plan).unwrap();
+                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
                     match result {
                         ExecutionResult::Upsert { inserted, .. } => inserted,
                         _ => panic!("expected Upsert"),
@@ -1010,7 +993,7 @@ fn bench_query_scan(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1023,14 +1006,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "status": "active" }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1038,7 +1014,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1051,14 +1027,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "status": "active" }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1066,7 +1035,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1079,25 +1048,10 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: bson::Bson::String("active".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "product_recommendation1".into(),
-                        operator: Operator::Eq,
-                        value: bson::Bson::String("ProductA".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "product_recommendation2".into(),
-                        operator: Operator::Eq,
-                        value: bson::Bson::String("ProductX".into()),
-                    }),
-                ],
+            filter: Some(rawdoc! {
+                "status": "active",
+                "product_recommendation1": "ProductA",
+                "product_recommendation2": "ProductX",
             }),
             sort: vec![],
             skip: None,
@@ -1106,7 +1060,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1119,14 +1073,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "last_contacted_at".into(),
-                    operator: Operator::IsNull,
-                    value: bson::Bson::Boolean(true),
-                })],
-            }),
+            filter: Some(rawdoc! { "last_contacted_at": { "$exists": false } }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1134,7 +1081,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1147,14 +1094,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "status": "active" }),
             sort: vec![Sort {
                 field: "contacts_count".into(),
                 direction: SortDirection::Desc,
@@ -1165,7 +1105,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1189,7 +1129,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1219,7 +1159,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1232,14 +1172,7 @@ fn bench_query_pagination(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "status": "active" }),
             sort: vec![Sort {
                 field: "contacts_count".into(),
                 direction: SortDirection::Desc,
@@ -1250,7 +1183,7 @@ fn bench_query_pagination(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1270,7 +1203,7 @@ fn bench_query_point_lookup(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 let mut found = 0usize;
                 for id in ids {
                     if txn.find_by_id("bench", id, None).unwrap().is_some() {
@@ -1297,7 +1230,7 @@ fn bench_query_projection(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1310,14 +1243,7 @@ fn bench_query_array_match(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "tags".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("renewal_due".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "tags": "renewal_due" }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1325,7 +1251,7 @@ fn bench_query_array_match(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1348,7 +1274,7 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1369,7 +1295,7 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1390,7 +1316,7 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1404,21 +1330,14 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
         let engine = realistic_seeded_engine(n);
         let query = DistinctQuery {
             field: "product_recommendation1".into(),
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: bson::Bson::String("active".into()),
-                })],
-            }),
+            filter: Some(rawdoc! { "status": "active" }),
             sort: None,
             skip: None,
             take: None,
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.distinct("bench", query).unwrap()
             })
         });
@@ -1438,14 +1357,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
         let engine = realistic_seeded_engine(n);
         // contacts_count > 50 on indexed field
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![FilterNode::Condition(Filter {
-                    field: "contacts_count".into(),
-                    operator: Operator::Gt,
-                    value: bson::Bson::Int32(50),
-                })],
-            }),
+            filter: Some(rawdoc! { "contacts_count": { "$gt": 50 } }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1453,7 +1365,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1467,21 +1379,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
         let engine = realistic_seeded_engine(n);
         // contacts_count > 20 AND contacts_count < 80 on indexed field
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "contacts_count".into(),
-                        operator: Operator::Gt,
-                        value: bson::Bson::Int32(20),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "contacts_count".into(),
-                        operator: Operator::Lt,
-                        value: bson::Bson::Int32(80),
-                    }),
-                ],
-            }),
+            filter: Some(rawdoc! { "contacts_count": { "$gt": 20, "$lt": 80 } }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1489,7 +1387,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });
@@ -1503,21 +1401,7 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
         let engine = realistic_seeded_engine(n);
         // status = "active" AND contacts_count > 50 (Eq wins index, range is residual)
         let query = Query {
-            filter: Some(FilterGroup {
-                logical: LogicalOp::And,
-                children: vec![
-                    FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: bson::Bson::String("active".into()),
-                    }),
-                    FilterNode::Condition(Filter {
-                        field: "contacts_count".into(),
-                        operator: Operator::Gt,
-                        value: bson::Bson::Int32(50),
-                    }),
-                ],
-            }),
+            filter: Some(rawdoc! { "status": "active", "contacts_count": { "$gt": 50 } }),
             sort: vec![],
             skip: None,
             take: None,
@@ -1525,7 +1409,7 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
         };
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
-                let mut txn = engine.begin(true).unwrap();
+                let txn = engine.begin(true).unwrap();
                 txn.find("bench", query).unwrap().iter().unwrap().count()
             })
         });

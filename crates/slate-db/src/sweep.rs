@@ -54,7 +54,7 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
                 break;
             }
             let collections = match engine.begin(true) {
-                Ok(mut txn) => match txn.list_collections() {
+                Ok(txn) => match txn.list_collections() {
                     Ok(c) => {
                         let _ = txn.rollback();
                         c

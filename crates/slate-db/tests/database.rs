@@ -1,9 +1,7 @@
 use bson::raw::RawDocument;
-use bson::{Bson, RawBson, doc};
+use bson::{Bson, RawBson, doc, rawdoc};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
-use slate_query::{
-    DistinctQuery, Filter, FilterGroup, FilterNode, LogicalOp, Operator, Query, Sort, SortDirection,
-};
+use slate_query::{DistinctQuery, Query, Sort, SortDirection};
 use slate_store::MemoryStore;
 
 trait HasKey {
@@ -51,15 +49,10 @@ fn no_filter_query() -> Query {
     }
 }
 
-fn eq_filter(field: &str, value: Bson) -> FilterGroup {
-    FilterGroup {
-        logical: LogicalOp::And,
-        children: vec![FilterNode::Condition(Filter {
-            field: field.into(),
-            operator: Operator::Eq,
-            value,
-        })],
-    }
+fn eq_filter(field: &str, value: Bson) -> bson::RawDocumentBuf {
+    let mut doc = bson::Document::new();
+    doc.insert(field.to_string(), value);
+    bson::RawDocumentBuf::from_document(&doc).unwrap()
 }
 
 fn create_collection(db: &Database<MemoryStore>, name: &str) {
@@ -107,7 +100,7 @@ fn insert_one_and_find_one() {
     assert_eq!(result.id, "acct-1");
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("_id", Bson::String("acct-1".into()))),
         sort: vec![],
@@ -150,7 +143,7 @@ fn insert_one_auto_generated_id() {
     assert!(!result.id.is_empty());
     assert!(result.id.contains('-')); // UUID format
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -182,7 +175,7 @@ fn insert_many_batch() {
     assert_eq!(results[1].id, "acct-2");
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let all = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -200,7 +193,7 @@ fn find_no_filters() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -216,7 +209,7 @@ fn find_eq_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -239,16 +232,9 @@ fn find_gt_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "revenue".into(),
-                operator: Operator::Gt,
-                value: Bson::Double(80000.0),
-            })],
-        }),
+        filter: Some(rawdoc! { "revenue": { "$gt": 80000.0 } }),
         sort: vec![],
         skip: None,
         take: None,
@@ -279,16 +265,9 @@ fn find_isnull_filter() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".into(),
-                operator: Operator::IsNull,
-                value: Bson::Boolean(true),
-            })],
-        }),
+        filter: Some(rawdoc! { "status": null }),
         sort: vec![],
         skip: None,
         take: None,
@@ -310,23 +289,9 @@ fn find_or_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: Bson::String("snoozed".into()),
-                }),
-                FilterNode::Condition(Filter {
-                    field: "status".into(),
-                    operator: Operator::Eq,
-                    value: Bson::String("rejected".into()),
-                }),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] }),
         sort: vec![],
         skip: None,
         take: None,
@@ -349,7 +314,7 @@ fn find_sort_asc() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -377,7 +342,7 @@ fn find_sort_desc() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -406,7 +371,7 @@ fn find_skip_and_take() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -434,7 +399,7 @@ fn find_filter_sort_paginate() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![Sort {
@@ -463,7 +428,7 @@ fn find_with_projection() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -492,7 +457,7 @@ fn find_projection_includes_filter_columns() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -519,7 +484,7 @@ fn find_projection_includes_sort_columns() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         skip: None,
@@ -570,7 +535,7 @@ fn update_one_merge() {
     assert_eq!(result.modified, 1);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -617,7 +582,7 @@ fn update_one_upsert() {
     assert!(result.upserted_id.is_some());
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -643,7 +608,7 @@ fn update_many_multiple() {
     assert_eq!(result.modified, 3);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("archived".into()))),
         sort: vec![],
@@ -685,7 +650,7 @@ fn replace_one_full_replacement() {
     assert_eq!(result.modified, 1);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -721,7 +686,7 @@ fn delete_one_removes_record() {
     assert_eq!(result.deleted, 1);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -743,7 +708,7 @@ fn delete_many_removes_matching() {
     assert_eq!(result.deleted, 3);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -761,7 +726,7 @@ fn count_all() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let count = txn.count(COLLECTION, None).unwrap();
     assert_eq!(count, 5);
 }
@@ -771,9 +736,9 @@ fn count_with_filter() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
-    let count = txn.count(COLLECTION, Some(&filter)).unwrap();
+    let count = txn.count(COLLECTION, Some(filter)).unwrap();
     assert_eq!(count, 3);
 }
 
@@ -798,7 +763,7 @@ fn create_and_use_index() {
     txn.create_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -831,7 +796,7 @@ fn drop_index() {
     txn.create_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let mut indexes = txn.list_indexes(COLLECTION).unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "ttl"]);
@@ -840,7 +805,7 @@ fn drop_index() {
     txn.drop_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let indexes = txn.list_indexes(COLLECTION).unwrap();
     assert_eq!(indexes, vec!["ttl"]);
 }
@@ -860,7 +825,7 @@ fn list_collections() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let mut collections = txn.list_collections().unwrap();
     collections.sort();
     assert_eq!(collections, vec!["accounts", "contacts"]);
@@ -880,7 +845,7 @@ fn drop_collection() {
     txn.drop_collection(COLLECTION).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let result = txn
         .find(COLLECTION, &no_filter_query())
         .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
@@ -907,7 +872,7 @@ fn collection_isolation() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let contacts = txn
         .find("contacts", &no_filter_query())
         .unwrap()
@@ -952,7 +917,7 @@ fn index_maintained_on_insert() {
     txn.commit().unwrap();
 
     // Index scan should work
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -993,7 +958,7 @@ fn index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Old index value should not match
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -1048,7 +1013,7 @@ fn index_maintained_on_delete() {
     txn.commit().unwrap();
 
     // Index should be empty
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -1089,7 +1054,7 @@ fn nested_doc_write_and_read() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("nested", &no_filter_query())
         .unwrap()
@@ -1123,7 +1088,7 @@ fn dot_notation_filter_eq() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
         sort: vec![],
@@ -1164,7 +1129,7 @@ fn dot_notation_sort() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![Sort {
@@ -1209,7 +1174,7 @@ fn dot_notation_projection() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1254,7 +1219,7 @@ fn dot_notation_projection_multiple_subfields() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1296,16 +1261,9 @@ fn dot_notation_isnull_missing_parent() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "address.city".into(),
-                operator: Operator::IsNull,
-                value: Bson::Boolean(true),
-            })],
-        }),
+        filter: Some(rawdoc! { "address.city": null }),
         sort: vec![],
         skip: None,
         take: None,
@@ -1335,7 +1293,7 @@ fn dot_notation_deep_nesting() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter(
             "data.level1.level2.value",
@@ -1362,7 +1320,7 @@ fn projection_only_uses_selective_read() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: None,
         sort: vec![],
@@ -1394,7 +1352,7 @@ fn find_by_id_returns_document() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let doc = txn.find_by_id(COLLECTION, "acct-1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
     assert_eq!(doc.get_str("name").unwrap(), "Acme Corp");
@@ -1406,7 +1364,7 @@ fn find_by_id_not_found() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let result = txn.find_by_id(COLLECTION, "nonexistent", None).unwrap();
     assert!(result.is_none());
 }
@@ -1415,7 +1373,7 @@ fn find_by_id_not_found() {
 fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let result = txn.find_by_id("no_such_collection", "id-1", None);
     assert!(matches!(
         result,
@@ -1428,7 +1386,7 @@ fn find_by_id_with_projection() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let doc = txn
         .find_by_id(COLLECTION, "acct-1", Some(&["name", "status"]))
         .unwrap()
@@ -1463,7 +1421,7 @@ fn index_on_nested_path() {
     txn.commit().unwrap();
 
     // Index scan on address.city
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
         sort: vec![],
@@ -1508,7 +1466,7 @@ fn index_on_array_of_scalars() {
     txn.commit().unwrap();
 
     // Query for tag "rust" via index
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
@@ -1576,7 +1534,7 @@ fn index_on_array_of_objects() {
     txn.commit().unwrap();
 
     // Query for sku "A1"
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("items.[].sku", Bson::String("A1".into()))),
         sort: vec![],
@@ -1644,7 +1602,7 @@ fn multikey_index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Old tags should not match
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
@@ -1700,7 +1658,7 @@ fn multikey_index_maintained_on_delete() {
     txn.commit().unwrap();
 
     // Index entries should be cleaned up
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
@@ -1742,7 +1700,7 @@ fn multikey_index_backfill() {
     txn.commit().unwrap();
 
     // Verify backfill worked
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
@@ -1787,7 +1745,7 @@ fn multikey_index_replace_one() {
     txn.commit().unwrap();
 
     // Old tags gone
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
         sort: vec![],
@@ -1837,7 +1795,7 @@ fn create_collection_with_indexes() {
     txn.commit().unwrap();
 
     // Verify indexes were created
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let mut indexes = txn.list_indexes("configured").unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "tags.[]", "ttl"]);
@@ -1871,7 +1829,7 @@ fn create_collection_idempotent() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("idem", &no_filter_query())
         .unwrap()
@@ -1883,22 +1841,6 @@ fn create_collection_idempotent() {
 }
 
 // ── OR / AND index integration tests ────────────────────────────
-
-fn eq_condition(field: &str, value: Bson) -> FilterNode {
-    FilterNode::Condition(Filter {
-        field: field.into(),
-        operator: Operator::Eq,
-        value,
-    })
-}
-
-fn gt_condition(field: &str, value: Bson) -> FilterNode {
-    FilterNode::Condition(Filter {
-        field: field.into(),
-        operator: Operator::Gt,
-        value,
-    })
-}
 
 /// Create a collection with indexes and seed data for OR/AND tests.
 fn seed_or_test_data(db: &Database<MemoryStore>) {
@@ -1939,16 +1881,10 @@ fn find_with_or_indexed() {
 
     // user_id = "abc" OR status = "active"
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                eq_condition("user_id", Bson::String("abc".into())),
-                eq_condition("status", Bson::String("active".into())),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -1967,16 +1903,10 @@ fn find_with_or_same_field() {
 
     // status = "active" OR status = "archived"
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                eq_condition("status", Bson::String("active".into())),
-                eq_condition("status", Bson::String("archived".into())),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -1995,16 +1925,10 @@ fn find_with_or_fallback_scan() {
 
     // user_id = "abc" OR score > 50 (score not indexed → full scan)
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                eq_condition("user_id", Bson::String("abc".into())),
-                gt_condition("score", Bson::Int64(50)),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -2024,16 +1948,10 @@ fn find_with_and_priority() {
     // user_id = "abc" AND status = "active"
     // user_id has higher priority — planner should use it for IndexScan
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![
-                eq_condition("status", Bson::String("active".into())),
-                eq_condition("user_id", Bson::String("abc".into())),
-            ],
-        }),
+        filter: Some(rawdoc! { "status": "active", "user_id": "abc" }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -2052,28 +1970,13 @@ fn find_with_nested_and_or() {
 
     // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                FilterNode::Group(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![
-                        eq_condition("user_id", Bson::String("abc".into())),
-                        eq_condition("status", Bson::String("active".into())),
-                    ],
-                }),
-                FilterNode::Group(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![
-                        eq_condition("user_id", Bson::String("xyz".into())),
-                        eq_condition("status", Bson::String("archived".into())),
-                    ],
-                }),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [
+            { "user_id": "abc", "status": "active" },
+            { "user_id": "xyz", "status": "archived" },
+        ] }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -2092,17 +1995,12 @@ fn find_with_or_three_values() {
 
     // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                eq_condition("user_id", Bson::String("abc".into())),
-                eq_condition("user_id", Bson::String("xyz".into())),
-                eq_condition("user_id", Bson::String("def".into())),
-            ],
-        }),
+        filter: Some(
+            rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] },
+        ),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -2125,22 +2023,13 @@ fn find_with_or_partial_index_per_branch() {
     // (user_id = "abc" AND score > 50) OR status = "pending"
     // Each OR branch has one indexed Eq — IndexMerge(Or), full recheck
     let q = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::Or,
-            children: vec![
-                FilterNode::Group(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![
-                        eq_condition("user_id", Bson::String("abc".into())),
-                        gt_condition("score", Bson::Int64(50)),
-                    ],
-                }),
-                eq_condition("status", Bson::String("pending".into())),
-            ],
-        }),
+        filter: Some(rawdoc! { "$or": [
+            { "user_id": "abc", "score": { "$gt": 50_i64 } },
+            { "status": "pending" },
+        ] }),
         ..no_filter_query()
     };
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find("orders", &q)
         .unwrap()
@@ -2184,7 +2073,7 @@ fn ttl_expired_docs_hidden_before_purge() {
     txn.commit().unwrap();
 
     // Expired docs are immediately invisible (TTL read filtering)
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -2222,7 +2111,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
     let deleted = db.purge_expired(COLLECTION).unwrap();
     assert_eq!(deleted, 1);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -2268,7 +2157,7 @@ fn ttl_purge_deletes_expired_docs() {
     assert_eq!(purged, 1);
 
     // Expired doc is physically gone
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
     let results = txn
         .find(COLLECTION, &no_filter_query())
@@ -2330,7 +2219,7 @@ fn ttl_purge_cleans_user_indexes() {
     assert_eq!(purged, 1);
 
     // Index should only have one entry for "active" (doc "b")
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -2374,7 +2263,7 @@ fn ttl_index_maintained_on_update() {
     let purged = db.purge_expired(COLLECTION).unwrap();
     assert_eq!(purged, 1);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -2406,7 +2295,7 @@ fn ttl_purge_multiple_expired() {
     let purged = db.purge_expired(COLLECTION).unwrap();
     assert_eq!(purged, 3);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -2436,7 +2325,7 @@ fn ttl_find_by_id_hides_expired() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     assert!(txn.find_by_id(COLLECTION, "x", None).unwrap().is_none());
     assert!(txn.find_by_id(COLLECTION, "y", None).unwrap().is_some());
 }
@@ -2489,7 +2378,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
     txn.commit().unwrap();
 
     // The new doc should be visible and should NOT contain old_field
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let doc = txn.find_by_id(COLLECTION, "a", None).unwrap().unwrap();
     assert!(doc.get("new_field").is_some());
     assert!(doc.get("old_field").is_none());
@@ -2512,7 +2401,7 @@ fn ttl_no_ttl_field_always_visible() {
     txn.commit().unwrap();
 
     // Docs without ttl are always visible
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, &no_filter_query())
         .unwrap()
@@ -2526,7 +2415,7 @@ fn ttl_no_ttl_field_always_visible() {
     let purged = db.purge_expired(COLLECTION).unwrap();
     assert_eq!(purged, 0);
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let count = txn.count(COLLECTION, None).unwrap();
     assert_eq!(count, 2);
 }
@@ -2550,7 +2439,7 @@ fn distinct_scalar_field() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2581,7 +2470,7 @@ fn distinct_nested_path() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "address.city".into(),
         filter: None,
@@ -2610,7 +2499,7 @@ fn distinct_array_field() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "tags".into(),
         filter: None,
@@ -2642,7 +2531,7 @@ fn distinct_with_filter() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "tier".into(),
         filter: Some(eq_filter("status", Bson::String("active".into()))),
@@ -2673,7 +2562,7 @@ fn distinct_with_sort_asc() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2709,7 +2598,7 @@ fn distinct_with_sort_desc() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2742,7 +2631,7 @@ fn distinct_missing_field() {
     txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "nonexistent".into(),
         filter: None,
@@ -2770,7 +2659,7 @@ fn distinct_mixed_presence() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2805,7 +2694,7 @@ fn distinct_array_of_sub_documents() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "triggers.type".into(),
         filter: None,
@@ -2850,7 +2739,7 @@ fn distinct_sub_document() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "address".into(),
         filter: None,
@@ -2883,7 +2772,7 @@ fn distinct_with_take() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2917,7 +2806,7 @@ fn distinct_with_skip_take() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = DistinctQuery {
         field: "status".into(),
         filter: None,
@@ -2953,7 +2842,7 @@ fn distinct_with_sort_and_limit() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     // Sort desc, skip 1, take 2 → ["date", "cherry"]
     let query = DistinctQuery {
         field: "status".into(),
@@ -2986,7 +2875,7 @@ fn index_covered_preserves_int32_type() {
     txn.commit().unwrap();
 
     // Query with Int64 — same encoded bytes, different BSON type
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("score", Bson::Int64(100))),
         sort: vec![],
@@ -3024,7 +2913,7 @@ fn index_covered_preserves_string_type() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         sort: vec![],
@@ -3403,16 +3292,9 @@ fn find_gt_on_indexed_field() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "score".into(),
-                operator: Operator::Gt,
-                value: Bson::Int32(75),
-            })],
-        }),
+        filter: Some(rawdoc! { "score": { "$gt": 75 } }),
         sort: vec![],
         skip: None,
         take: None,
@@ -3458,24 +3340,10 @@ fn find_gte_lte_on_indexed_field() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     // score >= 70 AND score <= 80
     let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![
-                FilterNode::Condition(Filter {
-                    field: "score".into(),
-                    operator: Operator::Gte,
-                    value: Bson::Int32(70),
-                }),
-                FilterNode::Condition(Filter {
-                    field: "score".into(),
-                    operator: Operator::Lte,
-                    value: Bson::Int32(80),
-                }),
-            ],
-        }),
+        filter: Some(rawdoc! { "score": { "$gte": 70, "$lte": 80 } }),
         sort: vec![],
         skip: None,
         take: None,
@@ -3540,7 +3408,7 @@ fn mutation_set_explicit() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "archived");
@@ -3571,7 +3439,7 @@ fn mutation_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "active");
@@ -3599,7 +3467,7 @@ fn mutation_inc_i32() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 15);
 }
@@ -3625,7 +3493,7 @@ fn mutation_inc_missing_field() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 7);
 }
@@ -3651,7 +3519,7 @@ fn mutation_inc_negative_decrement() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 70);
 }
@@ -3677,7 +3545,7 @@ fn mutation_inc_f64() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert!((d.get_f64("balance").unwrap() - 125.75).abs() < f64::EPSILON);
 }
@@ -3706,7 +3574,7 @@ fn mutation_rename() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert!(!d.contains_key("old_name"));
@@ -3734,7 +3602,7 @@ fn mutation_push() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["rust", "db", "perf"]);
 }
@@ -3760,7 +3628,7 @@ fn mutation_push_creates_array() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["new"]);
 }
@@ -3789,7 +3657,7 @@ fn mutation_lpush() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "queue"), vec!["first", "second", "third"]);
 }
@@ -3810,7 +3678,7 @@ fn mutation_pop() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "stack"), vec!["a", "b"]);
 }
@@ -3843,7 +3711,7 @@ fn mutation_multiple_operators() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice Updated");
     assert_eq!(d.get_i32("score").unwrap(), 15);
@@ -3874,7 +3742,7 @@ fn mutation_bare_fields_implicit_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "archived");
@@ -3905,7 +3773,7 @@ fn mutation_dot_path_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     let addr = d.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Denver");
@@ -3936,7 +3804,7 @@ fn mutation_dot_path_inc() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     let stats = d.get_document("stats").unwrap();
     assert_eq!(stats.get_i32("views").unwrap(), 101);
@@ -3964,7 +3832,7 @@ fn mutation_dot_path_creates_intermediates() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     let addr = d.get_document("address").unwrap();
@@ -3995,7 +3863,7 @@ fn mutation_dot_path_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     let addr = d.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Austin");
@@ -4024,7 +3892,7 @@ fn mutation_dot_path_push() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "data.items"), vec!["a", "b"]);
 }
@@ -4047,7 +3915,7 @@ fn mutation_update_many_with_inc() {
     assert_eq!(result.modified, 3);
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "acct-1", None).unwrap().unwrap();
     assert!((d.get_f64("revenue").unwrap() - 51000.0).abs() < f64::EPSILON);
 
@@ -4088,7 +3956,7 @@ fn mutation_index_maintained_on_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let q = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         ..no_filter_query()
@@ -4144,7 +4012,7 @@ fn mutation_index_maintained_on_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let q = Query {
         filter: Some(eq_filter("status", Bson::String("active".into()))),
         ..no_filter_query()
@@ -4186,7 +4054,7 @@ fn mutation_push_pop_as_stack() {
         txn.commit().unwrap();
     }
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b", "c"]);
 
@@ -4196,7 +4064,7 @@ fn mutation_push_pop_as_stack() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b"]);
 }
@@ -4224,7 +4092,7 @@ fn mutation_lpush_pop_as_queue() {
         txn.commit().unwrap();
     }
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second", "first"]);
 
@@ -4234,7 +4102,7 @@ fn mutation_lpush_pop_as_queue() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(true).unwrap();
+    let txn = db.begin(true).unwrap();
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second"]);
 }

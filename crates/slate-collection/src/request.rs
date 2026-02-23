@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use slate_query::{FilterGroup, Sort, SortDirection};
+use slate_query::{Sort, SortDirection};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueryRequest {
-    pub filters: Option<FilterGroup>,
+    pub filters: Option<bson::Document>,
     #[serde(default)]
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
@@ -20,7 +20,7 @@ pub struct QueryResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DistinctRequest {
     pub field: String,
-    pub filters: Option<FilterGroup>,
+    pub filters: Option<bson::Document>,
     pub sort: Option<SortDirection>,
     pub skip: Option<usize>,
     pub take: Option<usize>,

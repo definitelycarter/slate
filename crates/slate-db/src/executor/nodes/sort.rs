@@ -8,7 +8,7 @@ use crate::executor::exec;
 use crate::executor::{RawIter, RawValue};
 
 pub(crate) fn execute<'a>(
-    sorts: &'a [Sort],
+    sorts: Vec<Sort>,
     mut source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     match source.next() {
@@ -51,7 +51,7 @@ pub(crate) fn execute<'a>(
         }
         Some(first) => {
             let iter: RawIter<'a> = Box::new(std::iter::once(first).chain(source));
-            sort_records(sorts, iter)
+            sort_records(&sorts, iter)
         }
         None => Ok(Box::new(std::iter::empty())),
     }

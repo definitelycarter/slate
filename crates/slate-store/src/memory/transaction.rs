@@ -100,12 +100,9 @@ impl<'a> MemoryTransaction<'a> {
 impl<'a> Transaction for MemoryTransaction<'a> {
     type Cf = MemoryCf;
 
-    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
-        let snap = self
-            .snapshot
-            .get_mut()
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
+    fn cf(&self, name: &str) -> Result<Self::Cf, StoreError> {
+        let mut snap = self.snapshot.borrow_mut();
+        let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
         snap.ensure(self.store, name)?;
         let data = Arc::clone(snap.get_cf(name)?);
         Ok(MemoryCf {

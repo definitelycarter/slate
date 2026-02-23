@@ -5,7 +5,7 @@ use bson::{Bson, doc};
 use rand::Rng;
 use slate_client::Client;
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
-use slate_query::*;
+use slate_query::{Sort, SortDirection};
 use slate_server::Server;
 use slate_store::RocksStore;
 
@@ -52,21 +52,16 @@ fn insert_and_find_one() {
         )
         .unwrap();
 
-    let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "_id".into(),
-                operator: Operator::Eq,
-                value: Bson::String("acct-1".into()),
-            })],
-        }),
-        sort: vec![],
-        skip: None,
-        take: Some(1),
-        columns: None,
-    };
-    let result = client.find_one(COLLECTION, &query).unwrap();
+    let result = client
+        .find_one(
+            COLLECTION,
+            Some(doc! { "_id": "acct-1" }),
+            vec![],
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
     assert!(result.is_some());
     let r = result.unwrap();
     assert_eq!(r.get_str("_id").unwrap(), "acct-1");
@@ -79,21 +74,16 @@ fn find_one_not_found() {
     let mut client = Client::connect(&addr).unwrap();
     ensure_collection(&mut client, COLLECTION);
 
-    let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "_id".into(),
-                operator: Operator::Eq,
-                value: Bson::String("nonexistent".into()),
-            })],
-        }),
-        sort: vec![],
-        skip: None,
-        take: Some(1),
-        columns: None,
-    };
-    let result = client.find_one(COLLECTION, &query).unwrap();
+    let result = client
+        .find_one(
+            COLLECTION,
+            Some(doc! { "_id": "nonexistent" }),
+            vec![],
+            None,
+            Some(1),
+            None,
+        )
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -115,32 +105,22 @@ fn insert_many_and_find() {
         .unwrap();
 
     // Query all
-    let query = Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
-    let results = client.find(COLLECTION, &query).unwrap();
+    let results = client
+        .find(COLLECTION, None, vec![], None, None, None)
+        .unwrap();
     assert_eq!(results.len(), 3);
 
     // Query with filter
-    let query = Query {
-        filter: Some(FilterGroup {
-            logical: LogicalOp::And,
-            children: vec![FilterNode::Condition(Filter {
-                field: "status".to_string(),
-                operator: Operator::Eq,
-                value: Bson::String("active".to_string()),
-            })],
-        }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
-    let results = client.find(COLLECTION, &query).unwrap();
+    let results = client
+        .find(
+            COLLECTION,
+            Some(doc! { "status": "active" }),
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -157,25 +137,13 @@ fn delete_one() {
         )
         .unwrap();
 
-    let filter = FilterGroup {
-        logical: LogicalOp::And,
-        children: vec![FilterNode::Condition(Filter {
-            field: "_id".into(),
-            operator: Operator::Eq,
-            value: Bson::String("acct-1".into()),
-        })],
-    };
-    let result = client.delete_one(COLLECTION, &filter).unwrap();
+    let filter = doc! { "_id": "acct-1" };
+    let result = client.delete_one(COLLECTION, filter.clone()).unwrap();
     assert_eq!(result.deleted, 1);
 
-    let query = Query {
-        filter: Some(filter),
-        sort: vec![],
-        skip: None,
-        take: Some(1),
-        columns: None,
-    };
-    let result = client.find_one(COLLECTION, &query).unwrap();
+    let result = client
+        .find_one(COLLECTION, Some(filter), vec![], None, Some(1), None)
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -221,17 +189,19 @@ fn find_with_sort_and_pagination() {
     }
     client.insert_many(COLLECTION, docs).unwrap();
 
-    let query = Query {
-        filter: None,
-        sort: vec![Sort {
-            field: "score".to_string(),
-            direction: SortDirection::Desc,
-        }],
-        skip: Some(5),
-        take: Some(3),
-        columns: None,
-    };
-    let results = client.find(COLLECTION, &query).unwrap();
+    let results = client
+        .find(
+            COLLECTION,
+            None,
+            vec![Sort {
+                field: "score".to_string(),
+                direction: SortDirection::Desc,
+            }],
+            Some(5),
+            Some(3),
+            None,
+        )
+        .unwrap();
     assert_eq!(results.len(), 3);
     // Descending: 19,18,17,16,15,14,13,12... skip 5 → 14,13,12
     assert_eq!(results[0].get_str("_id").unwrap(), "r-14");
@@ -272,28 +242,22 @@ fn update_one_merge() {
         )
         .unwrap();
 
-    let filter = FilterGroup {
-        logical: LogicalOp::And,
-        children: vec![FilterNode::Condition(Filter {
-            field: "_id".into(),
-            operator: Operator::Eq,
-            value: Bson::String("acct-1".into()),
-        })],
-    };
+    let filter = doc! { "_id": "acct-1" };
     let result = client
-        .update_one(COLLECTION, &filter, doc! { "status": "rejected" }, false)
+        .update_one(
+            COLLECTION,
+            filter.clone(),
+            doc! { "status": "rejected" },
+            false,
+        )
         .unwrap();
     assert_eq!(result.matched, 1);
     assert_eq!(result.modified, 1);
 
-    let query = Query {
-        filter: Some(filter),
-        sort: vec![],
-        skip: None,
-        take: Some(1),
-        columns: None,
-    };
-    let doc = client.find_one(COLLECTION, &query).unwrap().unwrap();
+    let doc = client
+        .find_one(COLLECTION, Some(filter), vec![], None, Some(1), None)
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Acme"); // unchanged
     assert_eq!(doc.get_str("status").unwrap(), "rejected"); // updated
 }
@@ -376,26 +340,10 @@ fn bulk_insert_and_count() {
 fn query_indexed_filter() {
     let (mut client, _dir) = start_server_with_data();
 
-    let filter = FilterGroup {
-        logical: LogicalOp::And,
-        children: vec![FilterNode::Condition(Filter {
-            field: "status".into(),
-            operator: Operator::Eq,
-            value: Bson::String("active".into()),
-        })],
-    };
+    let filter = doc! { "status": "active" };
 
     let results = client
-        .find(
-            COLLECTION,
-            &Query {
-                filter: Some(filter.clone()),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
-        )
+        .find(COLLECTION, Some(filter.clone()), vec![], None, None, None)
         .unwrap();
 
     assert!(!results.is_empty());
@@ -403,7 +351,7 @@ fn query_indexed_filter() {
         assert_eq!(doc.get_str("status").unwrap(), "active");
     }
 
-    let count = client.count(COLLECTION, Some(&filter)).unwrap();
+    let count = client.count(COLLECTION, Some(filter)).unwrap();
     assert_eq!(count, results.len() as u64);
 }
 
@@ -414,32 +362,15 @@ fn query_multi_condition_and() {
     let results = client
         .find(
             COLLECTION,
-            &Query {
-                filter: Some(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![
-                        FilterNode::Condition(Filter {
-                            field: "status".into(),
-                            operator: Operator::Eq,
-                            value: Bson::String("active".into()),
-                        }),
-                        FilterNode::Condition(Filter {
-                            field: "product_recommendation1".into(),
-                            operator: Operator::Eq,
-                            value: Bson::String("ProductA".into()),
-                        }),
-                        FilterNode::Condition(Filter {
-                            field: "product_recommendation2".into(),
-                            operator: Operator::Eq,
-                            value: Bson::String("ProductX".into()),
-                        }),
-                    ],
-                }),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            Some(doc! {
+                "status": "active",
+                "product_recommendation1": "ProductA",
+                "product_recommendation2": "ProductX",
+            }),
+            vec![],
+            None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -457,16 +388,14 @@ fn query_sort_and_take() {
     let results = client
         .find(
             COLLECTION,
-            &Query {
-                filter: None,
-                sort: vec![Sort {
-                    field: "contacts_count".into(),
-                    direction: SortDirection::Desc,
-                }],
-                skip: None,
-                take: Some(10),
-                columns: None,
-            },
+            None,
+            vec![Sort {
+                field: "contacts_count".into(),
+                direction: SortDirection::Desc,
+            }],
+            None,
+            Some(10),
+            None,
         )
         .unwrap();
 
@@ -489,30 +418,12 @@ fn query_skip_take() {
 
     // Get the full sorted set (first 20)
     let full = client
-        .find(
-            COLLECTION,
-            &Query {
-                filter: None,
-                sort: sort.clone(),
-                skip: None,
-                take: Some(20),
-                columns: None,
-            },
-        )
+        .find(COLLECTION, None, sort.clone(), None, Some(20), None)
         .unwrap();
 
     // Get skip(5) + take(5)
     let page = client
-        .find(
-            COLLECTION,
-            &Query {
-                filter: None,
-                sort,
-                skip: Some(5),
-                take: Some(5),
-                columns: None,
-            },
-        )
+        .find(COLLECTION, None, sort, Some(5), Some(5), None)
         .unwrap();
 
     assert_eq!(page.len(), 5);
@@ -531,20 +442,11 @@ fn query_take_no_sort() {
     let results = client
         .find(
             COLLECTION,
-            &Query {
-                filter: Some(FilterGroup {
-                    logical: LogicalOp::And,
-                    children: vec![FilterNode::Condition(Filter {
-                        field: "status".into(),
-                        operator: Operator::Eq,
-                        value: Bson::String("active".into()),
-                    })],
-                }),
-                sort: vec![],
-                skip: None,
-                take: Some(50),
-                columns: None,
-            },
+            Some(doc! { "status": "active" }),
+            vec![],
+            None,
+            Some(50),
+            None,
         )
         .unwrap();
 
@@ -619,20 +521,11 @@ fn concurrent_readers_and_writers() {
                 let results = c
                     .find(
                         COLLECTION,
-                        &Query {
-                            filter: Some(FilterGroup {
-                                logical: LogicalOp::And,
-                                children: vec![FilterNode::Condition(Filter {
-                                    field: "status".into(),
-                                    operator: Operator::Eq,
-                                    value: Bson::String("active".into()),
-                                })],
-                            }),
-                            sort: vec![],
-                            skip: None,
-                            take: Some(50),
-                            columns: None,
-                        },
+                        Some(doc! { "status": "active" }),
+                        vec![],
+                        None,
+                        Some(50),
+                        None,
                     )
                     .expect("reader find");
                 assert!(results.len() <= 50);

@@ -1,9 +1,41 @@
 use std::sync::Arc;
 
+use serde::Deserialize;
 use slate_db::{Database, DatabaseConfig, DatabaseTransaction, DbError};
-use slate_query::{FilterGroup, Query};
+use slate_query::{Query, Sort};
 
 use crate::error::SlateError;
+
+/// JSON-deserializable query representation for the uniffi boundary.
+#[derive(Deserialize)]
+struct QueryJson {
+    #[serde(default)]
+    filter: Option<bson::Document>,
+    #[serde(default)]
+    sort: Vec<Sort>,
+    #[serde(default)]
+    skip: Option<usize>,
+    #[serde(default)]
+    take: Option<usize>,
+    #[serde(default)]
+    columns: Option<Vec<String>>,
+}
+
+impl QueryJson {
+    fn into_query(self) -> Result<Query, bson::raw::Error> {
+        let filter = self
+            .filter
+            .map(|d| bson::RawDocumentBuf::from_document(&d))
+            .transpose()?;
+        Ok(Query {
+            filter,
+            sort: self.sort,
+            skip: self.skip,
+            take: self.take,
+            columns: self.columns,
+        })
+    }
+}
 
 // --- Feature-gated store imports and type alias ---
 
@@ -113,7 +145,14 @@ impl SlateDatabase {
     // --- Query ---
 
     pub fn find(&self, collection: String, query_json: String) -> Result<Vec<Vec<u8>>, SlateError> {
-        let query: Query = serde_json::from_str(&query_json)?;
+        let query = serde_json::from_str::<QueryJson>(&query_json)
+            .map_err(|e| SlateError::InvalidQuery {
+                message: e.to_string(),
+            })?
+            .into_query()
+            .map_err(|e| SlateError::InvalidQuery {
+                message: e.to_string(),
+            })?;
         self.read(|txn| {
             let results: Vec<Vec<u8>> = txn
                 .find(&collection, &query)?
@@ -129,7 +168,14 @@ impl SlateDatabase {
         collection: String,
         query_json: String,
     ) -> Result<Option<Vec<u8>>, SlateError> {
-        let query: Query = serde_json::from_str(&query_json)?;
+        let query = serde_json::from_str::<QueryJson>(&query_json)
+            .map_err(|e| SlateError::InvalidQuery {
+                message: e.to_string(),
+            })?
+            .into_query()
+            .map_err(|e| SlateError::InvalidQuery {
+                message: e.to_string(),
+            })?;
         self.read(|txn| {
             let raw = txn.find_one(&collection, &query)?;
             Ok(raw.map(|r| r.into_bytes()))
@@ -166,7 +212,7 @@ impl SlateDatabase {
         update: Vec<u8>,
         upsert: bool,
     ) -> Result<SlateUpdateResult, SlateError> {
-        let filter: FilterGroup = serde_json::from_str(&filter_json)?;
+        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
             let result = txn.update_one(&collection, &filter, update, upsert)?;
             Ok(SlateUpdateResult {
@@ -183,7 +229,7 @@ impl SlateDatabase {
         filter_json: String,
         update: Vec<u8>,
     ) -> Result<SlateUpdateResult, SlateError> {
-        let filter: FilterGroup = serde_json::from_str(&filter_json)?;
+        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
             let result = txn.update_many(&collection, &filter, update)?;
             Ok(SlateUpdateResult {
@@ -200,7 +246,7 @@ impl SlateDatabase {
         filter_json: String,
         replacement: Vec<u8>,
     ) -> Result<SlateUpdateResult, SlateError> {
-        let filter: FilterGroup = serde_json::from_str(&filter_json)?;
+        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
             let result = txn.replace_one(&collection, &filter, replacement)?;
             Ok(SlateUpdateResult {
@@ -214,7 +260,7 @@ impl SlateDatabase {
     // --- Delete ---
 
     pub fn delete_one(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
-        let filter: FilterGroup = serde_json::from_str(&filter_json)?;
+        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
             let result = txn.delete_one(&collection, &filter)?;
             Ok(result.deleted)
@@ -222,7 +268,7 @@ impl SlateDatabase {
     }
 
     pub fn delete_many(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
-        let filter: FilterGroup = serde_json::from_str(&filter_json)?;
+        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
             let result = txn.delete_many(&collection, &filter)?;
             Ok(result.deleted)
@@ -236,12 +282,19 @@ impl SlateDatabase {
         collection: String,
         filter_json: Option<String>,
     ) -> Result<u64, SlateError> {
-        let filter: Option<FilterGroup> = match filter_json {
-            Some(json) => Some(serde_json::from_str(&json)?),
+        let filter: Option<bson::RawDocumentBuf> = match filter_json {
+            Some(json) => {
+                let doc: bson::Document = serde_json::from_str(&json)?;
+                Some(bson::RawDocumentBuf::from_document(&doc).map_err(|e| {
+                    SlateError::InvalidQuery {
+                        message: e.to_string(),
+                    }
+                })?)
+            }
             None => None,
         };
         self.read(|txn| {
-            let count = txn.count(&collection, filter.as_ref())?;
+            let count = txn.count(&collection, filter)?;
             Ok(count)
         })
     }

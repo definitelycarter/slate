@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ pub struct RocksTransaction<'db> {
     txn: Option<rocksdb::Transaction<'db, DB>>,
     db: &'db DB,
     read_only: bool,
-    cf_cache: HashMap<String, Arc<BoundColumnFamily<'db>>>,
+    cf_cache: RefCell<HashMap<String, Arc<BoundColumnFamily<'db>>>>,
 }
 
 impl<'db> RocksTransaction<'db> {
@@ -30,7 +31,7 @@ impl<'db> RocksTransaction<'db> {
             txn: Some(txn),
             db,
             read_only,
-            cf_cache: HashMap::new(),
+            cf_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -45,16 +46,18 @@ impl<'db> RocksTransaction<'db> {
         Ok(())
     }
 
-    /// Resolve a CF handle, caching it for reuse. Used internally by writes.
-    fn cf_handle(&mut self, cf: &str) -> Result<Arc<BoundColumnFamily<'db>>, StoreError> {
-        if let Some(handle) = self.cf_cache.get(cf) {
+    /// Resolve a CF handle, caching it for reuse.
+    fn cf_handle(&self, cf: &str) -> Result<Arc<BoundColumnFamily<'db>>, StoreError> {
+        if let Some(handle) = self.cf_cache.borrow().get(cf) {
             return Ok(Arc::clone(handle));
         }
         let handle = self
             .db
             .cf_handle(cf)
             .ok_or_else(|| StoreError::Storage(format!("column family not found: {cf}")))?;
-        self.cf_cache.insert(cf.to_string(), Arc::clone(&handle));
+        self.cf_cache
+            .borrow_mut()
+            .insert(cf.to_string(), Arc::clone(&handle));
         Ok(handle)
     }
 }
@@ -62,7 +65,7 @@ impl<'db> RocksTransaction<'db> {
 impl<'db> Transaction for RocksTransaction<'db> {
     type Cf = RocksCf<'db>;
 
-    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
+    fn cf(&self, name: &str) -> Result<Self::Cf, StoreError> {
         let handle = self.cf_handle(name)?;
         Ok(RocksCf { handle })
     }
@@ -180,14 +183,14 @@ impl<'db> Transaction for RocksTransaction<'db> {
         }
         // Pre-warm cache for the newly created CF
         if let Some(handle) = self.db.cf_handle(name) {
-            self.cf_cache.insert(name.to_string(), handle);
+            self.cf_cache.borrow_mut().insert(name.to_string(), handle);
         }
         Ok(())
     }
 
     fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
-        self.cf_cache.remove(name);
+        self.cf_cache.borrow_mut().remove(name);
         self.db
             .drop_cf(name)
             .map_err(|e| StoreError::Storage(e.to_string()))

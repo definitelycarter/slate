@@ -2,7 +2,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
 use slate_db::{CollectionConfig, DeleteResult, InsertResult, UpdateResult, UpsertResult};
-use slate_query::{DistinctQuery, FilterGroup, Query};
+use slate_query::{Sort, SortDirection};
 use slate_server::protocol::{Request, Response};
 
 #[derive(Debug)]
@@ -124,11 +124,19 @@ impl Client {
     pub fn find(
         &mut self,
         collection: &str,
-        query: &Query,
+        filter: Option<bson::Document>,
+        sort: Vec<Sort>,
+        skip: Option<usize>,
+        take: Option<usize>,
+        columns: Option<Vec<String>>,
     ) -> Result<Vec<bson::Document>, ClientError> {
         match self.request(Request::Find {
             collection: collection.to_string(),
-            query: query.clone(),
+            filter,
+            sort,
+            skip,
+            take,
+            columns,
         })? {
             Response::Records(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
@@ -160,11 +168,19 @@ impl Client {
     pub fn find_one(
         &mut self,
         collection: &str,
-        query: &Query,
+        filter: Option<bson::Document>,
+        sort: Vec<Sort>,
+        skip: Option<usize>,
+        take: Option<usize>,
+        columns: Option<Vec<String>>,
     ) -> Result<Option<bson::Document>, ClientError> {
         match self.request(Request::FindOne {
             collection: collection.to_string(),
-            query: query.clone(),
+            filter,
+            sort,
+            skip,
+            take,
+            columns,
         })? {
             Response::Record(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
@@ -179,13 +195,13 @@ impl Client {
     pub fn update_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: bson::Document,
         update: bson::Document,
         upsert: bool,
     ) -> Result<UpdateResult, ClientError> {
         match self.request(Request::UpdateOne {
             collection: collection.to_string(),
-            filter: filter.clone(),
+            filter,
             update,
             upsert,
         })? {
@@ -200,12 +216,12 @@ impl Client {
     pub fn update_many(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: bson::Document,
         update: bson::Document,
     ) -> Result<UpdateResult, ClientError> {
         match self.request(Request::UpdateMany {
             collection: collection.to_string(),
-            filter: filter.clone(),
+            filter,
             update,
         })? {
             Response::Update(r) => Ok(r),
@@ -219,12 +235,12 @@ impl Client {
     pub fn replace_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: bson::Document,
         doc: bson::Document,
     ) -> Result<UpdateResult, ClientError> {
         match self.request(Request::ReplaceOne {
             collection: collection.to_string(),
-            filter: filter.clone(),
+            filter,
             doc,
         })? {
             Response::Update(r) => Ok(r),
@@ -276,11 +292,11 @@ impl Client {
     pub fn delete_one(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: bson::Document,
     ) -> Result<DeleteResult, ClientError> {
         match self.request(Request::DeleteOne {
             collection: collection.to_string(),
-            filter: filter.clone(),
+            filter,
         })? {
             Response::Delete(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
@@ -293,11 +309,11 @@ impl Client {
     pub fn delete_many(
         &mut self,
         collection: &str,
-        filter: &FilterGroup,
+        filter: bson::Document,
     ) -> Result<DeleteResult, ClientError> {
         match self.request(Request::DeleteMany {
             collection: collection.to_string(),
-            filter: filter.clone(),
+            filter,
         })? {
             Response::Delete(r) => Ok(r),
             Response::Error(e) => Err(ClientError::Server(e)),
@@ -312,11 +328,11 @@ impl Client {
     pub fn count(
         &mut self,
         collection: &str,
-        filter: Option<&FilterGroup>,
+        filter: Option<bson::Document>,
     ) -> Result<u64, ClientError> {
         match self.request(Request::Count {
             collection: collection.to_string(),
-            filter: filter.cloned(),
+            filter,
         })? {
             Response::Count(n) => Ok(n),
             Response::Error(e) => Err(ClientError::Server(e)),
@@ -331,11 +347,19 @@ impl Client {
     pub fn distinct(
         &mut self,
         collection: &str,
-        query: &DistinctQuery,
+        field: &str,
+        filter: Option<bson::Document>,
+        sort: Option<SortDirection>,
+        skip: Option<usize>,
+        take: Option<usize>,
     ) -> Result<bson::RawBson, ClientError> {
         match self.request(Request::Distinct {
             collection: collection.to_string(),
-            query: query.clone(),
+            field: field.to_string(),
+            filter,
+            sort,
+            skip,
+            take,
         })? {
             Response::Values(v) => Ok(v),
             Response::Error(e) => Err(ClientError::Server(e)),

@@ -83,7 +83,7 @@ impl<'db> RedbTransaction<'db> {
 impl<'db> Transaction for RedbTransaction<'db> {
     type Cf = String;
 
-    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError> {
+    fn cf(&self, name: &str) -> Result<Self::Cf, StoreError> {
         // Validate the table exists by attempting to open it.
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(name);
         match &self.inner {

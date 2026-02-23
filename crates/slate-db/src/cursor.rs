@@ -3,31 +3,52 @@ use slate_store::{Store, Transaction};
 
 use crate::error::DbError;
 use crate::executor::{ExecutionResult, Executor, RawIter};
-use crate::planner::PlanNode;
+use crate::planner;
 
 /// A prepared query that can be iterated over.
 ///
-/// Owns the query plan and column family handle, borrows the transaction.
-/// Call [`.iter()`](Cursor::iter) to produce a streaming [`CursorIter`].
+/// Borrows the transaction and owns the statement + planner inputs.
+/// Call [`.iter()`](Cursor::iter) to plan and produce a streaming
+/// [`CursorIter`]. Planning is deferred so that `PlanNode<'_>` borrows
+/// from the owned `Statement` via `&self` — no self-referential struct.
 pub struct Cursor<'db, 'txn, S: Store + 'db> {
     txn: &'txn S::Txn<'db>,
     cf: <S::Txn<'db> as Transaction>::Cf,
-    plan: PlanNode,
+    collection: String,
+    indexed_fields: Vec<String>,
+    statement: planner::Statement,
 }
 
 impl<'db, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn S::Txn<'db>,
         cf: <S::Txn<'db> as Transaction>::Cf,
-        plan: PlanNode,
+        collection: String,
+        indexed_fields: Vec<String>,
+        statement: planner::Statement,
     ) -> Self {
-        Self { txn, cf, plan }
+        Self {
+            txn,
+            cf,
+            collection,
+            indexed_fields,
+            statement,
+        }
     }
 
-    /// Create a streaming iterator over the query results.
+    /// Plan the query and return a streaming iterator.
+    ///
+    /// `PlanNode<'_>` borrows from `&self.statement`; the executor iterator
+    /// borrows from `self.txn` and `&self.cf`. All three are alive as long
+    /// as `&self` — which the caller holds.
     pub fn iter(&self) -> Result<CursorIter<'_>, DbError> {
+        let plan = planner::plan(
+            &self.collection,
+            self.indexed_fields.clone(),
+            &self.statement,
+        )?;
         let exec = Executor::new(self.txn, &self.cf);
-        match exec.execute(&self.plan)? {
+        match exec.execute(plan)? {
             ExecutionResult::Rows(inner) => Ok(CursorIter { inner }),
             _ => unreachable!(),
         }

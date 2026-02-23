@@ -5,7 +5,7 @@ use slate_store::Transaction;
 
 use crate::encoding;
 use crate::error::DbError;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::{RawIter, RawValue, exec};
 use crate::planner::IndexFilter;
 
 /// Pre-encoded range bounds for byte-level filtering inside the iterator.
@@ -19,7 +19,7 @@ struct RangeBounds {
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    column: &'a str,
+    column: String,
     filter: Option<&IndexFilter>,
     direction: SortDirection,
     limit: Option<usize>,
@@ -29,8 +29,8 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
 ) -> Result<RawIter<'a>, DbError> {
     // Eq uses a narrow prefix; everything else scans the whole column.
     let prefix = match filter {
-        Some(IndexFilter::Eq(v)) => encoding::index_scan_prefix(column, v),
-        _ => encoding::index_scan_field_prefix(column),
+        Some(IndexFilter::Eq(v)) => encoding::index_scan_prefix(&column, *v),
+        _ => encoding::index_scan_field_prefix(&column),
     };
 
     // Build range bounds only when needed. Boxed so the None case adds only
@@ -38,13 +38,13 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     // keeping the Eq/None hot path cache-friendly.
     let range_bounds: Option<Box<RangeBounds>> = match filter {
         Some(IndexFilter::Gt(v)) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_value(v)),
+            lower: Some(encoding::encode_raw_value(*v)),
             lower_inclusive: false,
             upper: None,
             upper_inclusive: false,
         })),
         Some(IndexFilter::Gte(v)) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_value(v)),
+            lower: Some(encoding::encode_raw_value(*v)),
             lower_inclusive: true,
             upper: None,
             upper_inclusive: false,
@@ -52,19 +52,19 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
         Some(IndexFilter::Lt(v)) => Some(Box::new(RangeBounds {
             lower: None,
             lower_inclusive: false,
-            upper: Some(encoding::encode_value(v)),
+            upper: Some(encoding::encode_raw_value(*v)),
             upper_inclusive: false,
         })),
         Some(IndexFilter::Lte(v)) => Some(Box::new(RangeBounds {
             lower: None,
             lower_inclusive: false,
-            upper: Some(encoding::encode_value(v)),
+            upper: Some(encoding::encode_raw_value(*v)),
             upper_inclusive: true,
         })),
         Some(IndexFilter::Range { lower, upper }) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_value(&lower.value)),
+            lower: Some(encoding::encode_raw_value(lower.value)),
             lower_inclusive: lower.inclusive,
-            upper: Some(encoding::encode_value(&upper.value)),
+            upper: Some(encoding::encode_raw_value(upper.value)),
             upper_inclusive: upper.inclusive,
         })),
         _ => None, // Eq and None — no range filtering
@@ -73,7 +73,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     // Pre-convert the query value once for covered projections (Eq only).
     let raw_value = if covered {
         if let Some(IndexFilter::Eq(v)) = filter {
-            Some(RawBson::try_from(v.clone()).unwrap_or(RawBson::Null))
+            exec::to_raw_bson(*v)
         } else {
             None
         }
@@ -183,7 +183,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                                 let coerced = encoding::coerce_to_stored_type(rv, &stored_value);
                                 let mut doc = RawDocumentBuf::new();
                                 doc.append("_id", RawBson::String(record_id.to_string()));
-                                doc.append(column, coerced);
+                                doc.append(&column, coerced);
                                 return Some(Ok(Some(RawValue::Owned(RawBson::Document(doc)))));
                             } else {
                                 // Standard path: yield bare ID string

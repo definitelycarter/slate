@@ -30,7 +30,7 @@ pub trait Transaction {
     type Cf;
 
     /// Resolve a column family by name. Must be called before any reads on that CF.
-    fn cf(&mut self, name: &str) -> Result<Self::Cf, StoreError>;
+    fn cf(&self, name: &str) -> Result<Self::Cf, StoreError>;
 
     // Reads — &self, allowing concurrent borrows.
     // Return lifetimes are tied to the CF handle so backends can borrow from it.

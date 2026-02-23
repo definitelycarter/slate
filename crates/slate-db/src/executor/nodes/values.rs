@@ -1,11 +1,11 @@
 use bson::RawDocumentBuf;
-use bson::raw::RawBsonRef;
+use bson::raw::RawBson;
 
 use crate::error::DbError;
 use crate::executor::{RawIter, RawValue};
 
-pub(crate) fn execute<'a>(docs: &'a [RawDocumentBuf]) -> Result<RawIter<'a>, DbError> {
-    Ok(Box::new(docs.iter().map(|raw| {
-        Ok(Some(RawValue::Borrowed(RawBsonRef::Document(raw))))
+pub(crate) fn execute<'a>(docs: Vec<RawDocumentBuf>) -> Result<RawIter<'a>, DbError> {
+    Ok(Box::new(docs.into_iter().map(|raw| {
+        Ok(Some(RawValue::Owned(RawBson::Document(raw))))
     })))
 }

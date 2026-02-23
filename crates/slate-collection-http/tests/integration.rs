@@ -84,16 +84,7 @@ fn query_with_filters() {
     let handler = build_handler(&addr);
 
     let request_body = serde_json::json!({
-        "filters": {
-            "logical": "and",
-            "children": [{
-                "condition": {
-                    "field": "revenue",
-                    "operator": "gt",
-                    "value": 50000.0
-                }
-            }]
-        }
+        "filters": { "revenue": { "$gt": 50000.0 } }
     });
 
     let req = Request::builder()

@@ -26,7 +26,7 @@ fn extract_id(v: &RawBson) -> Option<&str> {
 }
 
 pub(crate) fn execute<'a>(
-    logical: &LogicalOp,
+    logical: LogicalOp,
     left_source: RawIter<'a>,
     right_source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
