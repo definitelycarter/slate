@@ -7,46 +7,33 @@ use crate::planner;
 
 /// A prepared query that can be iterated over.
 ///
-/// Borrows the transaction and owns the statement + planner inputs.
+/// Borrows the transaction and owns a [`PreparedStatement`](planner::PreparedStatement)
+/// that co-locates the `Statement` and `indexed_fields`.
 /// Call [`.iter()`](Cursor::iter) to plan and produce a streaming
 /// [`CursorIter`]. Planning is deferred so that `PlanNode<'_>` borrows
-/// from the owned `Statement` via `&self` — no self-referential struct.
+/// from the owned data via `&self` — no self-referential struct.
 pub struct Cursor<'db, 'txn, S: Store + 'db> {
     txn: &'txn S::Txn<'db>,
     cf: <S::Txn<'db> as Transaction>::Cf,
-    collection: String,
-    indexed_fields: Vec<String>,
-    statement: planner::Statement,
+    prepared: planner::PreparedStatement,
 }
 
 impl<'db, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn S::Txn<'db>,
         cf: <S::Txn<'db> as Transaction>::Cf,
-        collection: String,
-        indexed_fields: Vec<String>,
-        statement: planner::Statement,
+        prepared: planner::PreparedStatement,
     ) -> Self {
-        Self {
-            txn,
-            cf,
-            collection,
-            indexed_fields,
-            statement,
-        }
+        Self { txn, cf, prepared }
     }
 
     /// Plan the query and return a streaming iterator.
     ///
-    /// `PlanNode<'_>` borrows from `&self.statement`; the executor iterator
+    /// `PlanNode<'_>` borrows from `&self.prepared`; the executor iterator
     /// borrows from `self.txn` and `&self.cf`. All three are alive as long
     /// as `&self` — which the caller holds.
     pub fn iter(&self) -> Result<CursorIter<'_>, DbError> {
-        let plan = planner::plan(
-            &self.collection,
-            self.indexed_fields.clone(),
-            &self.statement,
-        )?;
+        let plan = planner::plan(&self.prepared)?;
         let exec = Executor::new(self.txn, &self.cf);
         match exec.execute(plan)? {
             ExecutionResult::Rows(inner) => Ok(CursorIter { inner }),

@@ -108,7 +108,7 @@ fn insert_one_and_find_one() {
         take: Some(1),
         columns: None,
     };
-    let record = txn.find_one(COLLECTION, &query).unwrap().unwrap();
+    let record = txn.find_one(COLLECTION, query).unwrap().unwrap();
     assert_eq!(record.get_str("_id").unwrap(), "acct-1");
     assert_eq!(record.get_str("name").unwrap(), "Acme");
     assert_eq!(record.get_f64("revenue").unwrap(), 50000.0);
@@ -145,7 +145,7 @@ fn insert_one_auto_generated_id() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -177,7 +177,7 @@ fn insert_many_batch() {
 
     let txn = db.begin(true).unwrap();
     let all = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -195,7 +195,7 @@ fn find_no_filters() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -218,7 +218,7 @@ fn find_eq_filter() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -241,7 +241,7 @@ fn find_gt_filter() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -274,7 +274,7 @@ fn find_isnull_filter() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -298,7 +298,7 @@ fn find_or_filter() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -326,7 +326,7 @@ fn find_sort_asc() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -354,7 +354,7 @@ fn find_sort_desc() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -383,7 +383,7 @@ fn find_skip_and_take() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -411,7 +411,7 @@ fn find_filter_sort_paginate() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -437,7 +437,7 @@ fn find_with_projection() {
         columns: Some(vec!["name".into(), "status".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -466,7 +466,7 @@ fn find_projection_includes_filter_columns() {
         columns: Some(vec!["name".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -496,7 +496,7 @@ fn find_projection_includes_sort_columns() {
         columns: Some(vec!["name".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -537,7 +537,7 @@ fn update_one_merge() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -584,7 +584,7 @@ fn update_one_upsert() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -617,7 +617,7 @@ fn update_many_multiple() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -652,7 +652,7 @@ fn replace_one_full_replacement() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -688,7 +688,7 @@ fn delete_one_removes_record() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -710,7 +710,7 @@ fn delete_many_removes_matching() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -772,7 +772,7 @@ fn create_and_use_index() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -847,7 +847,7 @@ fn drop_collection() {
 
     let txn = db.begin(true).unwrap();
     let result = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
@@ -874,7 +874,7 @@ fn collection_isolation() {
 
     let txn = db.begin(true).unwrap();
     let contacts = txn
-        .find("contacts", &no_filter_query())
+        .find("contacts", no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -884,7 +884,7 @@ fn collection_isolation() {
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
     let accounts = txn
-        .find("accounts", &no_filter_query())
+        .find("accounts", no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -926,7 +926,7 @@ fn index_maintained_on_insert() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -967,7 +967,7 @@ fn index_maintained_on_update() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -984,7 +984,7 @@ fn index_maintained_on_update() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1022,7 +1022,7 @@ fn index_maintained_on_delete() {
         columns: None,
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1056,7 +1056,7 @@ fn nested_doc_write_and_read() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("nested", &no_filter_query())
+        .find("nested", no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -1097,7 +1097,7 @@ fn dot_notation_filter_eq() {
         columns: None,
     };
     let results = txn
-        .find("nested", &query)
+        .find("nested", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1141,7 +1141,7 @@ fn dot_notation_sort() {
         columns: None,
     };
     let results = txn
-        .find("nested", &query)
+        .find("nested", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1183,7 +1183,7 @@ fn dot_notation_projection() {
         columns: Some(vec!["name".into(), "address.city".into()]),
     };
     let results = txn
-        .find("nested", &query)
+        .find("nested", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1232,7 +1232,7 @@ fn dot_notation_projection_multiple_subfields() {
         ]),
     };
     let results = txn
-        .find("nested", &query)
+        .find("nested", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1270,7 +1270,7 @@ fn dot_notation_isnull_missing_parent() {
         columns: None,
     };
     let results = txn
-        .find("nested", &query)
+        .find("nested", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1305,7 +1305,7 @@ fn dot_notation_deep_nesting() {
         columns: None,
     };
     let results = txn
-        .find("deep", &query)
+        .find("deep", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1329,7 +1329,7 @@ fn projection_only_uses_selective_read() {
         columns: Some(vec!["name".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1430,7 +1430,7 @@ fn index_on_nested_path() {
         columns: None,
     };
     let results = txn
-        .find("nested_idx", &query)
+        .find("nested_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1475,7 +1475,7 @@ fn index_on_array_of_scalars() {
         columns: None,
     };
     let results = txn
-        .find("tags_idx", &query)
+        .find("tags_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1498,7 +1498,7 @@ fn index_on_array_of_scalars() {
         columns: None,
     };
     let results = txn
-        .find("tags_idx", &query)
+        .find("tags_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1543,7 +1543,7 @@ fn index_on_array_of_objects() {
         columns: None,
     };
     let results = txn
-        .find("items_idx", &query)
+        .find("items_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1566,7 +1566,7 @@ fn index_on_array_of_objects() {
         columns: None,
     };
     let results = txn
-        .find("items_idx", &query)
+        .find("items_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1611,7 +1611,7 @@ fn multikey_index_maintained_on_update() {
         columns: None,
     };
     let results = txn
-        .find("tags_upd", &query)
+        .find("tags_upd", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1628,7 +1628,7 @@ fn multikey_index_maintained_on_update() {
         columns: None,
     };
     let results = txn
-        .find("tags_upd", &query)
+        .find("tags_upd", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1667,7 +1667,7 @@ fn multikey_index_maintained_on_delete() {
         columns: None,
     };
     let results = txn
-        .find("tags_del", &query)
+        .find("tags_del", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1709,7 +1709,7 @@ fn multikey_index_backfill() {
         columns: None,
     };
     let results = txn
-        .find("backfill", &query)
+        .find("backfill", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1754,7 +1754,7 @@ fn multikey_index_replace_one() {
         columns: None,
     };
     assert_eq!(
-        txn.find("tags_rep", &query)
+        txn.find("tags_rep", query)
             .unwrap()
             .iter()
             .unwrap()
@@ -1773,7 +1773,7 @@ fn multikey_index_replace_one() {
         columns: None,
     };
     let results = txn
-        .find("tags_rep", &query)
+        .find("tags_rep", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1831,7 +1831,7 @@ fn create_collection_idempotent() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("idem", &no_filter_query())
+        .find("idem", no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -1886,7 +1886,7 @@ fn find_with_or_indexed() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -1908,7 +1908,7 @@ fn find_with_or_same_field() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -1930,7 +1930,7 @@ fn find_with_or_fallback_scan() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -1953,7 +1953,7 @@ fn find_with_and_priority() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -1978,7 +1978,7 @@ fn find_with_nested_and_or() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -2002,7 +2002,7 @@ fn find_with_or_three_values() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -2031,7 +2031,7 @@ fn find_with_or_partial_index_per_branch() {
     };
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("orders", &q)
+        .find("orders", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -2075,7 +2075,7 @@ fn ttl_expired_docs_hidden_before_purge() {
     // Expired docs are immediately invisible (TTL read filtering)
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2113,7 +2113,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2160,7 +2160,7 @@ fn ttl_purge_deletes_expired_docs() {
     let txn = db.begin(true).unwrap();
     // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2228,7 +2228,7 @@ fn ttl_purge_cleans_user_indexes() {
         columns: None,
     };
     let results = txn
-        .find("purge_idx", &query)
+        .find("purge_idx", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -2265,7 +2265,7 @@ fn ttl_index_maintained_on_update() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2297,7 +2297,7 @@ fn ttl_purge_multiple_expired() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2403,7 +2403,7 @@ fn ttl_no_ttl_field_always_visible() {
     // Docs without ttl are always visible
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -2447,7 +2447,7 @@ fn distinct_scalar_field() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2478,7 +2478,7 @@ fn distinct_nested_path() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("Austin".into())));
     assert!(values.contains(&Bson::String("Denver".into())));
@@ -2507,7 +2507,7 @@ fn distinct_array_field() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 3);
     assert!(values.contains(&Bson::String("rust".into())));
     assert!(values.contains(&Bson::String("db".into())));
@@ -2539,7 +2539,7 @@ fn distinct_with_filter() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("gold".into())));
     assert!(values.contains(&Bson::String("silver".into())));
@@ -2570,7 +2570,7 @@ fn distinct_with_sort_asc() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2606,7 +2606,7 @@ fn distinct_with_sort_desc() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2639,7 +2639,7 @@ fn distinct_missing_field() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert!(values.is_empty());
 }
 
@@ -2667,7 +2667,7 @@ fn distinct_mixed_presence() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2702,7 +2702,7 @@ fn distinct_array_of_sub_documents() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![
@@ -2747,7 +2747,7 @@ fn distinct_sub_document() {
         skip: None,
         take: None,
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::Document(doc! { "city": "Austin", "state": "TX" })));
     assert!(values.contains(&Bson::Document(doc! { "city": "Denver", "state": "CO" })));
@@ -2780,7 +2780,7 @@ fn distinct_with_take() {
         skip: None,
         take: Some(2),
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![Bson::String("apple".into()), Bson::String("banana".into()),]
@@ -2814,7 +2814,7 @@ fn distinct_with_skip_take() {
         skip: Some(1),
         take: Some(2),
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![Bson::String("banana".into()), Bson::String("cherry".into()),]
@@ -2851,7 +2851,7 @@ fn distinct_with_sort_and_limit() {
         skip: Some(1),
         take: Some(2),
     };
-    let values = to_bson_vec(txn.distinct(COLLECTION, &query).unwrap());
+    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
     assert_eq!(
         values,
         vec![Bson::String("date".into()), Bson::String("cherry".into()),]
@@ -2884,7 +2884,7 @@ fn index_covered_preserves_int32_type() {
         columns: Some(vec!["score".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -2922,7 +2922,7 @@ fn index_covered_preserves_string_type() {
         columns: Some(vec!["status".into()]),
     };
     let results = txn
-        .find(COLLECTION, &query)
+        .find(COLLECTION, query)
         .unwrap()
         .iter()
         .unwrap()
@@ -2954,7 +2954,7 @@ fn upsert_many_inserts_new() {
     assert_eq!(result.updated, 0);
 
     let found = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -3010,7 +3010,7 @@ fn upsert_many_mixed() {
     assert_eq!(result.updated, 1);
 
     let found = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -3036,7 +3036,7 @@ fn upsert_many_updates_indexes() {
     let active = txn
         .find(
             COLLECTION,
-            &Query {
+            Query {
                 filter: Some(eq_filter("status", Bson::String("active".into()))),
                 sort: vec![],
                 skip: None,
@@ -3062,7 +3062,7 @@ fn upsert_many_updates_indexes() {
     let active = txn
         .find(
             COLLECTION,
-            &Query {
+            Query {
                 filter: Some(eq_filter("status", Bson::String("active".into()))),
                 sort: vec![],
                 skip: None,
@@ -3081,7 +3081,7 @@ fn upsert_many_updates_indexes() {
     let inactive = txn
         .find(
             COLLECTION,
-            &Query {
+            Query {
                 filter: Some(eq_filter("status", Bson::String("inactive".into()))),
                 sort: vec![],
                 skip: None,
@@ -3114,7 +3114,7 @@ fn merge_many_inserts_new() {
     assert_eq!(result.updated, 0);
 
     let found = txn
-        .find(COLLECTION, &no_filter_query())
+        .find(COLLECTION, no_filter_query())
         .unwrap()
         .iter()
         .unwrap()
@@ -3168,7 +3168,7 @@ fn merge_many_index_maintenance() {
     let active = txn
         .find(
             COLLECTION,
-            &Query {
+            Query {
                 filter: Some(eq_filter("status", Bson::String("active".into()))),
                 sort: vec![],
                 skip: None,
@@ -3187,7 +3187,7 @@ fn merge_many_index_maintenance() {
     let inactive = txn
         .find(
             COLLECTION,
-            &Query {
+            Query {
                 filter: Some(eq_filter("status", Bson::String("inactive".into()))),
                 sort: vec![],
                 skip: None,
@@ -3301,7 +3301,7 @@ fn find_gt_on_indexed_field() {
         columns: None,
     };
     let results = txn
-        .find("scores", &query)
+        .find("scores", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -3350,7 +3350,7 @@ fn find_gte_lte_on_indexed_field() {
         columns: None,
     };
     let results = txn
-        .find("scores", &query)
+        .find("scores", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -3962,7 +3962,7 @@ fn mutation_index_maintained_on_set() {
         ..no_filter_query()
     };
     let results = txn
-        .find("idx_mut", &q)
+        .find("idx_mut", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -3975,7 +3975,7 @@ fn mutation_index_maintained_on_set() {
         ..no_filter_query()
     };
     let results = txn
-        .find("idx_mut", &q)
+        .find("idx_mut", q)
         .unwrap()
         .iter()
         .unwrap()
@@ -4018,7 +4018,7 @@ fn mutation_index_maintained_on_unset() {
         ..no_filter_query()
     };
     let results = txn
-        .find("idx_unset", &q)
+        .find("idx_unset", q)
         .unwrap()
         .iter()
         .unwrap()

@@ -441,8 +441,9 @@ fn delete_removes_records() {
 #[test]
 fn delete_index_removes_index_keys() {
     let (txn, cf) = mock_executor();
+    let fields = vec!["status".into()];
     let plan = PlanNode::DeleteIndex {
-        indexed_fields: vec!["status".into()],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Values {
             docs: vec![
                 rawdoc! { "_id": "1", "status": "active" },
@@ -471,8 +472,9 @@ fn delete_index_removes_index_keys() {
 fn delete_index_with_ttl() {
     let (txn, cf) = mock_executor();
     let dt = bson::DateTime::from_millis(1700000000000);
+    let fields = vec!["status".into(), "ttl".into()];
     let plan = PlanNode::DeleteIndex {
-        indexed_fields: vec!["status".into(), "ttl".into()],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Values {
             docs: vec![rawdoc! { "_id": "1", "status": "active", "ttl": dt }],
         }),
@@ -496,9 +498,10 @@ fn delete_index_with_ttl() {
 #[test]
 fn update_writes_merged_doc() {
     let (txn, cf) = mock_executor();
+    let fields: Vec<String> = vec![];
     // Wrap Update in InsertIndex so execute() returns Update variant
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec![],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Update {
             mutation: slate_query::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
             input: Box::new(PlanNode::Values {
@@ -528,8 +531,9 @@ fn update_writes_merged_doc() {
 #[test]
 fn update_unchanged_skips_write() {
     let (txn, cf) = mock_executor();
+    let fields: Vec<String> = vec![];
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec![],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Update {
             mutation: slate_query::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
             input: Box::new(PlanNode::Values {
@@ -551,8 +555,9 @@ fn update_unchanged_skips_write() {
 #[test]
 fn replace_writes_replacement() {
     let (txn, cf) = mock_executor();
+    let fields: Vec<String> = vec![];
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec![],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Replace {
             replacement: rawdoc! { "replaced": true },
             input: Box::new(PlanNode::Values {
@@ -579,8 +584,9 @@ fn replace_writes_replacement() {
 #[test]
 fn insert_index_writes_keys() {
     let (txn, cf) = mock_executor();
+    let fields = vec!["status".into()];
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec!["status".into()],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Values {
             docs: vec![
                 rawdoc! { "_id": "1", "status": "active" },
@@ -611,9 +617,10 @@ fn insert_index_writes_keys() {
 #[test]
 fn full_delete_pipeline() {
     let (txn, cf) = mock_executor();
+    let fields = vec!["status".into()];
     let plan = PlanNode::Delete {
         input: Box::new(PlanNode::DeleteIndex {
-            indexed_fields: vec!["status".into()],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::Values {
                 docs: vec![
                     rawdoc! { "_id": "1", "status": "active" },
@@ -648,13 +655,14 @@ fn full_delete_pipeline() {
 #[test]
 fn full_update_pipeline() {
     let (txn, cf) = mock_executor();
+    let fields = vec!["status".into()];
     // InsertIndex → Update → DeleteIndex → Values
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec!["status".into()],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Update {
             mutation: slate_query::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
             input: Box::new(PlanNode::DeleteIndex {
-                indexed_fields: vec!["status".into()],
+                indexed_fields: &fields,
                 input: Box::new(PlanNode::Values {
                     docs: vec![rawdoc! { "_id": "1", "status": "active" }],
                 }),
@@ -730,9 +738,7 @@ fn scan_yields_all_records() {
     let txn = db.store().begin(true).unwrap();
     let cf = txn.cf("test").unwrap();
 
-    let plan = PlanNode::Scan {
-        collection: "test".into(),
-    };
+    let plan = PlanNode::Scan;
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     // Scan yields in key order (record_key is "d:{id}")
@@ -749,7 +755,6 @@ fn index_scan_eq_filter() {
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "status".into(),
         filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
         direction: SortDirection::Asc,
@@ -771,7 +776,6 @@ fn index_scan_full_column() {
 
     // Scan entire "score" index (filter: None) in ascending order
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: None,
         direction: SortDirection::Asc,
@@ -791,7 +795,6 @@ fn index_scan_desc() {
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: None,
         direction: SortDirection::Desc,
@@ -811,7 +814,6 @@ fn index_scan_with_limit() {
     let cf = txn.cf("test").unwrap();
 
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: None,
         direction: SortDirection::Asc,
@@ -833,7 +835,6 @@ fn index_merge_or() {
     let plan = PlanNode::IndexMerge {
         logical: LogicalOp::Or,
         lhs: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
@@ -842,7 +843,6 @@ fn index_merge_or() {
             covered: false,
         }),
         rhs: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("inactive"))),
             direction: SortDirection::Asc,
@@ -869,7 +869,6 @@ fn index_merge_and() {
     let plan = PlanNode::IndexMerge {
         logical: LogicalOp::And,
         lhs: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
@@ -878,7 +877,6 @@ fn index_merge_and() {
             covered: false,
         }),
         rhs: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "score".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::Int32(80))),
             direction: SortDirection::Asc,
@@ -900,7 +898,6 @@ fn read_record_fetches_docs_from_index_scan() {
     // ReadRecord wrapping an IndexScan — should fetch actual documents
     let plan = PlanNode::ReadRecord {
         input: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: SortDirection::Asc,
@@ -937,7 +934,6 @@ fn read_record_skips_dangling_index() {
 
     let plan = PlanNode::ReadRecord {
         input: Box::new(PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("inactive"))),
             direction: SortDirection::Asc,
@@ -959,9 +955,7 @@ fn read_record_over_scan() {
 
     // ReadRecord wrapping Scan — passthrough path (Scan already yields docs)
     let plan = PlanNode::ReadRecord {
-        input: Box::new(PlanNode::Scan {
-            collection: "test".into(),
-        }),
+        input: Box::new(PlanNode::Scan),
     };
     let rows = collect_docs(Executor::new(&txn, &cf).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
@@ -976,11 +970,12 @@ use crate::planner::{IndexBound, UpsertMode};
 fn upsert_replace_insert_new() {
     // MockTransaction returns None for get() → insert path
     let (txn, cf) = mock_executor();
+    let fields = vec!["status".into()];
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec!["status".into()],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Upsert {
             mode: UpsertMode::Replace,
-            indexed_fields: vec!["status".into()],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }],
             }),
@@ -1006,11 +1001,12 @@ fn upsert_replace_insert_new() {
 #[test]
 fn upsert_merge_insert_new() {
     let (txn, cf) = mock_executor();
+    let fields: Vec<String> = vec![];
     let plan = PlanNode::InsertIndex {
-        indexed_fields: vec![],
+        indexed_fields: &fields,
         input: Box::new(PlanNode::Upsert {
             mode: UpsertMode::Merge,
-            indexed_fields: vec![],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::Values {
                 docs: vec![rawdoc! { "_id": "1", "name": "Alice" }],
             }),
@@ -1114,7 +1110,7 @@ fn upsert_replace_cleans_old_indexes() {
         columns: None,
     };
     let results: Vec<_> = txn
-        .find("test", &query)
+        .find("test", query)
         .unwrap()
         .iter()
         .unwrap()
@@ -1139,7 +1135,7 @@ fn upsert_replace_cleans_old_indexes() {
         columns: None,
     };
     let results2: Vec<_> = txn
-        .find("test", &query2)
+        .find("test", query2)
         .unwrap()
         .iter()
         .unwrap()
@@ -1163,7 +1159,6 @@ fn index_scan_gt() {
 
     // score > 70 → Bob(90), Charlie(80)
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Gt(RawBsonRef::Int32(70))),
         direction: SortDirection::Asc,
@@ -1183,7 +1178,6 @@ fn index_scan_gte() {
 
     // score >= 80 → Charlie(80), Bob(90)
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Gte(RawBsonRef::Int32(80))),
         direction: SortDirection::Asc,
@@ -1203,7 +1197,6 @@ fn index_scan_lt() {
 
     // score < 90 → Alice(70), Charlie(80)
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Lt(RawBsonRef::Int32(90))),
         direction: SortDirection::Asc,
@@ -1223,7 +1216,6 @@ fn index_scan_lte() {
 
     // score <= 80 → Alice(70), Charlie(80)
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Lte(RawBsonRef::Int32(80))),
         direction: SortDirection::Asc,
@@ -1243,7 +1235,6 @@ fn index_scan_range() {
 
     // score > 70 AND score < 90 → Charlie(80) only
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Range {
             lower: IndexBound {
@@ -1272,7 +1263,6 @@ fn index_scan_range_desc() {
 
     // score >= 70 AND score <= 90, descending
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Range {
             lower: IndexBound {
@@ -1301,7 +1291,6 @@ fn index_scan_range_with_limit() {
 
     // score >= 70, limit 2
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Gte(RawBsonRef::Int32(70))),
         direction: SortDirection::Asc,
@@ -1321,7 +1310,6 @@ fn index_scan_range_empty_result() {
 
     // score > 100 → nothing
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Gt(RawBsonRef::Int32(100))),
         direction: SortDirection::Asc,
@@ -1341,7 +1329,6 @@ fn index_scan_gt_desc() {
 
     // score > 70, descending → Bob(90), Charlie(80)
     let plan = PlanNode::IndexScan {
-        collection: "test".into(),
         column: "score".into(),
         filter: Some(IndexFilter::Gt(RawBsonRef::Int32(70))),
         direction: SortDirection::Desc,

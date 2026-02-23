@@ -155,7 +155,7 @@ impl SlateDatabase {
             })?;
         self.read(|txn| {
             let results: Vec<Vec<u8>> = txn
-                .find(&collection, &query)?
+                .find(&collection, query)?
                 .iter()?
                 .map(|r| r.map(|doc| doc.into_bytes()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -177,7 +177,7 @@ impl SlateDatabase {
                 message: e.to_string(),
             })?;
         self.read(|txn| {
-            let raw = txn.find_one(&collection, &query)?;
+            let raw = txn.find_one(&collection, query)?;
             Ok(raw.map(|r| r.into_bytes()))
         })
     }

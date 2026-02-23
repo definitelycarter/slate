@@ -75,13 +75,10 @@ pub enum IndexFilter<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlanNode<'a> {
     /// Full scan — yields all record IDs in a collection.
-    Scan {
-        collection: String,
-    },
+    Scan,
 
     /// Index scan — yields record IDs from an index.
     IndexScan {
-        collection: String,
         column: String,
         filter: Option<IndexFilter<'a>>,
         direction: SortDirection,
@@ -135,7 +132,7 @@ pub enum PlanNode<'a> {
 
     // ── Mutation nodes ──────────────────────────────────────────
     DeleteIndex {
-        indexed_fields: Vec<String>,
+        indexed_fields: &'a [String],
         input: Box<PlanNode<'a>>,
     },
 
@@ -154,7 +151,7 @@ pub enum PlanNode<'a> {
     },
 
     InsertIndex {
-        indexed_fields: Vec<String>,
+        indexed_fields: &'a [String],
         input: Box<PlanNode<'a>>,
     },
 
@@ -164,7 +161,7 @@ pub enum PlanNode<'a> {
 
     Upsert {
         mode: UpsertMode,
-        indexed_fields: Vec<String>,
+        indexed_fields: &'a [String],
         input: Box<PlanNode<'a>>,
     },
 
@@ -174,51 +171,40 @@ pub enum PlanNode<'a> {
     },
 }
 
+/// Co-locates ownership of `Statement` and `indexed_fields` so that
+/// `plan()` can borrow both from a single source.
+#[derive(Debug, Clone)]
+pub struct PreparedStatement {
+    pub statement: Statement,
+    pub indexed_fields: Vec<String>,
+}
+
 /// Build a query plan. The returned `PlanNode<'a>` borrows from the
-/// `Statement` so that `Expression<'a>` and `IndexFilter<'a>` can reference
-/// the raw BSON filter bytes without allocation.
-pub fn plan<'a>(
-    collection: &str,
-    indexed_fields: Vec<String>,
-    statement: &'a Statement,
-) -> Result<PlanNode<'a>, DbError> {
-    match statement {
-        Statement::Find(query) => plan_find(collection, &indexed_fields, query),
-        Statement::Distinct(query) => plan_distinct(collection, &indexed_fields, query),
+/// `PreparedStatement` so that `Expression<'a>`, `IndexFilter<'a>`, and
+/// mutation-node `indexed_fields` can all reference owned data without cloning.
+pub fn plan<'a>(prepared: &'a PreparedStatement) -> Result<PlanNode<'a>, DbError> {
+    let indexed_fields = &prepared.indexed_fields;
+    match &prepared.statement {
+        Statement::Find(query) => plan_find(indexed_fields, query),
+        Statement::Distinct(query) => plan_distinct(indexed_fields, query),
         Statement::Update {
             filter,
             mutation,
             limit,
         } => {
             let expr = parse_raw_filter(filter)?;
-            Ok(plan_update(
-                collection,
-                indexed_fields.clone(),
-                &expr,
-                mutation.clone(),
-                *limit,
-            ))
+            Ok(plan_update(indexed_fields, &expr, mutation.clone(), *limit))
         }
         Statement::Replace {
             filter,
             replacement,
         } => {
             let expr = parse_raw_filter(filter)?;
-            Ok(plan_replace(
-                collection,
-                indexed_fields.clone(),
-                &expr,
-                replacement.clone(),
-            ))
+            Ok(plan_replace(indexed_fields, &expr, replacement.clone()))
         }
         Statement::Delete { filter, limit } => {
             let expr = parse_raw_filter(filter)?;
-            Ok(plan_delete(
-                collection,
-                indexed_fields.clone(),
-                &expr,
-                *limit,
-            ))
+            Ok(plan_delete(indexed_fields, &expr, *limit))
         }
         Statement::Insert { docs } => Ok(plan_insert(indexed_fields, docs.clone())),
         Statement::UpsertMany { docs } => Ok(plan_upsert(
@@ -231,7 +217,7 @@ pub fn plan<'a>(
         }
         Statement::FlushExpired { filter } => {
             let expr = parse_raw_filter(filter)?;
-            Ok(plan_delete(collection, indexed_fields.clone(), &expr, None))
+            Ok(plan_delete(indexed_fields, &expr, None))
         }
     }
 }
@@ -251,26 +237,17 @@ fn parse_optional_filter<'a>(
     }
 }
 
-fn plan_find<'a>(
-    collection: &str,
-    indexed_fields: &[String],
-    query: &'a Query,
-) -> Result<PlanNode<'a>, DbError> {
+fn plan_find<'a>(indexed_fields: &[String], query: &'a Query) -> Result<PlanNode<'a>, DbError> {
     let expr = parse_optional_filter(query.filter.as_ref())?;
 
     // Step 1: Plan the filter — split into ID-tier node + residual document-tier predicate
     let (id_node, residual_filter) = match &expr {
-        Some(e) => plan_filter(collection, indexed_fields, e),
-        None => (
-            PlanNode::Scan {
-                collection: collection.to_string(),
-            },
-            None,
-        ),
+        Some(e) => plan_filter(indexed_fields, e),
+        None => (PlanNode::Scan, None),
     };
 
     // Capture before id_node is consumed — needed for indexed sort optimization in Step 4.
-    let id_is_scan = matches!(id_node, PlanNode::Scan { .. });
+    let id_is_scan = matches!(id_node, PlanNode::Scan);
     let has_residual_filter = residual_filter.is_some();
 
     // Step 2: Check if the index covers the projection (skip ReadRecord entirely).
@@ -352,7 +329,6 @@ fn plan_find<'a>(
 
         replace_scan_with_index_order(
             node,
-            collection,
             &query.sort[0].field,
             query.sort[0].direction,
             index_limit,
@@ -369,7 +345,6 @@ fn plan_find<'a>(
         };
         let node = replace_scan_with_index_order(
             node,
-            collection,
             &query.sort[0].field,
             query.sort[0].direction,
             index_limit,
@@ -419,7 +394,6 @@ fn plan_find<'a>(
 /// Projection extracts the distinct field; Distinct deduplicates;
 /// Sort/Limit are standard pipeline nodes on top.
 fn plan_distinct<'a>(
-    collection: &str,
     indexed_fields: &[String],
     query: &'a slate_query::DistinctQuery,
 ) -> Result<PlanNode<'a>, DbError> {
@@ -427,17 +401,12 @@ fn plan_distinct<'a>(
 
     // Step 1: Plan the filter — same as find
     let (id_node, residual_filter) = match &expr {
-        Some(e) => plan_filter(collection, indexed_fields, e),
-        None => (
-            PlanNode::Scan {
-                collection: collection.to_string(),
-            },
-            None,
-        ),
+        Some(e) => plan_filter(indexed_fields, e),
+        None => (PlanNode::Scan, None),
     };
 
     // Step 2: ReadRecord (only for index paths — Scan already yields documents)
-    let node = if matches!(id_node, PlanNode::Scan { .. }) {
+    let node = if matches!(id_node, PlanNode::Scan) {
         id_node
     } else {
         PlanNode::ReadRecord {
@@ -495,16 +464,14 @@ fn plan_distinct<'a>(
 /// Handles both `ReadRecord(Scan)` and `Filter(ReadRecord(Scan))`.
 fn replace_scan_with_index_order<'a>(
     node: PlanNode<'a>,
-    collection: &str,
     sort_field: &str,
     direction: SortDirection,
     limit: Option<usize>,
     complete_groups: bool,
 ) -> PlanNode<'a> {
     match node {
-        PlanNode::Scan { .. } => PlanNode::ReadRecord {
+        PlanNode::Scan => PlanNode::ReadRecord {
             input: Box::new(PlanNode::IndexScan {
-                collection: collection.to_string(),
                 column: sort_field.to_string(),
                 filter: None,
                 direction,
@@ -517,7 +484,6 @@ fn replace_scan_with_index_order<'a>(
             predicate,
             input: Box::new(replace_scan_with_index_order(
                 *input,
-                collection,
                 sort_field,
                 direction,
                 limit,
@@ -537,42 +503,34 @@ fn replace_scan_with_index_order<'a>(
 
 /// Plan a filter expression, returning an ID-tier node and optional residual.
 fn plan_filter<'a>(
-    collection: &str,
     indexed_fields: &[String],
     expr: &Expression<'a>,
 ) -> (PlanNode<'a>, Option<Expression<'a>>) {
     match expr {
-        Expression::And(children) => plan_and_children(collection, indexed_fields, children, expr),
-        Expression::Or(children) => plan_or_children(collection, indexed_fields, children, expr),
+        Expression::And(children) => plan_and_children(indexed_fields, children, expr),
+        Expression::Or(children) => plan_or_children(indexed_fields, children, expr),
         // Single condition at top level — wrap in a one-element "and" for uniform handling
-        other => plan_single_condition(collection, indexed_fields, other, expr),
+        other => plan_single_condition(indexed_fields, other, expr),
     }
 }
 
 /// Plan a single (non-And, non-Or) expression at the top level.
 fn plan_single_condition<'a>(
-    collection: &str,
     indexed_fields: &[String],
     expr: &Expression<'a>,
     original: &Expression<'a>,
 ) -> (PlanNode<'a>, Option<Expression<'a>>) {
     // Try to push into index
-    if let Some(node) = try_index_condition(collection, indexed_fields, expr) {
+    if let Some(node) = try_index_condition(indexed_fields, expr) {
         (node, None)
     } else {
-        (
-            PlanNode::Scan {
-                collection: collection.to_string(),
-            },
-            Some(original.clone()),
-        )
+        (PlanNode::Scan, Some(original.clone()))
     }
 }
 
 /// Try to convert a single condition expression into an IndexScan node.
 /// Returns None if the condition can't be served by an index.
 fn try_index_condition<'a>(
-    collection: &str,
     indexed_fields: &[String],
     expr: &Expression<'a>,
 ) -> Option<PlanNode<'a>> {
@@ -588,7 +546,6 @@ fn try_index_condition<'a>(
         return None;
     }
     Some(PlanNode::IndexScan {
-        collection: collection.to_string(),
         column: field.to_string(),
         filter: Some(index_filter),
         direction: SortDirection::Asc,
@@ -603,12 +560,11 @@ fn try_index_condition<'a>(
 /// Strategy: iterate indexed_fields in priority order, pick the best child
 /// to push into the ID tier. Non-selected children become residual.
 fn plan_and_children<'a>(
-    collection: &str,
     indexed_fields: &[String],
     children: &[Expression<'a>],
     original: &Expression<'a>,
 ) -> (PlanNode<'a>, Option<Expression<'a>>) {
-    let best = find_best_and_child(collection, indexed_fields, children);
+    let best = find_best_and_child(indexed_fields, children);
 
     match best {
         Some((id_node, consumed_indices)) => {
@@ -632,12 +588,7 @@ fn plan_and_children<'a>(
         }
         None => {
             // No indexed condition found — full scan, entire expression is residual
-            (
-                PlanNode::Scan {
-                    collection: collection.to_string(),
-                },
-                Some(original.clone()),
-            )
+            (PlanNode::Scan, Some(original.clone()))
         }
     }
 }
@@ -651,7 +602,6 @@ fn plan_and_children<'a>(
 ///
 /// Returns the ID-tier node and the indices of consumed children.
 fn find_best_and_child<'a>(
-    collection: &str,
     indexed_fields: &[String],
     children: &[Expression<'a>],
 ) -> Option<(PlanNode<'a>, Vec<usize>)> {
@@ -661,7 +611,6 @@ fn find_best_and_child<'a>(
             if let Expression::Eq(f, val) = child {
                 if *f == field.as_str() {
                     let node = PlanNode::IndexScan {
-                        collection: collection.to_string(),
                         column: f.to_string(),
                         filter: Some(IndexFilter::Eq(*val)),
                         direction: SortDirection::Asc,
@@ -680,7 +629,7 @@ fn find_best_and_child<'a>(
     // IndexScan branch may over-fetch — the full OR must be rechecked.
     for (_i, child) in children.iter().enumerate() {
         if let Expression::Or(or_children) = child {
-            if let Some(id_node) = try_or_index_merge(collection, indexed_fields, or_children) {
+            if let Some(id_node) = try_or_index_merge(indexed_fields, or_children) {
                 return Some((id_node, vec![]));
             }
         }
@@ -749,7 +698,6 @@ fn find_best_and_child<'a>(
             };
 
             let node = PlanNode::IndexScan {
-                collection: collection.to_string(),
                 column: field.to_string(),
                 filter: Some(index_filter),
                 direction: SortDirection::Asc,
@@ -773,24 +721,18 @@ fn find_best_and_child<'a>(
 /// The full original OR expression always becomes the residual filter (recheck),
 /// because each IndexScan branch may over-fetch.
 fn plan_or_children<'a>(
-    collection: &str,
     indexed_fields: &[String],
     children: &[Expression<'a>],
     original: &Expression<'a>,
 ) -> (PlanNode<'a>, Option<Expression<'a>>) {
-    match try_or_index_merge(collection, indexed_fields, children) {
+    match try_or_index_merge(indexed_fields, children) {
         Some(id_node) => {
             // All branches indexed — use IndexMerge(Or), full expression is residual recheck
             (id_node, Some(original.clone()))
         }
         None => {
             // Can't fully index the OR — fall back to Scan
-            (
-                PlanNode::Scan {
-                    collection: collection.to_string(),
-                },
-                Some(original.clone()),
-            )
+            (PlanNode::Scan, Some(original.clone()))
         }
     }
 }
@@ -800,7 +742,6 @@ fn plan_or_children<'a>(
 /// Returns Some(id_node) if every child can produce an ID-tier node.
 /// Returns None if any child has zero indexed conditions.
 fn try_or_index_merge<'a>(
-    collection: &str,
     indexed_fields: &[String],
     children: &[Expression<'a>],
 ) -> Option<PlanNode<'a>> {
@@ -810,7 +751,6 @@ fn try_or_index_merge<'a>(
         match child {
             Expression::Eq(field, val) if indexed_fields.iter().any(|f| f.as_str() == *field) => {
                 id_nodes.push(PlanNode::IndexScan {
-                    collection: collection.to_string(),
                     column: field.to_string(),
                     filter: Some(IndexFilter::Eq(*val)),
                     direction: SortDirection::Asc,
@@ -821,16 +761,15 @@ fn try_or_index_merge<'a>(
             }
             Expression::And(sub_children) => {
                 // Recurse: try to get an ID-tier node from the nested AND
-                let (id_node, _residual) =
-                    plan_and_children(collection, indexed_fields, sub_children, child);
-                if matches!(id_node, PlanNode::Scan { .. }) {
+                let (id_node, _residual) = plan_and_children(indexed_fields, sub_children, child);
+                if matches!(id_node, PlanNode::Scan) {
                     return None;
                 }
                 id_nodes.push(id_node);
             }
             Expression::Or(sub_children) => {
                 // Nested OR — recurse
-                match try_or_index_merge(collection, indexed_fields, sub_children) {
+                match try_or_index_merge(indexed_fields, sub_children) {
                     Some(node) => id_nodes.push(node),
                     None => return None,
                 }
@@ -873,15 +812,14 @@ fn try_or_index_merge<'a>(
 /// Build the read source for a mutation: ReadRecord → Filter → Scan/IndexScan.
 /// Optionally wraps with Limit for `_one` variants.
 fn build_filtered_source<'a>(
-    collection: &str,
     indexed_fields: &[String],
     filter: &Expression<'a>,
     take: Option<usize>,
 ) -> PlanNode<'a> {
-    let (id_node, residual_filter) = plan_filter(collection, indexed_fields, filter);
+    let (id_node, residual_filter) = plan_filter(indexed_fields, filter);
 
     // Scan already yields full documents — only wrap in ReadRecord for index paths.
-    let node = if matches!(id_node, PlanNode::Scan { .. }) {
+    let node = if matches!(id_node, PlanNode::Scan) {
         id_node
     } else {
         PlanNode::ReadRecord {
@@ -911,12 +849,11 @@ fn build_filtered_source<'a>(
 ///
 /// Pipeline: `Delete → DeleteIndex → [Limit] → Filter → ReadRecord → Scan/IndexScan`
 fn plan_delete<'a>(
-    collection: &str,
-    indexed_fields: Vec<String>,
+    indexed_fields: &'a [String],
     filter: &Expression<'a>,
     take: Option<usize>,
 ) -> PlanNode<'a> {
-    let source = build_filtered_source(collection, &indexed_fields, filter, take);
+    let source = build_filtered_source(indexed_fields, filter, take);
 
     let node = PlanNode::DeleteIndex {
         indexed_fields,
@@ -932,16 +869,15 @@ fn plan_delete<'a>(
 ///
 /// Pipeline: `InsertIndex → Update → DeleteIndex → [Limit] → Filter → ReadRecord → Scan/IndexScan`
 fn plan_update<'a>(
-    collection: &str,
-    indexed_fields: Vec<String>,
+    indexed_fields: &'a [String],
     filter: &Expression<'a>,
     mutation: Mutation,
     take: Option<usize>,
 ) -> PlanNode<'a> {
-    let source = build_filtered_source(collection, &indexed_fields, filter, take);
+    let source = build_filtered_source(indexed_fields, filter, take);
 
     let node = PlanNode::DeleteIndex {
-        indexed_fields: indexed_fields.clone(),
+        indexed_fields,
         input: Box::new(source),
     };
 
@@ -960,15 +896,14 @@ fn plan_update<'a>(
 ///
 /// Pipeline: `InsertIndex → Replace → DeleteIndex → [Limit(1)] → Filter → ReadRecord → Scan/IndexScan`
 fn plan_replace<'a>(
-    collection: &str,
-    indexed_fields: Vec<String>,
+    indexed_fields: &'a [String],
     filter: &Expression<'a>,
     replacement: bson::RawDocumentBuf,
 ) -> PlanNode<'a> {
-    let source = build_filtered_source(collection, &indexed_fields, filter, Some(1));
+    let source = build_filtered_source(indexed_fields, filter, Some(1));
 
     let node = PlanNode::DeleteIndex {
-        indexed_fields: indexed_fields.clone(),
+        indexed_fields,
         input: Box::new(source),
     };
 
@@ -986,7 +921,7 @@ fn plan_replace<'a>(
 /// Plan an insert operation.
 ///
 /// Pipeline: `InsertIndex → InsertRecord → Values`
-fn plan_insert<'a>(indexed_fields: Vec<String>, docs: Vec<bson::RawDocumentBuf>) -> PlanNode<'a> {
+fn plan_insert<'a>(indexed_fields: &'a [String], docs: Vec<bson::RawDocumentBuf>) -> PlanNode<'a> {
     let node = PlanNode::Values { docs };
 
     let node = PlanNode::InsertRecord {
@@ -1006,7 +941,7 @@ fn plan_insert<'a>(indexed_fields: Vec<String>, docs: Vec<bson::RawDocumentBuf>)
 /// The Upsert node handles old-doc lookup and old-index cleanup internally,
 /// so no separate DeleteIndex node is needed.
 fn plan_upsert<'a>(
-    indexed_fields: Vec<String>,
+    indexed_fields: &'a [String],
     docs: Vec<bson::RawDocumentBuf>,
     mode: UpsertMode,
 ) -> PlanNode<'a> {
@@ -1014,7 +949,7 @@ fn plan_upsert<'a>(
 
     let node = PlanNode::Upsert {
         mode,
-        indexed_fields: indexed_fields.clone(),
+        indexed_fields,
         input: Box::new(node),
     };
 
@@ -1036,6 +971,13 @@ mod tests {
             skip: None,
             take: None,
             columns: None,
+        }
+    }
+
+    fn prep(indexed_fields: Vec<String>, statement: Statement) -> PreparedStatement {
+        PreparedStatement {
+            statement,
+            indexed_fields,
         }
     }
 
@@ -1081,10 +1023,11 @@ mod tests {
     #[test]
     fn plan_no_filter() {
         let stmt = Statement::Find(empty_query());
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (cols, inner) = unwrap_projection(p);
         assert_eq!(cols, None);
-        assert!(matches!(inner, PlanNode::Scan { .. }));
+        assert!(matches!(inner, PlanNode::Scan));
     }
 
     #[test]
@@ -1094,11 +1037,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }
@@ -1112,7 +1056,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         // ReadRecord(IndexScan) — no residual filter since only condition is indexed
         match inner {
@@ -1120,7 +1065,6 @@ mod tests {
                 assert_eq!(
                     *input,
                     PlanNode::IndexScan {
-                        collection: "p1".into(),
                         column: "status".into(),
                         filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                         direction: SortDirection::Asc,
@@ -1142,7 +1086,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         // Filter(score > 50, ReadRecord(IndexScan(status)))
         match inner {
@@ -1169,11 +1114,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Sort { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Sort, got {:?}", inner),
         }
@@ -1190,7 +1136,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Sort { input, .. } => {
@@ -1208,13 +1155,14 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { skip, take, input } => {
                 assert_eq!(skip, 10);
                 assert_eq!(take, Some(5));
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Limit, got {:?}", inner),
         }
@@ -1227,10 +1175,11 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (cols, inner) = unwrap_projection(p);
         assert_eq!(cols, Some(vec!["name".to_string(), "status".to_string()]));
-        assert!(matches!(inner, PlanNode::Scan { .. }));
+        assert!(matches!(inner, PlanNode::Scan));
     }
 
     #[test]
@@ -1247,7 +1196,8 @@ mod tests {
             columns: Some(vec!["name".into(), "score".into()]),
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         // Projection(Limit(Sort(Filter(ReadRecord(IndexScan)))))
         let (_, inner) = unwrap_projection(p);
         match inner {
@@ -1277,7 +1227,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         // Filter(status = "active", ReadRecord(IndexScan(user_id = "abc")))
         match inner {
@@ -1307,7 +1258,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         // Filter(recheck, ReadRecord(IndexMerge(Or, IndexScan, IndexScan)))
         match inner {
@@ -1334,11 +1286,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }
@@ -1352,7 +1305,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => match *input {
@@ -1378,7 +1332,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => match *input {
@@ -1408,7 +1363,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { predicate, input } => {
@@ -1438,7 +1394,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => match *input {
@@ -1477,7 +1434,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => match *input {
@@ -1516,11 +1474,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }
@@ -1533,11 +1492,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }
@@ -1553,7 +1513,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { predicate, input } => {
@@ -1589,7 +1550,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1626,7 +1588,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1662,7 +1625,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1701,7 +1665,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         assert!(matches!(inner, PlanNode::Sort { .. }));
     }
@@ -1718,7 +1683,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => {
@@ -1741,7 +1707,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1781,7 +1748,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1836,7 +1804,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1878,7 +1847,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => {
@@ -1905,7 +1875,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         assert!(matches!(inner, PlanNode::Sort { .. }));
     }
@@ -1929,7 +1900,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -1977,7 +1949,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Limit { input, .. } => match *input {
@@ -2008,19 +1981,15 @@ mod tests {
             take: None,
         };
         let stmt = Statement::Distinct(q);
-        let p = plan("col", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         match p {
             PlanNode::Distinct { field, input } => {
                 assert_eq!(field, "status");
                 match *input {
                     PlanNode::Projection { columns, input } => {
                         assert_eq!(columns, Some(vec!["status".to_string()]));
-                        match *input {
-                            PlanNode::Scan { collection } => {
-                                assert_eq!(collection, "col");
-                            }
-                            _ => panic!("expected Scan"),
-                        }
+                        assert!(matches!(*input, PlanNode::Scan));
                     }
                     _ => panic!("expected Projection"),
                 }
@@ -2039,7 +2008,8 @@ mod tests {
             take: None,
         };
         let stmt = Statement::Distinct(q);
-        let p = plan("col", vec![], &stmt).unwrap();
+        let prepared = prep(vec![], stmt);
+        let p = plan(&prepared).unwrap();
         match p {
             PlanNode::Sort { sorts, input } => {
                 assert_eq!(sorts.len(), 1);
@@ -2053,7 +2023,7 @@ mod tests {
                                 assert_eq!(columns, Some(vec!["status".to_string()]));
                                 match *input {
                                     PlanNode::Filter { input, .. } => {
-                                        assert!(matches!(*input, PlanNode::Scan { .. }));
+                                        assert!(matches!(*input, PlanNode::Scan));
                                     }
                                     _ => panic!("expected Filter"),
                                 }
@@ -2079,7 +2049,8 @@ mod tests {
         };
         let indexed = vec!["priority".to_string()];
         let stmt = Statement::Distinct(q);
-        let p = plan("col", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         match p {
             PlanNode::Distinct { input, .. } => match *input {
                 PlanNode::Projection { input, .. } => match *input {
@@ -2108,7 +2079,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::ReadRecord { input } => match *input {
@@ -2130,7 +2102,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::ReadRecord { input } => match *input {
@@ -2152,7 +2125,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::ReadRecord { input } => match *input {
@@ -2186,7 +2160,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { predicate, input } => {
@@ -2214,7 +2189,8 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { predicate, input } => {
@@ -2242,11 +2218,12 @@ mod tests {
             ..empty_query()
         };
         let stmt = Statement::Find(q);
-        let p = plan("p1", indexed, &stmt).unwrap();
+        let prepared = prep(indexed, stmt);
+        let p = plan(&prepared).unwrap();
         let (_, inner) = unwrap_projection(p);
         match inner {
             PlanNode::Filter { input, .. } => {
-                assert!(matches!(*input, PlanNode::Scan { .. }));
+                assert!(matches!(*input, PlanNode::Scan));
             }
             _ => panic!("expected Filter, got {:?}", inner),
         }

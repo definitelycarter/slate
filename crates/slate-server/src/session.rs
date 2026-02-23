@@ -46,7 +46,7 @@ impl<S: Store> Session<S> {
                 };
                 self.read(|txn| {
                     let raw_records: Vec<_> = txn
-                        .find(&collection, &query)?
+                        .find(&collection, query)?
                         .iter()?
                         .collect::<Result<Vec<_>, _>>()?;
                     let records: Result<Vec<bson::Document>, _> =
@@ -75,7 +75,7 @@ impl<S: Store> Session<S> {
                     columns,
                 };
                 self.read(|txn| {
-                    let raw = txn.find_one(&collection, &query)?;
+                    let raw = txn.find_one(&collection, query)?;
                     let record = raw
                         .as_ref()
                         .map(|r| r.to_document())
@@ -182,7 +182,7 @@ impl<S: Store> Session<S> {
                     take,
                 };
                 self.read(|txn| {
-                    let values = txn.distinct(&collection, &query)?;
+                    let values = txn.distinct(&collection, query)?;
                     Ok(Response::Values(values))
                 })
             }

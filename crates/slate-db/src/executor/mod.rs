@@ -206,7 +206,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
                 let source = self.execute_node(*input)?;
                 nodes::filter::execute(predicate, source)
             }
-            PlanNode::Scan { .. } => nodes::scan::execute(self.txn, self.cf, self.now_millis),
+            PlanNode::Scan => nodes::scan::execute(self.txn, self.cf, self.now_millis),
             PlanNode::IndexScan {
                 column,
                 filter,

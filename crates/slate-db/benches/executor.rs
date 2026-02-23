@@ -355,9 +355,7 @@ fn bench_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let plan = PlanNode::Scan {
-            collection: "test".into(),
-        };
+        let plan = PlanNode::Scan;
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
             let txn = engine.store().begin(true).unwrap();
@@ -375,7 +373,6 @@ fn bench_index_scan(c: &mut Criterion) {
 
         // Eq scan: status = "active" (~50% match)
         let plan_eq = PlanNode::IndexScan {
-            collection: "test".into(),
             column: "status".into(),
             filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
             direction: slate_query::SortDirection::Asc,
@@ -392,7 +389,6 @@ fn bench_index_scan(c: &mut Criterion) {
 
         // Full column scan (no value filter)
         let plan_full = PlanNode::IndexScan {
-            collection: "test".into(),
             column: "contacts_count".into(),
             filter: None,
             direction: slate_query::SortDirection::Asc,
@@ -409,7 +405,6 @@ fn bench_index_scan(c: &mut Criterion) {
 
         // Desc with limit
         let plan_desc_limit = PlanNode::IndexScan {
-            collection: "test".into(),
             column: "contacts_count".into(),
             filter: None,
             direction: slate_query::SortDirection::Desc,
@@ -438,9 +433,7 @@ fn bench_read_record(c: &mut Criterion) {
 
         // ReadRecord over Scan (passthrough — Scan already yields full docs)
         let plan_scan = PlanNode::ReadRecord {
-            input: Box::new(PlanNode::Scan {
-                collection: "test".into(),
-            }),
+            input: Box::new(PlanNode::Scan),
         };
 
         group.bench_with_input(BenchmarkId::new("scan", n), &plan_scan, |b, plan| {
@@ -452,7 +445,6 @@ fn bench_read_record(c: &mut Criterion) {
         // ReadRecord over IndexScan (fetches full doc by id)
         let plan_idx = PlanNode::ReadRecord {
             input: Box::new(PlanNode::IndexScan {
-                collection: "test".into(),
                 column: "status".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
@@ -480,7 +472,6 @@ fn bench_index_merge(c: &mut Criterion) {
         let plan_or = PlanNode::IndexMerge {
             logical: slate_query::LogicalOp::Or,
             lhs: Box::new(PlanNode::IndexScan {
-                collection: "test".into(),
                 column: "status".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
@@ -489,7 +480,6 @@ fn bench_index_merge(c: &mut Criterion) {
                 covered: false,
             }),
             rhs: Box::new(PlanNode::IndexScan {
-                collection: "test".into(),
                 column: "contacts_count".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
@@ -509,7 +499,6 @@ fn bench_index_merge(c: &mut Criterion) {
         let plan_and = PlanNode::IndexMerge {
             logical: slate_query::LogicalOp::And,
             lhs: Box::new(PlanNode::IndexScan {
-                collection: "test".into(),
                 column: "status".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
                 direction: slate_query::SortDirection::Asc,
@@ -518,7 +507,6 @@ fn bench_index_merge(c: &mut Criterion) {
                 covered: false,
             }),
             rhs: Box::new(PlanNode::IndexScan {
-                collection: "test".into(),
                 column: "contacts_count".into(),
                 filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
                 direction: slate_query::SortDirection::Asc,
@@ -560,8 +548,9 @@ fn bench_insert(c: &mut Criterion) {
         };
 
         let docs = generate_docs(n);
+        let fields = vec!["status".into(), "contacts_count".into()];
         let plan = PlanNode::InsertIndex {
-            indexed_fields: vec!["status".into(), "contacts_count".into()],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::InsertRecord {
                 input: Box::new(PlanNode::Values { docs }),
             }),
@@ -594,17 +583,16 @@ fn bench_update(c: &mut Criterion) {
         let engine = seeded_engine(n);
 
         // Update: set status = "updated" for all docs via Scan → ReadRecord → Update
+        let fields = vec!["status".into(), "contacts_count".into()];
         let plan = PlanNode::InsertIndex {
-            indexed_fields: vec!["status".into(), "contacts_count".into()],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::Update {
                 mutation: slate_query::parse_mutation(
                     &bson::rawdoc! { "$set": { "status": "updated" } },
                 )
                 .unwrap(),
                 input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan {
-                        collection: "test".into(),
-                    }),
+                    input: Box::new(PlanNode::Scan),
                 }),
             }),
         };
@@ -636,13 +624,12 @@ fn bench_delete(c: &mut Criterion) {
         let engine = seeded_engine(n);
 
         // Delete all docs: Scan → ReadRecord → DeleteIndex → Delete
+        let fields = vec!["status".into(), "contacts_count".into()];
         let plan = PlanNode::Delete {
             input: Box::new(PlanNode::DeleteIndex {
-                indexed_fields: vec!["status".into(), "contacts_count".into()],
+                indexed_fields: &fields,
                 input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan {
-                        collection: "test".into(),
-                    }),
+                    input: Box::new(PlanNode::Scan),
                 }),
             }),
         };
@@ -674,8 +661,9 @@ fn bench_replace(c: &mut Criterion) {
         let engine = seeded_engine(n);
 
         // Replace all docs with a new document
+        let fields = vec!["status".into(), "contacts_count".into()];
         let plan = PlanNode::InsertIndex {
-            indexed_fields: vec!["status".into(), "contacts_count".into()],
+            indexed_fields: &fields,
             input: Box::new(PlanNode::Replace {
                 replacement: bson::rawdoc! {
                     "name": "Replaced",
@@ -683,9 +671,7 @@ fn bench_replace(c: &mut Criterion) {
                     "contacts_count": 0,
                 },
                 input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan {
-                        collection: "test".into(),
-                    }),
+                    input: Box::new(PlanNode::Scan),
                 }),
             }),
         };
@@ -736,10 +722,10 @@ fn bench_upsert_replace(c: &mut Criterion) {
                     let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
-                        indexed_fields: indexed.clone(),
+                        indexed_fields: &indexed,
                         input: Box::new(PlanNode::Upsert {
                             mode: UpsertMode::Replace,
-                            indexed_fields: indexed.clone(),
+                            indexed_fields: &indexed,
                             input: Box::new(PlanNode::Values {
                                 docs: raw_docs.clone(),
                             }),
@@ -784,10 +770,10 @@ fn bench_upsert_merge(c: &mut Criterion) {
                     let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
-                        indexed_fields: indexed.clone(),
+                        indexed_fields: &indexed,
                         input: Box::new(PlanNode::Upsert {
                             mode: UpsertMode::Merge,
-                            indexed_fields: indexed.clone(),
+                            indexed_fields: &indexed,
                             input: Box::new(PlanNode::Values {
                                 docs: raw_docs.clone(),
                             }),
@@ -846,10 +832,10 @@ fn bench_upsert_insert(c: &mut Criterion) {
                     let txn = engine.store().begin(false).unwrap();
                     let cf = txn.cf("test").unwrap();
                     let plan = PlanNode::InsertIndex {
-                        indexed_fields: indexed.clone(),
+                        indexed_fields: &indexed,
                         input: Box::new(PlanNode::Upsert {
                             mode: UpsertMode::Replace,
-                            indexed_fields: indexed.clone(),
+                            indexed_fields: &indexed,
                             input: Box::new(PlanNode::Values {
                                 docs: raw_docs.clone(),
                             }),
@@ -994,7 +980,11 @@ fn bench_query_scan(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1015,7 +1005,11 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1036,7 +1030,11 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1061,7 +1059,11 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1082,7 +1084,11 @@ fn bench_query_null_filter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1106,7 +1112,11 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1130,7 +1140,11 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1160,7 +1174,11 @@ fn bench_query_sort_multi(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1184,7 +1202,11 @@ fn bench_query_pagination(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1231,7 +1253,11 @@ fn bench_query_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1252,7 +1278,11 @@ fn bench_query_array_match(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1275,7 +1305,7 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct("bench", query).unwrap()
+                txn.distinct("bench", query.clone()).unwrap()
             })
         });
     }
@@ -1296,7 +1326,7 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct("bench", query).unwrap()
+                txn.distinct("bench", query.clone()).unwrap()
             })
         });
     }
@@ -1317,7 +1347,7 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct("bench", query).unwrap()
+                txn.distinct("bench", query.clone()).unwrap()
             })
         });
     }
@@ -1338,7 +1368,7 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct("bench", query).unwrap()
+                txn.distinct("bench", query.clone()).unwrap()
             })
         });
     }
@@ -1366,7 +1396,11 @@ fn bench_query_indexed_range(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1388,7 +1422,11 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
@@ -1410,7 +1448,11 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &query, |b, query| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", query).unwrap().iter().unwrap().count()
+                txn.find("bench", query.clone())
+                    .unwrap()
+                    .iter()
+                    .unwrap()
+                    .count()
             })
         });
     }
