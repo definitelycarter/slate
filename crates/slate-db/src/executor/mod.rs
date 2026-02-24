@@ -51,14 +51,6 @@ impl<'a> RawValue<'a> {
 
 pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
 
-pub enum ExecutionResult<'a> {
-    Rows(RawIter<'a>),
-    Delete { deleted: u64 },
-    Update { matched: u64, modified: u64 },
-    Insert { ids: Vec<String> },
-    Upsert { inserted: u64, updated: u64 },
-}
-
 pub struct Executor<'c, T: Transaction> {
     txn: &'c T,
     cf: &'c T::Cf,
@@ -86,71 +78,27 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         }
     }
 
-    pub fn execute(&self, node: PlanNode<'c>) -> Result<ExecutionResult<'c>, DbError> {
-        match node {
-            PlanNode::Delete { .. } => {
-                let iter = self.execute_node(node)?;
-                let mut deleted = 0u64;
-                for result in iter {
-                    result?;
-                    deleted += 1;
-                }
-                Ok(ExecutionResult::Delete { deleted })
-            }
-            PlanNode::InsertIndex { ref input, .. }
-                if matches!(**input, PlanNode::InsertRecord { .. }) =>
-            {
-                let iter = self.execute_node(node)?;
-                let mut ids = Vec::new();
-                for result in iter {
-                    if let Some(val) = result? {
-                        if let Some(raw) = val.as_document() {
-                            if let Some(id_str) = exec::raw_extract_id(raw)? {
-                                ids.push(id_str.to_string());
-                            }
-                        }
-                    }
-                }
-                Ok(ExecutionResult::Insert { ids })
-            }
-            PlanNode::InsertIndex { ref input, .. }
-                if matches!(**input, PlanNode::Upsert { .. }) =>
-            {
-                let inserted = Rc::new(Cell::new(0u64));
-                let updated = Rc::new(Cell::new(0u64));
-                let iter = self.execute_upsert_pipeline(node, &inserted, &updated)?;
-                for result in iter {
-                    result?;
-                }
-                Ok(ExecutionResult::Upsert {
-                    inserted: inserted.get(),
-                    updated: updated.get(),
-                })
-            }
-            PlanNode::InsertIndex { .. } => {
-                let iter = self.execute_node(node)?;
-                let mut matched = 0u64;
-                let mut modified = 0u64;
-                for result in iter {
-                    let opt_val = result?;
-                    matched += 1;
-                    if opt_val.is_some() {
-                        modified += 1;
-                    }
-                }
-                Ok(ExecutionResult::Update { matched, modified })
-            }
-            _ => {
-                let iter = self.execute_node(node)?;
-                Ok(ExecutionResult::Rows(iter))
-            }
-        }
+    /// Execute a plan node, returning a streaming iterator of rows.
+    pub fn execute(&self, node: PlanNode) -> Result<RawIter<'c>, DbError> {
+        self.execute_node(node)
+    }
+
+    /// Execute an upsert pipeline, returning the row iterator and shared counters
+    /// that are populated as the iterator is drained.
+    pub fn execute_upsert(
+        &self,
+        node: PlanNode,
+    ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
+        let inserted = Rc::new(Cell::new(0u64));
+        let updated = Rc::new(Cell::new(0u64));
+        let iter = self.execute_upsert_pipeline(node, &inserted, &updated)?;
+        Ok((iter, inserted, updated))
     }
 
     /// Execute the full upsert pipeline, threading shared counters through the Upsert node.
     fn execute_upsert_pipeline(
         &self,
-        node: PlanNode<'c>,
+        node: PlanNode,
         inserted: &Rc<Cell<u64>>,
         updated: &Rc<Cell<u64>>,
     ) -> Result<RawIter<'c>, DbError> {
@@ -183,7 +131,7 @@ impl<'c, T: Transaction + 'c> Executor<'c, T> {
         }
     }
 
-    fn execute_node(&self, node: PlanNode<'c>) -> Result<RawIter<'c>, DbError> {
+    fn execute_node(&self, node: PlanNode) -> Result<RawIter<'c>, DbError> {
         match node {
             PlanNode::Values { docs } => nodes::values::execute(docs),
             PlanNode::Projection { columns, input } => {

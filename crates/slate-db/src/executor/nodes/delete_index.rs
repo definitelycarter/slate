@@ -9,10 +9,10 @@ use crate::executor::field_tree::{FieldTree, walk};
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
-    indexed_fields: &'a [String],
+    indexed_fields: Vec<String>,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
-    let tree = FieldTree::from_paths(indexed_fields);
+    let tree = FieldTree::from_paths(&indexed_fields);
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;

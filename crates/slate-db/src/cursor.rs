@@ -1,44 +1,62 @@
 use bson::RawDocumentBuf;
 use slate_store::{Store, Transaction};
 
+use crate::catalog::Catalog;
 use crate::error::DbError;
-use crate::executor::{ExecutionResult, Executor, RawIter};
-use crate::planner;
+use crate::executor::{Executor, RawIter};
+use crate::planner::{Planner, Statement};
 
-/// A prepared query that can be iterated over.
+/// A prepared query that can be iterated or executed.
 ///
-/// Borrows the transaction and owns a [`PreparedStatement`](planner::PreparedStatement)
-/// that co-locates the `Statement` and `indexed_fields`.
-/// Call [`.iter()`](Cursor::iter) to plan and produce a streaming
-/// [`CursorIter`]. Planning is deferred so that `PlanNode<'_>` borrows
-/// from the owned data via `&self` — no self-referential struct.
+/// Owns a catalog reference, collection name, and `Statement`.
+/// Call [`.iter()`](Cursor::iter) for streaming iteration, or
+/// [`.execute()`](Cursor::execute) to drain and return a count.
 pub struct Cursor<'db, 'txn, S: Store + 'db> {
     txn: &'txn S::Txn<'db>,
     cf: <S::Txn<'db> as Transaction>::Cf,
-    prepared: planner::PreparedStatement,
+    catalog: &'txn Catalog,
+    collection: String,
+    statement: Statement,
 }
 
 impl<'db, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn S::Txn<'db>,
         cf: <S::Txn<'db> as Transaction>::Cf,
-        prepared: planner::PreparedStatement,
+        catalog: &'txn Catalog,
+        collection: String,
+        statement: Statement,
     ) -> Self {
-        Self { txn, cf, prepared }
+        Self {
+            txn,
+            cf,
+            catalog,
+            collection,
+            statement,
+        }
     }
 
     /// Plan the query and return a streaming iterator.
-    ///
-    /// `PlanNode<'_>` borrows from `&self.prepared`; the executor iterator
-    /// borrows from `self.txn` and `&self.cf`. All three are alive as long
-    /// as `&self` — which the caller holds.
     pub fn iter(&self) -> Result<CursorIter<'_>, DbError> {
-        let plan = planner::plan(&self.prepared)?;
+        let planner = Planner::new(self.txn, self.catalog);
+        let plan = planner.plan(&self.collection, self.statement.clone())?;
         let exec = Executor::new(self.txn, &self.cf);
-        match exec.execute(plan)? {
-            ExecutionResult::Rows(inner) => Ok(CursorIter { inner }),
-            _ => unreachable!(),
+        let inner = exec.execute(plan)?;
+        Ok(CursorIter { inner })
+    }
+
+    /// Consume the cursor, drain all rows, and return the count of affected rows.
+    pub fn execute(self) -> Result<u64, DbError> {
+        let planner = Planner::new(self.txn, self.catalog);
+        let plan = planner.plan(&self.collection, self.statement)?;
+        let exec = Executor::new(self.txn, &self.cf);
+        let iter = exec.execute(plan)?;
+        let mut count = 0u64;
+        for result in iter {
+            result?;
+            count += 1;
         }
+        Ok(count)
     }
 }
 

@@ -9,6 +9,7 @@ use crate::store::{Store, Transaction};
 use super::store::{ColumnFamily, MemoryStore};
 
 /// Pre-resolved column family handle for the memory backend.
+#[derive(Clone)]
 pub struct MemoryCf {
     pub(crate) name: String,
     pub(crate) data: Arc<ColumnFamily>,

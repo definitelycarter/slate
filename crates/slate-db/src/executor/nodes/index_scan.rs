@@ -5,8 +5,8 @@ use slate_store::Transaction;
 
 use crate::encoding;
 use crate::error::DbError;
-use crate::executor::{RawIter, RawValue, exec};
-use crate::planner::IndexFilter;
+use crate::executor::{RawIter, RawValue};
+use crate::planner::Expression;
 
 /// Pre-encoded range bounds for byte-level filtering inside the iterator.
 struct RangeBounds {
@@ -16,11 +16,24 @@ struct RangeBounds {
     upper_inclusive: bool,
 }
 
+/// Convert an owned `Bson` to `RawBson` for covered projection output.
+fn bson_to_raw_bson(val: &bson::Bson) -> Option<RawBson> {
+    Some(match val {
+        bson::Bson::String(s) => RawBson::String(s.clone()),
+        bson::Bson::Int32(i) => RawBson::Int32(*i),
+        bson::Bson::Int64(i) => RawBson::Int64(*i),
+        bson::Bson::Double(f) => RawBson::Double(*f),
+        bson::Bson::Boolean(b) => RawBson::Boolean(*b),
+        bson::Bson::DateTime(dt) => RawBson::DateTime(*dt),
+        _ => return None,
+    })
+}
+
 pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
     column: String,
-    filter: Option<&IndexFilter>,
+    filter: Option<&Expression>,
     direction: SortDirection,
     limit: Option<usize>,
     complete_groups: bool,
@@ -29,7 +42,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
 ) -> Result<RawIter<'a>, DbError> {
     // Eq uses a narrow prefix; everything else scans the whole column.
     let prefix = match filter {
-        Some(IndexFilter::Eq(v)) => encoding::index_scan_prefix(&column, *v),
+        Some(Expression::Eq(_, v)) => encoding::index_scan_prefix(&column, v),
         _ => encoding::index_scan_field_prefix(&column),
     };
 
@@ -37,43 +50,75 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     // 8 bytes to the closure (pointer) instead of 56 bytes (inlined struct),
     // keeping the Eq/None hot path cache-friendly.
     let range_bounds: Option<Box<RangeBounds>> = match filter {
-        Some(IndexFilter::Gt(v)) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_raw_value(*v)),
+        Some(Expression::Gt(_, v)) => Some(Box::new(RangeBounds {
+            lower: Some(encoding::encode_value(v)),
             lower_inclusive: false,
             upper: None,
             upper_inclusive: false,
         })),
-        Some(IndexFilter::Gte(v)) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_raw_value(*v)),
+        Some(Expression::Gte(_, v)) => Some(Box::new(RangeBounds {
+            lower: Some(encoding::encode_value(v)),
             lower_inclusive: true,
             upper: None,
             upper_inclusive: false,
         })),
-        Some(IndexFilter::Lt(v)) => Some(Box::new(RangeBounds {
+        Some(Expression::Lt(_, v)) => Some(Box::new(RangeBounds {
             lower: None,
             lower_inclusive: false,
-            upper: Some(encoding::encode_raw_value(*v)),
+            upper: Some(encoding::encode_value(v)),
             upper_inclusive: false,
         })),
-        Some(IndexFilter::Lte(v)) => Some(Box::new(RangeBounds {
+        Some(Expression::Lte(_, v)) => Some(Box::new(RangeBounds {
             lower: None,
             lower_inclusive: false,
-            upper: Some(encoding::encode_raw_value(*v)),
+            upper: Some(encoding::encode_value(v)),
             upper_inclusive: true,
         })),
-        Some(IndexFilter::Range { lower, upper }) => Some(Box::new(RangeBounds {
-            lower: Some(encoding::encode_raw_value(lower.value)),
-            lower_inclusive: lower.inclusive,
-            upper: Some(encoding::encode_raw_value(upper.value)),
-            upper_inclusive: upper.inclusive,
-        })),
+        // Two-sided range: And([Gte/Gt(_, lo), Lt/Lte(_, hi)])
+        Some(Expression::And(children)) if children.len() == 2 => {
+            let mut lower = None;
+            let mut lower_inclusive = false;
+            let mut upper = None;
+            let mut upper_inclusive = false;
+            for child in children {
+                match child {
+                    Expression::Gt(_, v) => {
+                        lower = Some(encoding::encode_value(v));
+                        lower_inclusive = false;
+                    }
+                    Expression::Gte(_, v) => {
+                        lower = Some(encoding::encode_value(v));
+                        lower_inclusive = true;
+                    }
+                    Expression::Lt(_, v) => {
+                        upper = Some(encoding::encode_value(v));
+                        upper_inclusive = false;
+                    }
+                    Expression::Lte(_, v) => {
+                        upper = Some(encoding::encode_value(v));
+                        upper_inclusive = true;
+                    }
+                    _ => {}
+                }
+            }
+            if lower.is_some() || upper.is_some() {
+                Some(Box::new(RangeBounds {
+                    lower,
+                    lower_inclusive,
+                    upper,
+                    upper_inclusive,
+                }))
+            } else {
+                None
+            }
+        }
         _ => None, // Eq and None — no range filtering
     };
 
     // Pre-convert the query value once for covered projections (Eq only).
     let raw_value = if covered {
-        if let Some(IndexFilter::Eq(v)) = filter {
-            exec::to_raw_bson(*v)
+        if let Some(Expression::Eq(_, v)) = filter {
+            bson_to_raw_bson(v)
         } else {
             None
         }

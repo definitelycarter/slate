@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::expression::LogicalOp;
+use crate::planner::LogicalOp;
 use bson::RawBson;
 
 use crate::error::DbError;

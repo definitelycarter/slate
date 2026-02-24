@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
-use crate::expression::Expression;
+use crate::planner::Expression;
 use slate_store::Transaction;
 
 use crate::error::DbError;
@@ -206,8 +206,12 @@ pub(crate) fn raw_get_path<'a>(
 }
 
 // ── Expression-based filter matching ─────────────────────────────
+//
+// The Expression carries owned `Bson` values (from the query), while the
+// document fields are read as `RawBsonRef` (zero-copy from raw bytes).
+// The `raw_value_eq_bson` / `raw_compare_bson` helpers bridge this gap.
 
-pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Result<bool, DbError> {
+pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression) -> Result<bool, DbError> {
     match expr {
         Expression::And(children) => {
             for child in children {
@@ -227,19 +231,19 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
         }
         Expression::Eq(field, val) => {
             // $eq: null matches both missing fields and explicit null values
-            if matches!(val, RawBsonRef::Null) {
+            if matches!(val, Bson::Null) {
                 return Ok(raw_get_path(raw, field)?.is_none());
             }
             match raw_get_path(raw, field)? {
                 Some(RawBsonRef::Array(arr)) => {
                     for elem in arr.into_iter().flatten() {
-                        if raw_values_eq(&elem, val) {
+                        if raw_value_eq_bson(&elem, val) {
                             return Ok(true);
                         }
                     }
                     Ok(false)
                 }
-                Some(v) => Ok(raw_values_eq(&v, val)),
+                Some(v) => Ok(raw_value_eq_bson(&v, val)),
                 None => Ok(false),
             }
         }
@@ -258,13 +262,13 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
             match field_value {
                 Some(RawBsonRef::Array(arr)) => {
                     for elem in arr.into_iter().flatten() {
-                        if raw_compare_values(Some(&elem), val, predicate)? {
+                        if raw_compare_bson(Some(&elem), val, predicate)? {
                             return Ok(true);
                         }
                     }
                     Ok(false)
                 }
-                _ => raw_compare_values(field_value.as_ref(), val, predicate),
+                _ => raw_compare_bson(field_value.as_ref(), val, predicate),
             }
         }
         Expression::Regex(field, re) => match raw_get_path(raw, field)? {
@@ -280,41 +284,42 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
     }
 }
 
-pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &RawBsonRef) -> bool {
+/// Equality: stored `RawBsonRef` (from document) vs query `Bson` (from Expression).
+fn raw_value_eq_bson(store_val: &RawBsonRef, query_val: &Bson) -> bool {
     match (store_val, query_val) {
         // ── Direct type matches ─────────────────────────────────
-        (RawBsonRef::String(a), RawBsonRef::String(b)) => *a == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => *a == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => (*a as i64) == *b,
-        (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => *a == *b,
-        (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => *a == (*b as i64),
-        (RawBsonRef::Double(a), RawBsonRef::Double(b)) => *a == *b,
-        (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => *a == (*b as f64),
-        (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => *a == (*b as f64),
-        (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Boolean(a), RawBsonRef::Boolean(b)) => *a == *b,
-        (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
+        (RawBsonRef::String(a), Bson::String(b)) => *a == b.as_str(),
+        (RawBsonRef::Int32(a), Bson::Int32(b)) => *a == *b,
+        (RawBsonRef::Int32(a), Bson::Int64(b)) => (*a as i64) == *b,
+        (RawBsonRef::Int64(a), Bson::Int64(b)) => *a == *b,
+        (RawBsonRef::Int64(a), Bson::Int32(b)) => *a == (*b as i64),
+        (RawBsonRef::Double(a), Bson::Double(b)) => *a == *b,
+        (RawBsonRef::Double(a), Bson::Int64(b)) => *a == (*b as f64),
+        (RawBsonRef::Double(a), Bson::Int32(b)) => *a == (*b as f64),
+        (RawBsonRef::Int64(a), Bson::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Int32(a), Bson::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Boolean(a), Bson::Boolean(b)) => *a == *b,
+        (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
             a.timestamp_millis() == b.timestamp_millis()
         }
 
-        // ── Cross-type coercion: RawBsonRef::String → stored type ─
-        (RawBsonRef::Int32(a), RawBsonRef::String(s)) => {
+        // ── Cross-type coercion: Bson::String → stored type ─
+        (RawBsonRef::Int32(a), Bson::String(s)) => {
             s.parse::<i64>().is_ok_and(|b| (*a as i64) == b)
         }
-        (RawBsonRef::Int64(a), RawBsonRef::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Double(a), RawBsonRef::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Boolean(a), RawBsonRef::String(s)) => match *s {
+        (RawBsonRef::Int64(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Double(a), Bson::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Boolean(a), Bson::String(s)) => match s.as_str() {
             "true" => *a,
             "false" => !*a,
             _ => false,
         },
-        (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+        (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
             .is_ok_and(|dt| a.timestamp_millis() == dt.timestamp_millis()),
 
         // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
-        (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => a.timestamp_millis() == (*b * 1000),
-        (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
+        (RawBsonRef::DateTime(a), Bson::Int64(b)) => a.timestamp_millis() == (*b * 1000),
+        (RawBsonRef::DateTime(a), Bson::Int32(b)) => {
             a.timestamp_millis() == (*b as i64 * 1000)
         }
 
@@ -415,58 +420,59 @@ pub(crate) fn apply_mutation(
     Ok(Some(raw))
 }
 
-pub(crate) fn raw_compare_values(
+/// Comparison: stored `RawBsonRef` (from document) vs query `Bson` (from Expression).
+fn raw_compare_bson(
     field_value: Option<&RawBsonRef>,
-    query_val: &RawBsonRef,
+    query_val: &Bson,
     predicate: fn(Ordering) -> bool,
 ) -> Result<bool, DbError> {
     match field_value {
         Some(store_val) => Ok(match (store_val, query_val) {
             // ── Direct type matches ─────────────────────────────
-            (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => predicate((*a as i64).cmp(b)),
-            (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => predicate(a.cmp(&(*b as i64))),
-            (RawBsonRef::Double(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int32(a), Bson::Int32(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int32(a), Bson::Int64(b)) => predicate((*a as i64).cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int64(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int32(b)) => predicate(a.cmp(&(*b as i64))),
+            (RawBsonRef::Double(a), Bson::Double(b)) => {
                 predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => {
+            (RawBsonRef::Double(a), Bson::Int64(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => {
+            (RawBsonRef::Double(a), Bson::Int32(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int64(a), Bson::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int32(a), Bson::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
+            (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
                 predicate(a.timestamp_millis().cmp(&b.timestamp_millis()))
             }
-            (RawBsonRef::String(a), RawBsonRef::String(b)) => predicate((*a).cmp(*b)),
+            (RawBsonRef::String(a), Bson::String(b)) => predicate((*a).cmp(b.as_str())),
 
-            // ── Cross-type coercion: RawBsonRef::String → stored type ─
-            (RawBsonRef::Int32(a), RawBsonRef::String(s)) => s
+            // ── Cross-type coercion: Bson::String → stored type ─
+            (RawBsonRef::Int32(a), Bson::String(s)) => s
                 .parse::<i64>()
                 .is_ok_and(|b| predicate((*a as i64).cmp(&b))),
-            (RawBsonRef::Int64(a), RawBsonRef::String(s)) => {
+            (RawBsonRef::Int64(a), Bson::String(s)) => {
                 s.parse::<i64>().is_ok_and(|b| predicate(a.cmp(&b)))
             }
-            (RawBsonRef::Double(a), RawBsonRef::String(s)) => s
+            (RawBsonRef::Double(a), Bson::String(s)) => s
                 .parse::<f64>()
                 .is_ok_and(|b| predicate(a.partial_cmp(&b).unwrap_or(Ordering::Equal))),
-            (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => {
+            (RawBsonRef::DateTime(a), Bson::String(s)) => {
                 bson::DateTime::parse_rfc3339_str(s)
                     .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis())))
             }
 
             // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
-            (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => {
+            (RawBsonRef::DateTime(a), Bson::Int64(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b * 1000)))
             }
-            (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
+            (RawBsonRef::DateTime(a), Bson::Int32(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b as i64 * 1000)))
             }
 

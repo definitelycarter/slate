@@ -18,16 +18,16 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
     txn: &'a T,
     cf: &'a T::Cf,
     mode: UpsertMode,
-    indexed_fields: &'a [String],
+    indexed_fields: Vec<String>,
     source: RawIter<'a>,
     inserted: Rc<Cell<u64>>,
     updated: Rc<Cell<u64>>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     let tree = if indexed_fields.iter().any(|p| p == "ttl") {
-        FieldTree::from_paths(indexed_fields)
+        FieldTree::from_paths(&indexed_fields)
     } else {
-        let mut paths = indexed_fields.to_vec();
+        let mut paths = indexed_fields;
         paths.push("ttl".into());
         FieldTree::from_paths(&paths)
     };
