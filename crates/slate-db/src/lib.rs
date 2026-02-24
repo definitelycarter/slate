@@ -13,6 +13,7 @@ mod executor;
 pub(crate) mod expression;
 pub(crate) mod parse_filter;
 mod planner;
+mod planner_v2;
 mod result;
 mod sweep;
 
