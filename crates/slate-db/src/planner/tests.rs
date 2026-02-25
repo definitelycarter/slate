@@ -33,7 +33,7 @@ fn find_stmt(predicate: Expression) -> Statement<'static> {
         sort: vec![],
         skip: None,
         take: None,
-        columns: None,
+        projection: None,
     }
 }
 
@@ -73,14 +73,20 @@ fn find_no_index_falls_back_to_scan() {
 
     // "name" is not indexed
     let plan = planner
-        .plan(find_stmt(Expression::Eq("name".into(), Bson::String("alice".into()))))
+        .plan(find_stmt(Expression::Eq(
+            "name".into(),
+            Bson::String("alice".into()),
+        )))
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
 
     // Should be Filter > Scan
     match node {
         Node::Filter { source, .. } => assert!(is_scan(&source)),
-        _ => panic!("expected Filter > Scan, got {:?}", std::mem::discriminant(&node)),
+        _ => panic!(
+            "expected Filter > Scan, got {:?}",
+            std::mem::discriminant(&node)
+        ),
     }
 }
 
@@ -91,7 +97,10 @@ fn find_indexed_eq_uses_index_scan() {
     let planner = Planner::new(|name| Ok(txn.collection(name)?));
 
     let plan = planner
-        .plan(find_stmt(Expression::Eq("status".into(), Bson::String("active".into()))))
+        .plan(find_stmt(Expression::Eq(
+            "status".into(),
+            Bson::String("active".into()),
+        )))
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
 
@@ -100,7 +109,10 @@ fn find_indexed_eq_uses_index_scan() {
         Node::KeyLookup { source, .. } => {
             assert!(is_index_scan_on(&source, "status"));
             match *source {
-                Node::IndexScan { range: IndexScanRange::Eq(v), .. } => {
+                Node::IndexScan {
+                    range: IndexScanRange::Eq(v),
+                    ..
+                } => {
                     assert_eq!(v, Bson::String("active".into()));
                 }
                 _ => panic!("expected IndexScan Eq"),
@@ -125,7 +137,10 @@ fn find_indexed_range_uses_index_scan() {
         Node::KeyLookup { source, .. } => {
             assert!(is_index_scan_on(&source, "age"));
             match *source {
-                Node::IndexScan { range: IndexScanRange::Range { lower, upper }, .. } => {
+                Node::IndexScan {
+                    range: IndexScanRange::Range { lower, upper },
+                    ..
+                } => {
                     assert!(lower.is_some());
                     assert!(upper.is_none());
                 }
@@ -307,7 +322,13 @@ fn and_containing_indexed_or_subgroup() {
             assert!(matches!(predicate, Expression::Eq(ref f, _) if f == "name"));
             match *source {
                 Node::KeyLookup { source, .. } => {
-                    assert!(matches!(*source, Node::IndexMerge { logical: LogicalOp::Or, .. }));
+                    assert!(matches!(
+                        *source,
+                        Node::IndexMerge {
+                            logical: LogicalOp::Or,
+                            ..
+                        }
+                    ));
                 }
                 _ => panic!("expected KeyLookup"),
             }
@@ -334,7 +355,7 @@ fn sort_on_indexed_field_with_take_uses_index_order() {
             }],
             skip: None,
             take: Some(10),
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
@@ -379,7 +400,7 @@ fn sort_without_take_does_not_use_index_order() {
             }],
             skip: None,
             take: None, // no take → can't use indexed sort
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
@@ -409,7 +430,7 @@ fn covered_index_scan_when_projection_matches() {
             sort: vec![],
             skip: None,
             take: None,
-            columns: Some(vec!["_id".into(), "status".into()]),
+            projection: Some(vec!["_id".into(), "status".into()]),
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -420,7 +441,10 @@ fn covered_index_scan_when_projection_matches() {
             assert_eq!(field, "status");
             assert!(covered);
         }
-        _ => panic!("expected covered IndexScan, got {:?}", std::mem::discriminant(&node)),
+        _ => panic!(
+            "expected covered IndexScan, got {:?}",
+            std::mem::discriminant(&node)
+        ),
     }
 }
 
@@ -437,7 +461,7 @@ fn not_covered_when_projection_needs_extra_fields() {
             sort: vec![],
             skip: None,
             take: None,
-            columns: Some(vec!["name".into(), "status".into()]), // "name" not in index
+            projection: Some(vec!["name".into(), "status".into()]), // "name" not in index
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -470,7 +494,7 @@ fn find_with_skip_and_take() {
             sort: vec![],
             skip: Some(10),
             take: Some(20),
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -703,15 +727,14 @@ fn collection_not_found() {
 
     let err = planner.plan(find_stmt(Expression::Exists("_id".into(), true)));
     // "users" exists but "nonexistent" does not
-    let err = planner
-        .plan(Statement::Find {
-            collection: "nonexistent",
-            predicate: Expression::Exists("_id".into(), true),
-            sort: vec![],
-            skip: None,
-            take: None,
-            columns: None,
-        });
+    let err = planner.plan(Statement::Find {
+        collection: "nonexistent",
+        predicate: Expression::Exists("_id".into(), true),
+        sort: vec![],
+        skip: None,
+        take: None,
+        projection: None,
+    });
     assert!(err.is_err());
 }
 

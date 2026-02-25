@@ -10,7 +10,7 @@ pub enum Statement<'a> {
         sort: Vec<Sort>,
         skip: Option<usize>,
         take: Option<usize>,
-        columns: Option<Vec<String>>,
+        projection: Option<Vec<String>>,
     },
     Distinct {
         collection: &'a str,

@@ -24,7 +24,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
                 sort,
                 skip,
                 take,
-                columns,
+                projection: columns,
             } => self.plan_find(collection, &predicate, sort, skip, take, columns),
             Statement::Distinct {
                 collection,
@@ -500,8 +500,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
                     _ => unreachable!(),
                 });
 
-                let consumed: Vec<usize> =
-                    [lower_idx, upper_idx].into_iter().flatten().collect();
+                let consumed: Vec<usize> = [lower_idx, upper_idx].into_iter().flatten().collect();
                 let node = Node::IndexScan {
                     collection: handle.clone(),
                     field: field.clone(),
@@ -595,11 +594,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     }
 
     /// Try to convert a single expression into an IndexScan.
-    fn try_index_scan(
-        &self,
-        handle: &CollectionHandle<Cf>,
-        expr: &Expression,
-    ) -> Option<Node<Cf>> {
+    fn try_index_scan(&self, handle: &CollectionHandle<Cf>, expr: &Expression) -> Option<Node<Cf>> {
         let (field, range) = match expr {
             Expression::Eq(f, v) => (f, IndexScanRange::Eq(v.clone())),
             Expression::Gt(f, v) => (

@@ -117,7 +117,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             sort: query.sort,
             skip: query.skip,
             take: query.take,
-            columns: query.columns,
+            projection: query.columns,
         };
         self.prepare_cursor(stmt)
     }
@@ -138,7 +138,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             None => return Ok(None),
         };
 
-        let mut doc: bson::Document = bson::from_slice(raw.as_bytes())?;
+        let mut doc = raw.to_document()?;
 
         if let Some(wanted) = columns {
             let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
