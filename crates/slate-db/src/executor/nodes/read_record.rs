@@ -1,5 +1,5 @@
 use bson::RawBson;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction, Record};
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::exec;
@@ -35,19 +35,9 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
         };
         let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(&id_str))
             .expect("string is always a valid BsonValue");
-        match txn.get(handle, &doc_id) {
-            Ok(Some(doc)) => {
-                // TTL check on the fetched document
-                if now_millis != i64::MIN {
-                    if let Some(millis) = Record::ttl_millis(&doc) {
-                        if millis < now_millis {
-                            return None;
-                        }
-                    }
-                }
-                Some(Ok(Some(RawValue::Owned(RawBson::Document(doc)))))
-            }
-            Ok(None) => None, // missing
+        match txn.get(handle, &doc_id, now_millis) {
+            Ok(Some(doc)) => Some(Ok(Some(RawValue::Owned(RawBson::Document(doc))))),
+            Ok(None) => None,
             Err(e) => Some(Err(DbError::from(e))),
         }
     })))

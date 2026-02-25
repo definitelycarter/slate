@@ -52,11 +52,13 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc_id: &BsonValue<'_>,
+        ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
         let encoded = key.encode();
         match self.txn.get(&handle.cf, &encoded)? {
             None => Ok(None),
+            Some(data) if Record::is_expired(&data, ttl) => Ok(None),
             Some(data) => {
                 let record = Record::decode(&data)?;
                 Ok(Some(record.doc))
@@ -73,49 +75,21 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
         let encoded_key = key.encode();
 
-        // Index maintenance: remove old entries, insert new ones.
+        // Index maintenance: remove old entries via IndexMap, insert new ones.
         if !handle.indexes.is_empty() {
-            let old_doc = match self.txn.get(&handle.cf, &encoded_key)? {
-                Some(data) => Some(Record::decode(&data)?),
-                None => None,
-            };
             let new_ttl = Record::ttl_millis(doc);
 
             for field in &handle.indexes {
-                let old_vals: Vec<Vec<u8>> = old_doc
-                    .as_ref()
-                    .map(|r| {
-                        bson_value::extract_all(&r.doc, field)
-                            .into_iter()
-                            .map(|v| v.to_vec())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let new_vals: Vec<(Vec<u8>, u8)> = bson_value::extract_all(doc, field)
-                    .into_iter()
-                    .map(|v| {
-                        let bytes = v.to_vec();
-                        (bytes, v.tag)
-                    })
-                    .collect();
-                let new_bytes: Vec<&[u8]> = new_vals.iter().map(|(b, _)| b.as_slice()).collect();
+                // Remove all old index entries for this (field, doc_id).
+                self.delete_index(handle, field, doc_id)?;
 
-                // Remove old index entries not present in new values.
-                for ov in &old_vals {
-                    if !new_bytes.contains(&ov.as_slice()) {
-                        self.delete_index(handle, field, ov, doc_id)?;
-                    }
-                }
-
-                // Insert new index entries not present in old values.
-                for (nv_bytes, nv_tag) in &new_vals {
-                    if !old_vals.iter().any(|ov| ov == nv_bytes) {
-                        let meta = IndexMeta {
-                            type_byte: *nv_tag,
-                            ttl_millis: new_ttl,
-                        };
-                        self.put_index(handle, field, nv_bytes, doc_id, &meta.encode())?;
-                    }
+                // Insert new index entries from the new document.
+                for val in bson_value::extract_all(doc, field) {
+                    let meta = IndexMeta {
+                        type_byte: val.tag,
+                        ttl_millis: new_ttl,
+                    };
+                    self.put_index(handle, field, &val.to_vec(), doc_id, &meta.encode())?;
                 }
             }
         }
@@ -132,16 +106,9 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
         let encoded = key.encode();
 
-        // Index maintenance: remove entries for the deleted doc.
-        if !handle.indexes.is_empty() {
-            if let Some(data) = self.txn.get(&handle.cf, &encoded)? {
-                let record = Record::decode(&data)?;
-                for field in &handle.indexes {
-                    for val in bson_value::extract_all(&record.doc, field) {
-                        self.delete_index(handle, field, &val.to_vec(), doc_id)?;
-                    }
-                }
-            }
+        // Index maintenance: remove entries for the deleted doc via IndexMap.
+        for field in &handle.indexes {
+            self.delete_index(handle, field, doc_id)?;
         }
 
         Ok(self.txn.delete(&handle.cf, &encoded)?)
@@ -150,21 +117,33 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     fn scan<'b>(
         &'b self,
         handle: &'b CollectionHandle<Self::Cf>,
+        ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'b>, RawDocumentBuf), EngineError>> + 'b>,
         EngineError,
     > {
         let prefix = KeyPrefix::Record(Cow::Borrowed(&handle.name)).encode();
         let iter = self.txn.scan_prefix(&handle.cf, &prefix)?;
-        Ok(Box::new(iter.map(|result| {
-            let (key_bytes, value_bytes) = result.map_err(EngineError::Store)?;
-            let key = Key::decode(&key_bytes)
-                .ok_or_else(|| EngineError::InvalidKey("invalid record key".into()))?;
-            let Key::Record(_, doc_id) = key else {
-                return Err(EngineError::InvalidKey("expected record key".into()));
-            };
-            let record = Record::decode(&value_bytes)?;
-            Ok((doc_id.into_owned(), record.doc))
+        Ok(Box::new(iter.filter_map(move |result| {
+            match result {
+                Err(e) => Some(Err(EngineError::Store(e))),
+                Ok((key_bytes, value_bytes)) => {
+                    if Record::is_expired(&value_bytes, ttl) {
+                        return None;
+                    }
+                    let key = match Key::decode(&key_bytes) {
+                        Some(k) => k,
+                        None => return Some(Err(EngineError::InvalidKey("invalid record key".into()))),
+                    };
+                    let Key::Record(_, doc_id) = key else {
+                        return Some(Err(EngineError::InvalidKey("expected record key".into())));
+                    };
+                    match Record::decode(&value_bytes) {
+                        Ok(record) => Some(Ok((doc_id.into_owned(), record.doc))),
+                        Err(e) => Some(Err(e)),
+                    }
+                }
+            }
         })))
     }
 
@@ -174,6 +153,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
+        ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'b>, EngineError>> + 'b>, EngineError>
     {
         let collection = &handle.name;
@@ -265,6 +245,10 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                             }
                         }
 
+                        if IndexMeta::is_expired(&metadata_bytes, ttl) {
+                            continue;
+                        }
+
                         return Some(Ok(IndexEntry {
                             doc_id: doc_id.into_owned(),
                             value_bytes: Cow::Owned(value_bytes.to_vec()),
@@ -325,24 +309,42 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
             Cow::Borrowed(field),
             doc_id.clone(),
         );
-        let encoded = key.encode_index(value);
-        Ok(self.txn.put(&handle.cf, &encoded, metadata)?)
+        let index_key = key.encode_index(value);
+        self.txn.put(&handle.cf, &index_key, metadata)?;
+
+        // Write the reverse map entry: IndexMap key → Index key bytes.
+        let map_key = Key::IndexMap(
+            Cow::Borrowed(&handle.name),
+            Cow::Borrowed(field),
+            doc_id.clone(),
+        );
+        let map_encoded = map_key.encode_index_map(value);
+        self.txn.put(&handle.cf, &map_encoded, &index_key)?;
+        Ok(())
     }
 
     fn delete_index(
         &self,
         handle: &CollectionHandle<<S::Txn<'a> as Transaction>::Cf>,
         field: &str,
-        value: &[u8],
         doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
-        let key = Key::Index(
+        let prefix = KeyPrefix::IndexMapRecord(
             Cow::Borrowed(&handle.name),
             Cow::Borrowed(field),
             doc_id.clone(),
         );
-        let encoded = key.encode_index(value);
-        Ok(self.txn.delete(&handle.cf, &encoded)?)
+        let prefix_bytes = prefix.encode();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = self
+            .txn
+            .scan_prefix(&handle.cf, &prefix_bytes)?
+            .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())))
+            .collect::<Result<_, _>>()?;
+        for (map_key, index_key) in entries {
+            self.txn.delete(&handle.cf, &index_key)?;
+            self.txn.delete(&handle.cf, &map_key)?;
+        }
+        Ok(())
     }
 
     /// Point-lookup the CF name for a collection.

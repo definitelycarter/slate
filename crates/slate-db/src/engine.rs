@@ -1,5 +1,5 @@
 use bson::RawDocumentBuf;
-use slate_engine::{BsonValue, Catalog, CollectionHandle, Engine, EngineTransaction, KvEngine};
+use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::{DistinctQuery, Query};
 use slate_store::Store;
 
@@ -133,17 +133,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let handle = self.txn.collection(collection)?;
         let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(id))
             .expect("string is always a valid BsonValue");
-        let raw = match self.txn.get(&handle, &doc_id)? {
+        let now = bson::DateTime::now().timestamp_millis();
+        let raw = match self.txn.get(&handle, &doc_id, now)? {
             Some(r) => r,
             None => return Ok(None),
         };
-
-        // TTL check
-        if let Some(millis) = slate_engine::Record::ttl_millis(&raw) {
-            if millis < bson::DateTime::now().timestamp_millis() {
-                return Ok(None);
-            }
-        }
 
         let mut doc: bson::Document = bson::from_slice(raw.as_bytes())?;
 

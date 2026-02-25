@@ -1,5 +1,5 @@
 use bson::RawBson;
-use slate_engine::{CollectionHandle, EngineTransaction, Record};
+use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::{RawIter, RawValue};
@@ -9,19 +9,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     handle: &'a CollectionHandle<T::Cf>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
-    let iter = txn.scan(handle)?;
+    let iter = txn.scan(handle, now_millis)?;
 
-    Ok(Box::new(iter.filter_map(move |result| match result {
-        Ok((_doc_id, doc)) => {
-            if now_millis != i64::MIN {
-                if let Some(millis) = Record::ttl_millis(&doc) {
-                    if millis < now_millis {
-                        return None;
-                    }
-                }
-            }
-            Some(Ok(Some(RawValue::Owned(RawBson::Document(doc)))))
-        }
-        Err(e) => Some(Err(DbError::from(e))),
+    Ok(Box::new(iter.map(|result| match result {
+        Ok((_doc_id, doc)) => Ok(Some(RawValue::Owned(RawBson::Document(doc)))),
+        Err(e) => Err(DbError::from(e)),
     })))
 }

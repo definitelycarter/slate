@@ -1,6 +1,6 @@
 use bson::RawBson;
 use bson::raw::RawDocumentBuf;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction, IndexMeta, IndexRange};
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction, IndexRange};
 
 use crate::error::DbError;
 use crate::executor::{RawIter, RawValue};
@@ -100,7 +100,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
         None
     };
 
-    let mut iter = txn.scan_index(handle, &field, engine_range, reverse)?;
+    let mut iter = txn.scan_index(handle, &field, engine_range, reverse, now_millis)?;
     let mut count = 0usize;
     let mut done = false;
 
@@ -131,10 +131,6 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
                     count += 1;
 
                     if let Some(ref rv) = raw_value {
-                        // Covered path: O(1) TTL check from index metadata
-                        if IndexMeta::is_expired(&entry.metadata, now_millis) {
-                            continue;
-                        }
                         // Build a minimal document with _id + the indexed field.
                         // Coerce the query value to the type stored in the index.
                         let coerced = coerce_to_stored_type(rv, &entry.metadata);

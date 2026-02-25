@@ -250,31 +250,6 @@ impl<'a> Key<'a> {
         let (value_bytes, bv) = split_trailing_doc_id(after_field)?;
         Some((value_bytes, bv))
     }
-
-    /// Convert all borrowed data to owned, producing a `Key<'static>`.
-    pub fn into_owned(self) -> Key<'static> {
-        match self {
-            Key::Collection(name) => Key::Collection(Cow::Owned(name.into_owned())),
-            Key::IndexConfig(collection, field) => Key::IndexConfig(
-                Cow::Owned(collection.into_owned()),
-                Cow::Owned(field.into_owned()),
-            ),
-            Key::Index(collection, field, doc_id) => Key::Index(
-                Cow::Owned(collection.into_owned()),
-                Cow::Owned(field.into_owned()),
-                doc_id.into_owned(),
-            ),
-            Key::IndexMap(collection, field, doc_id) => Key::IndexMap(
-                Cow::Owned(collection.into_owned()),
-                Cow::Owned(field.into_owned()),
-                doc_id.into_owned(),
-            ),
-            Key::Record(collection, doc_id) => Key::Record(
-                Cow::Owned(collection.into_owned()),
-                doc_id.into_owned(),
-            ),
-        }
-    }
 }
 
 /// Structured prefix for scan operations.
@@ -486,19 +461,4 @@ mod tests {
         assert!(Key::decode(b"").is_none());
     }
 
-    #[test]
-    fn into_owned_produces_static() {
-        let key = Key::Record(Cow::Borrowed("col"), str_id("id"));
-        let owned: Key<'static> = key.into_owned();
-        assert_eq!(
-            owned,
-            Key::Record(
-                Cow::Owned("col".to_owned()),
-                BsonValue {
-                    tag: 0x02,
-                    bytes: Cow::Owned(b"id".to_vec()),
-                }
-            )
-        );
-    }
 }

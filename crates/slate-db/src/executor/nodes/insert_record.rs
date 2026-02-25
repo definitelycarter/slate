@@ -9,6 +9,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
     handle: &'a CollectionHandle<T::Cf>,
     source: RawIter<'a>,
+    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -43,8 +44,8 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
         let doc_id = BsonValue::from_raw_bson_ref(RawBsonRef::String(&id_str))
             .expect("string is always a valid BsonValue");
 
-        // Duplicate key check
-        if txn.get(handle, &doc_id)?.is_some() {
+        // Duplicate key check (expired docs are treated as non-existent)
+        if txn.get(handle, &doc_id, now_millis)?.is_some() {
             return Err(DbError::DuplicateKey(id_str));
         }
 

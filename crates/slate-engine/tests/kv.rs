@@ -1,7 +1,7 @@
+use std::i64;
+
 use bson::raw::RawBsonRef;
-use slate_engine::{
-    BsonValue, Engine, EngineTransaction, Catalog, IndexRange, KvEngine,
-};
+use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -9,7 +9,9 @@ fn engine() -> KvEngine<MemoryStore> {
 }
 
 fn str_id(s: &str) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::String(s)).unwrap().into_owned()
+    BsonValue::from_raw_bson_ref(RawBsonRef::String(s))
+        .unwrap()
+        .into_owned()
 }
 
 // ── Catalog ──────────────────────────────────────────────────
@@ -80,7 +82,7 @@ fn put_get_roundtrip() {
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    let fetched = txn.get(&handle, &id).unwrap().unwrap();
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched, doc);
     txn.rollback().unwrap();
 }
@@ -93,7 +95,7 @@ fn get_missing_returns_none() {
     let handle = txn.collection("users").unwrap();
 
     let id = str_id("missing");
-    assert!(txn.get(&handle, &id).unwrap().is_none());
+    assert!(txn.get(&handle, &id, i64::MIN).unwrap().is_none());
     txn.rollback().unwrap();
 }
 
@@ -113,7 +115,7 @@ fn put_overwrite() {
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    let fetched = txn.get(&handle, &id).unwrap().unwrap();
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched, doc2);
     txn.rollback().unwrap();
 }
@@ -133,7 +135,7 @@ fn delete_removes_document() {
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    assert!(txn.get(&handle, &id).unwrap().is_none());
+    assert!(txn.get(&handle, &id, i64::MIN).unwrap().is_none());
     txn.rollback().unwrap();
 }
 
@@ -155,7 +157,7 @@ fn scan_returns_all_documents() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     let results: Vec<_> = txn
-        .scan(&handle)
+        .scan(&handle, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -186,7 +188,7 @@ fn drop_collection_removes_records() {
     txn.create_collection(None, "users").unwrap();
     let handle = txn.collection("users").unwrap();
     let results: Vec<_> = txn
-        .scan(&handle)
+        .scan(&handle, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -218,7 +220,7 @@ fn create_index_backfills_existing_records() {
     assert!(handle.indexes.contains(&"email".to_string()));
 
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -250,7 +252,7 @@ fn drop_index_removes_entries() {
 
     // Verify no index entries remain.
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -279,7 +281,7 @@ fn put_maintains_index() {
 
     // Full scan should have 3 entries.
     let all: Vec<_> = txn
-        .scan_index(&handle, "age", IndexRange::Full, false)
+        .scan_index(&handle, "age", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -288,7 +290,13 @@ fn put_maintains_index() {
     // Eq scan for age=25 should match 2.
     let age_25 = BsonValue::from_raw_bson_ref(RawBsonRef::Int32(25)).unwrap();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "age", IndexRange::Eq(&age_25.to_vec()), false)
+        .scan_index(
+            &handle,
+            "age",
+            IndexRange::Eq(&age_25.to_vec()),
+            false,
+            i64::MIN,
+        )
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -319,7 +327,7 @@ fn put_overwrite_updates_index() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -349,7 +357,7 @@ fn delete_removes_index_entries() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -380,7 +388,7 @@ fn drop_collection_removes_index_entries() {
     txn.create_index("users", "email").unwrap();
     let handle = txn.collection("users").unwrap();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -420,10 +428,10 @@ fn stale_handle_misses_index_on_put() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     assert!(handle.indexes.contains(&"email".to_string()));
-    assert!(txn.get(&handle, &str_id("a")).unwrap().is_some());
+    assert!(txn.get(&handle, &str_id("a"), i64::MIN).unwrap().is_some());
 
     let entries: Vec<_> = txn
-        .scan_index(&handle, "email", IndexRange::Full, false)
+        .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -446,7 +454,11 @@ fn commit_persists_across_transactions() {
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    assert!(txn.get(&handle, &str_id("alice")).unwrap().is_some());
+    assert!(
+        txn.get(&handle, &str_id("alice"), i64::MIN)
+            .unwrap()
+            .is_some()
+    );
     txn.rollback().unwrap();
 }
 
@@ -465,6 +477,10 @@ fn rollback_discards_changes() {
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    assert!(txn.get(&handle, &str_id("alice")).unwrap().is_none());
+    assert!(
+        txn.get(&handle, &str_id("alice"), i64::MIN)
+            .unwrap()
+            .is_none()
+    );
     txn.rollback().unwrap();
 }

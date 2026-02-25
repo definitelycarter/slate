@@ -114,7 +114,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
             Plan::Insert { collection, source } => {
                 let source = self.execute_node(source)?;
                 let handle = self.store_handle(collection);
-                nodes::insert_record::execute(self.txn, handle, source)
+                nodes::insert_record::execute(self.txn, handle, source, self.now_millis)
             }
 
             Plan::Update {

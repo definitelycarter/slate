@@ -18,6 +18,7 @@ fn encode_i32_sortable(n: i32) -> [u8; 4] {
     ((n as u32) ^ 0x8000_0000).to_be_bytes()
 }
 
+#[cfg(test)]
 #[inline]
 fn decode_i32_sortable(b: [u8; 4]) -> i32 {
     (u32::from_be_bytes(b) ^ 0x8000_0000) as i32
@@ -28,6 +29,7 @@ fn encode_i64_sortable(n: i64) -> [u8; 8] {
     ((n as u64) ^ 0x8000_0000_0000_0000).to_be_bytes()
 }
 
+#[cfg(test)]
 #[inline]
 fn decode_i64_sortable(b: [u8; 8]) -> i64 {
     (u64::from_be_bytes(b) ^ 0x8000_0000_0000_0000) as i64
@@ -44,6 +46,7 @@ fn encode_f64_sortable(f: f64) -> [u8; 8] {
     encoded.to_be_bytes()
 }
 
+#[cfg(test)]
 #[inline]
 fn decode_f64_sortable(b: [u8; 8]) -> f64 {
     let encoded = u64::from_be_bytes(b);

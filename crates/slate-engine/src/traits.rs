@@ -41,6 +41,7 @@ pub trait EngineTransaction {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc_id: &BsonValue<'_>,
+        ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError>;
 
     fn put(
@@ -59,6 +60,7 @@ pub trait EngineTransaction {
     fn scan<'a>(
         &'a self,
         handle: &'a CollectionHandle<Self::Cf>,
+        ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
         EngineError,
@@ -72,6 +74,7 @@ pub trait EngineTransaction {
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
+        ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>;
 
     // ── Lifecycle ──────────────────────────────────────────────

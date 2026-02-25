@@ -23,6 +23,7 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc_id: &BsonValue<'_>,
+        _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         panic!("NoopTransaction::get called");
     }
@@ -47,6 +48,7 @@ impl EngineTransaction for NoopTransaction {
     fn scan<'a>(
         &'a self,
         _handle: &'a CollectionHandle<Self::Cf>,
+        _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
         EngineError,
@@ -60,6 +62,7 @@ impl EngineTransaction for NoopTransaction {
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
+        _ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
     {
         panic!("NoopTransaction::scan_index called");
@@ -107,6 +110,7 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc_id: &BsonValue<'_>,
+        _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         Ok(None)
     }
@@ -139,6 +143,7 @@ impl EngineTransaction for MockTransaction {
     fn scan<'a>(
         &'a self,
         _handle: &'a CollectionHandle<Self::Cf>,
+        _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
         EngineError,
@@ -152,6 +157,7 @@ impl EngineTransaction for MockTransaction {
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
+        _ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
     {
         Ok(Box::new(std::iter::empty()))
