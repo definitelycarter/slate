@@ -51,21 +51,6 @@ type StoreImpl = slate_store::RocksStore;
 type Db = Database<StoreImpl>;
 type Txn<'a> = DatabaseTransaction<'a, StoreImpl>;
 
-// --- Result types ---
-
-#[derive(uniffi::Record)]
-pub struct SlateUpdateResult {
-    pub matched: u64,
-    pub modified: u64,
-    pub upserted_id: Option<String>,
-}
-
-#[derive(uniffi::Record)]
-pub struct SlateUpsertResult {
-    pub inserted: u64,
-    pub updated: u64,
-}
-
 // --- SlateDatabase ---
 
 #[derive(uniffi::Object)]
@@ -210,16 +195,11 @@ impl SlateDatabase {
         collection: String,
         filter_json: String,
         update: Vec<u8>,
-        upsert: bool,
-    ) -> Result<SlateUpdateResult, SlateError> {
+    ) -> Result<u64, SlateError> {
         let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let result = txn.update_one(&collection, &filter, update, upsert)?;
-            Ok(SlateUpdateResult {
-                matched: result.matched,
-                modified: result.modified,
-                upserted_id: result.upserted_id,
-            })
+            let affected = txn.update_one(&collection, &filter, update)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -228,15 +208,11 @@ impl SlateDatabase {
         collection: String,
         filter_json: String,
         update: Vec<u8>,
-    ) -> Result<SlateUpdateResult, SlateError> {
+    ) -> Result<u64, SlateError> {
         let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let result = txn.update_many(&collection, &filter, update)?;
-            Ok(SlateUpdateResult {
-                matched: result.matched,
-                modified: result.modified,
-                upserted_id: result.upserted_id,
-            })
+            let affected = txn.update_many(&collection, &filter, update)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -245,15 +221,11 @@ impl SlateDatabase {
         collection: String,
         filter_json: String,
         replacement: Vec<u8>,
-    ) -> Result<SlateUpdateResult, SlateError> {
+    ) -> Result<u64, SlateError> {
         let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let result = txn.replace_one(&collection, &filter, replacement)?;
-            Ok(SlateUpdateResult {
-                matched: result.matched,
-                modified: result.modified,
-                upserted_id: result.upserted_id,
-            })
+            let affected = txn.replace_one(&collection, &filter, replacement)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -262,16 +234,16 @@ impl SlateDatabase {
     pub fn delete_one(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
         let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let result = txn.delete_one(&collection, &filter)?;
-            Ok(result.deleted)
+            let affected = txn.delete_one(&collection, &filter)?.drain()?;
+            Ok(affected)
         })
     }
 
     pub fn delete_many(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
         let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let result = txn.delete_many(&collection, &filter)?;
-            Ok(result.deleted)
+            let affected = txn.delete_many(&collection, &filter)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -305,13 +277,10 @@ impl SlateDatabase {
         &self,
         collection: String,
         docs: Vec<Vec<u8>>,
-    ) -> Result<SlateUpsertResult, SlateError> {
+    ) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let result = txn.upsert_many(&collection, docs)?;
-            Ok(SlateUpsertResult {
-                inserted: result.inserted,
-                updated: result.updated,
-            })
+            let affected = txn.upsert_many(&collection, docs)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -319,13 +288,10 @@ impl SlateDatabase {
         &self,
         collection: String,
         docs: Vec<Vec<u8>>,
-    ) -> Result<SlateUpsertResult, SlateError> {
+    ) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let result = txn.merge_many(&collection, docs)?;
-            Ok(SlateUpsertResult {
-                inserted: result.inserted,
-                updated: result.updated,
-            })
+            let affected = txn.merge_many(&collection, docs)?.drain()?;
+            Ok(affected)
         })
     }
 

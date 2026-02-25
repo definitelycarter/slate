@@ -22,7 +22,7 @@ pub use cursor::{Cursor, CursorIter};
 pub use database::{Database, DatabaseConfig};
 pub use engine::Transaction as DatabaseTransaction;
 pub use error::DbError;
-pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
+pub use result::InsertResult;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench {

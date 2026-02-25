@@ -12,7 +12,7 @@ type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 ///
 /// Owns a pre-built `Plan` and a reference to the transaction.
 /// Call [`.iter()`](Cursor::iter) for streaming iteration, or
-/// [`.execute()`](Cursor::execute) to drain and return a count.
+/// [`.drain()`](Cursor::drain) to consume all rows and return a count.
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
     plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
@@ -33,7 +33,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     }
 
     /// Consume the cursor, drain all rows, and return the count of affected rows.
-    pub fn execute(self) -> Result<u64, DbError> {
+    pub fn drain(self) -> Result<u64, DbError> {
         let iter = Executor::new(self.txn).execute(self.plan)?;
         let mut count = 0u64;
         for result in iter {

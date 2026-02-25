@@ -909,12 +909,9 @@ fn upsert_replace_insert_new() {
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn);
-    let (iter, inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
-    for result in iter {
-        result.unwrap();
-    }
-    assert_eq!(inserted.get(), 1);
-    assert_eq!(updated.get(), 0);
+    let iter = exec.execute(plan).unwrap();
+    let rows = collect_docs(iter);
+    assert_eq!(rows.len(), 1);
 
     let puts = txn.puts.borrow();
     // Engine handles encoding and index maintenance internally
@@ -932,12 +929,9 @@ fn upsert_merge_insert_new() {
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn);
-    let (iter, inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
-    for result in iter {
-        result.unwrap();
-    }
-    assert_eq!(inserted.get(), 1);
-    assert_eq!(updated.get(), 0);
+    let iter = exec.execute(plan).unwrap();
+    let rows = collect_docs(iter);
+    assert_eq!(rows.len(), 1);
 
     let puts = txn.puts.borrow();
     assert_eq!(puts.len(), 1);
@@ -946,16 +940,17 @@ fn upsert_merge_insert_new() {
 #[test]
 fn upsert_replace_existing() {
     let db = seeded_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
-    let result = txn
+    let affected = txn
         .upsert_many(
             "test",
             vec![bson::doc! { "_id": "1", "name": "Alicia", "status": "archived", "score": 99 }],
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.inserted, 0);
-    assert_eq!(result.updated, 1);
+    assert_eq!(affected, 1);
 
     let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alicia");
@@ -966,13 +961,14 @@ fn upsert_replace_existing() {
 #[test]
 fn upsert_merge_existing() {
     let db = seeded_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
-    let result = txn
+    let affected = txn
         .merge_many("test", vec![bson::doc! { "_id": "1", "score": 99 }])
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.inserted, 0);
-    assert_eq!(result.updated, 1);
+    assert_eq!(affected, 1);
 
     let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
@@ -983,9 +979,9 @@ fn upsert_merge_existing() {
 #[test]
 fn upsert_mixed_insert_and_update() {
     let db = seeded_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
-    let result = txn
+    let affected = txn
         .upsert_many(
             "test",
             vec![
@@ -993,9 +989,10 @@ fn upsert_mixed_insert_and_update() {
                 bson::doc! { "_id": "99", "name": "New", "status": "pending", "score": 50 },
             ],
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.inserted, 1);
-    assert_eq!(result.updated, 1);
+    assert_eq!(affected, 2);
 
     let doc1 = txn.find_by_id("test", "1", None).unwrap().unwrap();
     assert_eq!(doc1.get_str("name").unwrap(), "Alicia");
@@ -1007,13 +1004,15 @@ fn upsert_mixed_insert_and_update() {
 #[test]
 fn upsert_replace_cleans_old_indexes() {
     let db = seeded_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     // Alice has status="active". Replace with status="archived".
     txn.upsert_many(
         "test",
         vec![bson::doc! { "_id": "1", "name": "Alice", "status": "archived", "score": 70 }],
     )
+    .unwrap()
+    .drain()
     .unwrap();
 
     // Query by old index value should not find Alice

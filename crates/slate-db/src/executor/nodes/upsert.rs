@@ -1,6 +1,3 @@
-use std::cell::Cell;
-use std::rc::Rc;
-
 use bson::raw::{RawBsonRef, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
 use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
@@ -20,8 +17,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: RawIter<'a>,
-    inserted: Rc<Cell<u64>>,
-    updated: Rc<Cell<u64>>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
@@ -55,18 +50,15 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                 Some(doc) => doc,
                 None => {
                     // Merge no-op: doc unchanged, still counts as matched.
-                    updated.set(updated.get() + 1);
                     return Ok(Some(RawBson::Document(old_raw_doc.clone())));
                 }
             };
 
             txn.put(&handle, &written, &doc_id)?;
-            updated.set(updated.get() + 1);
             Ok(Some(RawBson::Document(written)))
         } else {
             let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
             txn.put(&handle, &doc_to_write, &doc_id)?;
-            inserted.set(inserted.get() + 1);
             Ok(Some(RawBson::Document(doc_to_write)))
         }
     })))

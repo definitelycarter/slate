@@ -7,11 +7,8 @@ pub(crate) mod raw_mutation;
 #[cfg(test)]
 mod tests;
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use bson::RawBson;
-use slate_engine::{CollectionHandle, EngineTransaction};
+use slate_engine::EngineTransaction;
 
 use crate::error::DbError;
 use crate::planner::plan::{Node, Plan};
@@ -83,58 +80,27 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
             }
 
             Plan::Merge { collection, source } => {
-                let (iter, _, _) =
-                    self.execute_upsert(nodes::upsert::UpsertMode::Merge, collection, source)?;
-                Ok(iter)
+                let source = self.execute_node(source)?;
+                nodes::upsert::execute(
+                    self.txn,
+                    collection,
+                    nodes::upsert::UpsertMode::Merge,
+                    source,
+                    self.now_millis,
+                )
             }
 
             Plan::Upsert { collection, source } => {
-                let (iter, _, _) =
-                    self.execute_upsert(nodes::upsert::UpsertMode::Replace, collection, source)?;
-                Ok(iter)
+                let source = self.execute_node(source)?;
+                nodes::upsert::execute(
+                    self.txn,
+                    collection,
+                    nodes::upsert::UpsertMode::Replace,
+                    source,
+                    self.now_millis,
+                )
             }
         }
-    }
-
-    /// Execute an upsert pipeline, returning the row iterator and shared counters
-    /// that are populated as the iterator is drained.
-    pub fn execute_upsert_plan(
-        &self,
-        plan: Plan<T::Cf>,
-    ) -> Result<(RawIter<'a>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
-        match plan {
-            Plan::Merge { collection, source } => {
-                self.execute_upsert(nodes::upsert::UpsertMode::Merge, collection, source)
-            }
-            Plan::Upsert { collection, source } => {
-                self.execute_upsert(nodes::upsert::UpsertMode::Replace, collection, source)
-            }
-            _ => {
-                let iter = self.execute(plan)?;
-                Ok((iter, Rc::new(Cell::new(0)), Rc::new(Cell::new(0))))
-            }
-        }
-    }
-
-    fn execute_upsert(
-        &self,
-        mode: nodes::upsert::UpsertMode,
-        collection: CollectionHandle<T::Cf>,
-        source_node: Node<T::Cf>,
-    ) -> Result<(RawIter<'a>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
-        let inserted = Rc::new(Cell::new(0u64));
-        let updated = Rc::new(Cell::new(0u64));
-        let source = self.execute_node(source_node)?;
-        let iter = nodes::upsert::execute(
-            self.txn,
-            collection,
-            mode,
-            source,
-            Rc::clone(&inserted),
-            Rc::clone(&updated),
-            self.now_millis,
-        )?;
-        Ok((iter, inserted, updated))
     }
 
     fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'a>, DbError> {

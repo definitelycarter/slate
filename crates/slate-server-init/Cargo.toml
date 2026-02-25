@@ -1,9 +1,0 @@
-[package]
-name = "slate-server-init"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-slate-client = { path = "../slate-client" }
-slate-db = { path = "../slate-db" }
-serde_json = "1"

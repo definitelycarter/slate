@@ -804,11 +804,13 @@ fn bench_upsert_replace(c: &mut Criterion) {
                 },
                 |(txn, plan)| {
                     let exec = Executor::new(&txn);
-                    let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
+                    let iter = exec.execute(plan).unwrap();
+                    let mut count = 0u64;
                     for r in iter {
                         r.unwrap();
+                        count += 1;
                     }
-                    updated.get()
+                    count
                 },
                 BatchSize::PerIteration,
             )
@@ -844,11 +846,13 @@ fn bench_upsert_merge(c: &mut Criterion) {
                 },
                 |(txn, plan)| {
                     let exec = Executor::new(&txn);
-                    let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
+                    let iter = exec.execute(plan).unwrap();
+                    let mut count = 0u64;
                     for r in iter {
                         r.unwrap();
+                        count += 1;
                     }
-                    updated.get()
+                    count
                 },
                 BatchSize::PerIteration,
             )
@@ -898,11 +902,13 @@ fn bench_upsert_insert(c: &mut Criterion) {
                 },
                 |(txn, plan)| {
                     let exec = Executor::new(&txn);
-                    let (iter, inserted, _updated) = exec.execute_upsert_plan(plan).unwrap();
+                    let iter = exec.execute(plan).unwrap();
+                    let mut count = 0u64;
                     for r in iter {
                         r.unwrap();
+                        count += 1;
                     }
-                    inserted.get()
+                    count
                 },
                 BatchSize::PerIteration,
             )

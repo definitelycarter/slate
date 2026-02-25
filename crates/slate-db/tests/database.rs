@@ -526,13 +526,14 @@ fn update_one_merge() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "rejected" }, false)
+        .update_one(COLLECTION, &filter, doc! { "status": "rejected" })
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 1);
-    assert_eq!(result.modified, 1);
+    assert_eq!(result, 1);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -553,33 +554,31 @@ fn update_one_no_match() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("nonexistent".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "active" }, false)
+        .update_one(COLLECTION, &filter, doc! { "status": "active" })
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 0);
-    assert_eq!(result.modified, 0);
-    assert!(result.upserted_id.is_none());
+    assert_eq!(result, 0);
 }
 
 #[test]
-fn update_one_upsert() {
+fn upsert_via_upsert_many() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
-    let filter = eq_filter("_id", Bson::String("new-doc".into()));
+    let txn = db.begin(false).unwrap();
     let result = txn
-        .update_one(
+        .upsert_many(
             COLLECTION,
-            &filter,
-            doc! { "_id": "new-doc", "name": "Upserted" },
-            true,
+            vec![doc! { "_id": "new-doc", "name": "Upserted" }],
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 0);
-    assert!(result.upserted_id.is_some());
+    assert_eq!(result, 1);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -599,13 +598,14 @@ fn update_many_multiple() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
         .update_many(COLLECTION, &filter, doc! { "status": "archived" })
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 3);
-    assert_eq!(result.modified, 3);
+    assert_eq!(result, 3);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -641,13 +641,14 @@ fn replace_one_full_replacement() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
         .replace_one(COLLECTION, &filter, doc! { "name": "New Corp" })
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 1);
-    assert_eq!(result.modified, 1);
+    assert_eq!(result, 1);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -680,10 +681,14 @@ fn delete_one_removes_record() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
-    let result = txn.delete_one(COLLECTION, &filter).unwrap();
-    assert_eq!(result.deleted, 1);
+    let result = txn
+        .delete_one(COLLECTION, &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
+    assert_eq!(result, 1);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -702,10 +707,14 @@ fn delete_many_removes_matching() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
-    let result = txn.delete_many(COLLECTION, &filter).unwrap();
-    assert_eq!(result.deleted, 3);
+    let result = txn
+        .delete_many(COLLECTION, &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
+    assert_eq!(result, 3);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -951,9 +960,11 @@ fn index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Update the indexed field
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "status": "rejected" }, false)
+    txn.update_one(COLLECTION, &filter, doc! { "status": "rejected" })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -1007,9 +1018,12 @@ fn index_maintained_on_delete() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one(COLLECTION, &filter).unwrap();
+    txn.delete_one(COLLECTION, &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     // Index should be empty
@@ -1595,9 +1609,11 @@ fn multikey_index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Update tags
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one("tags_upd", &filter, doc! { "tags": ["go", "api"] }, false)
+    txn.update_one("tags_upd", &filter, doc! { "tags": ["go", "api"] })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -1652,9 +1668,12 @@ fn multikey_index_maintained_on_delete() {
     txn.commit().unwrap();
 
     // Delete
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one("tags_del", &filter).unwrap();
+    txn.delete_one("tags_del", &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     // Index entries should be cleaned up
@@ -1738,9 +1757,11 @@ fn multikey_index_replace_one() {
     txn.commit().unwrap();
 
     // Replace entirely
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.replace_one("tags_rep", &filter, doc! { "tags": ["python", "ml"] })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -2253,9 +2274,11 @@ fn ttl_index_maintained_on_update() {
     txn.commit().unwrap();
 
     // Update ttl to the past
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "ttl": past_ttl() }, false)
+    txn.update_one(COLLECTION, &filter, doc! { "ttl": past_ttl() })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -2344,12 +2367,14 @@ fn ttl_update_skips_expired() {
     txn.commit().unwrap();
 
     // update_one should match 0 — expired doc is invisible
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "new" }, false)
+        .update_one(COLLECTION, &filter, doc! { "status": "new" })
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.modified, 0);
+    assert_eq!(result, 0);
 }
 
 #[test]
@@ -2366,15 +2391,16 @@ fn ttl_merge_into_expired_inserts_fresh() {
     txn.commit().unwrap();
 
     // Merge with same _id — expired doc treated as non-existent, takes insert path
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let result = txn
         .merge_many(
             COLLECTION,
             vec![doc! { "_id": "a", "new_field": true, "ttl": future_ttl() }],
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.inserted, 1);
-    assert_eq!(result.updated, 0);
+    assert_eq!(result, 1);
     txn.commit().unwrap();
 
     // The new doc should be visible and should NOT contain old_field
@@ -2943,15 +2969,14 @@ fn index_covered_preserves_string_type() {
 fn upsert_many_inserts_new() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     let docs = vec![
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
         doc! { "_id": "u2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 2);
-    assert_eq!(result.updated, 0);
+    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 2);
 
     let found = txn
         .find(COLLECTION, no_filter_query())
@@ -2978,9 +3003,8 @@ fn upsert_many_replaces_existing() {
 
     // Upsert replaces entirely
     let docs = vec![doc! { "_id": "u1", "name": "Alice Updated", "status": "inactive" }];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 0);
-    assert_eq!(result.updated, 1);
+    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 1);
 
     let doc = txn.find_by_id(COLLECTION, "u1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice Updated");
@@ -3005,9 +3029,8 @@ fn upsert_many_mixed() {
         doc! { "_id": "u1", "name": "Alice v2", "status": "inactive" },
         doc! { "_id": "u2", "name": "Bob", "status": "active" },
     ];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 1);
-    assert_eq!(result.updated, 1);
+    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 2);
 
     let found = txn
         .find(COLLECTION, no_filter_query())
@@ -3056,6 +3079,8 @@ fn upsert_many_updates_indexes() {
         COLLECTION,
         vec![doc! { "_id": "u1", "name": "Alice", "status": "inactive" }],
     )
+    .unwrap()
+    .drain()
     .unwrap();
 
     // Old index entry gone
@@ -3103,15 +3128,14 @@ fn upsert_many_updates_indexes() {
 fn merge_many_inserts_new() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     let docs = vec![
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
         doc! { "_id": "m2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn.merge_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 2);
-    assert_eq!(result.updated, 0);
+    let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 2);
 
     let found = txn
         .find(COLLECTION, no_filter_query())
@@ -3137,9 +3161,8 @@ fn merge_many_merges_existing() {
 
     // Merge only updates status — score should remain
     let docs = vec![doc! { "_id": "m1", "status": "inactive" }];
-    let result = txn.merge_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 0);
-    assert_eq!(result.updated, 1);
+    let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 1);
 
     let doc = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
@@ -3162,6 +3185,8 @@ fn merge_many_index_maintenance() {
 
     // Merge changes status
     txn.merge_many(COLLECTION, vec![doc! { "_id": "m1", "status": "inactive" }])
+        .unwrap()
+        .drain()
         .unwrap();
 
     // Old index entry gone
@@ -3219,9 +3244,8 @@ fn merge_many_unchanged_noop() {
     // But internally raw_merge_update returns false for no-op, so updated stays at 1 because merge_many
     // always increments updated when the record exists
     let docs = vec![doc! { "_id": "m1", "status": "active" }];
-    let result = txn.merge_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 0);
-    assert_eq!(result.updated, 1);
+    let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 1);
 }
 
 #[test]
@@ -3235,6 +3259,8 @@ fn merge_many_adds_new_field() {
 
     // Merge adds a new field
     txn.merge_many(COLLECTION, vec![doc! { "_id": "m1", "status": "active" }])
+        .unwrap()
+        .drain()
         .unwrap();
 
     let doc = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
@@ -3258,9 +3284,8 @@ fn merge_many_mixed_insert_and_merge() {
         doc! { "_id": "m1", "status": "inactive" }, // merge
         doc! { "_id": "m2", "name": "Bob", "status": "active" }, // insert
     ];
-    let result = txn.merge_many(COLLECTION, docs).unwrap();
-    assert_eq!(result.inserted, 1);
-    assert_eq!(result.updated, 1);
+    let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
+    assert_eq!(result, 2);
 
     let m1 = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
     assert_eq!(m1.get_str("name").unwrap(), "Alice"); // preserved
@@ -3397,14 +3422,15 @@ fn mutation_set_explicit() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$set": { "status": "archived", "score": 100 } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3428,15 +3454,12 @@ fn mutation_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$unset": { "score": "" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$unset": { "score": "" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3456,15 +3479,12 @@ fn mutation_inc_i32() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$inc": { "score": 5_i32 } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": 5_i32 } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3482,15 +3502,12 @@ fn mutation_inc_missing_field() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$inc": { "score": 7_i32 } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": 7_i32 } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3508,15 +3525,12 @@ fn mutation_inc_negative_decrement() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$inc": { "score": -30_i32 } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": -30_i32 } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3534,14 +3548,15 @@ fn mutation_inc_f64() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$inc": { "balance": 25.25_f64 } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3563,14 +3578,15 @@ fn mutation_rename() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$rename": { "old_name": "name" } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3591,15 +3607,12 @@ fn mutation_push() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$push": { "tags": "perf" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$push": { "tags": "perf" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3617,15 +3630,12 @@ fn mutation_push_creates_array() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$push": { "tags": "new" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$push": { "tags": "new" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3646,15 +3656,12 @@ fn mutation_lpush() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$lpush": { "queue": "first" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$lpush": { "queue": "first" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3672,9 +3679,11 @@ fn mutation_pop() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "stack": 1 } }, false)
+    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "stack": 1 } })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -3696,7 +3705,7 @@ fn mutation_multiple_operators() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
@@ -3706,8 +3715,9 @@ fn mutation_multiple_operators() {
             "$inc": { "score": 5_i32 },
             "$push": { "tags": "b" },
         },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3731,14 +3741,15 @@ fn mutation_bare_fields_implicit_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "status": "archived", "score": 99 },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3762,14 +3773,15 @@ fn mutation_dot_path_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$set": { "address.city": "Denver" } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3793,14 +3805,15 @@ fn mutation_dot_path_inc() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$inc": { "stats.views": 1_i32 } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3821,14 +3834,15 @@ fn mutation_dot_path_creates_intermediates() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$set": { "address.city": "Austin" } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3852,14 +3866,15 @@ fn mutation_dot_path_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$unset": { "address.zip": "" } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -3881,15 +3896,12 @@ fn mutation_dot_path_push() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$push": { "data.items": "b" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one(COLLECTION, &filter, doc! { "$push": { "data.items": "b" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3902,7 +3914,7 @@ fn mutation_update_many_with_inc() {
     let (db, _dir) = temp_db();
     seed_records(&db);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
         .update_many(
@@ -3910,9 +3922,10 @@ fn mutation_update_many_with_inc() {
             &filter,
             doc! { "$inc": { "revenue": 1000.0_f64 } },
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(result.matched, 3);
-    assert_eq!(result.modified, 3);
+    assert_eq!(result, 3);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3945,14 +3958,15 @@ fn mutation_index_maintained_on_set() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
         "idx_mut",
         &filter,
         doc! { "$set": { "status": "archived" } },
-        false,
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
 
@@ -4001,15 +4015,12 @@ fn mutation_index_maintained_on_unset() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        "idx_unset",
-        &filter,
-        doc! { "$unset": { "status": "" } },
-        false,
-    )
-    .unwrap();
+    txn.update_one("idx_unset", &filter, doc! { "$unset": { "status": "" } })
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -4042,15 +4053,12 @@ fn mutation_push_pop_as_stack() {
     txn.commit().unwrap();
 
     for val in ["a", "b", "c"] {
-        let mut txn = db.begin(false).unwrap();
+        let txn = db.begin(false).unwrap();
         let filter = eq_filter("_id", Bson::String("r1".into()));
-        txn.update_one(
-            COLLECTION,
-            &filter,
-            doc! { "$push": { "items": val } },
-            false,
-        )
-        .unwrap();
+        txn.update_one(COLLECTION, &filter, doc! { "$push": { "items": val } })
+            .unwrap()
+            .drain()
+            .unwrap();
         txn.commit().unwrap();
     }
 
@@ -4058,9 +4066,11 @@ fn mutation_push_pop_as_stack() {
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b", "c"]);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } }, false)
+    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -4080,15 +4090,12 @@ fn mutation_lpush_pop_as_queue() {
     txn.commit().unwrap();
 
     for val in ["first", "second", "third"] {
-        let mut txn = db.begin(false).unwrap();
+        let txn = db.begin(false).unwrap();
         let filter = eq_filter("_id", Bson::String("r1".into()));
-        txn.update_one(
-            COLLECTION,
-            &filter,
-            doc! { "$lpush": { "items": val } },
-            false,
-        )
-        .unwrap();
+        txn.update_one(COLLECTION, &filter, doc! { "$lpush": { "items": val } })
+            .unwrap()
+            .drain()
+            .unwrap();
         txn.commit().unwrap();
     }
 
@@ -4096,9 +4103,11 @@ fn mutation_lpush_pop_as_queue() {
     let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second", "first"]);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } }, false)
+    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
@@ -4117,16 +4126,17 @@ fn mutation_unknown_operator_rejected() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     let result = txn.update_one(
         COLLECTION,
         &filter,
         doc! { "$badop": { "name": "Bob" } },
-        false,
     );
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
+    let err = match result {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected error for $badop"),
+    };
     assert!(
         err.contains("$badop"),
         "error should mention the bad op: {err}"
@@ -4143,8 +4153,8 @@ fn mutation_id_rejected() {
         .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.update_one(COLLECTION, &filter, doc! { "$set": { "_id": "r2" } }, false);
+    let result = txn.update_one(COLLECTION, &filter, doc! { "$set": { "_id": "r2" } });
     assert!(result.is_err());
 }

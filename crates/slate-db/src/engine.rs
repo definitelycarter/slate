@@ -12,7 +12,7 @@ use crate::executor::exec;
 use crate::expression::Expression;
 use crate::parser;
 use crate::planner::planner::Planner;
-use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
+use crate::result::InsertResult;
 use crate::statement::Statement;
 
 pub struct SlateEngine<S: Store> {
@@ -108,7 +108,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Find documents matching a query (filter, sort, skip, take, projection).
     ///
     /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
-    /// or drained via [`.execute()`](Cursor::execute) for a count.
+    /// or drained via [`.drain()`](Cursor::drain) for a count.
     pub fn find(&self, collection: &str, query: Query) -> Result<Cursor<'db, '_, S>, DbError> {
         let predicate = Self::parse_optional_filter(query.filter.as_ref())?;
         let stmt = Statement::Find {
@@ -161,14 +161,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Update operations ───────────────────────────────────────
 
-    /// Update the first document matching the filter. Merges fields.
+    /// Update the first document matching the filter.
     pub fn update_one(
-        &mut self,
+        &self,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
-        upsert: bool,
-    ) -> Result<UpdateResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
         let mutation = slate_query::parse_mutation(&raw)?;
@@ -179,42 +178,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             mutation,
             limit: Some(1),
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut matched = 0u64;
-        let mut modified = 0u64;
-        for result in iter {
-            let opt_val = result?;
-            matched += 1;
-            if opt_val.is_some() {
-                modified += 1;
-            }
-        }
-
-        if matched == 0 && upsert {
-            let result = self.insert_one(collection, raw)?;
-            Ok(UpdateResult {
-                matched: 0,
-                modified: 0,
-                upserted_id: Some(result.id),
-            })
-        } else {
-            Ok(UpdateResult {
-                matched,
-                modified,
-                upserted_id: None,
-            })
-        }
+        self.prepare_cursor(stmt)
     }
 
-    /// Update all documents matching the filter. Merges fields.
+    /// Update all documents matching the filter.
     pub fn update_many(
-        &mut self,
+        &self,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
-    ) -> Result<UpdateResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
         let mutation = slate_query::parse_mutation(&raw)?;
@@ -225,32 +198,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             mutation,
             limit: None,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut matched = 0u64;
-        let mut modified = 0u64;
-        for result in iter {
-            let opt_val = result?;
-            matched += 1;
-            if opt_val.is_some() {
-                modified += 1;
-            }
-        }
-        Ok(UpdateResult {
-            matched,
-            modified,
-            upserted_id: None,
-        })
+        self.prepare_cursor(stmt)
     }
 
     /// Replace the first document matching the filter entirely (no merge).
     pub fn replace_one(
-        &mut self,
+        &self,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         replacement: impl IntoRawDocumentBuf,
-    ) -> Result<UpdateResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = replacement.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -259,33 +216,17 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             predicate,
             replacement: raw,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut matched = 0u64;
-        let mut modified = 0u64;
-        for result in iter {
-            let opt_val = result?;
-            matched += 1;
-            if opt_val.is_some() {
-                modified += 1;
-            }
-        }
-        Ok(UpdateResult {
-            matched,
-            modified,
-            upserted_id: None,
-        })
+        self.prepare_cursor(stmt)
     }
 
     // ── Delete operations ───────────────────────────────────────
 
     /// Delete the first document matching the filter.
     pub fn delete_one(
-        &mut self,
+        &self,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
-    ) -> Result<DeleteResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
@@ -293,23 +234,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             predicate,
             limit: Some(1),
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut deleted = 0u64;
-        for result in iter {
-            result?;
-            deleted += 1;
-        }
-        Ok(DeleteResult { deleted })
+        self.prepare_cursor(stmt)
     }
 
     /// Delete all documents matching the filter.
     pub fn delete_many(
-        &mut self,
+        &self,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
-    ) -> Result<DeleteResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
@@ -317,25 +250,17 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             predicate,
             limit: None,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut deleted = 0u64;
-        for result in iter {
-            result?;
-            deleted += 1;
-        }
-        Ok(DeleteResult { deleted })
+        self.prepare_cursor(stmt)
     }
 
     // ── Bulk upsert / merge operations ────────────────────────────
 
     /// Upsert (insert-or-replace) a batch of documents by `_id`.
     pub fn upsert_many(
-        &mut self,
+        &self,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
-    ) -> Result<UpsertResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
             .map(|doc| doc.into_raw_document_buf())
@@ -345,24 +270,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             collection,
             docs: raw_docs,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let (iter, inserted, updated) = exec.execute_upsert_plan(plan)?;
-        for result in iter {
-            result?;
-        }
-        Ok(UpsertResult {
-            inserted: inserted.get(),
-            updated: updated.get(),
-        })
+        self.prepare_cursor(stmt)
     }
 
     /// Merge (insert-or-patch) a batch of partial documents by `_id`.
     pub fn merge_many(
-        &mut self,
+        &self,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
-    ) -> Result<UpsertResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
             .map(|doc| doc.into_raw_document_buf())
@@ -372,16 +288,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             collection,
             docs: raw_docs,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let (iter, inserted, updated) = exec.execute_upsert_plan(plan)?;
-        for result in iter {
-            result?;
-        }
-        Ok(UpsertResult {
-            inserted: inserted.get(),
-            updated: updated.get(),
-        })
+        self.prepare_cursor(stmt)
     }
 
     // ── Count ───────────────────────────────────────────────────
@@ -395,7 +302,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: None,
             columns: None,
         };
-        self.find(collection, query)?.execute()
+        self.find(collection, query)?.drain()
     }
 
     /// Return distinct values for a field, with optional filter and sort.
