@@ -3,22 +3,20 @@ use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 use slate_query::Mutation;
 
 use crate::error::DbError;
+use crate::executor::RawIter;
 use crate::executor::exec;
-use crate::executor::{RawIter, RawValue};
 
 pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    handle: &'a CollectionHandle<T::Cf>,
+    handle: CollectionHandle<T::Cf>,
     mutation: Mutation,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let old_raw = match &opt_val {
-            Some(val) => match val.as_document() {
-                Some(r) => r,
-                None => return Ok(None),
-            },
+            Some(RawBson::Document(d)) => d.as_ref(),
+            Some(_) => return Ok(None),
             None => return Ok(None),
         };
 
@@ -33,8 +31,8 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
                     bson::raw::RawBsonRef::String(&id_str),
                 )
                 .expect("string is always a valid BsonValue");
-                txn.put(handle, &mutated, &doc_id)?;
-                Ok(Some(RawValue::Owned(RawBson::Document(mutated))))
+                txn.put(&handle, &mutated, &doc_id)?;
+                Ok(Some(RawBson::Document(mutated)))
             }
             None => Ok(None),
         }

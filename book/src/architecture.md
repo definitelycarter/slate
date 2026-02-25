@@ -2,15 +2,16 @@
 
 ## Overview
 
-A layered system with a dynamic storage engine, a database layer with query execution, a TCP interface, and an HTTP layer for collection access.
+A layered system with a key-value storage backend, an engine layer for key encoding and index maintenance, a database layer with query planning and execution, a TCP interface, and an HTTP layer for collection access.
 
 ## Crate Structure
 
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
+  ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
   ├── slate-query            → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  ├── slate-db               → Database, Catalog, query execution, depends on slate-store + slate-query
+  ├── slate-db               → Query planner + executor, delegates storage to slate-engine
   ├── slate-server           → TCP server, MessagePack wire protocol, thread-per-connection
   ├── slate-client           → TCP client, connection pool (crossbeam channel)
   ├── slate-server-init      → CLI tool to initialize collections on a running server
@@ -47,18 +48,21 @@ All read/write operations go through a transaction. Read-only transactions retur
 
 ```rust
 pub trait Transaction {
+    type Cf: Clone;
+    fn cf(&self, name: &str) -> Result<Self::Cf, StoreError>;
+
     // Reads
-    fn get(&mut self, cf: &str, key: &[u8]) -> Result<Option<Cow<'_, [u8]>>, StoreError>;
-    fn multi_get(&mut self, cf: &str, keys: &[&[u8]])
-        -> Result<Vec<Option<Cow<'_, [u8]>>>, StoreError>;
-    fn scan_prefix(&mut self, cf: &str, prefix: &[u8])
-        -> Result<Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>, StoreError>;
-    fn scan_prefix_rev(&mut self, cf: &str, prefix: &[u8])
-        -> Result<Box<dyn Iterator<Item = Result<(Cow<'_, [u8]>, Cow<'_, [u8]>), StoreError>> + '_>, StoreError>;
+    fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
+    fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]])
+        -> Result<Vec<Option<Vec<u8>>>, StoreError>;
+    fn scan_prefix<'a>(&'a self, cf: &Self::Cf, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
+    fn scan_prefix_rev<'a>(&'a self, cf: &Self::Cf, prefix: &[u8])
+        -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
 
     // Writes
-    fn put(&mut self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
-    fn put_batch(&mut self, cf: &str, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
+    fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
+    fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
     fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError>;
 
     // Schema
@@ -100,7 +104,7 @@ The redb implementation (feature-gated behind `redb`) is a pure-Rust embedded ke
 
 - **No native `delete_range`** — implemented via iterate-and-delete within a write transaction.
 - **Eager scan collection** — redb iterators borrow the table handle and can't outlive the method. Prefix scans collect results into a `Vec` before returning. Acceptable because prefix scans in slate are bounded by collection size.
-- **Returns `Cow::Owned`** — like RocksDB, values must be copied out of redb's `AccessGuard`. No zero-copy borrows across the transaction boundary.
+- **Returns owned data** — like RocksDB, values must be copied out of redb's `AccessGuard`. No zero-copy borrows across the transaction boundary.
 
 ### Implementation: In-Memory (`MemoryStore`)
 
@@ -165,15 +169,43 @@ pub struct FilterGroup {
 
 Filter values use `bson::Bson` directly — no custom value type. This means filters can match against any BSON scalar (String, Int64, Double, Boolean, DateTime, Null) using the same types that documents are stored with.
 
+## Tier 2.5: Engine Layer (`slate-engine`)
+
+### Overview
+
+The engine layer sits between `slate-store` and `slate-db`. It owns the on-disk format: BSON key encoding, record serialization (with TTL metadata), index maintenance, and the collection catalog. It provides an `EngineTransaction` trait that `slate-db` programs against, hiding all key encoding and storage layout details.
+
+### Key Encoding
+
+All keys use a tag-prefixed binary format with sort-preserving BSON value encoding:
+
+- **Collection metadata** — `c:{name}` stores collection config in the `_sys` CF.
+- **Index config** — `x:{collection}:{field}` stores index metadata.
+- **Record** — `d:{collection}:{doc_id}` → encoded `Record` (BSON bytes + optional TTL).
+- **Index** — `i:{collection}:{field}:{value}:{doc_id}` → `IndexMeta` (type byte + TTL).
+- **IndexMap** — `m:{collection}:{field}:{doc_id}:{value}` → index key bytes (reverse lookup for O(1) cleanup).
+
+### TTL
+
+TTL filtering is handled inside the engine. `get()`, `scan()`, and `scan_index()` accept a `now_millis` timestamp and skip expired records transparently — callers never see expired data.
+
+### Index Maintenance
+
+On `put()`, the engine uses IndexMap reverse lookups to delete old index entries without reading the previous document, then inserts new entries. On `delete()`, the same IndexMap scan removes all index entries for the doc.
+
+### Catalog
+
+The `Catalog` trait provides collection and index lifecycle: `create_collection`, `drop_collection`, `create_index` (with backfill), `drop_index`, and `collection` handle resolution.
+
 ## Tier 3: Database Layer (`slate-db`)
 
 ### Overview
 
-The database layer sits on top of `slate-store` and `slate-query`. It provides collection management, query execution, and document storage. Records are stored as raw BSON bytes (`bson::to_vec` of a `bson::Document`), with no intermediate type system — the `bson::Document` is the record.
+The database layer sits on top of `slate-engine` and `slate-query`. It provides query planning, execution, and the user-facing `Database`/`Transaction` API. Storage operations (record reads, writes, scans, index lookups) are delegated to `slate-engine`'s `EngineTransaction` trait.
 
 ### Document Model
 
-Records are `bson::Document` values. There is no custom `Record`, `Cell`, or `Value` type — BSON's native types (`String`, `Int64`, `Double`, `Boolean`, `DateTime`, `Array`, `Document`) are used directly. This means nested documents and arrays are first-class citizens.
+Records are `bson::Document` values. There is no custom `Cell` or `Value` type — BSON's native types (`String`, `Int64`, `Double`, `Boolean`, `DateTime`, `Array`, `Document`) are used directly. This means nested documents and arrays are first-class citizens.
 
 ```rust
 let doc = doc! {
@@ -187,21 +219,6 @@ let doc = doc! {
     }
 };
 ```
-
-Each record is stored as a single key-value pair (`d:{record_id}` → raw BSON bytes) within the collection's column family. `_id` is stored in the key, not in the BSON value.
-
-### Collections
-
-A collection is a named group of documents backed by its own column family. Collections are managed through a `Catalog` that stores metadata in the `_sys` column family.
-
-```rust
-pub struct CollectionConfig {
-    pub name: String,
-    pub indexes: Vec<String>,  // field names to index
-}
-```
-
-Indexes are maintained automatically on writes. Each indexed field gets entries in the format `i:{field}:{value}:{record_id}` for O(1) lookups by field value.
 
 ### Database and Transactions
 
@@ -279,7 +296,7 @@ Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMer
 1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
 2. **Raw tier** — everything above `ReadRecord` operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly.
 
-For index-covered queries, `RawValue` carries scalar values directly from the index — no document fetch needed. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`.
+For index-covered queries, `RawValue` carries scalar values directly from the index — no document fetch needed.
 
 **Key properties:**
 

@@ -1,19 +1,9 @@
 use crate::error::DbError;
+use crate::executor::RawIter;
 use crate::executor::exec;
-use crate::executor::{RawIter, RawValue};
 use crate::expression::LogicalOp;
 use bson::RawBson;
 use std::collections::HashSet;
-
-fn extract_id_from_raw_value<'a>(v: &'a RawValue<'a>) -> Option<&'a str> {
-    match v {
-        RawValue::Borrowed(bson::raw::RawBsonRef::String(s)) => Some(s),
-        RawValue::Owned(RawBson::String(s)) => Some(s.as_str()),
-        _ => v
-            .as_document()
-            .and_then(|d| exec::raw_extract_id(d).ok().flatten()),
-    }
-}
 
 fn extract_id(v: &RawBson) -> Option<&str> {
     match v {
@@ -30,12 +20,8 @@ pub(crate) fn execute<'a>(
 ) -> Result<RawIter<'a>, DbError> {
     let merged = match logical {
         LogicalOp::Or => {
-            let left: Vec<Option<RawBson>> = left_source
-                .map(|r| r.map(|opt| opt.and_then(RawValue::into_raw_bson)))
-                .collect::<Result<_, _>>()?;
-            let right: Vec<Option<RawBson>> = right_source
-                .map(|r| r.map(|opt| opt.and_then(RawValue::into_raw_bson)))
-                .collect::<Result<_, _>>()?;
+            let left: Vec<Option<RawBson>> = left_source.collect::<Result<_, _>>()?;
+            let right: Vec<Option<RawBson>> = right_source.collect::<Result<_, _>>()?;
 
             let mut seen = HashSet::with_capacity(left.len() + right.len());
             let mut result = Vec::with_capacity(left.len() + right.len());
@@ -52,24 +38,23 @@ pub(crate) fn execute<'a>(
             result
         }
         LogicalOp::And => {
-            // Build ID set from right side without converting to owned RawBson.
+            // Build ID set from right side.
             let mut right_set = HashSet::new();
             for result in right_source {
                 if let Some(val) = result? {
-                    if let Some(id) = extract_id_from_raw_value(&val) {
+                    if let Some(id) = extract_id(&val) {
                         right_set.insert(id.to_string());
                     }
                 }
             }
 
-            // Materialize left side, keeping only docs whose ID is in right_set.
+            // Keep only left docs whose ID is in right_set.
             left_source
-                .map(|r| r.map(|opt| opt.and_then(RawValue::into_raw_bson)))
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .filter(|val| {
                     val.as_ref()
-                        .and_then(extract_id)
+                        .and_then(|v| extract_id(v))
                         .map(|id| right_set.contains(id))
                         .unwrap_or(false)
                 })
@@ -77,7 +62,5 @@ pub(crate) fn execute<'a>(
         }
     };
 
-    Ok(Box::new(
-        merged.into_iter().map(|val| Ok(val.map(RawValue::Owned))),
-    ))
+    Ok(Box::new(merged.into_iter().map(Ok)))
 }

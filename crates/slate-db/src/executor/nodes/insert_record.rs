@@ -3,28 +3,27 @@ use bson::raw::{RawBsonRef, RawDocumentBuf};
 use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
 
 pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    handle: &'a CollectionHandle<T::Cf>,
+    handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
-        let val = match &opt_val {
-            Some(v) => v,
+        let raw = match &opt_val {
+            Some(RawBson::Document(d)) => d.as_ref(),
+            Some(_) => {
+                return Err(DbError::InvalidQuery("expected document".into()));
+            }
             None => {
                 return Err(DbError::InvalidQuery(
                     "InsertRecord requires document".into(),
                 ));
             }
         };
-
-        let raw = val
-            .as_document()
-            .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
 
         let (id_str, doc_to_write) = match raw.get("_id")? {
             Some(RawBsonRef::String(s)) => (s.to_string(), None),
@@ -45,7 +44,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
             .expect("string is always a valid BsonValue");
 
         // Duplicate key check (expired docs are treated as non-existent)
-        if txn.get(handle, &doc_id, now_millis)?.is_some() {
+        if txn.get(&handle, &doc_id, now_millis)?.is_some() {
             return Err(DbError::DuplicateKey(id_str));
         }
 
@@ -54,10 +53,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
             Some(buf) => buf.as_ref(),
             None => raw,
         };
-        txn.put(handle, write_doc, &doc_id)?;
+        txn.put(&handle, write_doc, &doc_id)?;
 
         match doc_to_write {
-            Some(buf) => Ok(Some(RawValue::Owned(RawBson::Document(buf)))),
+            Some(buf) => Ok(Some(RawBson::Document(buf))),
             None => Ok(opt_val),
         }
     })))

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,37 +70,34 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(RocksCf { handle })
     }
 
-    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+    fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let data = self
             .txn()?
             .get_cf(&cf.handle, key)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
-        Ok(data.map(Cow::Owned))
+        Ok(data)
     }
 
-    fn multi_get<'c>(
+    fn multi_get(
         &self,
-        cf: &'c Self::Cf,
+        cf: &Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf.handle, *k)).collect();
         let results = txn.multi_get_cf(cf_keys);
         results
             .into_iter()
-            .map(|r| {
-                r.map(|opt| opt.map(Cow::Owned))
-                    .map_err(|e| StoreError::Storage(e.to_string()))
-            })
+            .map(|r| r.map_err(|e| StoreError::Storage(e.to_string())))
             .collect()
     }
 
-    fn scan_prefix<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     > {
         let prefix_owned = prefix.to_vec();
@@ -114,18 +110,18 @@ impl<'db> Transaction for RocksTransaction<'db> {
                 Err(_) => true,
             })
             .map(|item| {
-                item.map(|(k, v)| (Cow::Owned(k.into_vec()), Cow::Owned(v.into_vec())))
+                item.map(|(k, v)| (k.into_vec(), v.into_vec()))
                     .map_err(|e| StoreError::Storage(e.to_string()))
             }),
         ))
     }
 
-    fn scan_prefix_rev<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix_rev<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     > {
         let prefix_owned = prefix.to_vec();
@@ -142,7 +138,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
                 Err(_) => true,
             })
             .map(|item| {
-                item.map(|(k, v)| (Cow::Owned(k.into_vec()), Cow::Owned(v.into_vec())))
+                item.map(|(k, v)| (k.into_vec(), v.into_vec()))
                     .map_err(|e| StoreError::Storage(e.to_string()))
             }),
         ))

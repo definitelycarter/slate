@@ -6,8 +6,8 @@ use bson::{RawBson, RawDocument};
 use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
+use crate::executor::RawIter;
 use crate::executor::raw_mutation;
-use crate::executor::{RawIter, RawValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpsertMode {
@@ -17,7 +17,7 @@ pub(crate) enum UpsertMode {
 
 pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    handle: &'a CollectionHandle<T::Cf>,
+    handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: RawIter<'a>,
     inserted: Rc<Cell<u64>>,
@@ -33,9 +33,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
             }
         };
 
-        let new_raw = val
-            .as_document()
-            .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
+        let new_raw = match &val {
+            RawBson::Document(d) => d.as_ref(),
+            _ => return Err(DbError::InvalidQuery("expected document".into())),
+        };
 
         let (id_str, new_doc) = extract_id(new_raw)?;
         let new_raw_ref = match &new_doc {
@@ -46,7 +47,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
         let doc_id = BsonValue::from_raw_bson_ref(RawBsonRef::String(&id_str))
             .expect("string is always a valid BsonValue");
 
-        let old_doc = txn.get(handle, &doc_id, now_millis)?;
+        let old_doc = txn.get(&handle, &doc_id, now_millis)?;
 
         if let Some(ref old_raw_doc) = old_doc {
             let written = build_doc(&mode, &id_str, new_raw_ref, old_raw_doc)?;
@@ -55,20 +56,20 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
                 None => {
                     // Merge no-op: doc unchanged, still counts as matched.
                     updated.set(updated.get() + 1);
-                    return Ok(Some(RawValue::Owned(RawBson::Document(
+                    return Ok(Some(RawBson::Document(
                         old_raw_doc.clone(),
-                    ))));
+                    )));
                 }
             };
 
-            txn.put(handle, &written, &doc_id)?;
+            txn.put(&handle, &written, &doc_id)?;
             updated.set(updated.get() + 1);
-            Ok(Some(RawValue::Owned(RawBson::Document(written))))
+            Ok(Some(RawBson::Document(written)))
         } else {
             let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
-            txn.put(handle, &doc_to_write, &doc_id)?;
+            txn.put(&handle, &doc_to_write, &doc_id)?;
             inserted.set(inserted.get() + 1);
-            Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
+            Ok(Some(RawBson::Document(doc_to_write)))
         }
     })))
 }

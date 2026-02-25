@@ -59,8 +59,8 @@ impl From<slate_query::ParseError> for DbError {
     }
 }
 
-impl From<crate::parse_filter::FilterParseError> for DbError {
-    fn from(e: crate::parse_filter::FilterParseError) -> Self {
+impl From<crate::parser::FilterParseError> for DbError {
+    fn from(e: crate::parser::FilterParseError) -> Self {
         DbError::InvalidQuery(e.to_string())
     }
 }

@@ -47,7 +47,7 @@ impl EngineTransaction for NoopTransaction {
 
     fn scan<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
@@ -58,7 +58,7 @@ impl EngineTransaction for NoopTransaction {
 
     fn scan_index<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
@@ -142,7 +142,7 @@ impl EngineTransaction for MockTransaction {
 
     fn scan<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
@@ -153,7 +153,7 @@ impl EngineTransaction for MockTransaction {
 
     fn scan_index<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
@@ -178,7 +178,7 @@ impl EngineTransaction for MockTransaction {
 fn collect_ids(iter: RawIter) -> Vec<String> {
     iter.map(|r| {
         let opt_val = r.unwrap();
-        match opt_val.unwrap().into_raw_bson().unwrap() {
+        match opt_val.unwrap() {
             bson::RawBson::String(s) => s,
             other => panic!("expected String, got {:?}", other),
         }
@@ -189,9 +189,11 @@ fn collect_ids(iter: RawIter) -> Vec<String> {
 fn collect_docs(iter: RawIter) -> Vec<Option<bson::Document>> {
     iter.map(|r| {
         let opt_val = r.unwrap();
-        opt_val.and_then(|v| {
-            v.into_document_buf()
-                .map(|raw| bson::from_slice::<bson::Document>(raw.as_bytes()).unwrap())
+        opt_val.and_then(|v| match v {
+            bson::RawBson::Document(raw) => {
+                Some(bson::from_slice::<bson::Document>(raw.as_bytes()).unwrap())
+            }
+            _ => None,
         })
     })
     .collect()
@@ -358,16 +360,15 @@ fn distinct_on_values() {
         }),
     });
     let mut iter = Executor::new(&txn).execute(plan).unwrap();
-    let val = iter.next().unwrap().unwrap();
-    let raw_bson = val.unwrap().into_raw_bson().unwrap();
-    let arr = match raw_bson {
-        RawBson::Array(a) => a,
+    let val = iter.next().unwrap().unwrap().unwrap();
+    let arr = match val {
+        bson::RawBson::Array(a) => a,
         _ => panic!("expected array"),
     };
     let values: Vec<String> = arr
         .into_iter()
         .map(|v| match v.unwrap() {
-            RawBsonRef::String(s) => s.to_string(),
+            bson::raw::RawBsonRef::String(s) => s.to_string(),
             _ => panic!("expected string"),
         })
         .collect();
@@ -421,7 +422,7 @@ fn delete_removes_records() {
         collection: mock_collection(vec![]),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut deleted = 0u64;
     for result in iter {
@@ -444,7 +445,7 @@ fn update_writes_merged_doc() {
         mutation: slate_query::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -474,7 +475,7 @@ fn update_unchanged_skips_write() {
         mutation: slate_query::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -500,7 +501,7 @@ fn replace_writes_replacement() {
         replacement: rawdoc! { "replaced": true },
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -531,7 +532,7 @@ fn insert_writes_records() {
         collection: mock_collection(vec!["status".into()]),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut count = 0u64;
     for result in iter {
@@ -554,7 +555,7 @@ fn full_update_pipeline() {
         mutation: slate_query::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -907,7 +908,7 @@ fn upsert_replace_insert_new() {
         collection: mock_collection(vec!["status".into()]),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let (iter, inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
     for result in iter {
         result.unwrap();
@@ -930,7 +931,7 @@ fn upsert_merge_insert_new() {
         collection: mock_collection(vec![]),
         source: Node::Values(docs),
     };
-    let mut exec = Executor::new(&txn);
+    let exec = Executor::new(&txn);
     let (iter, inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
     for result in iter {
         result.unwrap();

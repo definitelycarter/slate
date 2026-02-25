@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use bson::raw::{RawDocument, RawDocumentBuf};
 
 use crate::encoding::bson_value::BsonValue;
@@ -59,7 +57,7 @@ pub trait EngineTransaction {
 
     fn scan<'a>(
         &'a self,
-        handle: &'a CollectionHandle<Self::Cf>,
+        handle: &CollectionHandle<Self::Cf>,
         ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
@@ -70,7 +68,7 @@ pub trait EngineTransaction {
 
     fn scan_index<'a>(
         &'a self,
-        handle: &'a CollectionHandle<Self::Cf>,
+        handle: &CollectionHandle<Self::Cf>,
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
@@ -101,8 +99,8 @@ pub enum IndexRange<'a> {
 /// A decoded index scan entry.
 pub struct IndexEntry<'a> {
     pub doc_id: BsonValue<'a>,
-    pub value_bytes: Cow<'a, [u8]>,
-    pub metadata: Cow<'a, [u8]>,
+    pub value_bytes: Vec<u8>,
+    pub metadata: Vec<u8>,
 }
 
 /// Catalog operations for collection and index metadata.

@@ -49,7 +49,7 @@ impl Record {
         }
     }
 
-    /// Decode a record from its wire format.
+    /// Decode a record from its wire format (borrows, copies BSON portion).
     pub fn decode(data: &[u8]) -> Result<Self, EngineError> {
         if data.is_empty() {
             return Err(EngineError::Encoding("empty record".into()));
@@ -72,6 +72,35 @@ impl Record {
             }
         };
         let doc = RawDocumentBuf::from_bytes(bson_bytes.to_vec())
+            .map_err(|e| EngineError::Encoding(format!("invalid BSON: {e}")))?;
+        Ok(Record { ttl_millis, doc })
+    }
+
+    /// Decode a record from owned bytes, reusing the allocation.
+    pub fn decode_owned(data: Vec<u8>) -> Result<Self, EngineError> {
+        if data.is_empty() {
+            return Err(EngineError::Encoding("empty record".into()));
+        }
+        let (ttl_millis, bson_start) = match data[0] {
+            TAG_NO_TTL => (None, 1),
+            TAG_TTL => {
+                let header_len = 1 + TTL_SIZE;
+                if data.len() < header_len {
+                    return Err(EngineError::Encoding("truncated TTL header".into()));
+                }
+                let millis =
+                    i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
+                (Some(millis), header_len)
+            }
+            tag => {
+                return Err(EngineError::Encoding(format!(
+                    "unknown record tag: 0x{tag:02X}"
+                )));
+            }
+        };
+        let mut bson_bytes = data;
+        bson_bytes.drain(..bson_start);
+        let doc = RawDocumentBuf::from_bytes(bson_bytes)
             .map_err(|e| EngineError::Encoding(format!("invalid BSON: {e}")))?;
         Ok(Record { ttl_millis, doc })
     }

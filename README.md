@@ -20,8 +20,9 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
+  ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
   ├── slate-query            → Query model: filters, operators, sorting (pure data structures)
-  ├── slate-db               → Database layer: collections, indexes, query planner + executor
+  ├── slate-db               → Database layer: query planner + executor, delegates storage to slate-engine
   ├── slate-server           → TCP server with MessagePack wire protocol, thread-per-connection
   ├── slate-client           → TCP client with connection pool
   ├── slate-server-init      → CLI tool to initialize collections on a running server

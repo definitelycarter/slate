@@ -60,7 +60,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             None => Ok(None),
             Some(data) if Record::is_expired(&data, ttl) => Ok(None),
             Some(data) => {
-                let record = Record::decode(&data)?;
+                let record = Record::decode_owned(data)?;
                 Ok(Some(record.doc))
             }
         }
@@ -116,7 +116,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
     fn scan<'b>(
         &'b self,
-        handle: &'b CollectionHandle<Self::Cf>,
+        handle: &CollectionHandle<Self::Cf>,
         ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'b>, RawDocumentBuf), EngineError>> + 'b>,
@@ -138,7 +138,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                     let Key::Record(_, doc_id) = key else {
                         return Some(Err(EngineError::InvalidKey("expected record key".into())));
                     };
-                    match Record::decode(&value_bytes) {
+                    match Record::decode_owned(value_bytes) {
                         Ok(record) => Some(Ok((doc_id.into_owned(), record.doc))),
                         Err(e) => Some(Err(e)),
                     }
@@ -149,7 +149,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
     fn scan_index<'b>(
         &'b self,
-        handle: &'b CollectionHandle<Self::Cf>,
+        handle: &CollectionHandle<Self::Cf>,
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
@@ -187,7 +187,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         };
 
         let mut iter: Box<
-            dyn Iterator<Item = Result<(Cow<'b, [u8]>, Cow<'b, [u8]>), StoreError>> + 'b,
+            dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b,
         > = if reverse {
             self.txn.scan_prefix_rev(&handle.cf, &prefix)?
         } else {
@@ -251,8 +251,8 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
                         return Some(Ok(IndexEntry {
                             doc_id: doc_id.into_owned(),
-                            value_bytes: Cow::Owned(value_bytes.to_vec()),
-                            metadata: Cow::Owned(metadata_bytes.into_owned()),
+                            value_bytes: value_bytes.to_vec(),
+                            metadata: metadata_bytes,
                         }));
                     }
                 }
@@ -288,7 +288,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         let keys: Vec<Vec<u8>> = self
             .txn
             .scan_prefix(cf, prefix)?
-            .map(|r| r.map(|(k, _)| k.to_vec()))
+            .map(|r| r.map(|(k, _)| k))
             .collect::<Result<_, _>>()?;
         for k in keys {
             self.txn.delete(cf, &k)?;
@@ -338,7 +338,6 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         let entries: Vec<(Vec<u8>, Vec<u8>)> = self
             .txn
             .scan_prefix(&handle.cf, &prefix_bytes)?
-            .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())))
             .collect::<Result<_, _>>()?;
         for (map_key, index_key) in entries {
             self.txn.delete(&handle.cf, &index_key)?;
@@ -472,7 +471,6 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let entries: Vec<(Vec<u8>, Vec<u8>)> = self
             .txn
             .scan_prefix(&cf, &record_prefix)?
-            .map(|r| r.map(|(k, v)| (k.to_vec(), v.to_vec())))
             .collect::<Result<_, _>>()?;
 
         for (key_bytes, value_bytes) in &entries {

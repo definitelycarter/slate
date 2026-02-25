@@ -54,7 +54,7 @@ impl EngineTransaction for NoopTransaction {
 
     fn scan<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
@@ -65,7 +65,7 @@ impl EngineTransaction for NoopTransaction {
 
     fn scan_index<'a>(
         &'a self,
-        _handle: &'a CollectionHandle<Self::Cf>,
+        _handle: &CollectionHandle<Self::Cf>,
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
@@ -139,7 +139,7 @@ fn bench_values(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || Plan::Find(Node::Values(docs.clone())),
                 |plan| consume_rows(exec.execute(plan).unwrap()),
@@ -157,7 +157,7 @@ fn bench_projection(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("select", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
@@ -172,7 +172,7 @@ fn bench_projection(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("passthrough", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
@@ -194,7 +194,7 @@ fn bench_limit(c: &mut Criterion) {
 
     group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let mut exec = Executor::new(&txn);
+        let exec = Executor::new(&txn);
         b.iter_batched(
             || {
                 Plan::Find(Node::Limit {
@@ -210,7 +210,7 @@ fn bench_limit(c: &mut Criterion) {
 
     group.bench_with_input(BenchmarkId::new("take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let mut exec = Executor::new(&txn);
+        let exec = Executor::new(&txn);
         b.iter_batched(
             || {
                 Plan::Find(Node::Limit {
@@ -234,7 +234,7 @@ fn bench_sort(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("single", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -252,7 +252,7 @@ fn bench_sort(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("multi", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -284,7 +284,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("low_card", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Distinct {
@@ -302,7 +302,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sorted", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -326,7 +326,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sorted_hc", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -358,7 +358,7 @@ fn bench_filter(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("eq", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Filter {
@@ -376,7 +376,7 @@ fn bench_filter(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("and", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let mut exec = Executor::new(&txn);
+            let exec = Executor::new(&txn);
             b.iter_batched(
                 || {
                     Plan::Find(Node::Filter {
@@ -412,7 +412,7 @@ fn bench_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -443,7 +443,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -466,7 +466,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -489,7 +489,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -518,7 +518,7 @@ fn bench_read_record(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -544,7 +544,7 @@ fn bench_read_record(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -586,7 +586,7 @@ fn bench_index_merge(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -620,7 +620,7 @@ fn bench_index_merge(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -666,7 +666,7 @@ fn bench_insert(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let iter = exec.execute(plan).unwrap();
                     iter.count()
                 },
@@ -698,7 +698,7 @@ fn bench_update(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let iter = exec.execute(plan).unwrap();
                     let modified: u64 =
                         iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
@@ -728,7 +728,7 @@ fn bench_delete(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let iter = exec.execute(plan).unwrap();
                     let deleted: u64 = iter.map(|r| r.unwrap()).count() as u64;
                     deleted
@@ -762,7 +762,7 @@ fn bench_replace(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let iter = exec.execute(plan).unwrap();
                     let modified: u64 =
                         iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
@@ -803,7 +803,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
                     for r in iter {
                         r.unwrap();
@@ -843,7 +843,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
                     for r in iter {
                         r.unwrap();
@@ -897,7 +897,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let mut exec = Executor::new(&txn);
+                    let exec = Executor::new(&txn);
                     let (iter, inserted, _updated) = exec.execute_upsert_plan(plan).unwrap();
                     for r in iter {
                         r.unwrap();

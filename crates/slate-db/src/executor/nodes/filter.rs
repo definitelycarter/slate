@@ -1,3 +1,5 @@
+use bson::RawBson;
+
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
@@ -10,9 +12,9 @@ pub(crate) fn execute<'a>(
     Ok(Box::new(source.filter_map(move |result| match result {
         Err(e) => Some(Err(e)),
         Ok(Some(val)) => {
-            let raw = match val.as_document() {
-                Some(r) => r,
-                None => {
+            let raw = match &val {
+                RawBson::Document(d) => d.as_ref(),
+                _ => {
                     return Some(Err(DbError::InvalidQuery("expected document".into())));
                 }
             };

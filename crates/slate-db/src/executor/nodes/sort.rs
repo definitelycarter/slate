@@ -5,20 +5,25 @@ use slate_query::{Sort, SortDirection};
 
 use crate::error::DbError;
 use crate::executor::exec;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
+
+fn as_document(val: &RawBson) -> Option<&bson::RawDocument> {
+    match val {
+        RawBson::Document(d) => Some(d),
+        _ => None,
+    }
+}
 
 pub(crate) fn execute<'a>(
     sorts: Vec<Sort>,
     mut source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     match source.next() {
-        Some(Ok(Some(RawValue::Owned(RawBson::Array(arr))))) => {
+        Some(Ok(Some(RawBson::Array(arr)))) => {
             let sort = match sorts.first() {
                 Some(s) => s,
                 None => {
-                    return Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
-                        RawBson::Array(arr),
-                    ))))));
+                    return Ok(Box::new(std::iter::once(Ok(Some(RawBson::Array(arr))))));
                 }
             };
             let mut elements: Vec<RawBson> = arr
@@ -45,9 +50,7 @@ pub(crate) fn execute<'a>(
             for elem in &elements {
                 exec::push_raw(&mut buf, elem.as_raw_bson_ref());
             }
-            Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
-                RawBson::Array(buf),
-            ))))))
+            Ok(Box::new(std::iter::once(Ok(Some(RawBson::Array(buf))))))
         }
         Some(first) => {
             let iter: RawIter<'a> = Box::new(std::iter::once(first).chain(source));
@@ -58,7 +61,7 @@ pub(crate) fn execute<'a>(
 }
 
 fn sort_records<'a>(sorts: &[Sort], source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
-    let mut records: Vec<Option<RawValue<'a>>> = source.collect::<Result<Vec<_>, _>>()?;
+    let mut records: Vec<Option<RawBson>> = source.collect::<Result<Vec<_>, _>>()?;
 
     if sorts.is_empty() {
         return Ok(Box::new(records.into_iter().map(Ok)));
@@ -69,11 +72,11 @@ fn sort_records<'a>(sorts: &[Sort], source: RawIter<'a>) -> Result<RawIter<'a>, 
         for sort in sorts {
             let a_field = a_opt
                 .as_ref()
-                .and_then(|v| v.as_document())
+                .and_then(as_document)
                 .and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
             let b_field = b_opt
                 .as_ref()
-                .and_then(|v| v.as_document())
+                .and_then(as_document)
                 .and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
             let ord = exec::raw_compare_field_values(a_field, b_field);
             let ord = match sort.direction {
@@ -87,5 +90,5 @@ fn sort_records<'a>(sorts: &[Sort], source: RawIter<'a>) -> Result<RawIter<'a>, 
         Ordering::Equal
     });
 
-    Ok(Box::new(records.into_iter().map(|val| Ok(val))))
+    Ok(Box::new(records.into_iter().map(Ok)))
 }

@@ -1,9 +1,9 @@
+use std::i64;
+
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_engine::{
-    BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine,
-};
+use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -60,7 +60,7 @@ fn bench_get(c: &mut Criterion) {
                 let handle = txn.collection("bench").unwrap();
                 let mut found = 0usize;
                 for id in ids {
-                    if txn.get(&handle, id).unwrap().is_some() {
+                    if txn.get(&handle, id, i64::MIN).unwrap().is_some() {
                         found += 1;
                     }
                 }
@@ -83,7 +83,7 @@ fn bench_scan(c: &mut Criterion) {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
-                let count = txn.scan(&handle).unwrap().count();
+                let count = txn.scan(&handle, i64::MIN).unwrap().count();
                 txn.rollback().unwrap();
                 count
             })
@@ -107,7 +107,7 @@ fn bench_index_scan_eq(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
                 let count = txn
-                    .scan_index(&handle, "status", IndexRange::Eq(&active), false)
+                    .scan_index(&handle, "status", IndexRange::Eq(&active), false, i64::MIN)
                     .unwrap()
                     .count();
                 txn.rollback().unwrap();
@@ -128,7 +128,7 @@ fn bench_index_scan_full(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
                 let count = txn
-                    .scan_index(&handle, "age", IndexRange::Full, false)
+                    .scan_index(&handle, "age", IndexRange::Full, false, i64::MIN)
                     .unwrap()
                     .count();
                 txn.rollback().unwrap();
@@ -165,6 +165,7 @@ fn bench_index_scan_range(c: &mut Criterion) {
                             upper_inclusive: false,
                         },
                         false,
+                        i64::MIN,
                     )
                     .unwrap()
                     .count();
@@ -254,9 +255,7 @@ fn bench_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete");
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
-        let ids: Vec<BsonValue<'static>> = (0..n)
-            .map(|i| str_id(&format!("rec-{i}")))
-            .collect();
+        let ids: Vec<BsonValue<'static>> = (0..n).map(|i| str_id(&format!("rec-{i}"))).collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(

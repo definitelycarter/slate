@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
@@ -100,7 +98,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
         Ok(name.to_string())
     }
 
-    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+    fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Read(txn) => {
@@ -110,7 +108,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
                 let value = table
                     .get(key)
                     .map_err(|e| StoreError::Storage(e.to_string()))?;
-                Ok(value.map(|v| Cow::Owned(v.value().to_vec())))
+                Ok(value.map(|v| v.value().to_vec()))
             }
             Inner::Write(txn) => {
                 let table = txn
@@ -119,17 +117,17 @@ impl<'db> Transaction for RedbTransaction<'db> {
                 let value = table
                     .get(key)
                     .map_err(|e| StoreError::Storage(e.to_string()))?;
-                Ok(value.map(|v| Cow::Owned(v.value().to_vec())))
+                Ok(value.map(|v| v.value().to_vec()))
             }
             Inner::Consumed => Err(StoreError::TransactionConsumed),
         }
     }
 
-    fn multi_get<'c>(
+    fn multi_get(
         &self,
-        cf: &'c Self::Cf,
+        cf: &Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Read(txn) => {
@@ -141,7 +139,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
                         let value = table
                             .get(*key)
                             .map_err(|e| StoreError::Storage(e.to_string()))?;
-                        Ok(value.map(|v| Cow::Owned(v.value().to_vec())))
+                        Ok(value.map(|v| v.value().to_vec()))
                     })
                     .collect()
             }
@@ -154,7 +152,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
                         let value = table
                             .get(*key)
                             .map_err(|e| StoreError::Storage(e.to_string()))?;
-                        Ok(value.map(|v| Cow::Owned(v.value().to_vec())))
+                        Ok(value.map(|v| v.value().to_vec()))
                     })
                     .collect()
             }
@@ -162,36 +160,28 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn scan_prefix<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     > {
         let entries = self.collect_prefix(cf, prefix, false)?;
-        Ok(Box::new(
-            entries
-                .into_iter()
-                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
-        ))
+        Ok(Box::new(entries.into_iter().map(Ok)))
     }
 
-    fn scan_prefix_rev<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix_rev<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     > {
         let entries = self.collect_prefix(cf, prefix, true)?;
-        Ok(Box::new(
-            entries
-                .into_iter()
-                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
-        ))
+        Ok(Box::new(entries.into_iter().map(Ok)))
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {

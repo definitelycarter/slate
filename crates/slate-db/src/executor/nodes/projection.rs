@@ -6,7 +6,7 @@ use bson::{RawDocument, RawDocumentBuf};
 use crate::error::DbError;
 use crate::executor::field_tree::FieldTree;
 use crate::executor::raw_bson::skip_bson_value;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
 
 pub(crate) fn execute<'a>(
     columns: Option<Vec<String>>,
@@ -25,22 +25,23 @@ pub(crate) fn execute<'a>(
             None => return Ok(Some(val)),
         };
 
-        let raw = val
-            .as_document()
-            .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
+        let raw = match &val {
+            RawBson::Document(d) => d.as_ref(),
+            _ => return Err(DbError::InvalidQuery("expected document".into())),
+        };
 
         // Fast path: all flat fields → raw byte projection
         if flat {
             let projected = raw_project_flat(raw.as_bytes(), tree);
             let buf = RawDocumentBuf::from_bytes(projected)
                 .map_err(|e| DbError::Serialization(e.to_string()))?;
-            return Ok(Some(RawValue::Owned(RawBson::Document(buf))));
+            return Ok(Some(RawBson::Document(buf)));
         }
 
         // Slow path: nested projection (dot-paths, arrays of documents)
         let mut buf = RawDocumentBuf::new();
         project_document(raw, tree, &mut buf)?;
-        Ok(Some(RawValue::Owned(RawBson::Document(buf))))
+        Ok(Some(RawBson::Document(buf)))
     })))
 }
 

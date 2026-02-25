@@ -5,7 +5,7 @@ use bson::raw::{RawBson, RawBsonRef};
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::field_tree::{FieldTree, walk};
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
 
 pub(crate) fn execute<'a>(field: String, source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
     let paths = vec![field];
@@ -20,9 +20,10 @@ pub(crate) fn execute<'a>(field: String, source: RawIter<'a>) -> Result<RawIter<
             Some(v) => v,
             None => continue,
         };
-        let raw = val
-            .as_document()
-            .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
+        let raw = match &val {
+            RawBson::Document(d) => d.as_ref(),
+            _ => return Err(DbError::InvalidQuery("expected document".into())),
+        };
 
         walk(raw, &tree, |_path, raw_ref| {
             if !matches!(raw_ref, RawBsonRef::Null) {
@@ -31,7 +32,5 @@ pub(crate) fn execute<'a>(field: String, source: RawIter<'a>) -> Result<RawIter<
         });
     }
 
-    Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
-        RawBson::Array(buf),
-    ))))))
+    Ok(Box::new(std::iter::once(Ok(Some(RawBson::Array(buf))))))
 }

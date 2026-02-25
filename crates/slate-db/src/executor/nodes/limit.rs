@@ -2,7 +2,7 @@ use bson::raw::{RawArrayBuf, RawBson};
 
 use crate::error::DbError;
 use crate::executor::exec;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
 
 pub(crate) fn execute<'a>(
     skip: usize,
@@ -11,7 +11,7 @@ pub(crate) fn execute<'a>(
 ) -> Result<RawIter<'a>, DbError> {
     // Check first item — if it's a single array (from Distinct), slice its elements.
     match source.next() {
-        Some(Ok(Some(RawValue::Owned(RawBson::Array(arr))))) => {
+        Some(Ok(Some(RawBson::Array(arr)))) => {
             let take_n = take.unwrap_or(usize::MAX);
             let mut buf = RawArrayBuf::new();
             for elem in arr.into_iter().skip(skip).take(take_n) {
@@ -19,9 +19,7 @@ pub(crate) fn execute<'a>(
                     exec::push_raw(&mut buf, val);
                 }
             }
-            Ok(Box::new(std::iter::once(Ok(Some(RawValue::Owned(
-                RawBson::Array(buf),
-            ))))))
+            Ok(Box::new(std::iter::once(Ok(Some(RawBson::Array(buf))))))
         }
         Some(first) => {
             let full = std::iter::once(first).chain(source);

@@ -3,7 +3,7 @@ use bson::raw::RawDocumentBuf;
 use slate_engine::{BsonValue, CollectionHandle, EngineTransaction, IndexRange};
 
 use crate::error::DbError;
-use crate::executor::{RawIter, RawValue};
+use crate::executor::RawIter;
 use crate::planner::plan::{IndexScanRange, ScanDirection};
 
 /// Convert a `bson::Bson` value to its encoded bytes via `BsonValue`.
@@ -26,7 +26,7 @@ fn bson_to_raw_bson(val: &bson::Bson) -> Option<RawBson> {
 
 pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    handle: &'a CollectionHandle<T::Cf>,
+    handle: CollectionHandle<T::Cf>,
     field: String,
     range: &IndexScanRange,
     direction: ScanDirection,
@@ -100,7 +100,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
         None
     };
 
-    let mut iter = txn.scan_index(handle, &field, engine_range, reverse, now_millis)?;
+    let mut iter = txn.scan_index(&handle, &field, engine_range, reverse, now_millis)?;
     let mut count = 0usize;
     let mut done = false;
 
@@ -138,11 +138,11 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
                         let mut doc = RawDocumentBuf::new();
                         doc.append("_id", RawBson::String(id_str));
                         doc.append(&field, coerced);
-                        return Some(Ok(Some(RawValue::Owned(RawBson::Document(doc)))));
+                        return Some(Ok(Some(RawBson::Document(doc))));
                     } else {
                         // Standard path: yield bare ID string for KeyLookup
                         let id_str = bson_value_to_string(&entry.doc_id);
-                        return Some(Ok(Some(RawValue::Owned(RawBson::String(id_str)))));
+                        return Some(Ok(Some(RawBson::String(id_str))));
                     }
                 }
                 Err(e) => {

@@ -8,71 +8,29 @@ pub(crate) mod raw_mutation;
 mod tests;
 
 use std::cell::Cell;
-use std::pin::Pin;
 use std::rc::Rc;
 
-use bson::RawDocument;
-use bson::raw::{RawBson, RawBsonRef};
+use bson::RawBson;
 use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::planner::plan::{Node, Plan};
 
-// ── RawValue ────────────────────────────────────────────────────
-
-pub enum RawValue<'a> {
-    Borrowed(RawBsonRef<'a>),
-    Owned(RawBson),
-}
-
-impl<'a> RawValue<'a> {
-    pub fn as_document(&self) -> Option<&RawDocument> {
-        match self {
-            Self::Borrowed(RawBsonRef::Document(d)) => Some(d),
-            Self::Owned(RawBson::Document(d)) => Some(d),
-            _ => None,
-        }
-    }
-
-    pub fn into_raw_bson(self) -> Option<RawBson> {
-        match self {
-            Self::Owned(b) => Some(b),
-            Self::Borrowed(r) => exec::to_raw_bson(r),
-        }
-    }
-
-    pub fn into_document_buf(self) -> Option<bson::RawDocumentBuf> {
-        match self {
-            Self::Owned(RawBson::Document(buf)) => Some(buf),
-            Self::Borrowed(RawBsonRef::Document(d)) => Some(d.to_raw_document_buf()),
-            _ => None,
-        }
-    }
-}
-
-pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
+pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>> + 'a>;
 
 /// Executes query plans against an [`EngineTransaction`].
 ///
-/// # Safety contract
-///
-/// The executor stores [`CollectionHandle`]s in a heap-pinned arena.  The
-/// returned `RawIter` borrows from those handles.  Callers **must** keep the
-/// `Executor` alive at least as long as any iterator it produces:
+/// The returned `RawIter` borrows from the transaction, not from the executor.
+/// Collection handles are passed by value into iterator closures, so the
+/// executor can be used as a temporary:
 ///
 /// ```ignore
-/// let mut exec = Executor::new(&txn);   // bind to a local
-/// let iter = exec.execute(plan)?;
+/// let iter = Executor::new(&txn).execute(plan)?;
 /// for row in iter { /* ... */ }
-/// // `exec` is dropped here — after `iter` is consumed
 /// ```
-///
-/// Using the executor as a temporary (e.g. `Executor::new(&txn).execute(plan)`)
-/// when the plan touches a collection is **unsound**.
 pub struct Executor<'c, T: EngineTransaction> {
     txn: &'c T,
     now_millis: i64,
-    handles: Vec<Pin<Box<CollectionHandle<T::Cf>>>>,
 }
 
 impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
@@ -80,7 +38,6 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         Self {
             txn,
             now_millis: bson::DateTime::now().timestamp_millis(),
-            handles: Vec::new(),
         }
     }
 
@@ -89,32 +46,17 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         Self {
             txn,
             now_millis: i64::MIN,
-            handles: Vec::new(),
         }
     }
 
-    /// Store a handle on the heap and return a reference valid for `'c`.
-    ///
-    /// # Safety
-    ///
-    /// Sound only when the caller guarantees that `self` outlives the returned
-    /// reference — i.e. the `Executor` must outlive any `RawIter` that captures
-    /// the returned `&CollectionHandle`.
-    fn store_handle(&mut self, handle: CollectionHandle<T::Cf>) -> &'c CollectionHandle<T::Cf> {
-        self.handles.push(Box::pin(handle));
-        let pinned: &CollectionHandle<T::Cf> = &self.handles.last().unwrap();
-        unsafe { &*(pinned as *const CollectionHandle<T::Cf>) }
-    }
-
     /// Execute a plan, returning a streaming iterator of rows.
-    pub fn execute(&mut self, plan: Plan<T::Cf>) -> Result<RawIter<'c>, DbError> {
+    pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'c>, DbError> {
         match plan {
             Plan::Find(node) => self.execute_node(node),
 
             Plan::Insert { collection, source } => {
                 let source = self.execute_node(source)?;
-                let handle = self.store_handle(collection);
-                nodes::insert_record::execute(self.txn, handle, source, self.now_millis)
+                nodes::insert_record::execute(self.txn, collection, source, self.now_millis)
             }
 
             Plan::Update {
@@ -123,8 +65,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                let handle = self.store_handle(collection);
-                nodes::mutate::execute(self.txn, handle, mutation, source)
+                nodes::mutate::execute(self.txn, collection, mutation, source)
             }
 
             Plan::Replace {
@@ -133,14 +74,12 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                let handle = self.store_handle(collection);
-                nodes::replace::execute(self.txn, handle, replacement, source)
+                nodes::replace::execute(self.txn, collection, replacement, source)
             }
 
             Plan::Delete { collection, source } => {
                 let source = self.execute_node(source)?;
-                let handle = self.store_handle(collection);
-                nodes::delete::execute(self.txn, handle, source)
+                nodes::delete::execute(self.txn, collection, source)
             }
 
             Plan::Merge { collection, source } => {
@@ -160,7 +99,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
     /// Execute an upsert pipeline, returning the row iterator and shared counters
     /// that are populated as the iterator is drained.
     pub fn execute_upsert_plan(
-        &mut self,
+        &self,
         plan: Plan<T::Cf>,
     ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
         match plan {
@@ -178,7 +117,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
     }
 
     fn execute_upsert(
-        &mut self,
+        &self,
         mode: nodes::upsert::UpsertMode,
         collection: CollectionHandle<T::Cf>,
         source_node: Node<T::Cf>,
@@ -186,10 +125,9 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         let inserted = Rc::new(Cell::new(0u64));
         let updated = Rc::new(Cell::new(0u64));
         let source = self.execute_node(source_node)?;
-        let handle = self.store_handle(collection);
         let iter = nodes::upsert::execute(
             self.txn,
-            handle,
+            collection,
             mode,
             source,
             Rc::clone(&inserted),
@@ -199,13 +137,12 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         Ok((iter, inserted, updated))
     }
 
-    fn execute_node(&mut self, node: Node<T::Cf>) -> Result<RawIter<'c>, DbError> {
+    fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'c>, DbError> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
 
             Node::Scan { collection } => {
-                let handle = self.store_handle(collection);
-                nodes::scan::execute(self.txn, handle, self.now_millis)
+                nodes::scan::execute(self.txn, collection, self.now_millis)
             }
 
             Node::IndexScan {
@@ -216,10 +153,9 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
                 limit,
                 covered,
             } => {
-                let handle = self.store_handle(collection);
                 nodes::index_scan::execute(
                     self.txn,
-                    handle,
+                    collection,
                     field,
                     &range,
                     direction,
@@ -237,8 +173,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
 
             Node::KeyLookup { collection, source } => {
                 let source = self.execute_node(*source)?;
-                let handle = self.store_handle(collection);
-                nodes::read_record::execute(self.txn, handle, source, self.now_millis)
+                nodes::read_record::execute(self.txn, collection, source, self.now_millis)
             }
 
             Node::Filter { predicate, source } => {

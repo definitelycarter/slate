@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::ops::RangeBounds;
 
 use crate::error::StoreError;
@@ -24,41 +23,37 @@ pub trait Store {
 
 pub trait Transaction {
     /// Backend-specific column family handle.
-    /// Concrete types must be independent of `&self` (owned or borrowed from
-    /// something other than the transaction) so that `cf(&mut self)` doesn't
-    /// extend the mutable borrow into subsequent `&self` reads.
     /// Must be cheaply cloneable (all backends use Arc-based handles).
     type Cf: Clone;
 
     /// Resolve a column family by name. Must be called before any reads on that CF.
     fn cf(&self, name: &str) -> Result<Self::Cf, StoreError>;
 
-    // Reads — &self, allowing concurrent borrows.
-    // Return lifetimes are tied to the CF handle so backends can borrow from it.
-    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError>;
-    fn multi_get<'c>(
+    // Reads
+    fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
+    fn multi_get(
         &self,
-        cf: &'c Self::Cf,
+        cf: &Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError>;
-    fn scan_prefix<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError>;
+    fn scan_prefix<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     >;
-    fn scan_prefix_rev<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix_rev<'a>(
+        &'a self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
         StoreError,
     >;
 
-    // Writes — &self + &Self::Cf, allowing interleaved reads/writes.
+    // Writes
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
     fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError>;

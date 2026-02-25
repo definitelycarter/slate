@@ -9,7 +9,7 @@ pub mod engine;
 mod error;
 mod executor;
 mod expression;
-pub(crate) mod parse_filter;
+pub(crate) mod parser;
 mod planner;
 mod result;
 mod statement;
@@ -27,7 +27,7 @@ pub use result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 #[cfg(feature = "bench-internals")]
 pub mod bench {
     pub use crate::engine::SlateEngine;
-    pub use crate::executor::{Executor, RawIter, RawValue};
+    pub use crate::executor::{Executor, RawIter};
     pub use crate::expression::{Expression, LogicalOp};
     pub use crate::planner::plan::{IndexScanRange, Node, Plan, ScanDirection};
     pub use crate::planner::planner::Planner;

@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, MutexGuard};
@@ -112,33 +111,30 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         })
     }
 
-    fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+    fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
         let snap = self.snapshot.borrow();
         let snap = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = snap.get_cf(&cf.name)?;
-        Ok(data.get(key).map(|v| Cow::Owned(v.clone())))
+        Ok(data.get(key).cloned())
     }
 
-    fn multi_get<'c>(
+    fn multi_get(
         &self,
-        cf: &'c Self::Cf,
+        cf: &Self::Cf,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let snap = self.snapshot.borrow();
         let snap = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = snap.get_cf(&cf.name)?;
-        Ok(keys
-            .iter()
-            .map(|k| data.get(*k).map(|v| Cow::Owned(v.clone())))
-            .collect())
+        Ok(keys.iter().map(|k| data.get(*k).cloned()).collect())
     }
 
-    fn scan_prefix<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix<'b>(
+        &'b self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>,
         StoreError,
     > {
         let snap = self.snapshot.borrow();
@@ -151,19 +147,15 @@ impl<'a> Transaction for MemoryTransaction<'a> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        Ok(Box::new(
-            entries
-                .into_iter()
-                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
-        ))
+        Ok(Box::new(entries.into_iter().map(Ok)))
     }
 
-    fn scan_prefix_rev<'c>(
-        &'c self,
-        cf: &'c Self::Cf,
+    fn scan_prefix_rev<'b>(
+        &'b self,
+        cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
+        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>,
         StoreError,
     > {
         let snap = self.snapshot.borrow();
@@ -180,11 +172,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        Ok(Box::new(
-            entries
-                .into_iter()
-                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
-        ))
+        Ok(Box::new(entries.into_iter().map(Ok)))
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {

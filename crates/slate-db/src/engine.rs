@@ -1,4 +1,4 @@
-use bson::RawDocumentBuf;
+use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::{DistinctQuery, Query};
 use slate_store::Store;
@@ -8,10 +8,9 @@ use crate::convert::IntoRawDocumentBuf;
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::executor;
-use crate::executor::RawValue;
 use crate::executor::exec;
 use crate::expression::Expression;
-use crate::parse_filter;
+use crate::parser;
 use crate::planner::planner::Planner;
 use crate::result::{DeleteResult, InsertResult, UpdateResult, UpsertResult};
 use crate::statement::Statement;
@@ -89,7 +88,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             docs: raw_docs,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut ids = Vec::new();
         for result in iter {
@@ -181,7 +180,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             limit: Some(1),
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut matched = 0u64;
         let mut modified = 0u64;
@@ -227,7 +226,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             limit: None,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut matched = 0u64;
         let mut modified = 0u64;
@@ -261,7 +260,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             replacement: raw,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut matched = 0u64;
         let mut modified = 0u64;
@@ -295,7 +294,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             limit: Some(1),
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut deleted = 0u64;
         for result in iter {
@@ -319,7 +318,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             limit: None,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let iter = exec.execute(plan)?;
         let mut deleted = 0u64;
         for result in iter {
@@ -347,7 +346,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             docs: raw_docs,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let (iter, inserted, updated) = exec.execute_upsert_plan(plan)?;
         for result in iter {
             result?;
@@ -374,7 +373,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             docs: raw_docs,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let (iter, inserted, updated) = exec.execute_upsert_plan(plan)?;
         for result in iter {
             result?;
@@ -415,15 +414,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: query.take,
         };
         let plan = self.plan(stmt)?;
-        let mut exec = executor::Executor::new(&self.txn);
+        let exec = executor::Executor::new(&self.txn);
         let mut iter = exec.execute(plan)?;
         match iter.next() {
             Some(result) => {
-                let opt_val: Option<RawValue> = result?;
-                opt_val
-                    .ok_or_else(|| DbError::InvalidQuery("expected value".into()))?
-                    .into_raw_bson()
-                    .ok_or_else(|| DbError::InvalidQuery("unsupported bson type".into()))
+                let opt_val: Option<RawBson> = result?;
+                opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))
             }
             None => Ok(bson::RawBson::Array(bson::RawArrayBuf::new())),
         }
@@ -442,7 +438,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         };
         let plan = self.plan(stmt)?;
         // Use no-TTL-filter executor so the delete pipeline can read expired docs
-        let mut exec = executor::Executor::new_no_ttl_filter(&self.txn);
+        let exec = executor::Executor::new_no_ttl_filter(&self.txn);
         let iter = exec.execute(plan)?;
         let mut deleted = 0u64;
         for result in iter {
@@ -549,14 +545,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Parse a required filter document into an Expression.
     fn parse_required_filter(doc: &RawDocumentBuf) -> Result<Expression, DbError> {
-        Ok(parse_filter::parse_filter(doc)?)
+        Ok(parser::parse_filter(doc)?)
     }
 
     /// Parse an optional filter document into an Expression.
     /// None or empty doc → Expression::And(vec![]) (matches everything).
     fn parse_optional_filter(doc: Option<&RawDocumentBuf>) -> Result<Expression, DbError> {
         match doc {
-            Some(d) => Ok(parse_filter::parse_filter(d)?),
+            Some(d) => Ok(parser::parse_filter(d)?),
             None => Ok(Expression::And(vec![])),
         }
     }
