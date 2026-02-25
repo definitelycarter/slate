@@ -1,117 +1,13 @@
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
+use crate::expression::Expression;
 use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
-use crate::expression::Expression;
-use slate_store::Transaction;
 
 use crate::error::DbError;
-
-// ── TTL helpers ────────────────────────────────────────────────
-
-/// Fast O(1) TTL check on an enveloped record value.
-/// Delegates to `encoding::is_record_expired` which reads the fixed-offset
-/// prefix — no BSON field walking needed.
-#[inline]
-pub(crate) fn is_ttl_expired(data: &[u8], now_millis: i64) -> bool {
-    crate::encoding::is_record_expired(data, now_millis)
-}
-
-/// Fetch a record by key and check TTL. Returns `None` if missing or expired.
-pub(crate) fn get_record_if_alive<'a, T: Transaction>(
-    txn: &'a T,
-    cf: &'a T::Cf,
-    key: &[u8],
-    now_millis: i64,
-) -> Result<Option<Cow<'a, [u8]>>, DbError> {
-    match txn.get(cf, key)? {
-        Some(bytes) if is_ttl_expired(&bytes, now_millis) => Ok(None),
-        other => Ok(other),
-    }
-}
-
-// ── Multi-key path resolution (for indexing) ───────────────────
-
-/// Resolve an index path that may contain `[]` array traversal segments.
-/// Returns all scalar Bson values reachable through the path.
-///
-/// - `"status"`        → vec![&String("active")]
-/// - `"address.city"`  → vec![&String("Austin")]
-/// - `"items.[].sku"`  → vec![&String("A1"), &String("B2")]
-/// - `"tags.[]"`       → vec![&String("rust"), &String("db")]
-pub(crate) fn get_path_values<'a>(doc: &'a bson::Document, path: &str) -> Vec<&'a Bson> {
-    let segments: Vec<&str> = path.split('.').collect();
-    let mut results = Vec::new();
-    collect_from_doc(doc, &segments, 0, &mut results);
-    results
-}
-
-fn collect_from_doc<'a>(
-    doc: &'a bson::Document,
-    segments: &[&str],
-    idx: usize,
-    out: &mut Vec<&'a Bson>,
-) {
-    if idx >= segments.len() {
-        return;
-    }
-
-    let seg = segments[idx];
-    if seg == "[]" {
-        return;
-    }
-
-    if let Some(value) = doc.get(seg) {
-        collect_from_value(value, segments, idx + 1, out);
-    }
-}
-
-fn collect_from_value<'a>(value: &'a Bson, segments: &[&str], idx: usize, out: &mut Vec<&'a Bson>) {
-    if idx >= segments.len() {
-        match value {
-            Bson::Array(arr) => {
-                for elem in arr {
-                    if is_indexable_scalar(elem) {
-                        out.push(elem);
-                    }
-                }
-            }
-            _ if is_indexable_scalar(value) => {
-                out.push(value);
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    let seg = segments[idx];
-
-    if seg == "[]" {
-        if let Bson::Array(arr) = value {
-            for elem in arr {
-                collect_from_value(elem, segments, idx + 1, out);
-            }
-        }
-    } else if let Bson::Document(d) = value {
-        collect_from_doc(d, segments, idx, out);
-    }
-}
-
-fn is_indexable_scalar(value: &Bson) -> bool {
-    matches!(
-        value,
-        Bson::String(_)
-            | Bson::Int32(_)
-            | Bson::Int64(_)
-            | Bson::Double(_)
-            | Bson::Boolean(_)
-            | Bson::DateTime(_)
-    )
-}
 
 // ── Projection ──────────────────────────────────────────────────
 
@@ -206,8 +102,12 @@ pub(crate) fn raw_get_path<'a>(
 }
 
 // ── Expression-based filter matching ─────────────────────────────
+//
+// The Expression carries owned `Bson` values (from the query), while the
+// document fields are read as `RawBsonRef` (zero-copy from raw bytes).
+// The `raw_value_eq_bson` / `raw_compare_bson` helpers bridge this gap.
 
-pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Result<bool, DbError> {
+pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression) -> Result<bool, DbError> {
     match expr {
         Expression::And(children) => {
             for child in children {
@@ -227,19 +127,19 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
         }
         Expression::Eq(field, val) => {
             // $eq: null matches both missing fields and explicit null values
-            if matches!(val, RawBsonRef::Null) {
+            if matches!(val, Bson::Null) {
                 return Ok(raw_get_path(raw, field)?.is_none());
             }
             match raw_get_path(raw, field)? {
                 Some(RawBsonRef::Array(arr)) => {
                     for elem in arr.into_iter().flatten() {
-                        if raw_values_eq(&elem, val) {
+                        if raw_value_eq_bson(&elem, val) {
                             return Ok(true);
                         }
                     }
                     Ok(false)
                 }
-                Some(v) => Ok(raw_values_eq(&v, val)),
+                Some(v) => Ok(raw_value_eq_bson(&v, val)),
                 None => Ok(false),
             }
         }
@@ -258,13 +158,13 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
             match field_value {
                 Some(RawBsonRef::Array(arr)) => {
                     for elem in arr.into_iter().flatten() {
-                        if raw_compare_values(Some(&elem), val, predicate)? {
+                        if raw_compare_bson(Some(&elem), val, predicate)? {
                             return Ok(true);
                         }
                     }
                     Ok(false)
                 }
-                _ => raw_compare_values(field_value.as_ref(), val, predicate),
+                _ => raw_compare_bson(field_value.as_ref(), val, predicate),
             }
         }
         Expression::Regex(field, re) => match raw_get_path(raw, field)? {
@@ -280,43 +180,40 @@ pub(crate) fn raw_matches_expr(raw: &RawDocument, expr: &Expression<'_>) -> Resu
     }
 }
 
-pub(crate) fn raw_values_eq(store_val: &RawBsonRef, query_val: &RawBsonRef) -> bool {
+/// Equality: stored `RawBsonRef` (from document) vs query `Bson` (from Expression).
+fn raw_value_eq_bson(store_val: &RawBsonRef, query_val: &Bson) -> bool {
     match (store_val, query_val) {
         // ── Direct type matches ─────────────────────────────────
-        (RawBsonRef::String(a), RawBsonRef::String(b)) => *a == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => *a == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => (*a as i64) == *b,
-        (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => *a == *b,
-        (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => *a == (*b as i64),
-        (RawBsonRef::Double(a), RawBsonRef::Double(b)) => *a == *b,
-        (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => *a == (*b as f64),
-        (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => *a == (*b as f64),
-        (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => (*a as f64) == *b,
-        (RawBsonRef::Boolean(a), RawBsonRef::Boolean(b)) => *a == *b,
-        (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
+        (RawBsonRef::String(a), Bson::String(b)) => *a == b.as_str(),
+        (RawBsonRef::Int32(a), Bson::Int32(b)) => *a == *b,
+        (RawBsonRef::Int32(a), Bson::Int64(b)) => (*a as i64) == *b,
+        (RawBsonRef::Int64(a), Bson::Int64(b)) => *a == *b,
+        (RawBsonRef::Int64(a), Bson::Int32(b)) => *a == (*b as i64),
+        (RawBsonRef::Double(a), Bson::Double(b)) => *a == *b,
+        (RawBsonRef::Double(a), Bson::Int64(b)) => *a == (*b as f64),
+        (RawBsonRef::Double(a), Bson::Int32(b)) => *a == (*b as f64),
+        (RawBsonRef::Int64(a), Bson::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Int32(a), Bson::Double(b)) => (*a as f64) == *b,
+        (RawBsonRef::Boolean(a), Bson::Boolean(b)) => *a == *b,
+        (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
             a.timestamp_millis() == b.timestamp_millis()
         }
 
-        // ── Cross-type coercion: RawBsonRef::String → stored type ─
-        (RawBsonRef::Int32(a), RawBsonRef::String(s)) => {
-            s.parse::<i64>().is_ok_and(|b| (*a as i64) == b)
-        }
-        (RawBsonRef::Int64(a), RawBsonRef::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Double(a), RawBsonRef::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
-        (RawBsonRef::Boolean(a), RawBsonRef::String(s)) => match *s {
+        // ── Cross-type coercion: Bson::String → stored type ─
+        (RawBsonRef::Int32(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| (*a as i64) == b),
+        (RawBsonRef::Int64(a), Bson::String(s)) => s.parse::<i64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Double(a), Bson::String(s)) => s.parse::<f64>().is_ok_and(|b| *a == b),
+        (RawBsonRef::Boolean(a), Bson::String(s)) => match s.as_str() {
             "true" => *a,
             "false" => !*a,
             _ => false,
         },
-        (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+        (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
             .is_ok_and(|dt| a.timestamp_millis() == dt.timestamp_millis()),
 
         // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
-        (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => a.timestamp_millis() == (*b * 1000),
-        (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
-            a.timestamp_millis() == (*b as i64 * 1000)
-        }
+        (RawBsonRef::DateTime(a), Bson::Int64(b)) => a.timestamp_millis() == (*b * 1000),
+        (RawBsonRef::DateTime(a), Bson::Int32(b)) => a.timestamp_millis() == (*b as i64 * 1000),
 
         // ── Incompatible types: silent exclusion ────────────────
         _ => false,
@@ -415,58 +312,57 @@ pub(crate) fn apply_mutation(
     Ok(Some(raw))
 }
 
-pub(crate) fn raw_compare_values(
+/// Comparison: stored `RawBsonRef` (from document) vs query `Bson` (from Expression).
+fn raw_compare_bson(
     field_value: Option<&RawBsonRef>,
-    query_val: &RawBsonRef,
+    query_val: &Bson,
     predicate: fn(Ordering) -> bool,
 ) -> Result<bool, DbError> {
     match field_value {
         Some(store_val) => Ok(match (store_val, query_val) {
             // ── Direct type matches ─────────────────────────────
-            (RawBsonRef::Int32(a), RawBsonRef::Int32(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int32(a), RawBsonRef::Int64(b)) => predicate((*a as i64).cmp(b)),
-            (RawBsonRef::Int64(a), RawBsonRef::Int64(b)) => predicate(a.cmp(b)),
-            (RawBsonRef::Int64(a), RawBsonRef::Int32(b)) => predicate(a.cmp(&(*b as i64))),
-            (RawBsonRef::Double(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int32(a), Bson::Int32(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int32(a), Bson::Int64(b)) => predicate((*a as i64).cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int64(b)) => predicate(a.cmp(b)),
+            (RawBsonRef::Int64(a), Bson::Int32(b)) => predicate(a.cmp(&(*b as i64))),
+            (RawBsonRef::Double(a), Bson::Double(b)) => {
                 predicate(a.partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), RawBsonRef::Int64(b)) => {
+            (RawBsonRef::Double(a), Bson::Int64(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Double(a), RawBsonRef::Int32(b)) => {
+            (RawBsonRef::Double(a), Bson::Int32(b)) => {
                 predicate(a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int64(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int64(a), Bson::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::Int32(a), RawBsonRef::Double(b)) => {
+            (RawBsonRef::Int32(a), Bson::Double(b)) => {
                 predicate((*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal))
             }
-            (RawBsonRef::DateTime(a), RawBsonRef::DateTime(b)) => {
+            (RawBsonRef::DateTime(a), Bson::DateTime(b)) => {
                 predicate(a.timestamp_millis().cmp(&b.timestamp_millis()))
             }
-            (RawBsonRef::String(a), RawBsonRef::String(b)) => predicate((*a).cmp(*b)),
+            (RawBsonRef::String(a), Bson::String(b)) => predicate((*a).cmp(b.as_str())),
 
-            // ── Cross-type coercion: RawBsonRef::String → stored type ─
-            (RawBsonRef::Int32(a), RawBsonRef::String(s)) => s
+            // ── Cross-type coercion: Bson::String → stored type ─
+            (RawBsonRef::Int32(a), Bson::String(s)) => s
                 .parse::<i64>()
                 .is_ok_and(|b| predicate((*a as i64).cmp(&b))),
-            (RawBsonRef::Int64(a), RawBsonRef::String(s)) => {
+            (RawBsonRef::Int64(a), Bson::String(s)) => {
                 s.parse::<i64>().is_ok_and(|b| predicate(a.cmp(&b)))
             }
-            (RawBsonRef::Double(a), RawBsonRef::String(s)) => s
+            (RawBsonRef::Double(a), Bson::String(s)) => s
                 .parse::<f64>()
                 .is_ok_and(|b| predicate(a.partial_cmp(&b).unwrap_or(Ordering::Equal))),
-            (RawBsonRef::DateTime(a), RawBsonRef::String(s)) => {
-                bson::DateTime::parse_rfc3339_str(s)
-                    .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis())))
-            }
+            (RawBsonRef::DateTime(a), Bson::String(s)) => bson::DateTime::parse_rfc3339_str(s)
+                .is_ok_and(|dt| predicate(a.timestamp_millis().cmp(&dt.timestamp_millis()))),
 
             // ── Cross-type coercion: Int → DateTime (epoch seconds) ─
-            (RawBsonRef::DateTime(a), RawBsonRef::Int64(b)) => {
+            (RawBsonRef::DateTime(a), Bson::Int64(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b * 1000)))
             }
-            (RawBsonRef::DateTime(a), RawBsonRef::Int32(b)) => {
+            (RawBsonRef::DateTime(a), Bson::Int32(b)) => {
                 predicate(a.timestamp_millis().cmp(&(*b as i64 * 1000)))
             }
 
@@ -615,115 +511,6 @@ mod tests {
     use super::*;
     use bson::{RawDocumentBuf, doc};
 
-    #[test]
-    fn get_path_values_scalar() {
-        let doc = doc! { "status": "active" };
-        let vals = get_path_values(&doc, "status");
-        assert_eq!(vals, vec![&Bson::String("active".into())]);
-    }
-
-    #[test]
-    fn get_path_values_nested_scalar() {
-        let doc = doc! { "address": { "city": "Austin" } };
-        let vals = get_path_values(&doc, "address.city");
-        assert_eq!(vals, vec![&Bson::String("Austin".into())]);
-    }
-
-    #[test]
-    fn get_path_values_array_of_scalars() {
-        let doc = doc! { "tags": ["rust", "db", "fast"] };
-        let vals = get_path_values(&doc, "tags.[]");
-        assert_eq!(vals.len(), 3);
-        assert_eq!(vals[0], &Bson::String("rust".into()));
-        assert_eq!(vals[1], &Bson::String("db".into()));
-        assert_eq!(vals[2], &Bson::String("fast".into()));
-    }
-
-    #[test]
-    fn get_path_values_array_of_objects() {
-        let doc = doc! { "items": [{ "sku": "A1", "qty": 2 }, { "sku": "B2", "qty": 1 }] };
-        let vals = get_path_values(&doc, "items.[].sku");
-        assert_eq!(vals.len(), 2);
-        assert_eq!(vals[0], &Bson::String("A1".into()));
-        assert_eq!(vals[1], &Bson::String("B2".into()));
-    }
-
-    #[test]
-    fn get_path_values_missing_field() {
-        let doc = doc! { "name": "test" };
-        let vals = get_path_values(&doc, "missing");
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn get_path_values_missing_nested() {
-        let doc = doc! { "name": "test" };
-        let vals = get_path_values(&doc, "missing.[].sku");
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn get_path_values_not_array() {
-        let doc = doc! { "name": "test" };
-        let vals = get_path_values(&doc, "name.[]");
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn get_path_values_nested_array() {
-        let doc = doc! {
-            "order": {
-                "items": [{ "sku": "X1" }, { "sku": "X2" }]
-            }
-        };
-        let vals = get_path_values(&doc, "order.items.[].sku");
-        assert_eq!(vals.len(), 2);
-        assert_eq!(vals[0], &Bson::String("X1".into()));
-        assert_eq!(vals[1], &Bson::String("X2".into()));
-    }
-
-    #[test]
-    fn get_path_values_skips_non_scalar() {
-        let doc = doc! { "items": [{ "meta": { "a": 1 } }] };
-        let vals = get_path_values(&doc, "items.[].meta");
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn get_path_values_null_skipped() {
-        let doc = doc! { "status": bson::Bson::Null };
-        let vals = get_path_values(&doc, "status");
-        assert!(vals.is_empty());
-    }
-
-    #[test]
-    fn get_path_values_array_scalars_direct() {
-        let doc = doc! { "tags": ["rust", "db", "fast"] };
-        let vals = get_path_values(&doc, "tags");
-        assert_eq!(vals.len(), 3);
-        assert_eq!(vals[0], &Bson::String("rust".into()));
-        assert_eq!(vals[1], &Bson::String("db".into()));
-        assert_eq!(vals[2], &Bson::String("fast".into()));
-    }
-
-    #[test]
-    fn get_path_values_array_mixed_types() {
-        let doc = doc! { "vals": [1_i64, "hello", true, bson::Bson::Null] };
-        let vals = get_path_values(&doc, "vals");
-        // Null is not indexable, so only 3 values
-        assert_eq!(vals.len(), 3);
-        assert_eq!(vals[0], &Bson::Int64(1));
-        assert_eq!(vals[1], &Bson::String("hello".into()));
-        assert_eq!(vals[2], &Bson::Boolean(true));
-    }
-
-    #[test]
-    fn get_path_values_empty_array() {
-        let doc = doc! { "tags": bson::Bson::Array(vec![]) };
-        let vals = get_path_values(&doc, "tags");
-        assert!(vals.is_empty());
-    }
-
     // ── Raw BSON tests ──────────────────────────────────────────
 
     fn make_raw(doc: &bson::Document) -> RawDocumentBuf {
@@ -764,51 +551,6 @@ mod tests {
         let raw = make_raw(&doc! { "_id": "abc123", "name": "test" });
         let val = raw_get_path(&raw, "_id").unwrap();
         assert_eq!(val, Some(RawBsonRef::String("abc123")));
-    }
-    // ── is_ttl_expired ──────────────────────────────────────────
-
-    #[test]
-    fn ttl_expired_returns_true() {
-        let past = bson::DateTime::from_millis(1_000);
-        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": past }).unwrap();
-        let envelope = crate::encoding::encode_record(&bson_bytes);
-        let now = bson::DateTime::now().timestamp_millis();
-        assert!(is_ttl_expired(&envelope, now));
-    }
-
-    #[test]
-    fn ttl_future_returns_false() {
-        let future = bson::DateTime::from_millis(i64::MAX - 1);
-        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": future }).unwrap();
-        let envelope = crate::encoding::encode_record(&bson_bytes);
-        let now = bson::DateTime::now().timestamp_millis();
-        assert!(!is_ttl_expired(&envelope, now));
-    }
-
-    #[test]
-    fn ttl_missing_returns_false() {
-        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "name": "Alice" }).unwrap();
-        let envelope = crate::encoding::encode_record(&bson_bytes);
-        let now = bson::DateTime::now().timestamp_millis();
-        assert!(!is_ttl_expired(&envelope, now));
-    }
-
-    #[test]
-    fn ttl_non_datetime_returns_false() {
-        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": "not-a-date" }).unwrap();
-        let envelope = crate::encoding::encode_record(&bson_bytes);
-        let now = bson::DateTime::now().timestamp_millis();
-        assert!(!is_ttl_expired(&envelope, now));
-    }
-
-    #[test]
-    fn ttl_equal_to_now_returns_false() {
-        let now_millis = 1_700_000_000_000_i64;
-        let dt = bson::DateTime::from_millis(now_millis);
-        let bson_bytes = bson::to_vec(&doc! { "_id": "1", "ttl": dt }).unwrap();
-        let envelope = crate::encoding::encode_record(&bson_bytes);
-        // ttl == now → not expired (< is strict)
-        assert!(!is_ttl_expired(&envelope, now_millis));
     }
 
     // ── raw_extract_id ──────────────────────────────────────────

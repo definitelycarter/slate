@@ -1,6 +1,4 @@
-use std::borrow::Cow;
-
-use bson::raw::RawBsonRef;
+use bson::raw::RawDocumentBuf;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::Rng;
@@ -8,73 +6,80 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::CollectionConfig;
 use slate_db::bench::{
-    Engine, ExecutionResult, Executor, Expression, IndexFilter, LogicalOp, PlanNode,
+    Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, RawIter, ScanDirection,
+    SlateEngine,
+};
+use slate_engine::{
+    BsonValue, Catalog, CollectionHandle, Engine, EngineError, EngineTransaction, IndexEntry,
+    IndexRange,
 };
 use slate_query::*;
-use slate_store::{MemoryStore, Store, StoreError, Transaction};
+use slate_store::MemoryStore;
 
 // ── NoopTransaction ─────────────────────────────────────────
 //
-// Implements Transaction with panics. Used for nodes that never
+// Implements EngineTransaction with panics. Used for nodes that never
 // touch the store (Values, Projection, Limit, Sort, Distinct, Filter).
 
 struct NoopTransaction;
 
-impl Transaction for NoopTransaction {
+impl EngineTransaction for NoopTransaction {
     type Cf = ();
 
-    fn cf(&self, _name: &str) -> Result<Self::Cf, StoreError> {
-        panic!("NoopTransaction::cf called");
-    }
-    fn get<'c>(&self, _cf: &'c Self::Cf, _key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
+    fn get(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        _doc_id: &BsonValue<'_>,
+        _ttl: i64,
+    ) -> Result<Option<RawDocumentBuf>, EngineError> {
         panic!("NoopTransaction::get called");
     }
-    fn multi_get<'c>(
+
+    fn put(
         &self,
-        _cf: &'c Self::Cf,
-        _keys: &[&[u8]],
-    ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
-        panic!("NoopTransaction::multi_get called");
-    }
-    fn scan_prefix<'c>(
-        &'c self,
-        _cf: &'c Self::Cf,
-        _prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
-        StoreError,
-    > {
-        panic!("NoopTransaction::scan_prefix called");
-    }
-    fn scan_prefix_rev<'c>(
-        &'c self,
-        _cf: &'c Self::Cf,
-        _prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
-        StoreError,
-    > {
-        panic!("NoopTransaction::scan_prefix_rev called");
-    }
-    fn put(&self, _cf: &Self::Cf, _key: &[u8], _value: &[u8]) -> Result<(), StoreError> {
+        _handle: &CollectionHandle<Self::Cf>,
+        _doc: &bson::raw::RawDocument,
+        _doc_id: &BsonValue<'_>,
+    ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put called");
     }
-    fn put_batch(&self, _cf: &Self::Cf, _entries: &[(&[u8], &[u8])]) -> Result<(), StoreError> {
-        panic!("NoopTransaction::put_batch called");
-    }
-    fn delete(&self, _cf: &Self::Cf, _key: &[u8]) -> Result<(), StoreError> {
+
+    fn delete(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        _doc_id: &BsonValue<'_>,
+    ) -> Result<(), EngineError> {
         panic!("NoopTransaction::delete called");
     }
-    fn create_cf(&mut self, _name: &str) -> Result<(), StoreError> {
-        panic!("NoopTransaction::create_cf called");
+
+    fn scan<'a>(
+        &'a self,
+        _handle: &'a CollectionHandle<Self::Cf>,
+        _ttl: i64,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
+        EngineError,
+    > {
+        panic!("NoopTransaction::scan called");
     }
-    fn drop_cf(&mut self, _name: &str) -> Result<(), StoreError> {
-        panic!("NoopTransaction::drop_cf called");
+
+    fn scan_index<'a>(
+        &'a self,
+        _handle: &'a CollectionHandle<Self::Cf>,
+        _field: &str,
+        _range: IndexRange<'_>,
+        _reverse: bool,
+        _ttl: i64,
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
+    {
+        panic!("NoopTransaction::scan_index called");
     }
-    fn commit(self) -> Result<(), StoreError> {
+
+    fn commit(self) -> Result<(), EngineError> {
         Ok(())
     }
-    fn rollback(self) -> Result<(), StoreError> {
+
+    fn rollback(self) -> Result<(), EngineError> {
         Ok(())
     }
 }
@@ -95,17 +100,14 @@ fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
         .collect()
 }
 
-fn consume_rows(result: ExecutionResult) -> usize {
-    match result {
-        ExecutionResult::Rows(iter) => iter.count(),
-        _ => panic!("expected Rows"),
-    }
+fn consume_rows(iter: RawIter) -> usize {
+    iter.count()
 }
 
 /// Create a seeded MemoryStore-backed Engine with `n` documents and indexes
 /// on `status` and `contacts_count`.
-fn seeded_engine(n: usize) -> Engine<MemoryStore> {
-    let engine = Engine::new(MemoryStore::new());
+fn seeded_engine(n: usize) -> SlateEngine<MemoryStore> {
+    let engine = SlateEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
@@ -134,12 +136,15 @@ fn bench_values(c: &mut Criterion) {
     let mut group = c.benchmark_group("values");
     for n in [100, 1_000, 10_000] {
         let docs = generate_docs(n);
-        let plan = PlanNode::Values { docs: &docs };
 
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || Plan::Find(Node::Values(docs.clone())),
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -150,31 +155,35 @@ fn bench_projection(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let docs = generate_docs(n);
 
-        let plan = PlanNode::Projection {
-            columns: Some(vec!["name".into(), "status".into()]),
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("select", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("select", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Projection {
+                        columns: Some(vec!["name".into(), "status".into()]),
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
 
-        let plan_passthrough = PlanNode::Projection {
-            columns: None,
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("passthrough", n),
-            &plan_passthrough,
-            |b, plan| {
-                let txn = NoopTransaction;
-                let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("passthrough", n), &n, |b, _| {
+            let txn = NoopTransaction;
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Projection {
+                        columns: None,
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
+        });
     }
     group.finish();
 }
@@ -183,28 +192,36 @@ fn bench_limit(c: &mut Criterion) {
     let mut group = c.benchmark_group("limit");
     let docs = generate_docs(10_000);
 
-    let plan = PlanNode::Limit {
-        skip: 100,
-        take: Some(200),
-        input: Box::new(PlanNode::Values { docs: &docs }),
-    };
-
-    group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &plan, |b, plan| {
+    group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+        let mut exec = Executor::new(&txn);
+        b.iter_batched(
+            || {
+                Plan::Find(Node::Limit {
+                    skip: 100,
+                    take: Some(200),
+                    source: Box::new(Node::Values(docs.clone())),
+                })
+            },
+            |plan| consume_rows(exec.execute(plan).unwrap()),
+            BatchSize::SmallInput,
+        )
     });
 
-    let plan_take = PlanNode::Limit {
-        skip: 0,
-        take: Some(200),
-        input: Box::new(PlanNode::Values { docs: &docs }),
-    };
-
-    group.bench_with_input(BenchmarkId::new("take", 10_000), &plan_take, |b, plan| {
+    group.bench_with_input(BenchmarkId::new("take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let exec = Executor::new(&txn, &());
-        b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+        let mut exec = Executor::new(&txn);
+        b.iter_batched(
+            || {
+                Plan::Find(Node::Limit {
+                    skip: 0,
+                    take: Some(200),
+                    source: Box::new(Node::Values(docs.clone())),
+                })
+            },
+            |plan| consume_rows(exec.execute(plan).unwrap()),
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -215,38 +232,46 @@ fn bench_sort(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let docs = generate_docs(n);
 
-        let plan = PlanNode::Sort {
-            sorts: vec![slate_query::Sort {
-                field: "contacts_count".into(),
-                direction: slate_query::SortDirection::Desc,
-            }],
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("single", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("single", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Sort {
+                        sorts: vec![slate_query::Sort {
+                            field: "contacts_count".into(),
+                            direction: slate_query::SortDirection::Desc,
+                        }],
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
 
-        let plan_multi = PlanNode::Sort {
-            sorts: vec![
-                slate_query::Sort {
-                    field: "status".into(),
-                    direction: slate_query::SortDirection::Asc,
-                },
-                slate_query::Sort {
-                    field: "contacts_count".into(),
-                    direction: slate_query::SortDirection::Desc,
-                },
-            ],
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("multi", n), &plan_multi, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("multi", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Sort {
+                        sorts: vec![
+                            slate_query::Sort {
+                                field: "status".into(),
+                                direction: slate_query::SortDirection::Asc,
+                            },
+                            slate_query::Sort {
+                                field: "contacts_count".into(),
+                                direction: slate_query::SortDirection::Desc,
+                            },
+                        ],
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -257,63 +282,71 @@ fn bench_distinct(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let docs = generate_docs(n);
 
-        let plan = PlanNode::Distinct {
-            field: "status".into(),
-            input: Box::new(PlanNode::Projection {
-                columns: Some(vec!["status".into()]),
-                input: Box::new(PlanNode::Values { docs: &docs }),
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("low_card", n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("low_card", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Distinct {
+                        field: "status".into(),
+                        source: Box::new(Node::Projection {
+                            columns: Some(vec!["status".into()]),
+                            source: Box::new(Node::Values(docs.clone())),
+                        }),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
 
-        let plan_sort = PlanNode::Sort {
-            sorts: vec![slate_query::Sort {
-                field: "status".into(),
-                direction: slate_query::SortDirection::Asc,
-            }],
-            input: Box::new(PlanNode::Distinct {
-                field: "status".into(),
-                input: Box::new(PlanNode::Projection {
-                    columns: Some(vec!["status".into()]),
-                    input: Box::new(PlanNode::Values { docs: &docs }),
-                }),
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("sorted", n), &plan_sort, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("sorted", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Sort {
+                        sorts: vec![slate_query::Sort {
+                            field: "status".into(),
+                            direction: slate_query::SortDirection::Asc,
+                        }],
+                        source: Box::new(Node::Distinct {
+                            field: "status".into(),
+                            source: Box::new(Node::Projection {
+                                columns: Some(vec!["status".into()]),
+                                source: Box::new(Node::Values(docs.clone())),
+                            }),
+                        }),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
 
-        let plan_sort_hc = PlanNode::Sort {
-            sorts: vec![slate_query::Sort {
-                field: "contacts_count".into(),
-                direction: slate_query::SortDirection::Desc,
-            }],
-            input: Box::new(PlanNode::Distinct {
-                field: "contacts_count".into(),
-                input: Box::new(PlanNode::Projection {
-                    columns: Some(vec!["contacts_count".into()]),
-                    input: Box::new(PlanNode::Values { docs: &docs }),
-                }),
-            }),
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("sorted_hc", n),
-            &plan_sort_hc,
-            |b, plan| {
-                let txn = NoopTransaction;
-                let exec = Executor::new(&txn, &());
-                b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("sorted_hc", n), &n, |b, _| {
+            let txn = NoopTransaction;
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Sort {
+                        sorts: vec![slate_query::Sort {
+                            field: "contacts_count".into(),
+                            direction: slate_query::SortDirection::Desc,
+                        }],
+                        source: Box::new(Node::Distinct {
+                            field: "contacts_count".into(),
+                            source: Box::new(Node::Projection {
+                                columns: Some(vec!["contacts_count".into()]),
+                                source: Box::new(Node::Values(docs.clone())),
+                            }),
+                        }),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
+        });
     }
     group.finish();
 }
@@ -323,29 +356,40 @@ fn bench_filter(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let docs = generate_docs(n);
 
-        let plan_eq = PlanNode::Filter {
-            predicate: Expression::Eq("status", RawBsonRef::String("active")),
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("eq", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Filter {
+                        predicate: Expression::Eq(
+                            "status".into(),
+                            bson::Bson::String("active".into()),
+                        ),
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
 
-        let plan_and = PlanNode::Filter {
-            predicate: Expression::And(vec![
-                Expression::Eq("status", RawBsonRef::String("active")),
-                Expression::Gt("contacts_count", RawBsonRef::Int32(50)),
-            ]),
-            input: Box::new(PlanNode::Values { docs: &docs }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
+        group.bench_with_input(BenchmarkId::new("and", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn, &());
-            b.iter(|| consume_rows(exec.execute(plan.clone()).unwrap()))
+            let mut exec = Executor::new(&txn);
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Filter {
+                        predicate: Expression::And(vec![
+                            Expression::Eq("status".into(), bson::Bson::String("active".into())),
+                            Expression::Gt("contacts_count".into(), bson::Bson::Int32(50)),
+                        ]),
+                        source: Box::new(Node::Values(docs.clone())),
+                    })
+                },
+                |plan| consume_rows(exec.execute(plan).unwrap()),
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -357,12 +401,22 @@ fn bench_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let plan = PlanNode::Scan;
 
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::Scan {
+                        collection: collection.clone(),
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -374,56 +428,73 @@ fn bench_index_scan(c: &mut Criterion) {
         let engine = seeded_engine(n);
 
         // Eq scan: status = "active" (~50% match)
-        let plan_eq = PlanNode::IndexScan {
-            column: "status".into(),
-            filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
-            direction: slate_query::SortDirection::Asc,
-            limit: None,
-            complete_groups: false,
-            covered: false,
-        };
-
-        group.bench_with_input(BenchmarkId::new("eq", n), &plan_eq, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        group.bench_with_input(BenchmarkId::new("eq", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::IndexScan {
+                        collection: collection.clone(),
+                        field: "status".into(),
+                        range: IndexScanRange::Eq(bson::Bson::String("active".into())),
+                        direction: ScanDirection::Forward,
+                        limit: None,
+                        covered: false,
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         // Full column scan (no value filter)
-        let plan_full = PlanNode::IndexScan {
-            column: "contacts_count".into(),
-            filter: None,
-            direction: slate_query::SortDirection::Asc,
-            limit: None,
-            complete_groups: false,
-            covered: false,
-        };
-
-        group.bench_with_input(BenchmarkId::new("full", n), &plan_full, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        group.bench_with_input(BenchmarkId::new("full", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::IndexScan {
+                        collection: collection.clone(),
+                        field: "contacts_count".into(),
+                        range: IndexScanRange::Full,
+                        direction: ScanDirection::Forward,
+                        limit: None,
+                        covered: false,
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         // Desc with limit
-        let plan_desc_limit = PlanNode::IndexScan {
-            column: "contacts_count".into(),
-            filter: None,
-            direction: slate_query::SortDirection::Desc,
-            limit: Some(50),
-            complete_groups: false,
-            covered: false,
-        };
-
-        group.bench_with_input(
-            BenchmarkId::new("desc_limit", n),
-            &plan_desc_limit,
-            |b, plan| {
-                let txn = engine.store().begin(true).unwrap();
-                let cf = txn.cf("test").unwrap();
-                b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("desc_limit", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::IndexScan {
+                        collection: collection.clone(),
+                        field: "contacts_count".into(),
+                        range: IndexScanRange::Full,
+                        direction: ScanDirection::Reverse,
+                        limit: Some(50),
+                        covered: false,
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
+        });
     }
     group.finish();
 }
@@ -433,33 +504,51 @@ fn bench_read_record(c: &mut Criterion) {
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
 
-        // ReadRecord over Scan (passthrough — Scan already yields full docs)
-        let plan_scan = PlanNode::ReadRecord {
-            input: Box::new(PlanNode::Scan),
-        };
-
-        group.bench_with_input(BenchmarkId::new("scan", n), &plan_scan, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        // KeyLookup over Scan (passthrough — Scan already yields full docs)
+        group.bench_with_input(BenchmarkId::new("scan", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::KeyLookup {
+                        collection: collection.clone(),
+                        source: Box::new(Node::Scan {
+                            collection: collection.clone(),
+                        }),
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
-        // ReadRecord over IndexScan (fetches full doc by id)
-        let plan_idx = PlanNode::ReadRecord {
-            input: Box::new(PlanNode::IndexScan {
-                column: "status".into(),
-                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
-                direction: slate_query::SortDirection::Asc,
-                limit: None,
-                complete_groups: false,
-                covered: false,
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("index", n), &plan_idx, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        // KeyLookup over IndexScan (fetches full doc by id)
+        group.bench_with_input(BenchmarkId::new("index", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::KeyLookup {
+                        collection: collection.clone(),
+                        source: Box::new(Node::IndexScan {
+                            collection: collection.clone(),
+                            field: "status".into(),
+                            range: IndexScanRange::Eq(bson::Bson::String("active".into())),
+                            direction: ScanDirection::Forward,
+                            limit: None,
+                            covered: false,
+                        }),
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -471,57 +560,71 @@ fn bench_index_merge(c: &mut Criterion) {
         let engine = seeded_engine(n);
 
         // OR merge: status="active" OR contacts_count=50
-        let plan_or = PlanNode::IndexMerge {
-            logical: LogicalOp::Or,
-            lhs: Box::new(PlanNode::IndexScan {
-                column: "status".into(),
-                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
-                direction: slate_query::SortDirection::Asc,
-                limit: None,
-                complete_groups: false,
-                covered: false,
-            }),
-            rhs: Box::new(PlanNode::IndexScan {
-                column: "contacts_count".into(),
-                filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
-                direction: slate_query::SortDirection::Asc,
-                limit: None,
-                complete_groups: false,
-                covered: false,
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("or", n), &plan_or, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        group.bench_with_input(BenchmarkId::new("or", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::IndexMerge {
+                        logical: LogicalOp::Or,
+                        lhs: Box::new(Node::IndexScan {
+                            collection: collection.clone(),
+                            field: "status".into(),
+                            range: IndexScanRange::Eq(bson::Bson::String("active".into())),
+                            direction: ScanDirection::Forward,
+                            limit: None,
+                            covered: false,
+                        }),
+                        rhs: Box::new(Node::IndexScan {
+                            collection: collection.clone(),
+                            field: "contacts_count".into(),
+                            range: IndexScanRange::Eq(bson::Bson::Int32(50)),
+                            direction: ScanDirection::Forward,
+                            limit: None,
+                            covered: false,
+                        }),
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
 
         // AND merge: status="active" AND contacts_count=50
-        let plan_and = PlanNode::IndexMerge {
-            logical: LogicalOp::And,
-            lhs: Box::new(PlanNode::IndexScan {
-                column: "status".into(),
-                filter: Some(IndexFilter::Eq(RawBsonRef::String("active"))),
-                direction: slate_query::SortDirection::Asc,
-                limit: None,
-                complete_groups: false,
-                covered: false,
-            }),
-            rhs: Box::new(PlanNode::IndexScan {
-                column: "contacts_count".into(),
-                filter: Some(IndexFilter::Eq(RawBsonRef::Int32(50))),
-                direction: slate_query::SortDirection::Asc,
-                limit: None,
-                complete_groups: false,
-                covered: false,
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::new("and", n), &plan_and, |b, plan| {
-            let txn = engine.store().begin(true).unwrap();
-            let cf = txn.cf("test").unwrap();
-            b.iter(|| consume_rows(Executor::new(&txn, &cf).execute(plan.clone()).unwrap()))
+        group.bench_with_input(BenchmarkId::new("and", n), &n, |b, _| {
+            let txn = engine.kv_engine().begin(true).unwrap();
+            let collection = txn.collection("test").unwrap();
+            b.iter_batched(
+                || {
+                    Plan::Find(Node::IndexMerge {
+                        logical: LogicalOp::And,
+                        lhs: Box::new(Node::IndexScan {
+                            collection: collection.clone(),
+                            field: "status".into(),
+                            range: IndexScanRange::Eq(bson::Bson::String("active".into())),
+                            direction: ScanDirection::Forward,
+                            limit: None,
+                            covered: false,
+                        }),
+                        rhs: Box::new(Node::IndexScan {
+                            collection: collection.clone(),
+                            field: "contacts_count".into(),
+                            range: IndexScanRange::Eq(bson::Bson::Int32(50)),
+                            direction: ScanDirection::Forward,
+                            limit: None,
+                            covered: false,
+                        }),
+                    })
+                },
+                |plan| {
+                    let mut exec = Executor::new(&txn);
+                    consume_rows(exec.execute(plan).unwrap())
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -538,7 +641,7 @@ fn bench_insert(c: &mut Criterion) {
     for n in [100, 1_000] {
         // Empty engine with collection + indexes, docs inserted per iteration
         let engine = {
-            let engine = Engine::new(MemoryStore::new());
+            let engine = SlateEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -550,27 +653,22 @@ fn bench_insert(c: &mut Criterion) {
         };
 
         let docs = generate_docs(n);
-        let fields = vec!["status".into(), "contacts_count".into()];
-        let plan = PlanNode::InsertIndex {
-            indexed_fields: &fields,
-            input: Box::new(PlanNode::InsertRecord {
-                input: Box::new(PlanNode::Values { docs: &docs }),
-            }),
-        };
 
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Insert {
+                        collection,
+                        source: Node::Values(docs.clone()),
+                    };
+                    (txn, plan)
                 },
-                |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Insert { ids } => ids.len(),
-                        _ => panic!("expected Insert"),
-                    }
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let iter = exec.execute(plan).unwrap();
+                    iter.count()
                 },
                 BatchSize::PerIteration,
             )
@@ -584,34 +682,27 @@ fn bench_update(c: &mut Criterion) {
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
 
-        // Update: set status = "updated" for all docs via Scan → ReadRecord → Update
-        let fields = vec!["status".into(), "contacts_count".into()];
-        let plan = PlanNode::InsertIndex {
-            indexed_fields: &fields,
-            input: Box::new(PlanNode::Update {
-                mutation: slate_query::parse_mutation(
-                    &bson::rawdoc! { "$set": { "status": "updated" } },
-                )
-                .unwrap(),
-                input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan),
-                }),
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Update {
+                        collection: collection.clone(),
+                        mutation: slate_query::parse_mutation(
+                            &bson::rawdoc! { "$set": { "status": "updated" } },
+                        )
+                        .unwrap(),
+                        source: Node::Scan { collection },
+                    };
+                    (txn, plan)
                 },
-                |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Update { modified, .. } => modified,
-                        _ => panic!("expected Update"),
-                    }
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let iter = exec.execute(plan).unwrap();
+                    let modified: u64 =
+                        iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
+                    modified
                 },
                 BatchSize::PerIteration,
             )
@@ -625,30 +716,22 @@ fn bench_delete(c: &mut Criterion) {
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
 
-        // Delete all docs: Scan → ReadRecord → DeleteIndex → Delete
-        let fields = vec!["status".into(), "contacts_count".into()];
-        let plan = PlanNode::Delete {
-            input: Box::new(PlanNode::DeleteIndex {
-                indexed_fields: &fields,
-                input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan),
-                }),
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Delete {
+                        collection: collection.clone(),
+                        source: Node::Scan { collection },
+                    };
+                    (txn, plan)
                 },
-                |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Delete { deleted } => deleted,
-                        _ => panic!("expected Delete"),
-                    }
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let iter = exec.execute(plan).unwrap();
+                    let deleted: u64 = iter.map(|r| r.unwrap()).count() as u64;
+                    deleted
                 },
                 BatchSize::PerIteration,
             )
@@ -662,35 +745,28 @@ fn bench_replace(c: &mut Criterion) {
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
 
-        // Replace all docs with a new document
-        let fields = vec!["status".into(), "contacts_count".into()];
-        let plan = PlanNode::InsertIndex {
-            indexed_fields: &fields,
-            input: Box::new(PlanNode::Replace {
-                replacement: bson::rawdoc! {
-                    "name": "Replaced",
-                    "status": "replaced",
-                    "contacts_count": 0,
-                },
-                input: Box::new(PlanNode::ReadRecord {
-                    input: Box::new(PlanNode::Scan),
-                }),
-            }),
-        };
-
-        group.bench_with_input(BenchmarkId::from_parameter(n), &plan, |b, plan| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    (txn, cf)
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Replace {
+                        collection: collection.clone(),
+                        replacement: bson::rawdoc! {
+                            "name": "Replaced",
+                            "status": "replaced",
+                            "contacts_count": 0,
+                        },
+                        source: Node::Scan { collection },
+                    };
+                    (txn, plan)
                 },
-                |(txn, cf)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Update { modified, .. } => modified,
-                        _ => panic!("expected Update"),
-                    }
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let iter = exec.execute(plan).unwrap();
+                    let modified: u64 =
+                        iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
+                    modified
                 },
                 BatchSize::PerIteration,
             )
@@ -700,10 +776,7 @@ fn bench_replace(c: &mut Criterion) {
 }
 
 fn bench_upsert_replace(c: &mut Criterion) {
-    use slate_db::bench::UpsertMode;
-
     let mut group = c.benchmark_group("upsert_replace");
-    let indexed = vec!["status".into(), "contacts_count".into()];
 
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
@@ -721,24 +794,21 @@ fn bench_upsert_replace(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    let plan = PlanNode::InsertIndex {
-                        indexed_fields: &indexed,
-                        input: Box::new(PlanNode::Upsert {
-                            mode: UpsertMode::Replace,
-                            indexed_fields: &indexed,
-                            input: Box::new(PlanNode::Values { docs: &raw_docs }),
-                        }),
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Upsert {
+                        collection,
+                        source: Node::Values(raw_docs.clone()),
                     };
-                    (txn, cf, plan)
+                    (txn, plan)
                 },
-                |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Upsert { updated, .. } => updated,
-                        _ => panic!("expected Upsert"),
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
+                    for r in iter {
+                        r.unwrap();
                     }
+                    updated.get()
                 },
                 BatchSize::PerIteration,
             )
@@ -748,10 +818,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
 }
 
 fn bench_upsert_merge(c: &mut Criterion) {
-    use slate_db::bench::UpsertMode;
-
     let mut group = c.benchmark_group("upsert_merge");
-    let indexed = vec!["status".into(), "contacts_count".into()];
 
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
@@ -767,24 +834,21 @@ fn bench_upsert_merge(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    let plan = PlanNode::InsertIndex {
-                        indexed_fields: &indexed,
-                        input: Box::new(PlanNode::Upsert {
-                            mode: UpsertMode::Merge,
-                            indexed_fields: &indexed,
-                            input: Box::new(PlanNode::Values { docs: &raw_docs }),
-                        }),
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Merge {
+                        collection,
+                        source: Node::Values(raw_docs.clone()),
                     };
-                    (txn, cf, plan)
+                    (txn, plan)
                 },
-                |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Upsert { updated, .. } => updated,
-                        _ => panic!("expected Upsert"),
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let (iter, _inserted, updated) = exec.execute_upsert_plan(plan).unwrap();
+                    for r in iter {
+                        r.unwrap();
                     }
+                    updated.get()
                 },
                 BatchSize::PerIteration,
             )
@@ -794,15 +858,12 @@ fn bench_upsert_merge(c: &mut Criterion) {
 }
 
 fn bench_upsert_insert(c: &mut Criterion) {
-    use slate_db::bench::UpsertMode;
-
     let mut group = c.benchmark_group("upsert_insert");
-    let indexed = vec!["status".into(), "contacts_count".into()];
 
     for n in [100, 1_000] {
         // Empty collection — upsert acts as pure insert
         let engine = {
-            let engine = Engine::new(MemoryStore::new());
+            let engine = SlateEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -827,24 +888,21 @@ fn bench_upsert_insert(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
                 || {
-                    let txn = engine.store().begin(false).unwrap();
-                    let cf = txn.cf("test").unwrap();
-                    let plan = PlanNode::InsertIndex {
-                        indexed_fields: &indexed,
-                        input: Box::new(PlanNode::Upsert {
-                            mode: UpsertMode::Replace,
-                            indexed_fields: &indexed,
-                            input: Box::new(PlanNode::Values { docs: &raw_docs }),
-                        }),
+                    let txn = engine.kv_engine().begin(false).unwrap();
+                    let collection = txn.collection("test").unwrap();
+                    let plan = Plan::Upsert {
+                        collection,
+                        source: Node::Values(raw_docs.clone()),
                     };
-                    (txn, cf, plan)
+                    (txn, plan)
                 },
-                |(txn, cf, plan)| {
-                    let result = Executor::new(&txn, &cf).execute(plan.clone()).unwrap();
-                    match result {
-                        ExecutionResult::Upsert { inserted, .. } => inserted,
-                        _ => panic!("expected Upsert"),
+                |(txn, plan)| {
+                    let mut exec = Executor::new(&txn);
+                    let (iter, inserted, _updated) = exec.execute_upsert_plan(plan).unwrap();
+                    for r in iter {
+                        r.unwrap();
                     }
+                    inserted.get()
                 },
                 BatchSize::PerIteration,
             )
@@ -909,8 +967,8 @@ fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
         .collect()
 }
 
-fn realistic_seeded_engine(n: usize) -> Engine<MemoryStore> {
-    let engine = Engine::new(MemoryStore::new());
+fn realistic_seeded_engine(n: usize) -> SlateEngine<MemoryStore> {
+    let engine = SlateEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
@@ -931,7 +989,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulk_insert");
     for n in [1_000, 10_000] {
         let engine = {
-            let engine = Engine::new(MemoryStore::new());
+            let engine = SlateEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),
@@ -1372,16 +1430,11 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
 }
 
 // ── Range filter benchmarks ─────────────────────────────────
-//
-// These capture the before/after for index range scans.
-// Before: range predicates on indexed fields fall back to Scan + Filter.
-// After: planner pushes them into IndexScan with range bounds.
 
 fn bench_query_indexed_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_range");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
-        // contacts_count > 50 on indexed field
         let query = Query {
             filter: Some(rawdoc! { "contacts_count": { "$gt": 50 } }),
             sort: vec![],
@@ -1407,7 +1460,6 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_range_dual");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
-        // contacts_count > 20 AND contacts_count < 80 on indexed field
         let query = Query {
             filter: Some(rawdoc! { "contacts_count": { "$gt": 20, "$lt": 80 } }),
             sort: vec![],
@@ -1433,7 +1485,6 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_eq_plus_range");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
-        // status = "active" AND contacts_count > 50 (Eq wins index, range is residual)
         let query = Query {
             filter: Some(rawdoc! { "status": "active", "contacts_count": { "$gt": 50 } }),
             sort: vec![],

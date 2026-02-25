@@ -58,3 +58,21 @@ impl From<slate_query::ParseError> for DbError {
         DbError::InvalidQuery(e.to_string())
     }
 }
+
+impl From<crate::parse_filter::FilterParseError> for DbError {
+    fn from(e: crate::parse_filter::FilterParseError) -> Self {
+        DbError::InvalidQuery(e.to_string())
+    }
+}
+
+impl From<slate_engine::EngineError> for DbError {
+    fn from(e: slate_engine::EngineError) -> Self {
+        match e {
+            slate_engine::EngineError::Store(se) => DbError::Store(se),
+            slate_engine::EngineError::CollectionNotFound(name) => {
+                DbError::CollectionNotFound(name)
+            }
+            other => DbError::InvalidQuery(other.to_string()),
+        }
+    }
+}

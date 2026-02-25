@@ -1,37 +1,29 @@
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use bson::raw::{RawBsonRef, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
-use slate_store::Transaction;
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
-use crate::encoding;
 use crate::error::DbError;
-use crate::executor::exec;
-use crate::executor::field_tree::{FieldTree, walk};
 use crate::executor::raw_mutation;
 use crate::executor::{RawIter, RawValue};
-use crate::planner::UpsertMode;
 
-pub(crate) fn execute<'a, T: Transaction + 'a>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpsertMode {
+    Replace,
+    Merge,
+}
+
+pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    cf: &'a T::Cf,
+    handle: &'a CollectionHandle<T::Cf>,
     mode: UpsertMode,
-    indexed_fields: &'a [String],
     source: RawIter<'a>,
     inserted: Rc<Cell<u64>>,
     updated: Rc<Cell<u64>>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
-    let tree = if indexed_fields.iter().any(|p| p == "ttl") {
-        FieldTree::from_paths(indexed_fields)
-    } else {
-        let mut paths = indexed_fields.to_vec();
-        paths.push("ttl".into());
-        FieldTree::from_paths(&paths)
-    };
-
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let val = match opt_val {
@@ -51,57 +43,30 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             None => new_raw,
         };
 
-        let record_key = encoding::record_key(&id_str);
-        let old_bytes = txn.get(cf, &record_key)?;
+        let doc_id = BsonValue::from_raw_bson_ref(RawBsonRef::String(&id_str))
+            .expect("string is always a valid BsonValue");
 
-        // Check if existing doc is expired (ttl < now)
-        let expired = old_bytes
-            .as_ref()
-            .map_or(false, |data| exec::is_ttl_expired(data, now_millis));
+        let old_doc = txn.get(handle, &doc_id, now_millis)?;
 
-        if let Some(ref old_data) = old_bytes {
-            let (_, bson_slice) = encoding::decode_record(old_data)?;
-            let old_raw = RawDocument::from_bytes(bson_slice)?;
-            delete_old_indexes(txn, cf, old_raw, &tree, &id_str)?;
+        if let Some(ref old_raw_doc) = old_doc {
+            let written = build_doc(&mode, &id_str, new_raw_ref, old_raw_doc)?;
+            let written = match written {
+                Some(doc) => doc,
+                None => {
+                    // Merge no-op: doc unchanged, still counts as matched.
+                    updated.set(updated.get() + 1);
+                    return Ok(Some(RawValue::Owned(RawBson::Document(
+                        old_raw_doc.clone(),
+                    ))));
+                }
+            };
 
-            if expired {
-                // Expired doc — clean up old indexes, then treat as fresh insert
-                let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
-                txn.put(
-                    cf,
-                    &record_key,
-                    &encoding::encode_record(doc_to_write.as_bytes()),
-                )?;
-                inserted.set(inserted.get() + 1);
-                Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
-            } else {
-                let written = build_doc(&mode, &id_str, new_raw_ref, old_raw)?;
-                let written = match written {
-                    Some(doc) => doc,
-                    None => {
-                        // Merge no-op: doc unchanged, still counts as matched.
-                        updated.set(updated.get() + 1);
-                        return Ok(Some(RawValue::Owned(RawBson::Document(
-                            old_raw.to_raw_document_buf(),
-                        ))));
-                    }
-                };
-
-                txn.put(
-                    cf,
-                    &record_key,
-                    &encoding::encode_record(written.as_bytes()),
-                )?;
-                updated.set(updated.get() + 1);
-                Ok(Some(RawValue::Owned(RawBson::Document(written))))
-            }
+            txn.put(handle, &written, &doc_id)?;
+            updated.set(updated.get() + 1);
+            Ok(Some(RawValue::Owned(RawBson::Document(written))))
         } else {
             let doc_to_write = normalize_id(new_doc, new_raw, &id_str)?;
-            txn.put(
-                cf,
-                &record_key,
-                &encoding::encode_record(doc_to_write.as_bytes()),
-            )?;
+            txn.put(handle, &doc_to_write, &doc_id)?;
             inserted.set(inserted.get() + 1);
             Ok(Some(RawValue::Owned(RawBson::Document(doc_to_write))))
         }
@@ -125,33 +90,6 @@ fn extract_id(raw: &RawDocument) -> Result<(String, Option<RawDocumentBuf>), DbE
             }
             Ok((id, Some(buf)))
         }
-    }
-}
-
-/// Walk the old document's indexed fields and delete their index entries.
-fn delete_old_indexes<T: Transaction>(
-    txn: &T,
-    cf: &T::Cf,
-    old_raw: &RawDocument,
-    tree: &HashMap<String, FieldTree>,
-    id: &str,
-) -> Result<(), DbError> {
-    let mut err: Option<DbError> = None;
-    walk(old_raw, tree, |path, value| {
-        if err.is_some() {
-            return;
-        }
-        if path == "ttl" && !matches!(value, RawBsonRef::DateTime(_)) {
-            return;
-        }
-        let idx_key = encoding::raw_index_key(path, value, id);
-        if let Err(e) = txn.delete(cf, &idx_key) {
-            err = Some(DbError::Store(e));
-        }
-    });
-    match err {
-        Some(e) => Err(e),
-        None => Ok(()),
     }
 }
 
@@ -342,330 +280,5 @@ mod tests {
         assert_eq!(keys[2], "score");
         // _id should only appear once (skipped from original iteration)
         assert_eq!(keys.len(), 3);
-    }
-
-    // ── delete_old_indexes ──────────────────────────────────────
-
-    #[test]
-    fn delete_old_indexes_deletes_indexed_fields() {
-        use crate::executor::field_tree::FieldTree;
-        use slate_store::Transaction;
-        use std::cell::RefCell;
-
-        // Minimal mock that only tracks deletes
-        struct DeleteTracker {
-            deletes: RefCell<Vec<Vec<u8>>>,
-        }
-        impl Transaction for DeleteTracker {
-            type Cf = ();
-            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn get<'c>(
-                &self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<Option<std::borrow::Cow<'c, [u8]>>, slate_store::StoreError> {
-                Ok(None)
-            }
-            fn multi_get<'c>(
-                &self,
-                _: &'c (),
-                _: &[&[u8]],
-            ) -> Result<Vec<Option<std::borrow::Cow<'c, [u8]>>>, slate_store::StoreError>
-            {
-                Ok(vec![])
-            }
-            fn scan_prefix<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn scan_prefix_rev<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn put(&self, _: &(), _: &[u8], _: &[u8]) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn put_batch(
-                &self,
-                _: &(),
-                _: &[(&[u8], &[u8])],
-            ) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn delete(&self, _: &(), key: &[u8]) -> Result<(), slate_store::StoreError> {
-                self.deletes.borrow_mut().push(key.to_vec());
-                Ok(())
-            }
-            fn create_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn drop_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn commit(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn rollback(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-        }
-
-        let txn = DeleteTracker {
-            deletes: RefCell::new(Vec::new()),
-        };
-        let cf = ();
-        let old_doc = rawdoc! { "_id": "1", "status": "active", "score": 80 };
-        let paths = vec!["status".to_string()];
-        let tree = FieldTree::from_paths(&paths);
-
-        delete_old_indexes(&txn, &cf, &old_doc, &tree, "1").unwrap();
-
-        let deletes = txn.deletes.borrow();
-        assert_eq!(deletes.len(), 1);
-        assert_eq!(
-            deletes[0],
-            encoding::raw_index_key("status", bson::raw::RawBsonRef::String("active"), "1")
-        );
-    }
-
-    #[test]
-    fn delete_old_indexes_skips_non_datetime_ttl() {
-        use crate::executor::field_tree::FieldTree;
-        use std::cell::RefCell;
-
-        struct DeleteTracker {
-            deletes: RefCell<Vec<Vec<u8>>>,
-        }
-        impl slate_store::Transaction for DeleteTracker {
-            type Cf = ();
-            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn get<'c>(
-                &self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<Option<std::borrow::Cow<'c, [u8]>>, slate_store::StoreError> {
-                Ok(None)
-            }
-            fn multi_get<'c>(
-                &self,
-                _: &'c (),
-                _: &[&[u8]],
-            ) -> Result<Vec<Option<std::borrow::Cow<'c, [u8]>>>, slate_store::StoreError>
-            {
-                Ok(vec![])
-            }
-            fn scan_prefix<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn scan_prefix_rev<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn put(&self, _: &(), _: &[u8], _: &[u8]) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn put_batch(
-                &self,
-                _: &(),
-                _: &[(&[u8], &[u8])],
-            ) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn delete(&self, _: &(), key: &[u8]) -> Result<(), slate_store::StoreError> {
-                self.deletes.borrow_mut().push(key.to_vec());
-                Ok(())
-            }
-            fn create_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn drop_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn commit(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn rollback(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-        }
-
-        let txn = DeleteTracker {
-            deletes: RefCell::new(Vec::new()),
-        };
-        let cf = ();
-        // ttl is a string, not DateTime — should be skipped
-        let old_doc = rawdoc! { "_id": "1", "ttl": "not-a-date" };
-        let paths = vec!["ttl".to_string()];
-        let tree = FieldTree::from_paths(&paths);
-
-        delete_old_indexes(&txn, &cf, &old_doc, &tree, "1").unwrap();
-
-        assert!(txn.deletes.borrow().is_empty());
-    }
-
-    #[test]
-    fn delete_old_indexes_handles_ttl_datetime() {
-        use crate::executor::field_tree::FieldTree;
-        use std::cell::RefCell;
-
-        struct DeleteTracker {
-            deletes: RefCell<Vec<Vec<u8>>>,
-        }
-        impl slate_store::Transaction for DeleteTracker {
-            type Cf = ();
-            fn cf(&self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn get<'c>(
-                &self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<Option<std::borrow::Cow<'c, [u8]>>, slate_store::StoreError> {
-                Ok(None)
-            }
-            fn multi_get<'c>(
-                &self,
-                _: &'c (),
-                _: &[&[u8]],
-            ) -> Result<Vec<Option<std::borrow::Cow<'c, [u8]>>>, slate_store::StoreError>
-            {
-                Ok(vec![])
-            }
-            fn scan_prefix<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn scan_prefix_rev<'c>(
-                &'c self,
-                _: &'c (),
-                _: &[u8],
-            ) -> Result<
-                Box<
-                    dyn Iterator<
-                            Item = Result<
-                                (std::borrow::Cow<'c, [u8]>, std::borrow::Cow<'c, [u8]>),
-                                slate_store::StoreError,
-                            >,
-                        > + 'c,
-                >,
-                slate_store::StoreError,
-            > {
-                Ok(Box::new(std::iter::empty()))
-            }
-            fn put(&self, _: &(), _: &[u8], _: &[u8]) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn put_batch(
-                &self,
-                _: &(),
-                _: &[(&[u8], &[u8])],
-            ) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn delete(&self, _: &(), key: &[u8]) -> Result<(), slate_store::StoreError> {
-                self.deletes.borrow_mut().push(key.to_vec());
-                Ok(())
-            }
-            fn create_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn drop_cf(&mut self, _: &str) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn commit(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-            fn rollback(self) -> Result<(), slate_store::StoreError> {
-                Ok(())
-            }
-        }
-
-        let txn = DeleteTracker {
-            deletes: RefCell::new(Vec::new()),
-        };
-        let cf = ();
-        let dt = bson::DateTime::from_millis(1700000000000);
-        let old_doc = rawdoc! { "_id": "1", "ttl": dt };
-        let paths = vec!["ttl".to_string()];
-        let tree = FieldTree::from_paths(&paths);
-
-        delete_old_indexes(&txn, &cf, &old_doc, &tree, "1").unwrap();
-
-        let deletes = txn.deletes.borrow();
-        assert_eq!(deletes.len(), 1);
-        assert_eq!(
-            deletes[0],
-            encoding::raw_index_key("ttl", bson::raw::RawBsonRef::DateTime(dt), "1")
-        );
     }
 }

@@ -1,15 +1,15 @@
 use bson::RawBson;
 use bson::raw::{RawBsonRef, RawDocumentBuf};
-use slate_store::Transaction;
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
-use crate::encoding;
 use crate::error::DbError;
 use crate::executor::{RawIter, RawValue};
 
-pub(crate) fn execute<'a, T: Transaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    cf: &'a T::Cf,
+    handle: &'a CollectionHandle<T::Cf>,
     source: RawIter<'a>,
+    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -41,16 +41,20 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             }
         };
 
-        // Duplicate key check
-        let key = encoding::record_key(&id_str);
-        if txn.get(cf, &key)?.is_some() {
+        let doc_id = BsonValue::from_raw_bson_ref(RawBsonRef::String(&id_str))
+            .expect("string is always a valid BsonValue");
+
+        // Duplicate key check (expired docs are treated as non-existent)
+        if txn.get(handle, &doc_id, now_millis)?.is_some() {
             return Err(DbError::DuplicateKey(id_str));
         }
 
-        match &doc_to_write {
-            Some(buf) => txn.put(cf, &key, &encoding::encode_record(buf.as_bytes()))?,
-            None => txn.put(cf, &key, &encoding::encode_record(raw.as_bytes()))?,
-        }
+        // Write via engine — handles encoding + index maintenance
+        let write_doc = match &doc_to_write {
+            Some(buf) => buf.as_ref(),
+            None => raw,
+        };
+        txn.put(handle, write_doc, &doc_id)?;
 
         match doc_to_write {
             Some(buf) => Ok(Some(RawValue::Owned(RawBson::Document(buf)))),

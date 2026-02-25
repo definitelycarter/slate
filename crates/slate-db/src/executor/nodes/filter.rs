@@ -1,11 +1,10 @@
-use crate::expression::Expression;
-
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
+use crate::expression::Expression;
 
 pub(crate) fn execute<'a>(
-    predicate: Expression<'a>,
+    predicate: Expression,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.filter_map(move |result| match result {

@@ -27,7 +27,8 @@ pub trait Transaction {
     /// Concrete types must be independent of `&self` (owned or borrowed from
     /// something other than the transaction) so that `cf(&mut self)` doesn't
     /// extend the mutable borrow into subsequent `&self` reads.
-    type Cf;
+    /// Must be cheaply cloneable (all backends use Arc-based handles).
+    type Cf: Clone;
 
     /// Resolve a column family by name. Must be called before any reads on that CF.
     fn cf(&self, name: &str) -> Result<Self::Cf, StoreError>;

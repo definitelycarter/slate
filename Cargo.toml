@@ -2,3 +2,6 @@
 resolver = "2"
 members = ["crates/*"]
 exclude = ["scratch/ttl_bench", "scratch/ttl_keyspace_bench", "scratch/raw_field_bench", "scratch/filter_poc"]
+
+[workspace.dependencies]
+bson = "2"

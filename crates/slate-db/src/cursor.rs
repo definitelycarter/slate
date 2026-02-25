@@ -1,69 +1,100 @@
 use bson::RawDocumentBuf;
-use slate_store::{Store, Transaction};
+use slate_engine::{EngineTransaction, KvEngine};
+use slate_store::Store;
 
 use crate::error::DbError;
-use crate::executor::{ExecutionResult, Executor, RawIter};
-use crate::planner;
+use crate::executor::Executor;
+use crate::planner::plan::Plan;
 
-/// A prepared query that can be iterated over.
+type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
+
+/// A prepared query that can be iterated or executed.
 ///
-/// Borrows the transaction and owns a [`PreparedStatement`](planner::PreparedStatement)
-/// that co-locates the `Statement` and `indexed_fields`.
-/// Call [`.iter()`](Cursor::iter) to plan and produce a streaming
-/// [`CursorIter`]. Planning is deferred so that `PlanNode<'_>` borrows
-/// from the owned data via `&self` — no self-referential struct.
-pub struct Cursor<'db, 'txn, S: Store + 'db> {
-    txn: &'txn S::Txn<'db>,
-    cf: <S::Txn<'db> as Transaction>::Cf,
-    prepared: planner::PreparedStatement,
+/// Owns a pre-built `Plan` and a reference to the transaction.
+/// Call [`.iter()`](Cursor::iter) for streaming iteration, or
+/// [`.execute()`](Cursor::execute) to drain and return a count.
+pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
+    txn: &'txn KvTxn<'db, S>,
+    plan: Option<Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>>,
 }
 
-impl<'db, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
+impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
-        txn: &'txn S::Txn<'db>,
-        cf: <S::Txn<'db> as Transaction>::Cf,
-        prepared: planner::PreparedStatement,
+        txn: &'txn KvTxn<'db, S>,
+        plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
     ) -> Self {
-        Self { txn, cf, prepared }
-    }
-
-    /// Plan the query and return a streaming iterator.
-    ///
-    /// `PlanNode<'_>` borrows from `&self.prepared`; the executor iterator
-    /// borrows from `self.txn` and `&self.cf`. All three are alive as long
-    /// as `&self` — which the caller holds.
-    pub fn iter(&self) -> Result<CursorIter<'_>, DbError> {
-        let plan = planner::plan(&self.prepared)?;
-        let exec = Executor::new(self.txn, &self.cf);
-        match exec.execute(plan)? {
-            ExecutionResult::Rows(inner) => Ok(CursorIter { inner }),
-            _ => unreachable!(),
+        Self {
+            txn,
+            plan: Some(plan),
         }
     }
-}
 
-/// A streaming iterator over query results.
-///
-/// Yields one [`RawDocumentBuf`] at a time without materializing the full result set.
-pub struct CursorIter<'a> {
-    inner: RawIter<'a>,
-}
+    /// Execute the plan and return a materialized iterator over documents.
+    ///
+    /// Results are collected eagerly so the executor (and its handle arena) can
+    /// be dropped before the caller starts iterating.  For small-to-medium
+    /// result sets this is fine; for very large ones, prefer `.execute()` which
+    /// streams without materializing.
+    pub fn iter(&self) -> Result<CursorIter, DbError> {
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or_else(|| DbError::InvalidQuery("cursor already consumed".into()))?;
+        let mut exec = Executor::new(self.txn);
+        let iter = exec.execute(plan.clone())?;
 
-impl Iterator for CursorIter<'_> {
-    type Item = Result<RawDocumentBuf, DbError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            match self.inner.next()? {
-                Err(e) => return Some(Err(e)),
-                Ok(None) => continue,
-                Ok(Some(val)) => {
-                    return Some(
-                        val.into_document_buf()
-                            .ok_or_else(|| DbError::InvalidQuery("expected document".into())),
-                    );
+        // Materialize: the executor's handle arena must outlive the RawIter,
+        // so we drain the iterator here while `exec` is still alive.
+        let mut docs = Vec::new();
+        for result in iter {
+            match result? {
+                None => continue,
+                Some(val) => {
+                    let doc = val
+                        .into_document_buf()
+                        .ok_or_else(|| DbError::InvalidQuery("expected document".into()))?;
+                    docs.push(doc);
                 }
             }
         }
+
+        Ok(CursorIter {
+            inner: docs.into_iter(),
+        })
+    }
+
+    /// Consume the cursor, drain all rows, and return the count of affected rows.
+    pub fn execute(mut self) -> Result<u64, DbError> {
+        let plan = self
+            .plan
+            .take()
+            .ok_or_else(|| DbError::InvalidQuery("cursor already consumed".into()))?;
+        let mut exec = Executor::new(self.txn);
+        let iter = exec.execute(plan)?;
+        let mut count = 0u64;
+        for result in iter {
+            result?;
+            count += 1;
+        }
+        Ok(count)
+    }
+}
+
+/// A materialized iterator over query results.
+///
+/// Each call to [`next()`](Iterator::next) returns the next pre-fetched document.
+pub struct CursorIter {
+    inner: std::vec::IntoIter<RawDocumentBuf>,
+}
+
+impl Iterator for CursorIter {
+    type Item = Result<RawDocumentBuf, DbError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(Ok)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }

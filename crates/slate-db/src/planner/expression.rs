@@ -1,4 +1,4 @@
-use bson::raw::RawBsonRef;
+use bson::Bson;
 use regex::Regex;
 
 /// Logical operator for index merge operations.
@@ -10,27 +10,27 @@ pub enum LogicalOp {
 
 /// A recursive filter expression tree.
 ///
-/// Borrows field names and values directly from the raw BSON filter document,
-/// avoiding heap allocations during parsing. The lifetime `'a` is tied to
-/// the `RawDocument` (or `RawDocumentBuf`) that was parsed.
+/// Owns field names and values so the expression can outlive the document
+/// it was parsed from. Scalars (i32, i64, f64, bool, etc.) are copied by
+/// value; only strings and nested documents allocate.
 #[derive(Debug, Clone)]
-pub enum Expression<'a> {
+pub enum Expression {
     // Logical
-    And(Vec<Expression<'a>>),
-    Or(Vec<Expression<'a>>),
-    // Comparison — field name + value borrowed from raw BSON bytes
-    Eq(&'a str, RawBsonRef<'a>),
-    Gt(&'a str, RawBsonRef<'a>),
-    Gte(&'a str, RawBsonRef<'a>),
-    Lt(&'a str, RawBsonRef<'a>),
-    Lte(&'a str, RawBsonRef<'a>),
+    And(Vec<Expression>),
+    Or(Vec<Expression>),
+    // Comparison — field name + value, owned
+    Eq(String, Bson),
+    Gt(String, Bson),
+    Gte(String, Bson),
+    Lt(String, Bson),
+    Lte(String, Bson),
     // Pattern — regex is compiled, not borrowed
-    Regex(&'a str, Regex),
+    Regex(String, Regex),
     // Existence
-    Exists(&'a str, bool),
+    Exists(String, bool),
 }
 
-impl PartialEq for Expression<'_> {
+impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Expression::And(a), Expression::And(b)) => a == b,

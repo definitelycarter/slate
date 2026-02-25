@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use slate_store::Store;
 
-use crate::engine::Engine;
+use crate::engine::SlateEngine;
 
 pub(crate) struct TtlHandle {
     shutdown: Arc<AtomicBool>,
@@ -33,7 +33,7 @@ impl Drop for TtlHandle {
 /// Spawn the background TTL sweep thread if an interval is configured.
 /// Returns `None` when `interval_secs == u64::MAX` (no sweep).
 pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
-    engine: Arc<Engine<S>>,
+    engine: Arc<SlateEngine<S>>,
     interval_secs: u64,
 ) -> Option<TtlHandle> {
     if interval_secs == u64::MAX {
@@ -53,14 +53,8 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
             if sweep_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let collections = match engine.begin(true) {
-                Ok(txn) => match txn.list_collections() {
-                    Ok(c) => {
-                        let _ = txn.rollback();
-                        c
-                    }
-                    Err(_) => continue,
-                },
+            let collections = match engine.list_collections() {
+                Ok(c) => c,
                 Err(_) => continue,
             };
             for col in &collections {

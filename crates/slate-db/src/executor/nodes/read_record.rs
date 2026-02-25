@@ -1,15 +1,13 @@
 use bson::RawBson;
-use bson::raw::RawDocumentBuf;
-use slate_store::Transaction;
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
-use crate::encoding;
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::{RawIter, RawValue};
 
-pub(crate) fn execute<'a, T: Transaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    cf: &'a T::Cf,
+    handle: &'a CollectionHandle<T::Cf>,
     source: RawIter<'a>,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
@@ -24,7 +22,7 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
             None => return None,
         };
         // Accept bare String id (from IndexScan) or Document with _id
-        let id = match &val {
+        let id_str = match &val {
             RawValue::Owned(RawBson::String(s)) => s.clone(),
             _ => match val.as_document() {
                 Some(raw) => match exec::raw_extract_id(raw) {
@@ -35,21 +33,12 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                 None => return None,
             },
         };
-        let key = encoding::record_key(&id);
-        match exec::get_record_if_alive(txn, cf, &key, now_millis) {
-            Ok(Some(bytes)) => {
-                let (_, bson_slice) = match encoding::decode_record(&bytes) {
-                    Ok(pair) => pair,
-                    Err(e) => return Some(Err(e)),
-                };
-                let raw = match RawDocumentBuf::from_bytes(bson_slice.to_vec()) {
-                    Ok(r) => r,
-                    Err(e) => return Some(Err(DbError::from(e))),
-                };
-                Some(Ok(Some(RawValue::Owned(RawBson::Document(raw)))))
-            }
-            Ok(None) => None, // missing or expired
-            Err(e) => Some(Err(e)),
+        let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(&id_str))
+            .expect("string is always a valid BsonValue");
+        match txn.get(handle, &doc_id, now_millis) {
+            Ok(Some(doc)) => Some(Ok(Some(RawValue::Owned(RawBson::Document(doc))))),
+            Ok(None) => None,
+            Err(e) => Some(Err(DbError::from(e))),
         }
     })))
 }

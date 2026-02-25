@@ -1,10 +1,8 @@
 pub(crate) mod delete;
-pub(crate) mod delete_index;
 pub(crate) mod distinct;
 pub(crate) mod filter;
 pub(crate) mod index_merge;
 pub(crate) mod index_scan;
-pub(crate) mod insert_index;
 pub(crate) mod insert_record;
 pub(crate) mod limit;
 pub(crate) mod mutate;

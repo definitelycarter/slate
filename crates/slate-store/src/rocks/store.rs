@@ -45,6 +45,9 @@ impl Store for RocksStore {
     }
 
     fn create_cf(&self, name: &str) -> Result<(), StoreError> {
+        if self.db.cf_handle(name).is_some() {
+            return Ok(());
+        }
         let opts = Options::default();
         self.db
             .create_cf(name, &opts)

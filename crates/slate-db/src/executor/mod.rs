@@ -8,14 +8,15 @@ pub(crate) mod raw_mutation;
 mod tests;
 
 use std::cell::Cell;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use bson::RawDocument;
 use bson::raw::{RawBson, RawBsonRef};
-use slate_store::Transaction;
+use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
-use crate::planner::PlanNode;
+use crate::planner::plan::{Node, Plan};
 
 // ── RawValue ────────────────────────────────────────────────────
 
@@ -51,239 +52,218 @@ impl<'a> RawValue<'a> {
 
 pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawValue<'a>>, DbError>> + 'a>;
 
-pub enum ExecutionResult<'a> {
-    Rows(RawIter<'a>),
-    Delete { deleted: u64 },
-    Update { matched: u64, modified: u64 },
-    Insert { ids: Vec<String> },
-    Upsert { inserted: u64, updated: u64 },
-}
-
-pub struct Executor<'c, T: Transaction> {
+/// Executes query plans against an [`EngineTransaction`].
+///
+/// # Safety contract
+///
+/// The executor stores [`CollectionHandle`]s in a heap-pinned arena.  The
+/// returned `RawIter` borrows from those handles.  Callers **must** keep the
+/// `Executor` alive at least as long as any iterator it produces:
+///
+/// ```ignore
+/// let mut exec = Executor::new(&txn);   // bind to a local
+/// let iter = exec.execute(plan)?;
+/// for row in iter { /* ... */ }
+/// // `exec` is dropped here — after `iter` is consumed
+/// ```
+///
+/// Using the executor as a temporary (e.g. `Executor::new(&txn).execute(plan)`)
+/// when the plan touches a collection is **unsound**.
+pub struct Executor<'c, T: EngineTransaction> {
     txn: &'c T,
-    cf: &'c T::Cf,
     now_millis: i64,
+    handles: Vec<Pin<Box<CollectionHandle<T::Cf>>>>,
 }
 
-impl<'c, T: Transaction + 'c> Executor<'c, T> {
-    pub fn new(txn: &'c T, cf: &'c T::Cf) -> Self {
+impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
+    pub fn new(txn: &'c T) -> Self {
         Self {
             txn,
-            cf,
             now_millis: bson::DateTime::now().timestamp_millis(),
+            handles: Vec::new(),
         }
     }
 
     /// Create an executor that skips TTL filtering.
-    /// Used by `purge_expired` so the delete pipeline can read expired docs.
-    /// Sets `now_millis` to `i64::MIN` so `is_ttl_expired` always returns `false`
-    /// (no timestamp is less than `i64::MIN`).
-    pub fn new_no_ttl_filter(txn: &'c T, cf: &'c T::Cf) -> Self {
+    pub fn new_no_ttl_filter(txn: &'c T) -> Self {
         Self {
             txn,
-            cf,
             now_millis: i64::MIN,
+            handles: Vec::new(),
         }
     }
 
-    pub fn execute(&self, node: PlanNode<'c>) -> Result<ExecutionResult<'c>, DbError> {
-        match node {
-            PlanNode::Delete { .. } => {
-                let iter = self.execute_node(node)?;
-                let mut deleted = 0u64;
-                for result in iter {
-                    result?;
-                    deleted += 1;
-                }
-                Ok(ExecutionResult::Delete { deleted })
+    /// Store a handle on the heap and return a reference valid for `'c`.
+    ///
+    /// # Safety
+    ///
+    /// Sound only when the caller guarantees that `self` outlives the returned
+    /// reference — i.e. the `Executor` must outlive any `RawIter` that captures
+    /// the returned `&CollectionHandle`.
+    fn store_handle(&mut self, handle: CollectionHandle<T::Cf>) -> &'c CollectionHandle<T::Cf> {
+        self.handles.push(Box::pin(handle));
+        let pinned: &CollectionHandle<T::Cf> = &self.handles.last().unwrap();
+        unsafe { &*(pinned as *const CollectionHandle<T::Cf>) }
+    }
+
+    /// Execute a plan, returning a streaming iterator of rows.
+    pub fn execute(&mut self, plan: Plan<T::Cf>) -> Result<RawIter<'c>, DbError> {
+        match plan {
+            Plan::Find(node) => self.execute_node(node),
+
+            Plan::Insert { collection, source } => {
+                let source = self.execute_node(source)?;
+                let handle = self.store_handle(collection);
+                nodes::insert_record::execute(self.txn, handle, source, self.now_millis)
             }
-            PlanNode::InsertIndex { ref input, .. }
-                if matches!(**input, PlanNode::InsertRecord { .. }) =>
-            {
-                let iter = self.execute_node(node)?;
-                let mut ids = Vec::new();
-                for result in iter {
-                    if let Some(val) = result? {
-                        if let Some(raw) = val.as_document() {
-                            if let Some(id_str) = exec::raw_extract_id(raw)? {
-                                ids.push(id_str.to_string());
-                            }
-                        }
-                    }
-                }
-                Ok(ExecutionResult::Insert { ids })
+
+            Plan::Update {
+                collection,
+                mutation,
+                source,
+            } => {
+                let source = self.execute_node(source)?;
+                let handle = self.store_handle(collection);
+                nodes::mutate::execute(self.txn, handle, mutation, source)
             }
-            PlanNode::InsertIndex { ref input, .. }
-                if matches!(**input, PlanNode::Upsert { .. }) =>
-            {
-                let inserted = Rc::new(Cell::new(0u64));
-                let updated = Rc::new(Cell::new(0u64));
-                let iter = self.execute_upsert_pipeline(node, &inserted, &updated)?;
-                for result in iter {
-                    result?;
-                }
-                Ok(ExecutionResult::Upsert {
-                    inserted: inserted.get(),
-                    updated: updated.get(),
-                })
+
+            Plan::Replace {
+                collection,
+                replacement,
+                source,
+            } => {
+                let source = self.execute_node(source)?;
+                let handle = self.store_handle(collection);
+                nodes::replace::execute(self.txn, handle, replacement, source)
             }
-            PlanNode::InsertIndex { .. } => {
-                let iter = self.execute_node(node)?;
-                let mut matched = 0u64;
-                let mut modified = 0u64;
-                for result in iter {
-                    let opt_val = result?;
-                    matched += 1;
-                    if opt_val.is_some() {
-                        modified += 1;
-                    }
-                }
-                Ok(ExecutionResult::Update { matched, modified })
+
+            Plan::Delete { collection, source } => {
+                let source = self.execute_node(source)?;
+                let handle = self.store_handle(collection);
+                nodes::delete::execute(self.txn, handle, source)
+            }
+
+            Plan::Merge { collection, source } => {
+                let (iter, _, _) =
+                    self.execute_upsert(nodes::upsert::UpsertMode::Merge, collection, source)?;
+                Ok(iter)
+            }
+
+            Plan::Upsert { collection, source } => {
+                let (iter, _, _) =
+                    self.execute_upsert(nodes::upsert::UpsertMode::Replace, collection, source)?;
+                Ok(iter)
+            }
+        }
+    }
+
+    /// Execute an upsert pipeline, returning the row iterator and shared counters
+    /// that are populated as the iterator is drained.
+    pub fn execute_upsert_plan(
+        &mut self,
+        plan: Plan<T::Cf>,
+    ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
+        match plan {
+            Plan::Merge { collection, source } => {
+                self.execute_upsert(nodes::upsert::UpsertMode::Merge, collection, source)
+            }
+            Plan::Upsert { collection, source } => {
+                self.execute_upsert(nodes::upsert::UpsertMode::Replace, collection, source)
             }
             _ => {
-                let iter = self.execute_node(node)?;
-                Ok(ExecutionResult::Rows(iter))
+                let iter = self.execute(plan)?;
+                Ok((iter, Rc::new(Cell::new(0)), Rc::new(Cell::new(0))))
             }
         }
     }
 
-    /// Execute the full upsert pipeline, threading shared counters through the Upsert node.
-    fn execute_upsert_pipeline(
-        &self,
-        node: PlanNode<'c>,
-        inserted: &Rc<Cell<u64>>,
-        updated: &Rc<Cell<u64>>,
-    ) -> Result<RawIter<'c>, DbError> {
+    fn execute_upsert(
+        &mut self,
+        mode: nodes::upsert::UpsertMode,
+        collection: CollectionHandle<T::Cf>,
+        source_node: Node<T::Cf>,
+    ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
+        let inserted = Rc::new(Cell::new(0u64));
+        let updated = Rc::new(Cell::new(0u64));
+        let source = self.execute_node(source_node)?;
+        let handle = self.store_handle(collection);
+        let iter = nodes::upsert::execute(
+            self.txn,
+            handle,
+            mode,
+            source,
+            Rc::clone(&inserted),
+            Rc::clone(&updated),
+            self.now_millis,
+        )?;
+        Ok((iter, inserted, updated))
+    }
+
+    fn execute_node(&mut self, node: Node<T::Cf>) -> Result<RawIter<'c>, DbError> {
         match node {
-            PlanNode::InsertIndex {
-                indexed_fields,
-                input,
-            } => {
-                let source = self.execute_upsert_pipeline(*input, inserted, updated)?;
-                nodes::insert_index::execute(self.txn, self.cf, indexed_fields, source)
+            Node::Values(docs) => nodes::values::execute(docs),
+
+            Node::Scan { collection } => {
+                let handle = self.store_handle(collection);
+                nodes::scan::execute(self.txn, handle, self.now_millis)
             }
-            PlanNode::Upsert {
-                mode,
-                indexed_fields,
-                input,
+
+            Node::IndexScan {
+                collection,
+                field,
+                range,
+                direction,
+                limit,
+                covered,
             } => {
-                let source = self.execute_node(*input)?;
-                nodes::upsert::execute(
+                let handle = self.store_handle(collection);
+                nodes::index_scan::execute(
                     self.txn,
-                    self.cf,
-                    mode,
-                    indexed_fields,
-                    source,
-                    Rc::clone(inserted),
-                    Rc::clone(updated),
+                    handle,
+                    field,
+                    &range,
+                    direction,
+                    limit,
+                    covered,
                     self.now_millis,
                 )
             }
-            _ => self.execute_node(node),
-        }
-    }
 
-    fn execute_node(&self, node: PlanNode<'c>) -> Result<RawIter<'c>, DbError> {
-        match node {
-            PlanNode::Values { docs } => nodes::values::execute(docs),
-            PlanNode::Projection { columns, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::projection::execute(columns, source)
-            }
-            PlanNode::Limit { skip, take, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::limit::execute(skip, take, source)
-            }
-            PlanNode::Sort { sorts, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::sort::execute(sorts, source)
-            }
-            PlanNode::Distinct { field, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::distinct::execute(field, source)
-            }
-            PlanNode::Filter { predicate, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::filter::execute(predicate, source)
-            }
-            PlanNode::Scan => nodes::scan::execute(self.txn, self.cf, self.now_millis),
-            PlanNode::IndexScan {
-                column,
-                filter,
-                direction,
-                limit,
-                complete_groups,
-                covered,
-                ..
-            } => nodes::index_scan::execute(
-                self.txn,
-                self.cf,
-                column,
-                filter.as_ref(),
-                direction,
-                limit,
-                complete_groups,
-                covered,
-                self.now_millis,
-            ),
-            PlanNode::IndexMerge { logical, lhs, rhs } => {
+            Node::IndexMerge { logical, lhs, rhs } => {
                 let left = self.execute_node(*lhs)?;
                 let right = self.execute_node(*rhs)?;
                 nodes::index_merge::execute(logical, left, right)
             }
-            PlanNode::ReadRecord { input } => {
-                let source = self.execute_node(*input)?;
-                nodes::read_record::execute(self.txn, self.cf, source, self.now_millis)
+
+            Node::KeyLookup { collection, source } => {
+                let source = self.execute_node(*source)?;
+                let handle = self.store_handle(collection);
+                nodes::read_record::execute(self.txn, handle, source, self.now_millis)
             }
-            PlanNode::Delete { input } => {
-                let source = self.execute_node(*input)?;
-                nodes::delete::execute(self.txn, self.cf, source)
+
+            Node::Filter { predicate, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::filter::execute(predicate, source)
             }
-            PlanNode::Update { mutation, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::mutate::execute(self.txn, self.cf, mutation, source)
+
+            Node::Sort { sorts, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::sort::execute(sorts, source)
             }
-            PlanNode::Replace { replacement, input } => {
-                let source = self.execute_node(*input)?;
-                nodes::replace::execute(self.txn, self.cf, replacement, source)
+
+            Node::Limit { skip, take, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::limit::execute(skip, take, source)
             }
-            PlanNode::InsertRecord { input } => {
-                let source = self.execute_node(*input)?;
-                nodes::insert_record::execute(self.txn, self.cf, source)
+
+            Node::Projection { columns, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::projection::execute(columns, source)
             }
-            PlanNode::InsertIndex {
-                indexed_fields,
-                input,
-            } => {
-                let source = self.execute_node(*input)?;
-                nodes::insert_index::execute(self.txn, self.cf, indexed_fields, source)
-            }
-            PlanNode::DeleteIndex {
-                indexed_fields,
-                input,
-            } => {
-                let source = self.execute_node(*input)?;
-                nodes::delete_index::execute(self.txn, self.cf, indexed_fields, source)
-            }
-            PlanNode::Upsert {
-                mode,
-                indexed_fields,
-                input,
-            } => {
-                let source = self.execute_node(*input)?;
-                // Standalone execute_node — counters are discarded.
-                let inserted = Rc::new(Cell::new(0u64));
-                let updated = Rc::new(Cell::new(0u64));
-                nodes::upsert::execute(
-                    self.txn,
-                    self.cf,
-                    mode,
-                    indexed_fields,
-                    source,
-                    inserted,
-                    updated,
-                    self.now_millis,
-                )
+
+            Node::Distinct { field, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::distinct::execute(field, source)
             }
         }
     }

@@ -13,6 +13,7 @@ use crate::store::Transaction;
 type DB = OptimisticTransactionDB<MultiThreaded>;
 
 /// Pre-resolved column family handle for reads.
+#[derive(Clone)]
 pub struct RocksCf<'db> {
     handle: Arc<BoundColumnFamily<'db>>,
 }

@@ -1,11 +1,9 @@
-use std::collections::HashSet;
-
-use crate::expression::LogicalOp;
-use bson::RawBson;
-
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::{RawIter, RawValue};
+use crate::expression::LogicalOp;
+use bson::RawBson;
+use std::collections::HashSet;
 
 fn extract_id_from_raw_value<'a>(v: &'a RawValue<'a>) -> Option<&'a str> {
     match v {
