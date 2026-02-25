@@ -4,10 +4,9 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, DatabaseConfig};
 use slate_db::bench::{
-    Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, RawIter, ScanDirection,
-    SlateEngine,
+    Database, Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, RawIter, ScanDirection,
 };
 use slate_engine::{
     BsonValue, Catalog, CollectionHandle, Engine, EngineError, EngineTransaction, IndexEntry,
@@ -106,8 +105,8 @@ fn consume_rows(iter: RawIter) -> usize {
 
 /// Create a seeded MemoryStore-backed Engine with `n` documents and indexes
 /// on `status` and `contacts_count`.
-fn seeded_engine(n: usize) -> SlateEngine<MemoryStore> {
-    let engine = SlateEngine::new(MemoryStore::new());
+fn seeded_engine(n: usize) -> Database<MemoryStore> {
+    let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
@@ -641,7 +640,7 @@ fn bench_insert(c: &mut Criterion) {
     for n in [100, 1_000] {
         // Empty engine with collection + indexes, docs inserted per iteration
         let engine = {
-            let engine = SlateEngine::new(MemoryStore::new());
+            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -867,7 +866,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
     for n in [100, 1_000] {
         // Empty collection — upsert acts as pure insert
         let engine = {
-            let engine = SlateEngine::new(MemoryStore::new());
+            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -973,8 +972,8 @@ fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
         .collect()
 }
 
-fn realistic_seeded_engine(n: usize) -> SlateEngine<MemoryStore> {
-    let engine = SlateEngine::new(MemoryStore::new());
+fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
+    let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
@@ -995,7 +994,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulk_insert");
     for n in [1_000, 10_000] {
         let engine = {
-            let engine = SlateEngine::new(MemoryStore::new());
+            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),

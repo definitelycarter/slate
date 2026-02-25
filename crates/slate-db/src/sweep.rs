@@ -4,9 +4,10 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use slate_engine::{Engine, KvEngine};
 use slate_store::Store;
 
-use crate::engine::SlateEngine;
+use crate::database::Transaction;
 
 pub(crate) struct TtlHandle {
     shutdown: Arc<AtomicBool>,
@@ -33,7 +34,7 @@ impl Drop for TtlHandle {
 /// Spawn the background TTL sweep thread if an interval is configured.
 /// Returns `None` when `interval_secs == u64::MAX` (no sweep).
 pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
-    engine: Arc<SlateEngine<S>>,
+    engine: Arc<KvEngine<S>>,
     interval_secs: u64,
 ) -> Option<TtlHandle> {
     if interval_secs == u64::MAX {
@@ -53,12 +54,35 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
             if sweep_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let collections = match engine.list_collections() {
-                Ok(c) => c,
-                Err(_) => continue,
+            let collections = {
+                let txn = match engine.begin(true) {
+                    Ok(t) => Transaction::from_engine_txn(t),
+                    Err(_) => continue,
+                };
+                let names = match txn.list_collections() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        let _ = txn.rollback();
+                        continue;
+                    }
+                };
+                let _ = txn.rollback();
+                names
             };
             for col in &collections {
-                let _ = engine.purge_expired(col);
+                let txn = match engine.begin(false) {
+                    Ok(t) => Transaction::from_engine_txn(t),
+                    Err(_) => continue,
+                };
+                let mut txn = txn;
+                match txn.purge_expired(col) {
+                    Ok(_) => {
+                        let _ = txn.commit();
+                    }
+                    Err(_) => {
+                        let _ = txn.rollback();
+                    }
+                }
             }
         }
     });

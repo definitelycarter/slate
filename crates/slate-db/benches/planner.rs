@@ -27,7 +27,7 @@ fn find(predicate: Expression) -> Statement<'static> {
         sort: vec![],
         skip: None,
         take: None,
-        columns: None,
+        projection: None,
     }
 }
 
@@ -42,18 +42,18 @@ fn find_with_sort(
         sort,
         skip: None,
         take,
-        columns: None,
+        projection: None,
     }
 }
 
-fn find_with_projection(predicate: Expression, columns: Vec<String>) -> Statement<'static> {
+fn find_with_projection(predicate: Expression, projection: Vec<String>) -> Statement<'static> {
     Statement::Find {
         collection: "users",
         predicate,
         sort: vec![],
         skip: None,
         take: None,
-        columns: Some(columns),
+        projection: Some(projection),
     }
 }
 

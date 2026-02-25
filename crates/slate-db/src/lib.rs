@@ -1,11 +1,7 @@
 mod collection;
 mod convert;
 mod cursor;
-mod database;
-#[cfg(not(feature = "bench-internals"))]
-pub(crate) mod engine;
-#[cfg(feature = "bench-internals")]
-pub mod engine;
+pub(crate) mod database;
 mod error;
 mod executor;
 mod expression;
@@ -19,14 +15,13 @@ pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
 pub use convert::IntoRawDocumentBuf;
 pub use cursor::{Cursor, CursorIter};
-pub use database::{Database, DatabaseConfig};
-pub use engine::Transaction as DatabaseTransaction;
+pub use database::{Database, DatabaseConfig, Transaction as DatabaseTransaction};
 pub use error::DbError;
 pub use result::InsertResult;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench {
-    pub use crate::engine::SlateEngine;
+    pub use crate::database::Database;
     pub use crate::executor::{Executor, RawIter};
     pub use crate::expression::{Expression, LogicalOp};
     pub use crate::planner::plan::{IndexScanRange, Node, Plan, ScanDirection};
