@@ -19,13 +19,13 @@ ID tier:         Scan / IndexScan / IndexMerge (produce record IDs)
 ```
 
 **ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — everything above ReadRecord operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. MemoryStore preserves zero-copy via `RawValue::Borrowed`, RocksDB uses `RawValue::Owned`. For index-covered queries, `RawValue` carries scalar values (String, Int, etc.) directly from the index — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
+**Raw tier** — everything above ReadRecord operates on `Option<RawBson>`. For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose iterator yields `RawDocumentBuf` lazily. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
 ## Query Model
 
 ```rust
 Query {
-    filter: Option<FilterGroup>,      // WHERE clause
+    filter: Option<RawDocumentBuf>,   // BSON filter document
     sort: Vec<Sort>,                   // ORDER BY
     skip: Option<usize>,              // OFFSET
     take: Option<usize>,              // LIMIT
@@ -33,16 +33,23 @@ Query {
 }
 ```
 
-Filters use a recursive group structure with AND/OR logical operators:
+Filters are raw BSON documents at the query layer. At plan time, `slate-db`'s parser converts the BSON filter into a recursive `Expression` tree:
 
 ```rust
-FilterGroup {
-    logical: LogicalOp,               // And | Or
-    children: Vec<FilterNode>,        // Condition | nested Group
+enum Expression {
+    And(Vec<Expression>),
+    Or(Vec<Expression>),
+    Eq(String, Bson),
+    Gt(String, Bson),
+    Gte(String, Bson),
+    Lt(String, Bson),
+    Lte(String, Bson),
+    Regex(String, Regex),
+    Exists(String, bool),
 }
 ```
 
-Operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`, `IsNull`, `IContains`, `IStartsWith`, `IEndsWith`.
+Comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Pattern matching: `Regex`. Existence: `Exists`.
 
 ## Index Configuration
 
@@ -345,7 +352,7 @@ Projection(status)
   └── IndexScan(status = "active")
 ```
 
-The projection only requests `status`, which is the indexed field used by the `IndexScan`. Since the `IndexScan` already carries the matched value (`"active"`) as a `RawValue`, the planner skips `ReadRecord` entirely — no document bytes are fetched from storage. `Projection` constructs `{ _id, status: "active" }` directly from the index value.
+The projection only requests `status`, which is the indexed field used by the `IndexScan`. Since the `IndexScan` already carries the matched value (`"active"`) as `RawBson`, the planner skips `ReadRecord` entirely — no document bytes are fetched from storage. `Projection` constructs `{ _id, status: "active" }` directly from the index value.
 
 Each index entry stores the BSON element type byte in its value (e.g. `0x10` for Int32, `0x12` for Int64). When the query's value type differs from the stored type (e.g. query sends `Int64(100)` but the document stored `Int32(100)`), the executor coerces the emitted value to match the stored type. This ensures correct type round-tripping through index-covered projections.
 
@@ -400,7 +407,7 @@ When a filter field resolves to a `RawBsonRef::Array`, the executor iterates the
 
 Applies to all scalar comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Each element delegates to the existing scalar comparison functions, so cross-type coercion (String→Int, Double↔Int, etc.) works automatically within array elements.
 
-**Not supported:** sorting on array fields has no meaningful scalar ordering and is left unsupported. Filtering on nested array paths (e.g. `items.[].sku = "A1"`) is handled separately by the multi-key path resolution in `get_path_values`.
+**Not supported:** sorting on array fields has no meaningful scalar ordering and is left unsupported. Filtering on nested array paths (e.g. `items.[].sku = "A1"`) is handled separately by the multi-key path resolution in `field_tree::walk`.
 
 ---
 
@@ -483,7 +490,7 @@ Distinct queries find unique values for a single field. The planner builds a pla
 ```rust
 DistinctQuery {
     field: String,                     // The field to collect unique values from
-    filter: Option<FilterGroup>,       // Optional WHERE clause (same as find)
+    filter: Option<RawDocumentBuf>,    // Optional BSON filter document (same as find)
     sort: Option<SortDirection>,       // Optional sort on the distinct values
     skip: Option<usize>,              // Skip first N unique values
     take: Option<usize>,              // Take N unique values
@@ -568,7 +575,7 @@ Both Sort and Limit are general-purpose nodes — they don't need to know whethe
 
 ### Deduplication
 
-Distinct uses `HashSet<u64>` with a hash of the raw BSON bytes (`hash_raw`). This avoids materializing values for comparison — the raw byte representation is hashed directly. Null values are skipped. Nested fields are supported via `raw_walk_path`, which recursively walks dot-notation paths and invokes a callback for each matching value (handling both scalar fields and array elements).
+Distinct uses a `HashSet` with a hash of the raw BSON bytes (`hash_raw`). This avoids materializing values for comparison — the raw byte representation is hashed directly. Null values are skipped. Nested fields are supported via `field_tree::walk`, which recursively walks dot-notation paths using a `FieldTree` and invokes a callback for each matching value (handling both scalar fields and array elements).
 
 ## Dot-Notation Paths
 

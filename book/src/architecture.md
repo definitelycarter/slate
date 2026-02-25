@@ -10,14 +10,15 @@ A layered system with a key-value storage backend, an engine layer for key encod
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model, Filter, Operator, Sort, QueryValue (pure data structures)
-  ├── slate-db               → Query planner + executor, delegates storage to slate-engine
+  ├── slate-query            → Query model: Query, DistinctQuery, Sort, Mutation (pure data structures)
+  ├── slate-db               → Filter parser, expression tree, query planner + executor
   ├── slate-server           → TCP server, MessagePack wire protocol, thread-per-connection
   ├── slate-client           → TCP client, connection pool (crossbeam channel)
   ├── slate-server-init      → CLI tool to initialize collections on a running server
   ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
   ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
   ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
+  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-store-bench      → Store-level stress test (500k records, race conditions, data integrity)
 ```
 
@@ -63,10 +64,11 @@ pub trait Transaction {
     // Writes
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
-    fn delete(&mut self, cf: &str, key: &[u8]) -> Result<(), StoreError>;
+    fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError>;
 
     // Schema
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError>;
+    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError>;
 
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;
@@ -133,41 +135,34 @@ The in-memory implementation (feature-gated behind `memory`) is designed for eph
 
 ### Overview
 
-Pure data structures representing queries. No dependencies on storage or execution — transport-agnostic. Can be constructed from query strings, JSON, GraphQL, or programmatically.
+Pure data structures representing queries and mutations. No dependencies on storage or execution — transport-agnostic. Can be constructed from query strings, JSON, GraphQL, or programmatically.
 
 ### Query Model
 
 ```rust
 pub struct Query {
-    pub filter: Option<FilterGroup>,
+    pub filter: Option<RawDocumentBuf>,   // BSON filter document (parsed in slate-db)
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
-    pub columns: Option<Vec<String>>,  // column projection
+    pub columns: Option<Vec<String>>,     // column projection
 }
 ```
 
-### Filters
+Filters are `RawDocumentBuf` (raw BSON) at the query layer — `slate-query` doesn't interpret filter semantics. The filter document is parsed into an `Expression` tree by `slate-db`'s parser at plan time.
 
-Django-style field + operator model. Operators: `Eq`, `IContains`, `IStartsWith`, `IEndsWith`, `Gt`, `Gte`, `Lt`, `Lte`, `IsNull`.
-
-Filter groups support arbitrary nesting with `And`/`Or` logical operators:
+### Sort
 
 ```rust
-pub enum FilterNode {
-    Condition(Filter),
-    Group(FilterGroup),
-}
-
-pub struct FilterGroup {
-    pub logical: LogicalOp,  // And | Or
-    pub children: Vec<FilterNode>,
+pub struct Sort {
+    pub field: String,
+    pub direction: SortDirection,  // Asc | Desc
 }
 ```
 
-### Filter Values
+### Mutations
 
-Filter values use `bson::Bson` directly — no custom value type. This means filters can match against any BSON scalar (String, Int64, Double, Boolean, DateTime, Null) using the same types that documents are stored with.
+`slate-query` exports the `Mutation` model: `parse_mutation` converts a BSON update document (with `$set`, `$inc`, `$unset`, etc.) into a `Vec<FieldMutation>` — a flat list of field-level operations. This is used by the executor's mutation pipeline.
 
 ## Tier 2.5: Engine Layer (`slate-engine`)
 
@@ -179,7 +174,7 @@ The engine layer sits between `slate-store` and `slate-db`. It owns the on-disk 
 
 All keys use a tag-prefixed binary format with sort-preserving BSON value encoding:
 
-- **Collection metadata** — `c:{name}` stores collection config in the `_sys` CF.
+- **Collection metadata** — `c:{name}` stores collection config in the `_sys_` CF.
 - **Index config** — `x:{collection}:{field}` stores index metadata.
 - **Record** — `d:{collection}:{doc_id}` → encoded `Record` (BSON bytes + optional TTL).
 - **Index** — `i:{collection}:{field}:{value}:{doc_id}` → `IndexMeta` (type byte + TTL).
@@ -245,10 +240,14 @@ txn.insert_many("users", vec![
     doc! { "_id": "carol", "name": "Carol" },
 ])?;
 
-// Query
-let results = txn.find("users", &query)?;               // -> Vec<RawDocumentBuf>
+// Query — find() returns a Cursor for lazy iteration
+let cursor = txn.find("users", query)?;                  // -> Cursor
+for doc in cursor.iter()? {                              //    CursorIter yields RawDocumentBuf
+    let doc = doc?;
+}
+
 let one = txn.find_one("users", &query)?;                // -> Option<RawDocumentBuf>
-let record = txn.find_by_id("users", "bob", None)?;      // -> Option<RawDocumentBuf>
+let record = txn.find_by_id("users", "bob", None)?;      // -> Option<Document>
 let record = txn.find_by_id("users", "bob",
     Some(&["name"]))?;                                    // with projection
 
@@ -267,7 +266,7 @@ txn.delete_one("users", &filter)?;                       // -> DeleteResult
 txn.delete_many("users", &filter)?;
 
 // Count
-let n = txn.count("users", Some(&filter))?;              // -> u64
+let n = txn.count("users", Some(filter))?;               // -> u64 (filter is RawDocumentBuf)
 
 // Index management
 txn.create_index("users", "email")?;  // backfills existing records
@@ -294,9 +293,9 @@ Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMer
 **Two tiers:**
 
 1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
-2. **Raw tier** — everything above `ReadRecord` operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed) and `RawBson` (owned). Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns `Vec<RawDocumentBuf>` directly.
+2. **Raw tier** — everything above `ReadRecord` operates on `Option<RawBson>`. Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns a `Cursor` whose iterator yields `RawDocumentBuf` lazily.
 
-For index-covered queries, `RawValue` carries scalar values directly from the index — no document fetch needed.
+For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed.
 
 **Key properties:**
 
@@ -330,20 +329,25 @@ enum Request {
     // Insert
     InsertOne { collection: String, doc: bson::Document },
     InsertMany { collection: String, docs: Vec<bson::Document> },
-    // Query
-    Find { collection: String, query: Query },
-    FindOne { collection: String, query: Query },
+    // Query — filter is a BSON document, not a typed FilterGroup
+    Find { collection: String, filter: Option<bson::Document>,
+           sort: Vec<Sort>, skip: Option<usize>, take: Option<usize>,
+           columns: Option<Vec<String>> },
+    FindOne { collection: String, filter: Option<bson::Document>,
+              sort: Vec<Sort>, skip: Option<usize>, take: Option<usize>,
+              columns: Option<Vec<String>> },
     FindById { collection: String, id: String, columns: Option<Vec<String>> },
-    Distinct { collection: String, query: DistinctQuery },
+    Distinct { collection: String, field: String, filter: Option<bson::Document>,
+               sort: Option<SortDirection>, skip: Option<usize>, take: Option<usize> },
     // Update
-    UpdateOne { collection: String, filter: FilterGroup, update: bson::Document, upsert: bool },
-    UpdateMany { collection: String, filter: FilterGroup, update: bson::Document },
-    ReplaceOne { collection: String, filter: FilterGroup, doc: bson::Document },
+    UpdateOne { collection: String, filter: bson::Document, update: bson::Document, upsert: bool },
+    UpdateMany { collection: String, filter: bson::Document, update: bson::Document },
+    ReplaceOne { collection: String, filter: bson::Document, doc: bson::Document },
     // Delete
-    DeleteOne { collection: String, filter: FilterGroup },
-    DeleteMany { collection: String, filter: FilterGroup },
+    DeleteOne { collection: String, filter: bson::Document },
+    DeleteMany { collection: String, filter: bson::Document },
     // Count
-    Count { collection: String, filter: Option<FilterGroup> },
+    Count { collection: String, filter: Option<bson::Document> },
     // Bulk
     UpsertMany { collection: String, docs: Vec<bson::Document> },
     MergeMany { collection: String, docs: Vec<bson::Document> },

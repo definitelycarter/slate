@@ -21,14 +21,15 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
   ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model: filters, operators, sorting (pure data structures)
-  ├── slate-db               → Database layer: query planner + executor, delegates storage to slate-engine
+  ├── slate-query            → Query model: Query, DistinctQuery, Sort, Mutation (pure data structures)
+  ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
   ├── slate-server           → TCP server with MessagePack wire protocol, thread-per-connection
   ├── slate-client           → TCP client with connection pool
   ├── slate-server-init      → CLI tool to initialize collections on a running server
   ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
   ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
   ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
+  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-store-bench      → Store-level benchmark suite (raw read/write throughput)
 ```
 
@@ -71,14 +72,17 @@ txn.insert_one("accounts", doc! {
 txn.commit()?;
 
 // Query
-let mut txn = db.begin(true)?;
-let results = txn.find("accounts", &query)?;
-let doc = txn.find_by_id("accounts", "acct-1", None)?;
+let txn = db.begin(true)?;
+let cursor = txn.find("accounts", query)?;
+for doc in cursor.iter()? {
+    let doc = doc?; // RawDocumentBuf
+}
+let doc = txn.find_by_id("accounts", "acct-1", None)?; // Option<Document>
 let count = txn.count("accounts", None)?;
 
 // Update — atomic mutations, no read-modify-write
 let mut txn = db.begin(false)?;
-txn.update_one("accounts", &filter, doc! {
+txn.update_one("accounts", doc! { "status": "active" }, doc! {
     "$set": { "status": "archived" },
     "$inc": { "revenue": 5000.0 },
 }, false)?;
@@ -107,13 +111,13 @@ use slate_client::{Client, ClientPool};
 
 let mut client = Client::connect("127.0.0.1:9600")?;
 client.insert_one("accounts", doc! { "name": "Acme" })?;
-let results = client.find("accounts", &query)?;
+let results = client.find("accounts", query)?;
 let doc = client.find_by_id("accounts", "acct-1", None)?;
 
 // Connection pool
 let pool = ClientPool::new("127.0.0.1:9600", 10)?;
 let mut client = pool.get()?;
-client.find("accounts", &query)?;
+client.find("accounts", query)?;
 ```
 
 ## Performance
