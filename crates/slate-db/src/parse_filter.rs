@@ -2,7 +2,7 @@ use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocumentBuf};
 use regex::Regex;
 
-use super::expression::Expression;
+use crate::expression::Expression;
 
 /// Parse error for filter documents.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,15 +1,14 @@
 use bson::RawBson;
 use bson::raw::RawDocumentBuf;
-use slate_store::Transaction;
+use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
 
-use crate::encoding;
 use crate::error::DbError;
 use crate::executor::exec;
 use crate::executor::{RawIter, RawValue};
 
-pub(crate) fn execute<'a, T: Transaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
     txn: &'a T,
-    cf: &'a T::Cf,
+    handle: &'a CollectionHandle<T::Cf>,
     replacement: RawDocumentBuf,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
@@ -34,8 +33,9 @@ pub(crate) fn execute<'a, T: Transaction + 'a>(
                     buf.append_ref(k, v);
                 }
             }
-            let key = encoding::record_key(id);
-            txn.put(cf, &key, &encoding::encode_record(buf.as_bytes()))?;
+            let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(id))
+                .expect("string is always a valid BsonValue");
+            txn.put(handle, &buf, &doc_id)?;
             Ok(Some(RawValue::Owned(RawBson::Document(buf))))
         } else {
             Ok(None)

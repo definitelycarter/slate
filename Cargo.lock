@@ -2384,10 +2384,20 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "serde",
+ "slate-engine",
  "slate-query",
  "slate-store",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "slate-engine"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "criterion",
+ "slate-store",
 ]
 
 [[package]]

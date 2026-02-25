@@ -8,11 +8,13 @@ use crate::store::{Store, Transaction};
 
 use super::store::{ColumnFamily, MemoryStore};
 
-/// Pre-resolved column family handle for the memory backend.
+/// Column family handle for the memory backend.
+///
+/// This is a lightweight name token. All reads go through the transaction's
+/// snapshot so that writes within the same transaction are visible.
 #[derive(Clone)]
 pub struct MemoryCf {
     pub(crate) name: String,
-    pub(crate) data: Arc<ColumnFamily>,
 }
 
 /// Lazily-loaded snapshot of column families.
@@ -105,15 +107,16 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         let mut snap = self.snapshot.borrow_mut();
         let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
         snap.ensure(self.store, name)?;
-        let data = Arc::clone(snap.get_cf(name)?);
         Ok(MemoryCf {
             name: name.to_string(),
-            data,
         })
     }
 
     fn get<'c>(&self, cf: &'c Self::Cf, key: &[u8]) -> Result<Option<Cow<'c, [u8]>>, StoreError> {
-        Ok(cf.data.get(key).map(|v| Cow::Borrowed(v.as_slice())))
+        let snap = self.snapshot.borrow();
+        let snap = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf(&cf.name)?;
+        Ok(data.get(key).map(|v| Cow::Owned(v.clone())))
     }
 
     fn multi_get<'c>(
@@ -121,9 +124,12 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         cf: &'c Self::Cf,
         keys: &[&[u8]],
     ) -> Result<Vec<Option<Cow<'c, [u8]>>>, StoreError> {
+        let snap = self.snapshot.borrow();
+        let snap = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf(&cf.name)?;
         Ok(keys
             .iter()
-            .map(|k| cf.data.get(*k).map(|v| Cow::Borrowed(v.as_slice())))
+            .map(|k| data.get(*k).map(|v| Cow::Owned(v.clone())))
             .collect())
     }
 
@@ -135,13 +141,20 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
+        let snap = self.snapshot.borrow();
+        let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap_ref.get_cf(&cf.name)?;
         let prefix_vec = prefix.to_vec();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = data
+            .range(prefix_vec.clone()..)
+            .take_while(|(k, _)| k.starts_with(&prefix_vec))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
         Ok(Box::new(
-            cf.data
-                .range(prefix_vec.clone()..)
-                .take_while(move |(k, _)| k.starts_with(&prefix_vec))
-                .map(|(k, v)| Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))),
+            entries
+                .into_iter()
+                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
         ))
     }
 
@@ -153,15 +166,25 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Box<dyn Iterator<Item = Result<(Cow<'c, [u8]>, Cow<'c, [u8]>), StoreError>> + 'c>,
         StoreError,
     > {
+        let snap = self.snapshot.borrow();
+        let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap_ref.get_cf(&cf.name)?;
         let lower = prefix.to_vec();
         let mut upper = lower.clone();
         if let Some(last) = upper.last_mut() {
             *last = last.wrapping_add(1);
         }
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = data
+            .range(lower..upper)
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        Ok(Box::new(cf.data.range(lower..upper).rev().map(|(k, v)| {
-            Ok((Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice())))
-        })))
+        Ok(Box::new(
+            entries
+                .into_iter()
+                .map(|(k, v)| Ok((Cow::Owned(k), Cow::Owned(v)))),
+        ))
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {

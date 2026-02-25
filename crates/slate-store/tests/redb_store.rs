@@ -223,6 +223,36 @@ fn read_only_rejects_delete() {
 }
 
 #[test]
+fn read_own_writes() {
+    let (store, _dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"key1", b"value1").unwrap();
+
+    // Should see the write through the same CF handle.
+    let result = txn.get(&cf, b"key1").unwrap();
+    assert!(result.is_some(), "transaction should read its own writes");
+    assert_eq!(&*result.unwrap(), b"value1");
+}
+
+#[test]
+fn read_own_writes_scan() {
+    let (store, _dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"prefix:a", b"1").unwrap();
+    txn.put(&cf, b"prefix:b", b"2").unwrap();
+
+    // Scan should see uncommitted writes.
+    let entries: Vec<_> = txn
+        .scan_prefix(&cf, b"prefix:")
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2, "scan should see own writes");
+}
+
+#[test]
 fn overwrite_key() {
     let (store, _dir) = temp_store();
     let txn = store.begin(false).unwrap();

@@ -1,8 +1,7 @@
-use crate::planner::Expression;
-
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
+use crate::expression::Expression;
 
 pub(crate) fn execute<'a>(
     predicate: Expression,

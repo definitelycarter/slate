@@ -19,7 +19,7 @@ slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-bson = "2"
+bson = { workspace = true }
 
 [[bin]]
 name = "uniffi-bindgen"

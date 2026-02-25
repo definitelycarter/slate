@@ -13,7 +13,7 @@ use crate::traits::{
 };
 
 pub const SYS_CF: &str = "_sys_";
-const DEFAULT_CF: &str = "default";
+const DEFAULT_CF: &str = "default_cf";
 
 // ── KvEngine ───────────────────────────────────────────────────
 

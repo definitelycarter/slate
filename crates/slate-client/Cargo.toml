@@ -10,5 +10,5 @@ slate-query = { path = "../slate-query" }
 slate-server = { path = "../slate-server" }
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
-bson = "2"
+bson = { workspace = true }
 crossbeam = "0.8"
