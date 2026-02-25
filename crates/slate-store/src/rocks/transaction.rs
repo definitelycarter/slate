@@ -78,11 +78,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(data)
     }
 
-    fn multi_get(
-        &self,
-        cf: &Self::Cf,
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf.handle, *k)).collect();
         let results = txn.multi_get_cf(cf_keys);
@@ -96,10 +92,8 @@ impl<'db> Transaction for RocksTransaction<'db> {
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
         let prefix_owned = prefix.to_vec();
         let iter = self
             .txn()?
@@ -120,10 +114,8 @@ impl<'db> Transaction for RocksTransaction<'db> {
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
         let prefix_owned = prefix.to_vec();
         let mut upper = prefix.to_vec();
         if let Some(last) = upper.last_mut() {

@@ -31,7 +31,11 @@ fn find(predicate: Expression) -> Statement<'static> {
     }
 }
 
-fn find_with_sort(predicate: Expression, sort: Vec<Sort>, take: Option<usize>) -> Statement<'static> {
+fn find_with_sort(
+    predicate: Expression,
+    sort: Vec<Sort>,
+    take: Option<usize>,
+) -> Statement<'static> {
     Statement::Find {
         collection: "users",
         predicate,
@@ -79,7 +83,10 @@ fn bench_plan_index_eq(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let txn = engine.begin(true).unwrap();
-                let stmt = find(Expression::Eq("status".into(), Bson::String("active".into())));
+                let stmt = find(Expression::Eq(
+                    "status".into(),
+                    Bson::String("active".into()),
+                ));
                 (txn, stmt)
             },
             |(txn, stmt)| {
@@ -201,7 +208,10 @@ fn bench_plan_sort_indexed(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let stmt = find_with_sort(
                     Expression::Exists("name".into(), true),
-                    vec![Sort { field: "age".into(), direction: SortDirection::Asc }],
+                    vec![Sort {
+                        field: "age".into(),
+                        direction: SortDirection::Asc,
+                    }],
                     Some(10),
                 );
                 (txn, stmt)

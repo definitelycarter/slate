@@ -4,8 +4,8 @@ use bson::raw::{RawArrayBuf, RawBson, RawBsonRef};
 use slate_query::{Sort, SortDirection};
 
 use crate::error::DbError;
-use crate::executor::exec;
 use crate::executor::RawIter;
+use crate::executor::exec;
 
 fn as_document(val: &RawBson) -> Option<&bson::RawDocument> {
     match val {

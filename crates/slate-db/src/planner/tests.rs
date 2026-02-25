@@ -725,7 +725,6 @@ fn collection_not_found() {
     let txn = engine.begin(true).unwrap();
     let planner = Planner::new(|name| Ok(txn.collection(name)?));
 
-    let err = planner.plan(find_stmt(Expression::Exists("_id".into(), true)));
     // "users" exists but "nonexistent" does not
     let err = planner.plan(Statement::Find {
         collection: "nonexistent",
@@ -736,6 +735,57 @@ fn collection_not_found() {
         projection: None,
     });
     assert!(err.is_err());
+}
+
+// ── _id equality → KeyLookup optimization ───────────────────
+
+#[test]
+fn id_eq_produces_key_lookup() {
+    let engine = setup();
+    let txn = engine.begin(true).unwrap();
+    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+
+    let plan = planner
+        .plan(find_stmt(Expression::Eq(
+            "_id".into(),
+            Bson::String("123".into()),
+        )))
+        .unwrap();
+    let node = unwrap_projection(unwrap_find(plan));
+
+    // Should be KeyLookup > Values (direct point read, no scan)
+    match node {
+        Node::KeyLookup { source, .. } => {
+            assert!(matches!(*source, Node::Values(ref docs) if docs.len() == 1));
+        }
+        _ => panic!("expected KeyLookup > Values"),
+    }
+}
+
+#[test]
+fn id_eq_in_and_produces_key_lookup_with_residual() {
+    let engine = setup();
+    let txn = engine.begin(true).unwrap();
+    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+
+    let plan = planner
+        .plan(find_stmt(Expression::And(vec![
+            Expression::Eq("_id".into(), Bson::String("123".into())),
+            Expression::Eq("status".into(), Bson::String("active".into())),
+        ])))
+        .unwrap();
+    let node = unwrap_projection(unwrap_find(plan));
+
+    // Should be Filter(status=active) > KeyLookup > Values
+    match node {
+        Node::Filter { source, .. } => match *source {
+            Node::KeyLookup { source, .. } => {
+                assert!(matches!(*source, Node::Values(ref docs) if docs.len() == 1));
+            }
+            _ => panic!("expected KeyLookup > Values inside Filter"),
+        },
+        _ => panic!("expected Filter > KeyLookup > Values"),
+    }
 }
 
 // ── Mutation: non-indexed predicate uses scan ───────────────

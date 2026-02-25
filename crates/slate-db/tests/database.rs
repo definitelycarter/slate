@@ -1,7 +1,7 @@
 use bson::raw::RawDocument;
 use bson::{Bson, RawBson, doc, rawdoc};
 use slate_db::{CollectionConfig, Database, DatabaseConfig};
-use slate_query::{DistinctQuery, Query, Sort, SortDirection};
+use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
 trait HasKey {
@@ -37,16 +37,6 @@ fn temp_db() -> (Database<MemoryStore>, tempfile::TempDir) {
     let store = MemoryStore::new();
     let db = Database::open(store, DatabaseConfig::default());
     (db, dir)
-}
-
-fn no_filter_query() -> Query {
-    Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    }
 }
 
 fn eq_filter(field: &str, value: Bson) -> bson::RawDocumentBuf {
@@ -101,14 +91,10 @@ fn insert_one_and_find_one() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("_id", Bson::String("acct-1".into()))),
-        sort: vec![],
-        skip: None,
-        take: Some(1),
-        columns: None,
-    };
-    let record = txn.find_one(COLLECTION, query).unwrap().unwrap();
+    let record = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(record.get_str("_id").unwrap(), "acct-1");
     assert_eq!(record.get_str("name").unwrap(), "Acme");
     assert_eq!(record.get_f64("revenue").unwrap(), 50000.0);
@@ -145,7 +131,7 @@ fn insert_one_auto_generated_id() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -177,7 +163,7 @@ fn insert_many_batch() {
 
     let txn = db.begin(true).unwrap();
     let all = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -195,7 +181,7 @@ fn find_no_filters() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -210,15 +196,12 @@ fn find_eq_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -233,15 +216,12 @@ fn find_gt_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(rawdoc! { "revenue": { "$gt": 80000.0 } }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! { "revenue": { "$gt": 80000.0 } },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -266,15 +246,12 @@ fn find_isnull_filter() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(rawdoc! { "status": null }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! { "status": null },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -290,15 +267,12 @@ fn find_or_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -315,18 +289,18 @@ fn find_sort_asc() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![Sort {
-            field: "revenue".into(),
-            direction: SortDirection::Asc,
-        }],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                sort: vec![Sort {
+                    field: "revenue".into(),
+                    direction: SortDirection::Asc,
+                }],
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -343,18 +317,18 @@ fn find_sort_desc() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![Sort {
-            field: "revenue".into(),
-            direction: SortDirection::Desc,
-        }],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                sort: vec![Sort {
+                    field: "revenue".into(),
+                    direction: SortDirection::Desc,
+                }],
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -372,18 +346,20 @@ fn find_skip_and_take() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![Sort {
-            field: "revenue".into(),
-            direction: SortDirection::Asc,
-        }],
-        skip: Some(1),
-        take: Some(2),
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                sort: vec![Sort {
+                    field: "revenue".into(),
+                    direction: SortDirection::Asc,
+                }],
+                skip: Some(1),
+                take: Some(2),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -400,18 +376,20 @@ fn find_filter_sort_paginate() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![Sort {
-            field: "revenue".into(),
-            direction: SortDirection::Desc,
-        }],
-        skip: Some(1),
-        take: Some(1),
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions {
+                sort: vec![Sort {
+                    field: "revenue".into(),
+                    direction: SortDirection::Desc,
+                }],
+                skip: Some(1),
+                take: Some(1),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -429,15 +407,15 @@ fn find_with_projection() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["name".into(), "status".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                columns: Some(vec!["name".into(), "status".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -458,15 +436,15 @@ fn find_projection_includes_filter_columns() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["name".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions {
+                columns: Some(vec!["name".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -485,18 +463,20 @@ fn find_projection_includes_sort_columns() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        skip: None,
-        take: Some(2),
-        sort: vec![Sort {
-            field: "revenue".into(),
-            direction: SortDirection::Desc,
-        }],
-        columns: Some(vec!["name".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                sort: vec![Sort {
+                    field: "revenue".into(),
+                    direction: SortDirection::Desc,
+                }],
+                take: Some(2),
+                columns: Some(vec!["name".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -538,7 +518,7 @@ fn update_one_merge() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -583,7 +563,7 @@ fn upsert_via_upsert_many() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -609,15 +589,12 @@ fn update_many_multiple() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("archived".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("archived".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -653,7 +630,7 @@ fn replace_one_full_replacement() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -693,7 +670,7 @@ fn delete_one_removes_record() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -719,7 +696,7 @@ fn delete_many_removes_matching() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -736,7 +713,7 @@ fn count_all() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let count = txn.count(COLLECTION, None).unwrap();
+    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 5);
 }
 
@@ -747,7 +724,7 @@ fn count_with_filter() {
 
     let txn = db.begin(true).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
-    let count = txn.count(COLLECTION, Some(filter)).unwrap();
+    let count = txn.count(COLLECTION, filter).unwrap();
     assert_eq!(count, 3);
 }
 
@@ -773,15 +750,12 @@ fn create_and_use_index() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -856,7 +830,7 @@ fn drop_collection() {
 
     let txn = db.begin(true).unwrap();
     let result = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
@@ -883,7 +857,7 @@ fn collection_isolation() {
 
     let txn = db.begin(true).unwrap();
     let contacts = txn
-        .find("contacts", no_filter_query())
+        .find("contacts", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -893,7 +867,7 @@ fn collection_isolation() {
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
     let accounts = txn
-        .find("accounts", no_filter_query())
+        .find("accounts", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -927,15 +901,12 @@ fn index_maintained_on_insert() {
 
     // Index scan should work
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -970,15 +941,12 @@ fn index_maintained_on_update() {
 
     // Old index value should not match
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -987,15 +955,12 @@ fn index_maintained_on_update() {
     assert_eq!(results.len(), 0);
 
     // New index value should match
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("rejected".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("rejected".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1028,15 +993,12 @@ fn index_maintained_on_delete() {
 
     // Index should be empty
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1070,7 +1032,7 @@ fn nested_doc_write_and_read() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("nested", no_filter_query())
+        .find("nested", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -1103,15 +1065,12 @@ fn dot_notation_filter_eq() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("nested", query)
+        .find(
+            "nested",
+            eq_filter("address.city", Bson::String("Austin".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1144,18 +1103,18 @@ fn dot_notation_sort() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![Sort {
-            field: "address.city".into(),
-            direction: SortDirection::Asc,
-        }],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("nested", query)
+        .find(
+            "nested",
+            rawdoc! {},
+            FindOptions {
+                sort: vec![Sort {
+                    field: "address.city".into(),
+                    direction: SortDirection::Asc,
+                }],
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1189,15 +1148,15 @@ fn dot_notation_projection() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["name".into(), "address.city".into()]),
-    };
     let results = txn
-        .find("nested", query)
+        .find(
+            "nested",
+            rawdoc! {},
+            FindOptions {
+                columns: Some(vec!["name".into(), "address.city".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1234,19 +1193,19 @@ fn dot_notation_projection_multiple_subfields() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec![
-            "name".into(),
-            "address.city".into(),
-            "address.zip".into(),
-        ]),
-    };
     let results = txn
-        .find("nested", query)
+        .find(
+            "nested",
+            rawdoc! {},
+            FindOptions {
+                columns: Some(vec![
+                    "name".into(),
+                    "address.city".into(),
+                    "address.zip".into(),
+                ]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1276,15 +1235,12 @@ fn dot_notation_isnull_missing_parent() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(rawdoc! { "address.city": null }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("nested", query)
+        .find(
+            "nested",
+            rawdoc! { "address.city": null },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1308,18 +1264,12 @@ fn dot_notation_deep_nesting() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter(
-            "data.level1.level2.value",
-            Bson::String("found".into()),
-        )),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("deep", query)
+        .find(
+            "deep",
+            eq_filter("data.level1.level2.value", Bson::String("found".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1335,15 +1285,15 @@ fn projection_only_uses_selective_read() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: None,
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["name".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            rawdoc! {},
+            FindOptions {
+                columns: Some(vec!["name".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1367,7 +1317,10 @@ fn find_by_id_returns_document() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let doc = txn.find_by_id(COLLECTION, "acct-1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
     assert_eq!(doc.get_str("name").unwrap(), "Acme Corp");
     assert_eq!(doc.get_f64("revenue").unwrap(), 50000.0);
@@ -1379,7 +1332,9 @@ fn find_by_id_not_found() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let result = txn.find_by_id(COLLECTION, "nonexistent", None).unwrap();
+    let result = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "nonexistent" })
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -1388,7 +1343,7 @@ fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
     let txn = db.begin(true).unwrap();
-    let result = txn.find_by_id("no_such_collection", "id-1", None);
+    let result = txn.find_one("no_such_collection", rawdoc! { "_id": "id-1" });
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
@@ -1402,14 +1357,26 @@ fn find_by_id_with_projection() {
 
     let txn = db.begin(true).unwrap();
     let doc = txn
-        .find_by_id(COLLECTION, "acct-1", Some(&["name", "status"]))
+        .find(
+            COLLECTION,
+            rawdoc! { "_id": "acct-1" },
+            FindOptions {
+                columns: Some(vec!["name".into(), "status".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
     assert_eq!(doc.get_str("name").unwrap(), "Acme Corp");
     assert_eq!(doc.get_str("status").unwrap(), "active");
-    assert!(!doc.contains_key("revenue"));
-    assert!(!doc.contains_key("active"));
+    assert!(!doc.get_check("revenue"));
+    assert!(!doc.get_check("active"));
 }
 
 // ── Multi-key and nested path index tests ───────────────────────
@@ -1436,15 +1403,12 @@ fn index_on_nested_path() {
 
     // Index scan on address.city
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("address.city", Bson::String("Austin".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("nested_idx", query)
+        .find(
+            "nested_idx",
+            eq_filter("address.city", Bson::String("Austin".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1481,15 +1445,12 @@ fn index_on_array_of_scalars() {
 
     // Query for tag "rust" via index
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_idx", query)
+        .find(
+            "tags_idx",
+            eq_filter("tags.[]", Bson::String("rust".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1504,15 +1465,12 @@ fn index_on_array_of_scalars() {
     assert_eq!(names, vec!["Post A", "Post C"]);
 
     // Query for tag "api" via index
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("api".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_idx", query)
+        .find(
+            "tags_idx",
+            eq_filter("tags.[]", Bson::String("api".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1549,15 +1507,12 @@ fn index_on_array_of_objects() {
 
     // Query for sku "A1"
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("items.[].sku", Bson::String("A1".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("items_idx", query)
+        .find(
+            "items_idx",
+            eq_filter("items.[].sku", Bson::String("A1".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1572,15 +1527,12 @@ fn index_on_array_of_objects() {
     assert_eq!(ids, vec!["order-1", "order-3"]);
 
     // Query for sku "C3"
-    let query = Query {
-        filter: Some(eq_filter("items.[].sku", Bson::String("C3".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("items_idx", query)
+        .find(
+            "items_idx",
+            eq_filter("items.[].sku", Bson::String("C3".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1619,15 +1571,12 @@ fn multikey_index_maintained_on_update() {
 
     // Old tags should not match
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_upd", query)
+        .find(
+            "tags_upd",
+            eq_filter("tags.[]", Bson::String("rust".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1636,15 +1585,12 @@ fn multikey_index_maintained_on_update() {
     assert_eq!(results.len(), 0);
 
     // New tags should match
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("go".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_upd", query)
+        .find(
+            "tags_upd",
+            eq_filter("tags.[]", Bson::String("go".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1678,15 +1624,12 @@ fn multikey_index_maintained_on_delete() {
 
     // Index entries should be cleaned up
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_del", query)
+        .find(
+            "tags_del",
+            eq_filter("tags.[]", Bson::String("rust".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1720,15 +1663,12 @@ fn multikey_index_backfill() {
 
     // Verify backfill worked
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("backfill", query)
+        .find(
+            "backfill",
+            eq_filter("tags.[]", Bson::String("rust".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1767,34 +1707,28 @@ fn multikey_index_replace_one() {
 
     // Old tags gone
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("rust".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     assert_eq!(
-        txn.find("tags_rep", query)
-            .unwrap()
-            .iter()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .len(),
+        txn.find(
+            "tags_rep",
+            eq_filter("tags.[]", Bson::String("rust".into())),
+            FindOptions::default(),
+        )
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .len(),
         0
     );
 
     // New tags present
-    let query = Query {
-        filter: Some(eq_filter("tags.[]", Bson::String("python".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("tags_rep", query)
+        .find(
+            "tags_rep",
+            eq_filter("tags.[]", Bson::String("python".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1852,7 +1786,7 @@ fn create_collection_idempotent() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("idem", no_filter_query())
+        .find("idem", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -1900,14 +1834,14 @@ fn find_with_or_indexed() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // user_id = "abc" OR status = "active"
-    let q = Query {
-        filter: Some(rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // user_id = "abc" OR status = "active"
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1922,14 +1856,14 @@ fn find_with_or_same_field() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // status = "active" OR status = "archived"
-    let q = Query {
-        filter: Some(rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // status = "active" OR status = "archived"
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1944,14 +1878,14 @@ fn find_with_or_fallback_scan() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // user_id = "abc" OR score > 50 (score not indexed → full scan)
-    let q = Query {
-        filter: Some(rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // user_id = "abc" OR score > 50 (score not indexed -> full scan)
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1966,15 +1900,15 @@ fn find_with_and_priority() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // user_id = "abc" AND status = "active"
-    // user_id has higher priority — planner should use it for IndexScan
-    let q = Query {
-        filter: Some(rawdoc! { "status": "active", "user_id": "abc" }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // user_id = "abc" AND status = "active"
+    // user_id has higher priority -- planner should use it for IndexScan
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "status": "active", "user_id": "abc" },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1989,17 +1923,17 @@ fn find_with_nested_and_or() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
-    let q = Query {
-        filter: Some(rawdoc! { "$or": [
-            { "user_id": "abc", "status": "active" },
-            { "user_id": "xyz", "status": "archived" },
-        ] }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [
+                { "user_id": "abc", "status": "active" },
+                { "user_id": "xyz", "status": "archived" },
+            ] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2014,16 +1948,14 @@ fn find_with_or_three_values() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
-    let q = Query {
-        filter: Some(
-            rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] },
-        ),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2041,18 +1973,18 @@ fn find_with_or_partial_index_per_branch() {
     let (db, _dir) = temp_db();
     seed_or_test_data(&db);
 
-    // (user_id = "abc" AND score > 50) OR status = "pending"
-    // Each OR branch has one indexed Eq — IndexMerge(Or), full recheck
-    let q = Query {
-        filter: Some(rawdoc! { "$or": [
-            { "user_id": "abc", "score": { "$gt": 50_i64 } },
-            { "status": "pending" },
-        ] }),
-        ..no_filter_query()
-    };
     let txn = db.begin(true).unwrap();
+    // (user_id = "abc" AND score > 50) OR status = "pending"
+    // Each OR branch has one indexed Eq -- IndexMerge(Or), full recheck
     let results = txn
-        .find("orders", q)
+        .find(
+            "orders",
+            rawdoc! { "$or": [
+                { "user_id": "abc", "score": { "$gt": 50_i64 } },
+                { "status": "pending" },
+            ] },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2096,7 +2028,7 @@ fn ttl_expired_docs_hidden_before_purge() {
     // Expired docs are immediately invisible (TTL read filtering)
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2104,10 +2036,10 @@ fn ttl_expired_docs_hidden_before_purge() {
         .unwrap();
     assert_eq!(results.len(), 2);
 
-    let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
+    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "a" }).unwrap();
     assert!(result.is_none());
 
-    let count = txn.count(COLLECTION, None).unwrap();
+    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }
 
@@ -2134,7 +2066,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2148,10 +2080,10 @@ fn ttl_purge_makes_expired_docs_invisible() {
     names.sort();
     assert_eq!(names, vec!["Fresh", "Permanent"]);
 
-    let result = txn.find_by_id(COLLECTION, "a", None).unwrap();
+    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "a" }).unwrap();
     assert!(result.is_none());
 
-    let count = txn.count(COLLECTION, None).unwrap();
+    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }
 
@@ -2181,7 +2113,7 @@ fn ttl_purge_deletes_expired_docs() {
     let txn = db.begin(true).unwrap();
     // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2241,15 +2173,12 @@ fn ttl_purge_cleans_user_indexes() {
 
     // Index should only have one entry for "active" (doc "b")
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("purge_idx", query)
+        .find(
+            "purge_idx",
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2288,7 +2217,7 @@ fn ttl_index_maintained_on_update() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2320,7 +2249,7 @@ fn ttl_purge_multiple_expired() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2349,8 +2278,16 @@ fn ttl_find_by_id_hides_expired() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    assert!(txn.find_by_id(COLLECTION, "x", None).unwrap().is_none());
-    assert!(txn.find_by_id(COLLECTION, "y", None).unwrap().is_some());
+    assert!(
+        txn.find_one(COLLECTION, rawdoc! { "_id": "x" })
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        txn.find_one(COLLECTION, rawdoc! { "_id": "y" })
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2405,9 +2342,12 @@ fn ttl_merge_into_expired_inserts_fresh() {
 
     // The new doc should be visible and should NOT contain old_field
     let txn = db.begin(true).unwrap();
-    let doc = txn.find_by_id(COLLECTION, "a", None).unwrap().unwrap();
-    assert!(doc.get("new_field").is_some());
-    assert!(doc.get("old_field").is_none());
+    let doc = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "a" })
+        .unwrap()
+        .unwrap();
+    assert!(doc.get_check("new_field"));
+    assert!(!doc.get_check("old_field"));
 }
 
 #[test]
@@ -2429,7 +2369,7 @@ fn ttl_no_ttl_field_always_visible() {
     // Docs without ttl are always visible
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -2442,7 +2382,7 @@ fn ttl_no_ttl_field_always_visible() {
     assert_eq!(purged, 0);
 
     let txn = db.begin(true).unwrap();
-    let count = txn.count(COLLECTION, None).unwrap();
+    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }
 
@@ -2466,14 +2406,10 @@ fn distinct_scalar_field() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(COLLECTION, "status", rawdoc! {}, DistinctOptions::default())
+            .unwrap(),
+    );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2497,14 +2433,15 @@ fn distinct_nested_path() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "address.city".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "address.city",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
+    );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("Austin".into())));
     assert!(values.contains(&Bson::String("Denver".into())));
@@ -2526,14 +2463,10 @@ fn distinct_array_field() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "tags".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(COLLECTION, "tags", rawdoc! {}, DistinctOptions::default())
+            .unwrap(),
+    );
     assert_eq!(values.len(), 3);
     assert!(values.contains(&Bson::String("rust".into())));
     assert!(values.contains(&Bson::String("db".into())));
@@ -2558,14 +2491,15 @@ fn distinct_with_filter() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "tier".into(),
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "tier",
+            eq_filter("status", Bson::String("active".into())),
+            DistinctOptions::default(),
+        )
+        .unwrap(),
+    );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("gold".into())));
     assert!(values.contains(&Bson::String("silver".into())));
@@ -2589,14 +2523,18 @@ fn distinct_with_sort_asc() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: Some(SortDirection::Asc),
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Asc),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![
@@ -2625,14 +2563,18 @@ fn distinct_with_sort_desc() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: Some(SortDirection::Desc),
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Desc),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![
@@ -2658,14 +2600,15 @@ fn distinct_missing_field() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "nonexistent".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "nonexistent",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
+    );
     assert!(values.is_empty());
 }
 
@@ -2686,14 +2629,10 @@ fn distinct_mixed_presence() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(COLLECTION, "status", rawdoc! {}, DistinctOptions::default())
+            .unwrap(),
+    );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
     assert!(values.contains(&Bson::String("inactive".into())));
@@ -2721,14 +2660,18 @@ fn distinct_array_of_sub_documents() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "triggers.type".into(),
-        filter: None,
-        sort: Some(SortDirection::Asc),
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "triggers.type",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Asc),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![
@@ -2766,14 +2709,15 @@ fn distinct_sub_document() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "address".into(),
-        filter: None,
-        sort: None,
-        skip: None,
-        take: None,
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "address",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
+    );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::Document(doc! { "city": "Austin", "state": "TX" })));
     assert!(values.contains(&Bson::Document(doc! { "city": "Denver", "state": "CO" })));
@@ -2799,14 +2743,19 @@ fn distinct_with_take() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: Some(SortDirection::Asc),
-        skip: None,
-        take: Some(2),
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Asc),
+                take: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![Bson::String("apple".into()), Bson::String("banana".into()),]
@@ -2833,14 +2782,19 @@ fn distinct_with_skip_take() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: Some(SortDirection::Asc),
-        skip: Some(1),
-        take: Some(2),
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Asc),
+                skip: Some(1),
+                take: Some(2),
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![Bson::String("banana".into()), Bson::String("cherry".into()),]
@@ -2869,15 +2823,20 @@ fn distinct_with_sort_and_limit() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    // Sort desc, skip 1, take 2 → ["date", "cherry"]
-    let query = DistinctQuery {
-        field: "status".into(),
-        filter: None,
-        sort: Some(SortDirection::Desc),
-        skip: Some(1),
-        take: Some(2),
-    };
-    let values = to_bson_vec(txn.distinct(COLLECTION, query).unwrap());
+    // Sort desc, skip 1, take 2 -> ["date", "cherry"]
+    let values = to_bson_vec(
+        txn.distinct(
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions {
+                sort: Some(SortDirection::Desc),
+                skip: Some(1),
+                take: Some(2),
+            },
+        )
+        .unwrap(),
+    );
     assert_eq!(
         values,
         vec![Bson::String("date".into()), Bson::String("cherry".into()),]
@@ -2900,17 +2859,17 @@ fn index_covered_preserves_int32_type() {
         .unwrap();
     txn.commit().unwrap();
 
-    // Query with Int64 — same encoded bytes, different BSON type
+    // Query with Int64 -- same encoded bytes, different BSON type
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("score", Bson::Int64(100))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["score".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("score", Bson::Int64(100)),
+            FindOptions {
+                columns: Some(vec!["score".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2940,15 +2899,15 @@ fn index_covered_preserves_string_type() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: Some(vec!["status".into()]),
-    };
     let results = txn
-        .find(COLLECTION, query)
+        .find(
+            COLLECTION,
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions {
+                columns: Some(vec!["status".into()]),
+                ..Default::default()
+            },
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -2979,7 +2938,7 @@ fn upsert_many_inserts_new() {
     assert_eq!(result, 2);
 
     let found = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -3006,11 +2965,15 @@ fn upsert_many_replaces_existing() {
     let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 1);
 
-    let doc = txn.find_by_id(COLLECTION, "u1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "u1" })
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.get_str("_id").unwrap(), "u1");
     assert_eq!(doc.get_str("name").unwrap(), "Alice Updated");
     assert_eq!(doc.get_str("status").unwrap(), "inactive");
-    // score should be gone — full replace
-    assert!(doc.get("score").is_none());
+    // score should be gone -- full replace
+    assert!(!doc.get_check("score"));
 }
 
 #[test]
@@ -3033,7 +2996,7 @@ fn upsert_many_mixed() {
     assert_eq!(result, 2);
 
     let found = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -3059,13 +3022,8 @@ fn upsert_many_updates_indexes() {
     let active = txn
         .find(
             COLLECTION,
-            Query {
-                filter: Some(eq_filter("status", Bson::String("active".into()))),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
         )
         .unwrap()
         .iter()
@@ -3087,13 +3045,8 @@ fn upsert_many_updates_indexes() {
     let active = txn
         .find(
             COLLECTION,
-            Query {
-                filter: Some(eq_filter("status", Bson::String("active".into()))),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
         )
         .unwrap()
         .iter()
@@ -3106,13 +3059,8 @@ fn upsert_many_updates_indexes() {
     let inactive = txn
         .find(
             COLLECTION,
-            Query {
-                filter: Some(eq_filter("status", Bson::String("inactive".into()))),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            eq_filter("status", Bson::String("inactive".into())),
+            FindOptions::default(),
         )
         .unwrap()
         .iter()
@@ -3138,7 +3086,7 @@ fn merge_many_inserts_new() {
     assert_eq!(result, 2);
 
     let found = txn
-        .find(COLLECTION, no_filter_query())
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -3164,7 +3112,10 @@ fn merge_many_merges_existing() {
     let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 1);
 
-    let doc = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "m1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
     assert_eq!(doc.get_str("status").unwrap(), "inactive");
     assert_eq!(doc.get_i32("score").unwrap(), 100);
@@ -3193,13 +3144,8 @@ fn merge_many_index_maintenance() {
     let active = txn
         .find(
             COLLECTION,
-            Query {
-                filter: Some(eq_filter("status", Bson::String("active".into()))),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
         )
         .unwrap()
         .iter()
@@ -3212,13 +3158,8 @@ fn merge_many_index_maintenance() {
     let inactive = txn
         .find(
             COLLECTION,
-            Query {
-                filter: Some(eq_filter("status", Bson::String("inactive".into()))),
-                sort: vec![],
-                skip: None,
-                take: None,
-                columns: None,
-            },
+            eq_filter("status", Bson::String("inactive".into())),
+            FindOptions::default(),
         )
         .unwrap()
         .iter()
@@ -3263,7 +3204,10 @@ fn merge_many_adds_new_field() {
         .drain()
         .unwrap();
 
-    let doc = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "m1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
     assert_eq!(doc.get_str("status").unwrap(), "active");
 }
@@ -3287,11 +3231,17 @@ fn merge_many_mixed_insert_and_merge() {
     let result = txn.merge_many(COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 2);
 
-    let m1 = txn.find_by_id(COLLECTION, "m1", None).unwrap().unwrap();
+    let m1 = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "m1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(m1.get_str("name").unwrap(), "Alice"); // preserved
     assert_eq!(m1.get_str("status").unwrap(), "inactive"); // merged
 
-    let m2 = txn.find_by_id(COLLECTION, "m2", None).unwrap().unwrap();
+    let m2 = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "m2" })
+        .unwrap()
+        .unwrap();
     assert_eq!(m2.get_str("name").unwrap(), "Bob");
 }
 
@@ -3318,15 +3268,12 @@ fn find_gt_on_indexed_field() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let query = Query {
-        filter: Some(rawdoc! { "score": { "$gt": 75 } }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("scores", query)
+        .find(
+            "scores",
+            rawdoc! { "score": { "$gt": 75 } },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -3367,15 +3314,12 @@ fn find_gte_lte_on_indexed_field() {
 
     let txn = db.begin(true).unwrap();
     // score >= 70 AND score <= 80
-    let query = Query {
-        filter: Some(rawdoc! { "score": { "$gte": 70, "$lte": 80 } }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results = txn
-        .find("scores", query)
+        .find(
+            "scores",
+            rawdoc! { "score": { "$gte": 70, "$lte": 80 } },
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -3395,9 +3339,10 @@ fn find_gte_lte_on_indexed_field() {
 
 // ── Mutation operator tests ─────────────────────────────────────
 
-fn get_str_array(doc: &bson::Document, path: &str) -> Vec<String> {
+fn get_str_array(doc: &bson::RawDocumentBuf, path: &str) -> Vec<String> {
+    let parsed: bson::Document = bson::from_slice(doc.as_bytes()).unwrap();
     let segments: Vec<&str> = path.split('.').collect();
-    let mut current = doc;
+    let mut current = &parsed;
     for seg in &segments[..segments.len() - 1] {
         current = current.get_document(seg).unwrap();
     }
@@ -3435,7 +3380,10 @@ fn mutation_set_explicit() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "archived");
     assert_eq!(d.get_i32("score").unwrap(), 100);
@@ -3463,10 +3411,13 @@ fn mutation_unset() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "active");
-    assert!(!d.contains_key("score"));
+    assert!(!d.get_check("score"));
 }
 
 #[test]
@@ -3488,7 +3439,10 @@ fn mutation_inc_i32() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 15);
 }
 
@@ -3511,7 +3465,10 @@ fn mutation_inc_missing_field() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 7);
 }
 
@@ -3534,7 +3491,10 @@ fn mutation_inc_negative_decrement() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 70);
 }
 
@@ -3561,7 +3521,10 @@ fn mutation_inc_f64() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert!((d.get_f64("balance").unwrap() - 125.75).abs() < f64::EPSILON);
 }
 
@@ -3591,9 +3554,12 @@ fn mutation_rename() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
-    assert!(!d.contains_key("old_name"));
+    assert!(!d.get_check("old_name"));
     assert_eq!(d.get_str("status").unwrap(), "active");
 }
 
@@ -3616,7 +3582,10 @@ fn mutation_push() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["rust", "db", "perf"]);
 }
 
@@ -3639,7 +3608,10 @@ fn mutation_push_creates_array() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["new"]);
 }
 
@@ -3665,7 +3637,10 @@ fn mutation_lpush() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "queue"), vec!["first", "second", "third"]);
 }
 
@@ -3688,7 +3663,10 @@ fn mutation_pop() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "stack"), vec!["a", "b"]);
 }
 
@@ -3722,7 +3700,10 @@ fn mutation_multiple_operators() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice Updated");
     assert_eq!(d.get_i32("score").unwrap(), 15);
     assert_eq!(get_str_array(&d, "tags"), vec!["a", "b"]);
@@ -3754,7 +3735,10 @@ fn mutation_bare_fields_implicit_set() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     assert_eq!(d.get_str("status").unwrap(), "archived");
     assert_eq!(d.get_i32("score").unwrap(), 99);
@@ -3786,7 +3770,10 @@ fn mutation_dot_path_set() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     let addr = d.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Denver");
     assert_eq!(addr.get_str("state").unwrap(), "TX");
@@ -3818,7 +3805,10 @@ fn mutation_dot_path_inc() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     let stats = d.get_document("stats").unwrap();
     assert_eq!(stats.get_i32("views").unwrap(), 101);
     assert_eq!(stats.get_i32("likes").unwrap(), 10);
@@ -3847,7 +3837,10 @@ fn mutation_dot_path_creates_intermediates() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
     let addr = d.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Austin");
@@ -3879,11 +3872,14 @@ fn mutation_dot_path_unset() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     let addr = d.get_document("address").unwrap();
     assert_eq!(addr.get_str("city").unwrap(), "Austin");
     assert_eq!(addr.get_str("state").unwrap(), "TX");
-    assert!(!addr.contains_key("zip"));
+    assert!(!addr.get_check("zip"));
 }
 
 #[test]
@@ -3905,7 +3901,10 @@ fn mutation_dot_path_push() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "data.items"), vec!["a", "b"]);
 }
 
@@ -3929,16 +3928,28 @@ fn mutation_update_many_with_inc() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "acct-1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .unwrap()
+        .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 51000.0).abs() < f64::EPSILON);
 
-    let d = txn.find_by_id(COLLECTION, "acct-4", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-4" })
+        .unwrap()
+        .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 96000.0).abs() < f64::EPSILON);
 
-    let d = txn.find_by_id(COLLECTION, "acct-5", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-5" })
+        .unwrap()
+        .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 201000.0).abs() < f64::EPSILON);
 
-    let d = txn.find_by_id(COLLECTION, "acct-2", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "acct-2" })
+        .unwrap()
+        .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 80000.0).abs() < f64::EPSILON);
 }
 
@@ -3971,12 +3982,12 @@ fn mutation_index_maintained_on_set() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let q = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        ..no_filter_query()
-    };
     let results = txn
-        .find("idx_mut", q)
+        .find(
+            "idx_mut",
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -3984,12 +3995,12 @@ fn mutation_index_maintained_on_set() {
         .unwrap();
     assert_eq!(results.len(), 0);
 
-    let q = Query {
-        filter: Some(eq_filter("status", Bson::String("archived".into()))),
-        ..no_filter_query()
-    };
     let results = txn
-        .find("idx_mut", q)
+        .find(
+            "idx_mut",
+            eq_filter("status", Bson::String("archived".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -4024,12 +4035,12 @@ fn mutation_index_maintained_on_unset() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let q = Query {
-        filter: Some(eq_filter("status", Bson::String("active".into()))),
-        ..no_filter_query()
-    };
     let results = txn
-        .find("idx_unset", q)
+        .find(
+            "idx_unset",
+            eq_filter("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -4037,9 +4048,12 @@ fn mutation_index_maintained_on_unset() {
         .unwrap();
     assert_eq!(results.len(), 0);
 
-    let d = txn.find_by_id("idx_unset", "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one("idx_unset", rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
-    assert!(!d.contains_key("status"));
+    assert!(!d.get_check("status"));
 }
 
 #[test]
@@ -4063,7 +4077,10 @@ fn mutation_push_pop_as_stack() {
     }
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b", "c"]);
 
     let txn = db.begin(false).unwrap();
@@ -4075,7 +4092,10 @@ fn mutation_push_pop_as_stack() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b"]);
 }
 
@@ -4100,7 +4120,10 @@ fn mutation_lpush_pop_as_queue() {
     }
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second", "first"]);
 
     let txn = db.begin(false).unwrap();
@@ -4112,7 +4135,10 @@ fn mutation_lpush_pop_as_queue() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let d = txn.find_by_id(COLLECTION, "r1", None).unwrap().unwrap();
+    let d = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second"]);
 }
 
@@ -4128,11 +4154,7 @@ fn mutation_unknown_operator_rejected() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.update_one(
-        COLLECTION,
-        &filter,
-        doc! { "$badop": { "name": "Bob" } },
-    );
+    let result = txn.update_one(COLLECTION, &filter, doc! { "$badop": { "name": "Bob" } });
     let err = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error for $badop"),

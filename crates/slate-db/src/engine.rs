@@ -1,6 +1,6 @@
 use bson::{RawBson, RawDocumentBuf};
-use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, KvEngine};
-use slate_query::{DistinctQuery, Query};
+use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
+use slate_query::{DistinctOptions, FindOptions};
 use slate_store::Store;
 
 use crate::collection::CollectionConfig;
@@ -47,7 +47,7 @@ impl<S: Store> SlateEngine<S> {
         Ok(names)
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(any(feature = "bench-internals"))]
     pub fn kv_engine(&self) -> &KvEngine<S> {
         &self.engine
     }
@@ -105,57 +105,40 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Query operations ────────────────────────────────────────
 
-    /// Find documents matching a query (filter, sort, skip, take, projection).
+    /// Find documents matching a filter with optional sort, skip, take, and projection.
     ///
     /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
     /// or drained via [`.drain()`](Cursor::drain) for a count.
-    pub fn find(&self, collection: &str, query: Query) -> Result<Cursor<'db, '_, S>, DbError> {
-        let predicate = Self::parse_optional_filter(query.filter.as_ref())?;
+    pub fn find(
+        &self,
+        collection: &str,
+        filter: impl IntoRawDocumentBuf,
+        options: FindOptions,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let filter_raw = filter.into_raw_document_buf()?;
+        let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Find {
             collection,
             predicate,
-            sort: query.sort,
-            skip: query.skip,
-            take: query.take,
-            projection: query.columns,
+            sort: options.sort,
+            skip: options.skip,
+            take: options.take,
+            projection: options.columns,
         };
         self.prepare_cursor(stmt)
     }
 
-    /// Get a single document by `_id`. Direct key lookup — O(1).
-    pub fn find_by_id(
-        &self,
-        collection: &str,
-        id: &str,
-        columns: Option<&[&str]>,
-    ) -> Result<Option<bson::Document>, DbError> {
-        let handle = self.txn.collection(collection)?;
-        let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(id))
-            .expect("string is always a valid BsonValue");
-        let now = bson::DateTime::now().timestamp_millis();
-        let raw = match self.txn.get(&handle, &doc_id, now)? {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        let mut doc = raw.to_document()?;
-
-        if let Some(wanted) = columns {
-            let cols: Vec<String> = wanted.iter().map(|s| s.to_string()).collect();
-            exec::apply_projection(&mut doc, &cols);
-        }
-
-        Ok(Some(doc))
-    }
-
-    /// Find the first document matching a query.
+    /// Find the first document matching a filter.
     pub fn find_one(
         &self,
         collection: &str,
-        mut query: Query,
+        filter: impl IntoRawDocumentBuf,
     ) -> Result<Option<RawDocumentBuf>, DbError> {
-        query.take = Some(1);
-        let cursor = self.find(collection, query)?;
+        let options = FindOptions {
+            take: Some(1),
+            ..Default::default()
+        };
+        let cursor = self.find(collection, filter, options)?;
         cursor.iter()?.next().transpose()
     }
 
@@ -294,31 +277,28 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Count ───────────────────────────────────────────────────
 
     /// Count documents matching a filter.
-    pub fn count(&self, collection: &str, filter: Option<RawDocumentBuf>) -> Result<u64, DbError> {
-        let query = Query {
-            filter,
-            sort: vec![],
-            skip: None,
-            take: None,
-            columns: None,
-        };
-        self.find(collection, query)?.drain()
+    pub fn count(&self, collection: &str, filter: impl IntoRawDocumentBuf) -> Result<u64, DbError> {
+        self.find(collection, filter, FindOptions::default())?
+            .drain()
     }
 
     /// Return distinct values for a field, with optional filter and sort.
     pub fn distinct(
         &self,
         collection: &str,
-        query: DistinctQuery,
+        field: &str,
+        filter: impl IntoRawDocumentBuf,
+        options: DistinctOptions,
     ) -> Result<bson::RawBson, DbError> {
-        let predicate = Self::parse_optional_filter(query.filter.as_ref())?;
+        let filter_raw = filter.into_raw_document_buf()?;
+        let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Distinct {
             collection,
-            field: query.field,
+            field: field.to_string(),
             predicate,
-            sort: query.sort,
-            skip: query.skip,
-            take: query.take,
+            sort: options.sort,
+            skip: options.skip,
+            take: options.take,
         };
         let plan = self.plan(stmt)?;
         let exec = executor::Executor::new(&self.txn);
@@ -459,8 +439,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// None or empty doc → Expression::And(vec![]) (matches everything).
     fn parse_optional_filter(doc: Option<&RawDocumentBuf>) -> Result<Expression, DbError> {
         match doc {
-            Some(d) => Ok(parser::parse_filter(d)?),
-            None => Ok(Expression::And(vec![])),
+            Some(d) if d.iter().next().is_some() => Ok(parser::parse_filter(d)?),
+            _ => Ok(Expression::And(vec![])),
         }
     }
 }

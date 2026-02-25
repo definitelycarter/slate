@@ -124,24 +124,22 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     > {
         let prefix = KeyPrefix::Record(Cow::Borrowed(&handle.name)).encode();
         let iter = self.txn.scan_prefix(&handle.cf, &prefix)?;
-        Ok(Box::new(iter.filter_map(move |result| {
-            match result {
-                Err(e) => Some(Err(EngineError::Store(e))),
-                Ok((key_bytes, value_bytes)) => {
-                    if Record::is_expired(&value_bytes, ttl) {
-                        return None;
-                    }
-                    let key = match Key::decode(&key_bytes) {
-                        Some(k) => k,
-                        None => return Some(Err(EngineError::InvalidKey("invalid record key".into()))),
-                    };
-                    let Key::Record(_, doc_id) = key else {
-                        return Some(Err(EngineError::InvalidKey("expected record key".into())));
-                    };
-                    match Record::decode_owned(value_bytes) {
-                        Ok(record) => Some(Ok((doc_id.into_owned(), record.doc))),
-                        Err(e) => Some(Err(e)),
-                    }
+        Ok(Box::new(iter.filter_map(move |result| match result {
+            Err(e) => Some(Err(EngineError::Store(e))),
+            Ok((key_bytes, value_bytes)) => {
+                if Record::is_expired(&value_bytes, ttl) {
+                    return None;
+                }
+                let key = match Key::decode(&key_bytes) {
+                    Some(k) => k,
+                    None => return Some(Err(EngineError::InvalidKey("invalid record key".into()))),
+                };
+                let Key::Record(_, doc_id) = key else {
+                    return Some(Err(EngineError::InvalidKey("expected record key".into())));
+                };
+                match Record::decode_owned(value_bytes) {
+                    Ok(record) => Some(Ok((doc_id.into_owned(), record.doc))),
+                    Err(e) => Some(Err(e)),
                 }
             }
         })))
@@ -186,13 +184,12 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             _ => None,
         };
 
-        let mut iter: Box<
-            dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b,
-        > = if reverse {
-            self.txn.scan_prefix_rev(&handle.cf, &prefix)?
-        } else {
-            self.txn.scan_prefix(&handle.cf, &prefix)?
-        };
+        let mut iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b> =
+            if reverse {
+                self.txn.scan_prefix_rev(&handle.cf, &prefix)?
+            } else {
+                self.txn.scan_prefix(&handle.cf, &prefix)?
+            };
 
         let mut done = false;
 

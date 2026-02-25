@@ -40,11 +40,3 @@ impl From<DbError> for SlateError {
         }
     }
 }
-
-impl From<serde_json::Error> for SlateError {
-    fn from(e: serde_json::Error) -> Self {
-        SlateError::Serialization {
-            message: e.to_string(),
-        }
-    }
-}

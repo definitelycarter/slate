@@ -2,7 +2,7 @@
 
 ## Overview
 
-A layered system with a key-value storage backend, an engine layer for key encoding and index maintenance, a database layer with query planning and execution, a TCP interface, and an HTTP layer for collection access.
+A layered system with a key-value storage backend, an engine layer for key encoding and index maintenance, and a database layer with query planning and execution.
 
 ## Crate Structure
 
@@ -10,14 +10,8 @@ A layered system with a key-value storage backend, an engine layer for key encod
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model: Query, DistinctQuery, Sort, Mutation (pure data structures)
+  ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
   ├── slate-db               → Filter parser, expression tree, query planner + executor
-  ├── slate-server           → TCP server, MessagePack wire protocol, thread-per-connection
-  ├── slate-client           → TCP client, connection pool (crossbeam channel)
-  ├── slate-server-init      → CLI tool to initialize collections on a running server
-  ├── slate-collection       → HTTP handler for collection CRUD (framework-agnostic)
-  ├── slate-collection-http  → Standalone HTTP server wrapping slate-collection
-  ├── slate-operator         → Kubernetes operator for Server + Collection CRDs
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-store-bench      → Store-level stress test (500k records, race conditions, data integrity)
 ```
@@ -140,16 +134,21 @@ Pure data structures representing queries and mutations. No dependencies on stor
 ### Query Model
 
 ```rust
-pub struct Query {
-    pub filter: Option<RawDocumentBuf>,   // BSON filter document (parsed in slate-db)
+pub struct FindOptions {
     pub sort: Vec<Sort>,
     pub skip: Option<usize>,
     pub take: Option<usize>,
     pub columns: Option<Vec<String>>,     // column projection
 }
+
+pub struct DistinctOptions {
+    pub sort: Option<SortDirection>,
+    pub skip: Option<usize>,
+    pub take: Option<usize>,
+}
 ```
 
-Filters are `RawDocumentBuf` (raw BSON) at the query layer — `slate-query` doesn't interpret filter semantics. The filter document is parsed into an `Expression` tree by `slate-db`'s parser at plan time.
+Filters are passed separately as raw BSON bytes (`impl IntoRawDocumentBuf`) at the database API layer — `slate-query` only defines options for pagination, sorting, and projection. The filter document is parsed into an `Expression` tree by `slate-db`'s parser at plan time.
 
 ### Sort
 
@@ -220,6 +219,8 @@ let doc = doc! {
 The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
+use slate_query::FindOptions;
+
 let db = Database::open(store, DatabaseConfig::default());
 
 // Create a collection with indexes
@@ -241,32 +242,29 @@ txn.insert_many("users", vec![
 ])?;
 
 // Query — find() returns a Cursor for lazy iteration
-let cursor = txn.find("users", query)?;                  // -> Cursor
-for doc in cursor.iter()? {                              //    CursorIter yields RawDocumentBuf
+let cursor = txn.find("users", rawdoc! {}, FindOptions::default())?;
+for doc in cursor.iter()? {              // CursorIter yields RawDocumentBuf
     let doc = doc?;
 }
 
-let one = txn.find_one("users", &query)?;                // -> Option<RawDocumentBuf>
-let record = txn.find_by_id("users", "bob", None)?;      // -> Option<Document>
-let record = txn.find_by_id("users", "bob",
-    Some(&["name"]))?;                                    // with projection
+let one = txn.find_one("users", rawdoc! { "_id": "bob" })?; // -> Option<RawDocumentBuf>
 
 // Update (merge — preserves unspecified fields)
-txn.update_one("users", &filter,
-    doc! { "status": "archived" }, false)?;               // -> UpdateResult
-txn.update_many("users", &filter,
-    doc! { "status": "archived" })?;
+txn.update_one("users", filter,
+    rawdoc! { "$set": { "status": "archived" } })?.drain()?;
+txn.update_many("users", filter,
+    rawdoc! { "$set": { "status": "archived" } })?.drain()?;
 
 // Replace (full document swap)
-txn.replace_one("users", &filter,
-    doc! { "name": "Alice", "status": "inactive" })?;
+txn.replace_one("users", filter,
+    rawdoc! { "name": "Alice", "status": "inactive" })?.drain()?;
 
 // Delete
-txn.delete_one("users", &filter)?;                       // -> DeleteResult
-txn.delete_many("users", &filter)?;
+txn.delete_one("users", filter)?.drain()?;
+txn.delete_many("users", filter)?.drain()?;
 
 // Count
-let n = txn.count("users", Some(filter))?;               // -> u64 (filter is RawDocumentBuf)
+let n = txn.count("users", rawdoc! {})?;  // -> u64
 
 // Index management
 txn.create_index("users", "email")?;  // backfills existing records
@@ -304,174 +302,3 @@ For index-covered queries, the index value is carried directly as `RawBson` — 
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 
-## TCP Interface (`slate-server` + `slate-client`)
-
-### Overview
-
-Slate can run as a standalone TCP server, allowing clients in separate processes to interact with the database over the network. The wire protocol uses MessagePack serialization (rmp-serde) with length-prefixed framing. MessagePack was chosen over BSON for the wire because it's more compact for structured enum data — benchmarks showed BSON wire format 32-76% slower for bulk transfers (see Benchmarks).
-
-```
-┌──────────────┐       TCP (MessagePack)      ┌──────────────────┐
-│ slate-client │  ◄──────────────────────────► │  slate-server    │
-│ Client       │                               │  thread-per-conn │
-└──────────────┘                               │  Session         │
-                                               │    └─ Database   │
-                                               │        └─ Store  │
-                                               └──────────────────┘
-```
-
-### Wire Protocol
-
-Messages are length-prefixed: a 4-byte big-endian length followed by a MessagePack-serialized payload (via `rmp_serde`). All types on the wire implement `serde::Serialize + Deserialize`.
-
-```rust
-enum Request {
-    // Insert
-    InsertOne { collection: String, doc: bson::Document },
-    InsertMany { collection: String, docs: Vec<bson::Document> },
-    // Query — filter is a BSON document, not a typed FilterGroup
-    Find { collection: String, filter: Option<bson::Document>,
-           sort: Vec<Sort>, skip: Option<usize>, take: Option<usize>,
-           columns: Option<Vec<String>> },
-    FindOne { collection: String, filter: Option<bson::Document>,
-              sort: Vec<Sort>, skip: Option<usize>, take: Option<usize>,
-              columns: Option<Vec<String>> },
-    FindById { collection: String, id: String, columns: Option<Vec<String>> },
-    Distinct { collection: String, field: String, filter: Option<bson::Document>,
-               sort: Option<SortDirection>, skip: Option<usize>, take: Option<usize> },
-    // Update
-    UpdateOne { collection: String, filter: bson::Document, update: bson::Document, upsert: bool },
-    UpdateMany { collection: String, filter: bson::Document, update: bson::Document },
-    ReplaceOne { collection: String, filter: bson::Document, doc: bson::Document },
-    // Delete
-    DeleteOne { collection: String, filter: bson::Document },
-    DeleteMany { collection: String, filter: bson::Document },
-    // Count
-    Count { collection: String, filter: Option<bson::Document> },
-    // Bulk
-    UpsertMany { collection: String, docs: Vec<bson::Document> },
-    MergeMany { collection: String, docs: Vec<bson::Document> },
-    // Index management
-    CreateIndex { collection: String, field: String },
-    DropIndex { collection: String, field: String },
-    ListIndexes { collection: String },
-    // Collection management
-    CreateCollection { config: CollectionConfig },
-    ListCollections,
-    DropCollection { collection: String },
-}
-
-enum Response {
-    Ok,
-    Insert(InsertResult),
-    Inserts(Vec<InsertResult>),
-    Record(Option<bson::Document>),
-    Records(Vec<bson::Document>),
-    Update(UpdateResult),
-    Delete(DeleteResult),
-    Count(u64),
-    Indexes(Vec<String>),
-    Collections(Vec<String>),
-    Values(bson::RawBson),
-    Upsert(UpsertResult),
-    Error(String),
-}
-```
-
-### Server
-
-The server binds to a TCP address and spawns a thread per client connection. Each connection gets a `Session` that holds an `Arc<Database<S>>`. Every request is auto-committed — the session opens a transaction, performs the operation, and commits. No multi-request transactions over the wire (keeps the protocol stateless).
-
-```rust
-let server = Server::new(db, "127.0.0.1:9600");
-server.serve(); // blocks, listens for connections
-```
-
-### Client
-
-The client opens a TCP connection and provides methods that mirror the database API. All operations are scoped to a collection.
-
-```rust
-let mut client = Client::connect("127.0.0.1:9600")?;
-
-// Insert
-client.insert_one("users", doc! { "name": "Alice", "status": "active" })?;
-client.insert_many("users", vec![doc! { "name": "Bob" }])?;
-
-// Query
-client.find("users", &query)?;                         // -> Vec<Document>
-client.find_one("users", &query)?;                     // -> Option<Document>
-client.find_by_id("users", "rec-1", None)?;            // -> Option<Document>
-client.find_by_id("users", "rec-1", Some(&["name"]))?; // with projection
-
-// Update
-client.update_one("users", &filter, doc! { "status": "archived" }, false)?;
-client.update_many("users", &filter, doc! { "status": "archived" })?;
-client.replace_one("users", &filter, doc! { "name": "Alice" })?;
-
-// Delete
-client.delete_one("users", &filter)?;
-client.delete_many("users", &filter)?;
-
-// Count
-client.count("users", Some(&filter))?;
-
-// Index management
-client.create_index("users", "email")?;
-client.drop_index("users", "email")?;
-client.list_indexes("users")?;
-
-// Collection management
-client.create_collection(&config)?;
-client.list_collections()?;
-client.drop_collection("users")?;
-```
-
-### Connection Pool
-
-`ClientPool` manages a fixed set of pre-connected `Client` instances using a `crossbeam` bounded channel as a blocking queue. Connections are checked out with `pool.get()` and returned automatically on drop.
-
-```rust
-let pool = ClientPool::new("127.0.0.1:9600", 10)?; // 10 connections
-
-let mut client = pool.get()?; // blocks if all in use
-client.find("users", &query)?;
-// returns to pool on drop
-```
-
-Internally, `PooledClient` wraps an `Option<Client>` and implements `Deref`/`DerefMut` for transparent access. On `Drop`, the client is returned to the channel. The `Option` + `take()` + `expect("BUG: ...")` pattern (borrowed from sqlx) handles the provably-unreachable None case.
-
-## HTTP Layer (`slate-collection` + `slate-collection-http`)
-
-### Overview
-
-`slate-collection` provides a framework-agnostic HTTP handler (`CollectionHttp`) for CRUD operations on a single collection. It uses raw `http::Request`/`http::Response` from the `http` crate, with no dependency on any web framework. `slate-collection-http` wraps it in a standalone hyper-based HTTP server.
-
-### CollectionHttp
-
-```rust
-pub struct CollectionHttp {
-    collection: String,
-    pool: ClientPool,
-}
-```
-
-The handler is configured with a collection name and a TCP client pool. All requests are proxied to the slate-server via the pool.
-
-**Endpoints:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/query` | Execute query, return matching records |
-| POST | `/query/distinct` | Execute distinct query on a field |
-| POST | `/data` | Insert new records |
-| PUT | `/data` | Upsert records (insert or replace) |
-| PATCH | `/data` | Merge records (insert or partial update) |
-| DELETE | `/data` | Delete records matching a filter |
-
-**Request context:**
-- Request body — `QueryRequest` JSON (filters, sort, skip, take, columns) for `/query`. Empty body returns all records.
-- Request body — `Vec<bson::Document>` (JSON array) for POST/PUT/PATCH `/data`.
-- Request body — `{ "filter": {...} }` for DELETE `/data`.
-
-The `handle` method takes `http::Request<Vec<u8>>` and returns `http::Response<Vec<u8>>`.

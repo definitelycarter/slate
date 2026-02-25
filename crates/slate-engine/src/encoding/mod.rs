@@ -61,8 +61,7 @@ impl Record {
                 if data.len() < header_len {
                     return Err(EngineError::Encoding("truncated TTL header".into()));
                 }
-                let millis =
-                    i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
+                let millis = i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
                 (Some(millis), &data[header_len..])
             }
             tag => {
@@ -88,8 +87,7 @@ impl Record {
                 if data.len() < header_len {
                     return Err(EngineError::Encoding("truncated TTL header".into()));
                 }
-                let millis =
-                    i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
+                let millis = i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
                 (Some(millis), header_len)
             }
             tag => {

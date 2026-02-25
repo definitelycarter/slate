@@ -108,18 +108,11 @@ pub struct IndexEntry<'a> {
 /// Operates on a global `_sys_` column family internally.
 pub trait Catalog: EngineTransaction {
     /// Resolve a collection by name into a live handle.
-    fn collection(
-        &self,
-        name: &str,
-    ) -> Result<CollectionHandle<Self::Cf>, EngineError>;
+    fn collection(&self, name: &str) -> Result<CollectionHandle<Self::Cf>, EngineError>;
 
     fn list_collections(&self) -> Result<Vec<CollectionConfig>, EngineError>;
 
-    fn create_collection(
-        &mut self,
-        cf: Option<&str>,
-        name: &str,
-    ) -> Result<(), EngineError>;
+    fn create_collection(&mut self, cf: Option<&str>, name: &str) -> Result<(), EngineError>;
 
     fn drop_collection(&mut self, name: &str) -> Result<(), EngineError>;
 

@@ -370,7 +370,9 @@ mod tests {
 
     #[test]
     fn record_key_objectid_roundtrip() {
-        let oid = [0x50, 0x7f, 0x1f, 0x77, 0xbc, 0xf8, 0x6c, 0xd7, 0x99, 0x43, 0x90, 0x11];
+        let oid = [
+            0x50, 0x7f, 0x1f, 0x77, 0xbc, 0xf8, 0x6c, 0xd7, 0x99, 0x43, 0x90, 0x11,
+        ];
         let key = Key::Record(Cow::Borrowed("users"), oid_id(&oid));
         let bytes = key.encode();
         let decoded = Key::decode(&bytes).unwrap();
@@ -407,12 +409,10 @@ mod tests {
     #[test]
     fn index_key_objectid_with_null_bytes() {
         // ObjectId containing \x00 bytes
-        let oid = [0x00, 0x00, 0x1f, 0x77, 0xbc, 0xf8, 0x6c, 0xd7, 0x99, 0x43, 0x90, 0x00];
-        let key = Key::Index(
-            Cow::Borrowed("users"),
-            Cow::Borrowed("email"),
-            oid_id(&oid),
-        );
+        let oid = [
+            0x00, 0x00, 0x1f, 0x77, 0xbc, 0xf8, 0x6c, 0xd7, 0x99, 0x43, 0x90, 0x00,
+        ];
+        let key = Key::Index(Cow::Borrowed("users"), Cow::Borrowed("email"), oid_id(&oid));
         let value_bytes = b"test@example.com";
         let bytes = key.encode_index(value_bytes);
         let decoded = Key::decode(&bytes).unwrap();
@@ -460,5 +460,4 @@ mod tests {
         assert!(Key::decode(b"r").is_none());
         assert!(Key::decode(b"").is_none());
     }
-
 }

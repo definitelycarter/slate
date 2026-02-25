@@ -9,53 +9,6 @@ use bson::{Bson, RawDocument};
 
 use crate::error::DbError;
 
-// ── Projection ──────────────────────────────────────────────────
-
-/// Apply projection to a document, supporting dot-notation paths.
-/// Keeps `_id` always. For dotted paths like "address.city", outputs
-/// `{ "address": { "city": <value> } }` — only the requested sub-path.
-pub(crate) fn apply_projection(doc: &mut bson::Document, columns: &[String]) {
-    use std::collections::{HashMap, HashSet};
-
-    // Separate flat keys from dotted paths grouped by top-level key
-    let mut flat_keys: HashSet<&str> = HashSet::new();
-    // top_key → vec of remaining sub-paths
-    let mut nested: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for col in columns {
-        if let Some(dot_pos) = col.find('.') {
-            let top = &col[..dot_pos];
-            let rest = &col[dot_pos + 1..];
-            nested.entry(top).or_default().push(rest);
-        } else {
-            flat_keys.insert(col.as_str());
-        }
-    }
-
-    // Remove top-level keys that aren't needed
-    let keys_to_remove: Vec<String> = doc
-        .keys()
-        .filter(|k| {
-            *k != "_id" && !flat_keys.contains(k.as_str()) && !nested.contains_key(k.as_str())
-        })
-        .cloned()
-        .collect();
-    for key in keys_to_remove {
-        doc.remove(&key);
-    }
-
-    // Trim nested documents to only requested sub-paths
-    for (top_key, sub_paths) in &nested {
-        if let Some(Bson::Document(sub_doc)) = doc.get(*top_key) {
-            let sub_columns: Vec<String> = sub_paths.iter().map(|s| s.to_string()).collect();
-            let mut trimmed = sub_doc.clone();
-            apply_projection(&mut trimmed, &sub_columns);
-            trimmed.remove("_id");
-            doc.insert(top_key.to_string(), Bson::Document(trimmed));
-        }
-    }
-}
-
 // ── Raw BSON _id extraction ─────────────────────────────────────
 
 /// Extract `_id` from a raw document as a zero-copy `&str` borrow.

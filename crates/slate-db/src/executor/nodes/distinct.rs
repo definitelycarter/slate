@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use bson::raw::{RawBson, RawBsonRef};
 
 use crate::error::DbError;
+use crate::executor::RawIter;
 use crate::executor::exec;
 use crate::executor::field_tree::{FieldTree, walk};
-use crate::executor::RawIter;
 
 pub(crate) fn execute<'a>(field: String, source: RawIter<'a>) -> Result<RawIter<'a>, DbError> {
     let paths = vec![field];

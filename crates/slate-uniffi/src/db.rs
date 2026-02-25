@@ -1,41 +1,9 @@
 use std::sync::Arc;
 
-use serde::Deserialize;
 use slate_db::{Database, DatabaseConfig, DatabaseTransaction, DbError};
-use slate_query::{Query, Sort};
+use slate_query::FindOptions;
 
 use crate::error::SlateError;
-
-/// JSON-deserializable query representation for the uniffi boundary.
-#[derive(Deserialize)]
-struct QueryJson {
-    #[serde(default)]
-    filter: Option<bson::Document>,
-    #[serde(default)]
-    sort: Vec<Sort>,
-    #[serde(default)]
-    skip: Option<usize>,
-    #[serde(default)]
-    take: Option<usize>,
-    #[serde(default)]
-    columns: Option<Vec<String>>,
-}
-
-impl QueryJson {
-    fn into_query(self) -> Result<Query, bson::raw::Error> {
-        let filter = self
-            .filter
-            .map(|d| bson::RawDocumentBuf::from_document(&d))
-            .transpose()?;
-        Ok(Query {
-            filter,
-            sort: self.sort,
-            skip: self.skip,
-            take: self.take,
-            columns: self.columns,
-        })
-    }
-}
 
 // --- Feature-gated store imports and type alias ---
 
@@ -77,6 +45,15 @@ impl SlateDatabase {
         let result = f(&mut txn).map_err(SlateError::from)?;
         txn.commit().map_err(SlateError::from)?;
         Ok(result)
+    }
+
+    fn parse_options(options: Option<Vec<u8>>) -> Result<FindOptions, SlateError> {
+        match options {
+            Some(bytes) => bson::from_slice(&bytes).map_err(|e| SlateError::InvalidQuery {
+                message: e.to_string(),
+            }),
+            None => Ok(FindOptions::default()),
+        }
     }
 }
 
@@ -129,18 +106,16 @@ impl SlateDatabase {
 
     // --- Query ---
 
-    pub fn find(&self, collection: String, query_json: String) -> Result<Vec<Vec<u8>>, SlateError> {
-        let query = serde_json::from_str::<QueryJson>(&query_json)
-            .map_err(|e| SlateError::InvalidQuery {
-                message: e.to_string(),
-            })?
-            .into_query()
-            .map_err(|e| SlateError::InvalidQuery {
-                message: e.to_string(),
-            })?;
+    pub fn find(
+        &self,
+        collection: String,
+        filter: Vec<u8>,
+        options: Option<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, SlateError> {
+        let options = Self::parse_options(options)?;
         self.read(|txn| {
             let results: Vec<Vec<u8>> = txn
-                .find(&collection, query)?
+                .find(&collection, filter, options)?
                 .iter()?
                 .map(|r| r.map(|doc| doc.into_bytes()))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -151,40 +126,11 @@ impl SlateDatabase {
     pub fn find_one(
         &self,
         collection: String,
-        query_json: String,
+        filter: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, SlateError> {
-        let query = serde_json::from_str::<QueryJson>(&query_json)
-            .map_err(|e| SlateError::InvalidQuery {
-                message: e.to_string(),
-            })?
-            .into_query()
-            .map_err(|e| SlateError::InvalidQuery {
-                message: e.to_string(),
-            })?;
         self.read(|txn| {
-            let raw = txn.find_one(&collection, query)?;
+            let raw = txn.find_one(&collection, filter)?;
             Ok(raw.map(|r| r.into_bytes()))
-        })
-    }
-
-    pub fn find_by_id(
-        &self,
-        collection: String,
-        id: String,
-        columns: Option<Vec<String>>,
-    ) -> Result<Option<Vec<u8>>, SlateError> {
-        self.read(|txn| {
-            let cols: Option<Vec<&str>> = columns
-                .as_ref()
-                .map(|c| c.iter().map(|s| s.as_str()).collect());
-            let doc = txn.find_by_id(&collection, &id, cols.as_deref())?;
-            match doc {
-                Some(d) => {
-                    let raw = bson::RawDocumentBuf::from_document(&d).map_err(DbError::from)?;
-                    Ok(Some(raw.into_bytes()))
-                }
-                None => Ok(None),
-            }
         })
     }
 
@@ -193,12 +139,11 @@ impl SlateDatabase {
     pub fn update_one(
         &self,
         collection: String,
-        filter_json: String,
+        filter: Vec<u8>,
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
-        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let affected = txn.update_one(&collection, &filter, update)?.drain()?;
+            let affected = txn.update_one(&collection, filter, update)?.drain()?;
             Ok(affected)
         })
     }
@@ -206,12 +151,11 @@ impl SlateDatabase {
     pub fn update_many(
         &self,
         collection: String,
-        filter_json: String,
+        filter: Vec<u8>,
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
-        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let affected = txn.update_many(&collection, &filter, update)?.drain()?;
+            let affected = txn.update_many(&collection, filter, update)?.drain()?;
             Ok(affected)
         })
     }
@@ -219,30 +163,29 @@ impl SlateDatabase {
     pub fn replace_one(
         &self,
         collection: String,
-        filter_json: String,
+        filter: Vec<u8>,
         replacement: Vec<u8>,
     ) -> Result<u64, SlateError> {
-        let filter: bson::Document = serde_json::from_str(&filter_json)?;
         self.write(|txn| {
-            let affected = txn.replace_one(&collection, &filter, replacement)?.drain()?;
+            let affected = txn
+                .replace_one(&collection, filter, replacement)?
+                .drain()?;
             Ok(affected)
         })
     }
 
     // --- Delete ---
 
-    pub fn delete_one(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
-        let filter: bson::Document = serde_json::from_str(&filter_json)?;
+    pub fn delete_one(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let affected = txn.delete_one(&collection, &filter)?.drain()?;
+            let affected = txn.delete_one(&collection, filter)?.drain()?;
             Ok(affected)
         })
     }
 
-    pub fn delete_many(&self, collection: String, filter_json: String) -> Result<u64, SlateError> {
-        let filter: bson::Document = serde_json::from_str(&filter_json)?;
+    pub fn delete_many(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let affected = txn.delete_many(&collection, &filter)?.drain()?;
+            let affected = txn.delete_many(&collection, filter)?.drain()?;
             Ok(affected)
         })
     }
@@ -252,19 +195,9 @@ impl SlateDatabase {
     pub fn count(
         &self,
         collection: String,
-        filter_json: Option<String>,
+        filter: Option<Vec<u8>>,
     ) -> Result<u64, SlateError> {
-        let filter: Option<bson::RawDocumentBuf> = match filter_json {
-            Some(json) => {
-                let doc: bson::Document = serde_json::from_str(&json)?;
-                Some(bson::RawDocumentBuf::from_document(&doc).map_err(|e| {
-                    SlateError::InvalidQuery {
-                        message: e.to_string(),
-                    }
-                })?)
-            }
-            None => None,
-        };
+        let filter = filter.unwrap_or_else(|| bson::rawdoc! {}.into_bytes());
         self.read(|txn| {
             let count = txn.count(&collection, filter)?;
             Ok(count)
@@ -273,22 +206,14 @@ impl SlateDatabase {
 
     // --- Bulk ---
 
-    pub fn upsert_many(
-        &self,
-        collection: String,
-        docs: Vec<Vec<u8>>,
-    ) -> Result<u64, SlateError> {
+    pub fn upsert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         self.write(|txn| {
             let affected = txn.upsert_many(&collection, docs)?.drain()?;
             Ok(affected)
         })
     }
 
-    pub fn merge_many(
-        &self,
-        collection: String,
-        docs: Vec<Vec<u8>>,
-    ) -> Result<u64, SlateError> {
+    pub fn merge_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         self.write(|txn| {
             let affected = txn.merge_many(&collection, docs)?.drain()?;
             Ok(affected)

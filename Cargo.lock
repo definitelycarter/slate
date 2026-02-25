@@ -1214,8 +1214,6 @@ name = "slate-uniffi"
 version = "0.1.0"
 dependencies = [
  "bson",
- "serde",
- "serde_json",
  "slate-db",
  "slate-query",
  "slate-store",

@@ -1,21 +1,21 @@
-use crate::sort::{Sort, SortDirection};
-use bson::RawDocumentBuf;
+use serde::Deserialize;
 
-#[derive(Debug, Clone)]
-pub struct Query {
-    pub filter: Option<RawDocumentBuf>,
+use crate::sort::{Sort, SortDirection};
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FindOptions {
+    #[serde(default)]
     pub sort: Vec<Sort>,
+    #[serde(default)]
     pub skip: Option<usize>,
+    #[serde(default)]
     pub take: Option<usize>,
-    /// Column projection — if Some, only these columns are returned.
-    /// If None, all columns are returned.
+    #[serde(default)]
     pub columns: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DistinctQuery {
-    pub field: String,
-    pub filter: Option<RawDocumentBuf>,
+#[derive(Debug, Clone, Default)]
+pub struct DistinctOptions {
     pub sort: Option<SortDirection>,
     pub skip: Option<usize>,
     pub take: Option<usize>,

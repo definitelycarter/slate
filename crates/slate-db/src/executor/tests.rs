@@ -85,7 +85,6 @@ impl EngineTransaction for NoopTransaction {
 
 #[derive(Debug)]
 struct PutRecord {
-    doc_id: String,
     doc: RawDocumentBuf,
 }
 
@@ -119,12 +118,9 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         doc: &bson::RawDocument,
-        doc_id: &BsonValue<'_>,
+        _doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
-        // Extract the doc_id as a string for easier assertion
-        let id_str = format!("{:?}", doc_id);
         self.puts.borrow_mut().push(PutRecord {
-            doc_id: id_str,
             doc: doc.to_raw_document_buf(),
         });
         Ok(())
@@ -607,11 +603,6 @@ fn seeded_db() -> Database<MemoryStore> {
     db
 }
 
-/// Get a KvEngine handle for direct store-backed executor tests.
-fn kv_engine() -> KvEngine<MemoryStore> {
-    KvEngine::new(MemoryStore::new())
-}
-
 /// Seed a KvEngine with test data and return it.
 fn seeded_kv_engine() -> KvEngine<MemoryStore> {
     let db = seeded_db();
@@ -952,7 +943,10 @@ fn upsert_replace_existing() {
         .unwrap();
     assert_eq!(affected, 1);
 
-    let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one("test", rawdoc! { "_id": "1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alicia");
     assert_eq!(doc.get_str("status").unwrap(), "archived");
     assert_eq!(doc.get_i32("score").unwrap(), 99);
@@ -970,7 +964,10 @@ fn upsert_merge_existing() {
         .unwrap();
     assert_eq!(affected, 1);
 
-    let doc = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    let doc = txn
+        .find_one("test", rawdoc! { "_id": "1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
     assert_eq!(doc.get_str("status").unwrap(), "active");
     assert_eq!(doc.get_i32("score").unwrap(), 99);
@@ -994,10 +991,16 @@ fn upsert_mixed_insert_and_update() {
         .unwrap();
     assert_eq!(affected, 2);
 
-    let doc1 = txn.find_by_id("test", "1", None).unwrap().unwrap();
+    let doc1 = txn
+        .find_one("test", rawdoc! { "_id": "1" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc1.get_str("name").unwrap(), "Alicia");
 
-    let doc99 = txn.find_by_id("test", "99", None).unwrap().unwrap();
+    let doc99 = txn
+        .find_one("test", rawdoc! { "_id": "99" })
+        .unwrap()
+        .unwrap();
     assert_eq!(doc99.get_str("name").unwrap(), "New");
 }
 
@@ -1016,15 +1019,12 @@ fn upsert_replace_cleans_old_indexes() {
     .unwrap();
 
     // Query by old index value should not find Alice
-    let query = slate_query::Query {
-        filter: Some(rawdoc! { "status": "active" }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results: Vec<_> = txn
-        .find("test", query)
+        .find(
+            "test",
+            rawdoc! { "status": "active" },
+            slate_query::FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()
@@ -1041,15 +1041,12 @@ fn upsert_replace_cleans_old_indexes() {
     assert_eq!(active_ids, vec!["3"]);
 
     // Query by new index value should find Alice
-    let query2 = slate_query::Query {
-        filter: Some(rawdoc! { "status": "archived" }),
-        sort: vec![],
-        skip: None,
-        take: None,
-        columns: None,
-    };
     let results2: Vec<_> = txn
-        .find("test", query2)
+        .find(
+            "test",
+            rawdoc! { "status": "archived" },
+            slate_query::FindOptions::default(),
+        )
         .unwrap()
         .iter()
         .unwrap()

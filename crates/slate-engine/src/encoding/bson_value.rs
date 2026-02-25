@@ -407,10 +407,7 @@ mod tests {
         let dt = bson::DateTime::from_millis(1_700_000_000_000);
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::DateTime(dt)).unwrap();
         assert_eq!(val.tag, 0x09);
-        assert_eq!(
-            &*val.bytes,
-            &encode_i64_sortable(1_700_000_000_000)
-        );
+        assert_eq!(&*val.bytes, &encode_i64_sortable(1_700_000_000_000));
     }
 
     #[test]
@@ -550,8 +547,14 @@ mod tests {
         assert_eq!(decode_i32_sortable(encode_i32_sortable(i32::MIN)), i32::MIN);
         assert_eq!(decode_i32_sortable(encode_i32_sortable(i32::MAX)), i32::MAX);
 
-        assert_eq!(decode_i64_sortable(encode_i64_sortable(1_000_000)), 1_000_000);
-        assert_eq!(decode_i64_sortable(encode_i64_sortable(-1_000_000)), -1_000_000);
+        assert_eq!(
+            decode_i64_sortable(encode_i64_sortable(1_000_000)),
+            1_000_000
+        );
+        assert_eq!(
+            decode_i64_sortable(encode_i64_sortable(-1_000_000)),
+            -1_000_000
+        );
 
         assert_eq!(decode_f64_sortable(encode_f64_sortable(3.14)), 3.14);
         assert_eq!(decode_f64_sortable(encode_f64_sortable(-3.14)), -3.14);

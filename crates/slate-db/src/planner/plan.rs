@@ -39,9 +39,7 @@ pub enum Plan<Cf: Clone> {
 #[derive(Clone)]
 pub enum Node<Cf: Clone> {
     /// Full collection scan — yields (_id, doc) pairs.
-    Scan {
-        collection: CollectionHandle<Cf>,
-    },
+    Scan { collection: CollectionHandle<Cf> },
 
     /// Index scan — yields doc IDs from an index on `field`.
     IndexScan {

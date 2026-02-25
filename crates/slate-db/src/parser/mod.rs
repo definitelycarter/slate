@@ -36,8 +36,8 @@ fn to_bson(raw: RawBsonRef<'_>) -> Result<Bson, FilterParseError> {
             let raw_buf = a.to_raw_array_buf();
             let mut items = Vec::new();
             for result in raw_buf.into_iter() {
-                let elem = result
-                    .map_err(|e| FilterParseError(format!("invalid array element: {e}")))?;
+                let elem =
+                    result.map_err(|e| FilterParseError(format!("invalid array element: {e}")))?;
                 items.push(to_bson(elem)?);
             }
             Ok(Bson::Array(items))
@@ -58,8 +58,7 @@ pub fn parse_filter(doc: &RawDocumentBuf) -> Result<Expression, FilterParseError
     let mut children = Vec::new();
 
     for result in doc.iter() {
-        let (key, value) = result
-            .map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
+        let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
 
         match key {
             "$and" => children.push(parse_logical_array(value, Expression::And)?),
@@ -149,8 +148,7 @@ fn parse_operator_doc(
     let mut conditions: Vec<Expression> = Vec::new();
 
     for result in doc.iter() {
-        let (key, value) =
-            result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
+        let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
         let expr = match key {
             "$eq" => Expression::Eq(field.to_string(), to_bson(value)?),
             "$gt" => Expression::Gt(field.to_string(), to_bson(value)?),
@@ -184,8 +182,7 @@ fn parse_regex(field: &str, doc: &bson::RawDocument) -> Result<Expression, Filte
     let mut options: Option<String> = None;
 
     for result in doc.iter() {
-        let (key, value) =
-            result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
+        let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
         match key {
             "$regex" => match value {
                 RawBsonRef::String(s) => pattern = Some(s.to_string()),

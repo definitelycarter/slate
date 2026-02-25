@@ -31,27 +31,17 @@ pub trait Transaction {
 
     // Reads
     fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError>;
-    fn multi_get(
-        &self,
-        cf: &Self::Cf,
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Vec<u8>>>, StoreError>;
+    fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError>;
     fn scan_prefix<'a>(
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    >;
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
     fn scan_prefix_rev<'a>(
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    >;
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
 
     // Writes
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;

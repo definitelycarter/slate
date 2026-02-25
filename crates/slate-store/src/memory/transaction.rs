@@ -118,11 +118,7 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Ok(data.get(key).cloned())
     }
 
-    fn multi_get(
-        &self,
-        cf: &Self::Cf,
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let snap = self.snapshot.borrow();
         let snap = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = snap.get_cf(&cf.name)?;
@@ -133,10 +129,8 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         &'b self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>, StoreError>
+    {
         let snap = self.snapshot.borrow();
         let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = snap_ref.get_cf(&cf.name)?;
@@ -154,10 +148,8 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         &'b self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>, StoreError>
+    {
         let snap = self.snapshot.borrow();
         let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = snap_ref.get_cf(&cf.name)?;

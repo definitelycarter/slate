@@ -1,8 +1,8 @@
 use bson::raw::{RawArrayBuf, RawBson};
 
 use crate::error::DbError;
-use crate::executor::exec;
 use crate::executor::RawIter;
+use crate::executor::exec;
 
 pub(crate) fn execute<'a>(
     skip: usize,

@@ -123,11 +123,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn multi_get(
-        &self,
-        cf: &Self::Cf,
-        keys: &[&[u8]],
-    ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+    fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
         match &self.inner {
             Inner::Read(txn) => {
@@ -164,10 +160,8 @@ impl<'db> Transaction for RedbTransaction<'db> {
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
         let entries = self.collect_prefix(cf, prefix, false)?;
         Ok(Box::new(entries.into_iter().map(Ok)))
     }
@@ -176,10 +170,8 @@ impl<'db> Transaction for RedbTransaction<'db> {
         &'a self,
         cf: &Self::Cf,
         prefix: &[u8],
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>,
-        StoreError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
         let entries = self.collect_prefix(cf, prefix, true)?;
         Ok(Box::new(entries.into_iter().map(Ok)))
     }

@@ -111,10 +111,9 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
             source
         };
 
-        // KeyLookup for index paths (unless covered).
-        let node = if covered {
-            source
-        } else if source_is_scan {
+        // KeyLookup for index paths (unless covered or already a KeyLookup).
+        let source_is_key_lookup = matches!(source, Node::KeyLookup { .. });
+        let node = if covered || source_is_scan || source_is_key_lookup {
             source
         } else {
             Node::KeyLookup {
@@ -216,8 +215,8 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         let handle = (self.resolve)(collection)?;
         let (source, residual) = self.plan_source(&handle, predicate);
 
-        // KeyLookup for index paths.
-        let node = if matches!(source, Node::Scan { .. }) {
+        // KeyLookup for index paths (skip if already a KeyLookup).
+        let node = if matches!(source, Node::Scan { .. } | Node::KeyLookup { .. }) {
             source
         } else {
             Node::KeyLookup {
@@ -383,7 +382,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     ) -> Node<Cf> {
         let (source, residual) = self.plan_source(handle, predicate);
 
-        let source = if matches!(source, Node::Scan { .. }) {
+        let source = if matches!(source, Node::Scan { .. } | Node::KeyLookup { .. }) {
             source
         } else {
             Node::KeyLookup {
@@ -418,6 +417,13 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         handle: &CollectionHandle<Cf>,
         predicate: &Expression,
     ) -> (Node<Cf>, Option<Expression>) {
+        // Fast path: _id equality → direct key lookup, no scan needed.
+        if let Expression::Eq(field, value) = predicate {
+            if field == "_id" {
+                return (Self::id_lookup(handle, value), None);
+            }
+        }
+
         match predicate {
             Expression::And(children) => self.plan_and(handle, children, predicate),
             Expression::Or(children) => self.plan_or(handle, children, predicate),
@@ -450,6 +456,17 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         children: &[Expression],
         original: &Expression,
     ) -> (Node<Cf>, Option<Expression>) {
+        // Priority 0: _id equality — direct key lookup, always wins.
+        for (i, child) in children.iter().enumerate() {
+            if let Expression::Eq(field, value) = child {
+                if field == "_id" {
+                    let node = Self::id_lookup(handle, value);
+                    let residual = residual_from_and(children, &[i]);
+                    return (node, residual);
+                }
+            }
+        }
+
         // Priority 1: Eq on an indexed field (most selective).
         for (i, child) in children.iter().enumerate() {
             if let Expression::Eq(field, _) = child {
@@ -591,6 +608,16 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         }
 
         Some(result)
+    }
+
+    /// Build a KeyLookup over a Values node for a direct _id point read.
+    fn id_lookup(handle: &CollectionHandle<Cf>, value: &bson::Bson) -> Node<Cf> {
+        let doc = bson::RawDocumentBuf::from_document(&bson::doc! { "_id": value.clone() })
+            .expect("_id document is always valid");
+        Node::KeyLookup {
+            collection: handle.clone(),
+            source: Box::new(Node::Values(vec![doc])),
+        }
     }
 
     /// Try to convert a single expression into an IndexScan.
