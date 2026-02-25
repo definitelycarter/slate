@@ -4,7 +4,7 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 use crate::error::DbError;
 use crate::executor::RawIter;
 
-pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     now_millis: i64,

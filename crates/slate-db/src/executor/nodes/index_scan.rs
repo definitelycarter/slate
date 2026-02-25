@@ -24,7 +24,7 @@ fn bson_to_raw_bson(val: &bson::Bson) -> Option<RawBson> {
     })
 }
 
-pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     field: String,

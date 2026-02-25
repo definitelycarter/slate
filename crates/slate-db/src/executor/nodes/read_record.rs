@@ -5,7 +5,7 @@ use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
 
-pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,

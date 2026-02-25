@@ -6,7 +6,7 @@ use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
 
-pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     mutation: Mutation,
@@ -27,10 +27,8 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
 
         match exec::apply_mutation(old_raw, &mutation)? {
             Some(mutated) => {
-                let doc_id = BsonValue::from_raw_bson_ref(
-                    bson::raw::RawBsonRef::String(&id_str),
-                )
-                .expect("string is always a valid BsonValue");
+                let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(&id_str))
+                    .expect("string is always a valid BsonValue");
                 txn.put(&handle, &mutated, &doc_id)?;
                 Ok(Some(RawBson::Document(mutated)))
             }

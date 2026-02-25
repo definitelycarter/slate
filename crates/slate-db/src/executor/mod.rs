@@ -28,13 +28,13 @@ pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>>
 /// let iter = Executor::new(&txn).execute(plan)?;
 /// for row in iter { /* ... */ }
 /// ```
-pub struct Executor<'c, T: EngineTransaction> {
-    txn: &'c T,
+pub struct Executor<'a, T: EngineTransaction> {
+    txn: &'a T,
     now_millis: i64,
 }
 
-impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
-    pub fn new(txn: &'c T) -> Self {
+impl<'a, T: EngineTransaction> Executor<'a, T> {
+    pub fn new(txn: &'a T) -> Self {
         Self {
             txn,
             now_millis: bson::DateTime::now().timestamp_millis(),
@@ -42,7 +42,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
     }
 
     /// Create an executor that skips TTL filtering.
-    pub fn new_no_ttl_filter(txn: &'c T) -> Self {
+    pub fn new_no_ttl_filter(txn: &'a T) -> Self {
         Self {
             txn,
             now_millis: i64::MIN,
@@ -50,7 +50,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
     }
 
     /// Execute a plan, returning a streaming iterator of rows.
-    pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'c>, DbError> {
+    pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match plan {
             Plan::Find(node) => self.execute_node(node),
 
@@ -101,7 +101,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
     pub fn execute_upsert_plan(
         &self,
         plan: Plan<T::Cf>,
-    ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
+    ) -> Result<(RawIter<'a>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
         match plan {
             Plan::Merge { collection, source } => {
                 self.execute_upsert(nodes::upsert::UpsertMode::Merge, collection, source)
@@ -121,7 +121,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         mode: nodes::upsert::UpsertMode,
         collection: CollectionHandle<T::Cf>,
         source_node: Node<T::Cf>,
-    ) -> Result<(RawIter<'c>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
+    ) -> Result<(RawIter<'a>, Rc<Cell<u64>>, Rc<Cell<u64>>), DbError> {
         let inserted = Rc::new(Cell::new(0u64));
         let updated = Rc::new(Cell::new(0u64));
         let source = self.execute_node(source_node)?;
@@ -137,7 +137,7 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
         Ok((iter, inserted, updated))
     }
 
-    fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'c>, DbError> {
+    fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
 
@@ -152,18 +152,16 @@ impl<'c, T: EngineTransaction + 'c> Executor<'c, T> {
                 direction,
                 limit,
                 covered,
-            } => {
-                nodes::index_scan::execute(
-                    self.txn,
-                    collection,
-                    field,
-                    &range,
-                    direction,
-                    limit,
-                    covered,
-                    self.now_millis,
-                )
-            }
+            } => nodes::index_scan::execute(
+                self.txn,
+                collection,
+                field,
+                &range,
+                direction,
+                limit,
+                covered,
+                self.now_millis,
+            ),
 
             Node::IndexMerge { logical, lhs, rhs } => {
                 let left = self.execute_node(*lhs)?;

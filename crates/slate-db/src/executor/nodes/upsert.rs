@@ -15,7 +15,7 @@ pub(crate) enum UpsertMode {
     Merge,
 }
 
-pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
+pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
@@ -56,9 +56,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + 'a>(
                 None => {
                     // Merge no-op: doc unchanged, still counts as matched.
                     updated.set(updated.get() + 1);
-                    return Ok(Some(RawBson::Document(
-                        old_raw_doc.clone(),
-                    )));
+                    return Ok(Some(RawBson::Document(old_raw_doc.clone())));
                 }
             };
 
