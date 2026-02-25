@@ -2,10 +2,74 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, MutexGuard};
 
+use imbl::ordmap::RangedIter;
+
 use crate::error::StoreError;
 use crate::store::{Store, Transaction};
 
 use super::store::{ColumnFamily, MemoryStore};
+
+// ── Lazy prefix iterator ─────────────────────────────────────
+
+/// Lazily iterates over an `OrdMap` prefix range without collecting into a Vec.
+///
+/// Owns the `Arc<ColumnFamily>` to keep the map alive while iterating.
+/// Uses `unsafe` to extend the `RangedIter` lifetime — safe because the OrdMap
+/// is heap-allocated behind the Arc and won't be dropped while this struct exists.
+struct PrefixIter {
+    _data: Arc<ColumnFamily>,
+    iter: RangedIter<'static, Vec<u8>, Vec<u8>>,
+    prefix: Vec<u8>,
+    reverse: bool,
+}
+
+impl PrefixIter {
+    fn forward(data: Arc<ColumnFamily>, prefix: Vec<u8>) -> Self {
+        // SAFETY: `data` is heap-allocated via Arc and won't be dropped or moved
+        // while this struct exists. The RangedIter borrows from the OrdMap inside
+        // the Arc. We transmute the lifetime to 'static.
+        let iter: RangedIter<'static, Vec<u8>, Vec<u8>> =
+            unsafe { std::mem::transmute(data.range(prefix.clone()..)) };
+        Self {
+            _data: data,
+            iter,
+            prefix,
+            reverse: false,
+        }
+    }
+
+    fn reverse(data: Arc<ColumnFamily>, prefix: Vec<u8>) -> Self {
+        let mut upper = prefix.clone();
+        if let Some(last) = upper.last_mut() {
+            *last = last.wrapping_add(1);
+        }
+        // SAFETY: same as forward — Arc keeps OrdMap alive for the struct's lifetime.
+        let iter: RangedIter<'static, Vec<u8>, Vec<u8>> =
+            unsafe { std::mem::transmute(data.range(prefix.clone()..upper)) };
+        Self {
+            _data: data,
+            iter,
+            prefix,
+            reverse: true,
+        }
+    }
+}
+
+impl Iterator for PrefixIter {
+    type Item = Result<(Vec<u8>, Vec<u8>), StoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (k, v) = if self.reverse {
+            self.iter.next_back()?
+        } else {
+            self.iter.next()?
+        };
+        if !k.starts_with(&self.prefix) {
+            return None;
+        }
+        Some(Ok((k.clone(), v.clone())))
+    }
+}
 
 /// Column family handle for the memory backend.
 ///
@@ -133,15 +197,8 @@ impl<'a> Transaction for MemoryTransaction<'a> {
     {
         let snap = self.snapshot.borrow();
         let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
-        let data = snap_ref.get_cf(&cf.name)?;
-        let prefix_vec = prefix.to_vec();
-        let entries: Vec<(Vec<u8>, Vec<u8>)> = data
-            .range(prefix_vec.clone()..)
-            .take_while(|(k, _)| k.starts_with(&prefix_vec))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        Ok(Box::new(entries.into_iter().map(Ok)))
+        let data = Arc::clone(snap_ref.get_cf(&cf.name)?);
+        Ok(Box::new(PrefixIter::forward(data, prefix.to_vec())))
     }
 
     fn scan_prefix_rev<'b>(
@@ -152,19 +209,8 @@ impl<'a> Transaction for MemoryTransaction<'a> {
     {
         let snap = self.snapshot.borrow();
         let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
-        let data = snap_ref.get_cf(&cf.name)?;
-        let lower = prefix.to_vec();
-        let mut upper = lower.clone();
-        if let Some(last) = upper.last_mut() {
-            *last = last.wrapping_add(1);
-        }
-        let entries: Vec<(Vec<u8>, Vec<u8>)> = data
-            .range(lower..upper)
-            .rev()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        Ok(Box::new(entries.into_iter().map(Ok)))
+        let data = Arc::clone(snap_ref.get_cf(&cf.name)?);
+        Ok(Box::new(PrefixIter::reverse(data, prefix.to_vec())))
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {

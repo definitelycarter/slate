@@ -43,8 +43,10 @@ impl<'db> RedbTransaction<'db> {
         Ok(())
     }
 
-    fn collect_prefix(
-        &self,
+    /// Eagerly collect prefix entries for write transactions (where lazy iteration
+    /// isn't possible due to table handle lifetime constraints).
+    fn collect_prefix_write(
+        txn: &redb::WriteTransaction,
         cf: &str,
         prefix: &[u8],
         reverse: bool,
@@ -60,21 +62,10 @@ impl<'db> RedbTransaction<'db> {
             false
         };
 
-        match &self.inner {
-            Inner::Read(txn) => {
-                let table = txn
-                    .open_table(def)
-                    .map_err(|e| StoreError::Storage(e.to_string()))?;
-                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
-            }
-            Inner::Write(txn) => {
-                let table = txn
-                    .open_table(def)
-                    .map_err(|e| StoreError::Storage(e.to_string()))?;
-                collect_from_readable(&table, prefix, &upper, has_upper, reverse)
-            }
-            Inner::Consumed => Err(StoreError::TransactionConsumed),
-        }
+        let table = txn
+            .open_table(def)
+            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        collect_from_readable(&table, prefix, &upper, has_upper, reverse)
     }
 }
 
@@ -162,8 +153,37 @@ impl<'db> Transaction for RedbTransaction<'db> {
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
     {
-        let entries = self.collect_prefix(cf, prefix, false)?;
-        Ok(Box::new(entries.into_iter().map(Ok)))
+        match &self.inner {
+            Inner::Read(txn) => {
+                // ReadOnlyTable::range() returns Range<'static> — owned, ref-counted.
+                let cf_str = cf.to_string();
+                let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf_str);
+                let table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                let range = table
+                    .range::<&[u8]>(prefix..)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                let prefix_owned = prefix.to_vec();
+                Ok(Box::new(
+                    range
+                        .take_while(move |entry| match entry {
+                            Ok((k, _)) => k.value().starts_with(&prefix_owned),
+                            Err(_) => true,
+                        })
+                        .map(|entry| {
+                            let (k, v) =
+                                entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                            Ok((k.value().to_vec(), v.value().to_vec()))
+                        }),
+                ))
+            }
+            Inner::Write(txn) => {
+                let entries = Self::collect_prefix_write(txn, cf, prefix, false)?;
+                Ok(Box::new(entries.into_iter().map(Ok)))
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+        }
     }
 
     fn scan_prefix_rev<'a>(
@@ -172,8 +192,37 @@ impl<'db> Transaction for RedbTransaction<'db> {
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
     {
-        let entries = self.collect_prefix(cf, prefix, true)?;
-        Ok(Box::new(entries.into_iter().map(Ok)))
+        match &self.inner {
+            Inner::Read(txn) => {
+                let cf_str = cf.to_string();
+                let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf_str);
+                let table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                let mut upper = prefix.to_vec();
+                let has_upper = if let Some(last) = upper.last_mut() {
+                    *last = last.wrapping_add(1);
+                    true
+                } else {
+                    false
+                };
+                let range = if has_upper {
+                    table.range::<&[u8]>(prefix..upper.as_slice())
+                } else {
+                    table.range::<&[u8]>(..)
+                }
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+                Ok(Box::new(range.rev().map(|entry| {
+                    let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                    Ok((k.value().to_vec(), v.value().to_vec()))
+                })))
+            }
+            Inner::Write(txn) => {
+                let entries = Self::collect_prefix_write(txn, cf, prefix, true)?;
+                Ok(Box::new(entries.into_iter().map(Ok)))
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+        }
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
