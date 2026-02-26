@@ -245,6 +245,18 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Ok(())
     }
 
+    fn delete_batch(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<(), StoreError> {
+        self.check_writable()?;
+        self.dirty.borrow_mut().insert(cf.name.clone());
+        let mut snap = self.snapshot.borrow_mut();
+        let snap = snap.as_mut().ok_or(StoreError::TransactionConsumed)?;
+        let data = snap.get_cf_mut(&cf.name)?;
+        for key in keys {
+            data.remove(*key);
+        }
+        Ok(())
+    }
+
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         let _ = self.store.create_cf(name);

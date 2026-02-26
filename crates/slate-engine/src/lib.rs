@@ -1,6 +1,6 @@
-mod encoding;
+pub mod encoding;
 mod error;
-mod index_diff;
+mod index;
 mod key;
 mod kv;
 mod traits;

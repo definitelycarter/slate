@@ -35,7 +35,7 @@ fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_>)> {
 /// - `Collection(name)` — collection metadata in `_sys_`
 /// - `IndexConfig(collection, field)` — index metadata in `_sys_`
 /// - `Index(collection, field, doc_id)` — value-first index entry (`i` tag)
-/// - `IndexMap(collection, field, doc_id)` — record-first index entry (`j` tag, internal)
+/// - `IndexMap(collection, field, doc_id)` — doc-first reverse index entry (`j` tag, internal)
 /// - `Record(collection, doc_id)` — document record addressing
 ///
 /// `doc_id` is encoded as `[bson_type: 1][len: 2 BE][id_bytes]` in keys,
@@ -56,7 +56,7 @@ impl<'a> Key<'a> {
     /// - `IndexConfig`: `x\x00{collection}\x00{field}`
     /// - `Record`: `r\x00{collection}\x00[doc_id_encoded]`
     /// - `Index` (no value): `i\x00{collection}\x00{field}\x00\x00[doc_id_encoded]`
-    /// - `IndexMap` (no value): `j\x00{collection}\x00{field}\x00[doc_id_encoded]\x00`
+    /// - `IndexMap` (no value): `j\x00{collection}\x00[doc_id_encoded]\x00{field}\x00`
     ///
     /// For `Index`/`IndexMap` keys with value bytes, use
     /// [`encode_index`](Key::encode_index) / [`encode_index_map`](Key::encode_index_map).
@@ -104,15 +104,15 @@ impl<'a> Key<'a> {
             }
             Key::IndexMap(collection, field, doc_id) => {
                 let mut buf = Vec::with_capacity(
-                    2 + collection.len() + 1 + field.len() + 1 + 3 + doc_id.bytes.len() + 1,
+                    2 + collection.len() + 1 + 3 + doc_id.bytes.len() + 1 + field.len() + 1,
                 );
                 buf.push(INDEX_MAP_TAG);
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
-                buf.extend_from_slice(field.as_bytes());
-                buf.push(SEP);
                 doc_id.write_length_prefixed(&mut buf);
+                buf.push(SEP);
+                buf.extend_from_slice(field.as_bytes());
                 buf.push(SEP);
                 // empty value bytes
                 buf
@@ -148,7 +148,7 @@ impl<'a> Key<'a> {
 
     /// Encode an `IndexMap` key with the given encoded value bytes.
     ///
-    /// Layout: `j\x00{collection}\x00{field}\x00[doc_id_encoded]{value_bytes}`
+    /// Layout: `j\x00{collection}\x00[doc_id_encoded]\x00{field}\x00{value_bytes}`
     ///
     /// Panics if `self` is not an `IndexMap` variant.
     pub fn encode_index_map(&self, value_bytes: &[u8]) -> Vec<u8> {
@@ -156,15 +156,16 @@ impl<'a> Key<'a> {
             panic!("encode_index_map called on non-IndexMap key");
         };
         let mut buf = Vec::with_capacity(
-            2 + collection.len() + 1 + field.len() + 1 + 3 + doc_id.bytes.len() + value_bytes.len(),
+            2 + collection.len() + 1 + 3 + doc_id.bytes.len() + 1 + field.len() + 1 + value_bytes.len(),
         );
         buf.push(INDEX_MAP_TAG);
         buf.push(SEP);
         buf.extend_from_slice(collection.as_bytes());
         buf.push(SEP);
+        doc_id.write_length_prefixed(&mut buf);
+        buf.push(SEP);
         buf.extend_from_slice(field.as_bytes());
         buf.push(SEP);
-        doc_id.write_length_prefixed(&mut buf);
         buf.extend_from_slice(value_bytes);
         buf
     }
@@ -217,14 +218,15 @@ impl<'a> Key<'a> {
                 ))
             }
             INDEX_MAP_TAG => {
-                // j\x00{collection}\x00{field}\x00[type][len][id_bytes]{value_bytes}
+                // j\x00{collection}\x00[doc_id_lp]\x00{field}\x00{value_bytes}
                 let first_sep = rest.iter().position(|&b| b == SEP)?;
                 let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
                 let after_collection = &rest[first_sep + 1..];
-                let second_sep = after_collection.iter().position(|&b| b == SEP)?;
-                let field = std::str::from_utf8(&after_collection[..second_sep]).ok()?;
-                let after_field = &after_collection[second_sep + 1..];
-                let (bv, _value_bytes) = BsonValue::parse_length_prefixed(after_field)?;
+                let (bv, after_docid) = BsonValue::parse_length_prefixed(after_collection)?;
+                // after_docid = \x00{field}\x00{value_bytes}
+                let after_docid = after_docid.strip_prefix(&[SEP])?;
+                let field_sep = after_docid.iter().position(|&b| b == SEP)?;
+                let field = std::str::from_utf8(&after_docid[..field_sep]).ok()?;
                 Some(Key::IndexMap(
                     Cow::Borrowed(collection),
                     Cow::Borrowed(field),
@@ -261,7 +263,8 @@ impl<'a> Key<'a> {
 /// - `Record(collection)` — all document records in a collection (`r\x00{collection}\x00`)
 /// - `IndexField(collection, field)` — index entries for a field (`i\x00{collection}\x00{field}\x00`)
 /// - `IndexValue(collection, field, value)` — index entries for a specific value
-/// - `IndexMapRecord(collection, field, doc_id)` — index map entries for a record
+/// - `IndexMapRecord(collection, doc_id)` — index map entries for a specific record (all fields)
+/// - `IndexMapCollection(collection)` — all index map entries for a collection
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     Collection,
@@ -269,7 +272,8 @@ pub enum KeyPrefix<'a> {
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
-    IndexMapRecord(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
+    IndexMapRecord(Cow<'a, str>, BsonValue<'a>),
+    IndexMapCollection(Cow<'a, str>),
 }
 
 impl<'a> KeyPrefix<'a> {
@@ -314,17 +318,23 @@ impl<'a> KeyPrefix<'a> {
                 buf.extend_from_slice(value);
                 buf
             }
-            KeyPrefix::IndexMapRecord(collection, field, doc_id) => {
+            KeyPrefix::IndexMapRecord(collection, doc_id) => {
                 let mut buf = Vec::with_capacity(
-                    2 + collection.len() + 1 + field.len() + 1 + 3 + doc_id.bytes.len(),
+                    2 + collection.len() + 1 + 3 + doc_id.bytes.len(),
                 );
                 buf.push(INDEX_MAP_TAG);
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
-                buf.extend_from_slice(field.as_bytes());
-                buf.push(SEP);
                 doc_id.write_length_prefixed(&mut buf);
+                buf
+            }
+            KeyPrefix::IndexMapCollection(collection) => {
+                let mut buf = Vec::with_capacity(2 + collection.len() + 1);
+                buf.push(INDEX_MAP_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
                 buf
             }
         }

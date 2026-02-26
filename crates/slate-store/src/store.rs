@@ -47,6 +47,7 @@ pub trait Transaction {
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;
     fn put_batch(&self, cf: &Self::Cf, entries: &[(&[u8], &[u8])]) -> Result<(), StoreError>;
     fn delete(&self, cf: &Self::Cf, key: &[u8]) -> Result<(), StoreError>;
+    fn delete_batch(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<(), StoreError>;
 
     // Schema
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError>;

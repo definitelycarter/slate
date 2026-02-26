@@ -162,6 +162,16 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(())
     }
 
+    fn delete_batch(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<(), StoreError> {
+        self.check_writable()?;
+        let txn = self.txn()?;
+        for key in keys {
+            txn.delete_cf(&cf.handle, key)
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         if self.db.cf_handle(name).is_none() {

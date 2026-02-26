@@ -16,4 +16,20 @@ arc-swap = { version = "1", optional = true }
 redb = { version = "2", optional = true }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "memory"
+harness = false
+required-features = ["memory"]
+
+[[bench]]
+name = "rocks"
+harness = false
+required-features = ["rocksdb"]
+
+[[bench]]
+name = "redb"
+harness = false
+required-features = ["redb"]

@@ -6,7 +6,7 @@ use bson::{RawDocument, RawDocumentBuf};
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::field_tree::FieldTree;
-use crate::executor::raw_bson::skip_bson_value;
+use slate_engine::encoding::skip_bson_value;
 
 pub(crate) fn execute<'a>(
     columns: Option<Vec<String>>,

@@ -1193,6 +1193,7 @@ name = "slate-store"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "criterion",
  "imbl",
  "redb",
  "rocksdb",

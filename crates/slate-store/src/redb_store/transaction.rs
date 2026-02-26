@@ -281,6 +281,26 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
+    fn delete_batch(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<(), StoreError> {
+        self.check_writable()?;
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
+        match &self.inner {
+            Inner::Write(txn) => {
+                let mut table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                for key in keys {
+                    table
+                        .remove(*key)
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
+                }
+                Ok(())
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+            _ => unreachable!(),
+        }
+    }
+
     fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         let name = name.to_string();

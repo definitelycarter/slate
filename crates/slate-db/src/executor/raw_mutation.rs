@@ -10,7 +10,8 @@ use bson::raw::RawDocument;
 use bson::{Bson, RawDocumentBuf};
 use slate_query::{Mutation, MutationOp};
 
-use super::raw_bson::{find_field, skip_bson_value};
+use super::raw_bson::find_field;
+use slate_engine::encoding::skip_bson_value;
 use crate::error::DbError;
 
 // ── Result type ─────────────────────────────────────────────────
