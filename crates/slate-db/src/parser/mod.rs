@@ -28,12 +28,11 @@ fn to_bson(raw: RawBsonRef<'_>) -> Result<Bson, FilterParseError> {
         RawBsonRef::DateTime(dt) => Ok(Bson::DateTime(dt)),
         RawBsonRef::ObjectId(oid) => Ok(Bson::ObjectId(oid)),
         RawBsonRef::Document(d) => Ok(Bson::Document(
-            d.to_raw_document_buf()
-                .to_document()
+            bson::deserialize_from_slice(d.as_bytes())
                 .map_err(|e| FilterParseError(format!("invalid embedded document: {e}")))?,
         )),
         RawBsonRef::Array(a) => {
-            let raw_buf = a.to_raw_array_buf();
+            let raw_buf = a.to_owned();
             let mut items = Vec::new();
             for result in raw_buf.into_iter() {
                 let elem =
@@ -60,13 +59,13 @@ pub fn parse_filter(doc: &RawDocumentBuf) -> Result<Expression, FilterParseError
     for result in doc.iter() {
         let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
 
-        match key {
+        match key.as_str() {
             "$and" => children.push(parse_logical_array(value, Expression::And)?),
             "$or" => children.push(parse_logical_array(value, Expression::Or)?),
             k if k.starts_with('$') => {
                 return Err(FilterParseError(format!("unknown top-level operator: {k}")));
             }
-            _ => children.push(parse_field_condition(key, value)?),
+            _ => children.push(parse_field_condition(key.as_str(), value)?),
         }
     }
 
@@ -96,7 +95,7 @@ fn parse_logical_array(
         let elem = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
         match elem {
             RawBsonRef::Document(sub_doc) => {
-                let buf = sub_doc.to_raw_document_buf();
+                let buf = sub_doc.to_owned();
                 children.push(parse_filter(&buf)?);
             }
             _ => {
@@ -122,7 +121,7 @@ fn parse_field_condition(
     // If value is a document whose first key starts with $, it's an operator doc
     if let RawBsonRef::Document(sub_doc) = value {
         if let Some(Ok((first_key, _))) = sub_doc.iter().next() {
-            if first_key.starts_with('$') {
+            if first_key.as_str().starts_with('$') {
                 return parse_operator_doc(field, sub_doc);
             }
         }
@@ -149,7 +148,7 @@ fn parse_operator_doc(
 
     for result in doc.iter() {
         let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
-        let expr = match key {
+        let expr = match key.as_str() {
             "$eq" => Expression::Eq(field.to_string(), to_bson(value)?),
             "$gt" => Expression::Gt(field.to_string(), to_bson(value)?),
             "$gte" => Expression::Gte(field.to_string(), to_bson(value)?),
@@ -183,7 +182,7 @@ fn parse_regex(field: &str, doc: &bson::RawDocument) -> Result<Expression, Filte
 
     for result in doc.iter() {
         let (key, value) = result.map_err(|e| FilterParseError(format!("malformed BSON: {e}")))?;
-        match key {
+        match key.as_str() {
             "$regex" => match value {
                 RawBsonRef::String(s) => pattern = Some(s.to_string()),
                 _ => {
@@ -236,7 +235,7 @@ mod tests {
 
     /// Helper: create a RawDocumentBuf from a doc! macro.
     fn raw(doc: bson::Document) -> RawDocumentBuf {
-        RawDocumentBuf::from_document(&doc).unwrap()
+        RawDocumentBuf::try_from(&doc).unwrap()
     }
 
     #[test]

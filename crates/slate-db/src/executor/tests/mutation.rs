@@ -106,7 +106,7 @@ fn replace_writes_replacement() {
 
     let puts = txn.puts.borrow();
     assert_eq!(puts.len(), 1);
-    let written: bson::Document = bson::from_slice(puts[0].doc.as_bytes()).unwrap();
+    let written: bson::Document = bson::deserialize_from_slice(puts[0].doc.as_bytes()).unwrap();
     assert_eq!(written.get_bool("replaced").unwrap(), true);
 }
 

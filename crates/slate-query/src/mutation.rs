@@ -53,7 +53,7 @@ pub fn parse_mutation(doc: &RawDocument) -> Result<Mutation, ParseError> {
             continue; // silently skip _id
         }
 
-        match key {
+        match key.as_str() {
             "$set" => parse_operator_fields(value, MutationOp::Set, &mut ops)?,
             "$unset" => parse_unset_fields(value, &mut ops)?,
             "$inc" => parse_inc_fields(value, &mut ops)?,
@@ -210,9 +210,9 @@ fn parse_pop_fields(value: RawBsonRef, ops: &mut Vec<FieldMutation>) -> Result<(
 /// Convert a RawBsonRef to an owned Bson value.
 fn raw_to_bson(value: RawBsonRef) -> Result<Bson, ParseError> {
     value
-        .to_raw_bson()
+        .to_owned()
         .try_into()
-        .map_err(|e: bson::raw::Error| ParseError(format!("failed to convert BSON value: {e}")))
+        .map_err(|e: bson::error::Error| ParseError(format!("failed to convert BSON value: {e}")))
 }
 
 #[cfg(test)]

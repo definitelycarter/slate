@@ -104,18 +104,18 @@ fn project_document(
 
         // Always include _id
         if key == "_id" {
-            dest.append_ref("_id", raw_val);
+            dest.append(bson::cstr!("_id"), raw_val);
             continue;
         }
 
-        let node = match tree.get(key) {
+        let node = match tree.get(key.as_str()) {
             Some(node) => node,
             None => continue,
         };
 
         match node {
             FieldTree::Leaf(_) => {
-                dest.append_ref(key, raw_val);
+                dest.append(key, raw_val);
             }
             FieldTree::Branch(children) => match raw_val {
                 RawBsonRef::Document(sub_doc) => {
@@ -134,14 +134,14 @@ fn project_document(
                                 out.push(RawBson::Document(trimmed));
                             }
                             other => {
-                                out.push(other.to_raw_bson());
+                                out.push(other.to_owned());
                             }
                         }
                     }
                     dest.append(key, RawBson::Array(out));
                 }
                 _ => {
-                    dest.append_ref(key, raw_val);
+                    dest.append(key, raw_val);
                 }
             },
         }

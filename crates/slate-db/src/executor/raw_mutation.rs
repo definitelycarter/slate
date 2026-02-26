@@ -11,8 +11,8 @@ use bson::{Bson, RawDocumentBuf};
 use slate_query::{Mutation, MutationOp};
 
 use super::raw_bson::find_field;
-use slate_engine::encoding::skip_bson_value;
 use crate::error::DbError;
+use slate_engine::encoding::skip_bson_value;
 
 // ── Result type ─────────────────────────────────────────────────
 
@@ -483,11 +483,13 @@ pub(crate) fn raw_merge(
         // Try to find a matching field and overwrite at the byte level.
         // We work with the raw value bytes directly — extract type + value
         // from the update doc and splice them into the target.
-        match find_field(&bytes, key) {
+        match find_field(&bytes, key.as_str()) {
             Some(loc) => {
                 // Extract the raw value bytes from the update element
                 let update_bytes = update.as_bytes();
-                let update_loc = find_field(update_bytes, key).unwrap();
+                let Some(update_loc) = find_field(update_bytes, key.as_str()) else {
+                    continue;
+                };
                 let new_type = update_loc.type_byte;
                 let new_val = &update_bytes[update_loc.value_start..update_loc.element_end];
 
@@ -506,7 +508,7 @@ pub(crate) fn raw_merge(
                 }
 
                 // Different size or type → splice the whole element
-                let new_elem = encode_element(key, new_type, new_val);
+                let new_elem = encode_element(key.as_str(), new_type, new_val);
                 bytes.splice(loc.element_start..loc.element_end, new_elem);
                 update_doc_length(&mut bytes);
                 changed = true;
@@ -514,11 +516,13 @@ pub(crate) fn raw_merge(
             None => {
                 // Field missing → append before trailing 0x00
                 let update_bytes = update.as_bytes();
-                let update_loc = find_field(update_bytes, key).unwrap();
+                let Some(update_loc) = find_field(update_bytes, key.as_str()) else {
+                    continue;
+                };
                 let new_type = update_loc.type_byte;
                 let new_val = &update_bytes[update_loc.value_start..update_loc.element_end];
 
-                let new_elem = encode_element(key, new_type, new_val);
+                let new_elem = encode_element(key.as_str(), new_type, new_val);
                 let insert_pos = bytes.len() - 1;
                 bytes.splice(insert_pos..insert_pos, new_elem);
                 update_doc_length(&mut bytes);
@@ -544,12 +548,12 @@ mod tests {
     use bson::{doc, rawdoc};
 
     fn make_raw(doc: &bson::Document) -> bson::RawDocumentBuf {
-        let bytes = bson::to_vec(doc).unwrap();
+        let bytes = bson::serialize_to_vec(doc).unwrap();
         bson::RawDocumentBuf::from_bytes(bytes).unwrap()
     }
 
     fn to_doc(raw: &bson::RawDocumentBuf) -> bson::Document {
-        bson::from_slice(raw.as_bytes()).unwrap()
+        bson::deserialize_from_slice(raw.as_bytes()).unwrap()
     }
 
     // ── skip_bson_value ─────────────────────────────────────────
@@ -667,7 +671,7 @@ mod tests {
         let c = raw_set(&mut bytes, "score", &Bson::Int32(20)).unwrap();
         assert!(c);
         assert_eq!(bytes.len(), orig_len); // no realloc
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("score").unwrap(), 20);
     }
 
@@ -685,7 +689,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_set(&mut bytes, "name", &Bson::String("Bob".into())).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Bob");
     }
 
@@ -695,7 +699,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_set(&mut bytes, "val", &Bson::String("hello".into())).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_str("val").unwrap(), "hello");
     }
 
@@ -705,7 +709,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_set(&mut bytes, "b", &Bson::Int32(2)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("a").unwrap(), 1);
         assert_eq!(result.get_i32("b").unwrap(), 2);
     }
@@ -718,7 +722,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_unset(&mut bytes, "a");
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert!(result.get("a").is_none());
         assert_eq!(result.get_i32("b").unwrap(), 2);
     }
@@ -741,7 +745,7 @@ mod tests {
         let c = raw_inc(&mut bytes, "count", &Bson::Int32(5)).unwrap();
         assert!(c);
         assert_eq!(bytes.len(), orig_len); // in-place
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("count").unwrap(), 15);
     }
 
@@ -751,7 +755,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "count", &Bson::Int64(50)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i64("count").unwrap(), 150);
     }
 
@@ -761,7 +765,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "score", &Bson::Double(0.5)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert!((result.get_f64("score").unwrap() - 2.0).abs() < f64::EPSILON);
     }
 
@@ -771,7 +775,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "n", &Bson::Int32(1)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i64("n").unwrap(), i32::MAX as i64 + 1);
     }
 
@@ -781,7 +785,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "n", &Bson::Int64(5)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i64("n").unwrap(), 15);
     }
 
@@ -791,7 +795,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "counter", &Bson::Int32(10)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("counter").unwrap(), 10);
     }
 
@@ -809,7 +813,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_inc(&mut bytes, "n", &Bson::Double(0.5)).unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert!((result.get_f64("n").unwrap() - 10.5).abs() < f64::EPSILON);
     }
 
@@ -823,7 +827,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         let arr = result.get_array("tags").unwrap();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[2].as_str().unwrap(), "c");
@@ -837,7 +841,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         let arr = result.get_array("tags").unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].as_str().unwrap(), "first");
@@ -859,7 +863,7 @@ mod tests {
         let mut bytes = raw.as_bytes().to_vec();
         let c = raw_pop(&mut bytes, "tags").unwrap();
         assert!(c);
-        let result: bson::Document = bson::from_slice(&bytes).unwrap();
+        let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         let arr = result.get_array("tags").unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0].as_str().unwrap(), "a");

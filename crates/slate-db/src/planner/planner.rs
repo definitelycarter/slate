@@ -612,7 +612,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     /// Build a KeyLookup over a Values node for a direct _id point read.
     fn id_lookup(handle: &CollectionHandle<Cf>, value: &bson::Bson) -> Node<Cf> {
-        let doc = bson::RawDocumentBuf::from_document(&bson::doc! { "_id": value.clone() })
+        let doc = bson::RawDocumentBuf::try_from(&bson::doc! { "_id": value.clone() })
             .expect("_id document is always valid");
         Node::KeyLookup {
             collection: handle.clone(),

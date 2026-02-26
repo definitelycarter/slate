@@ -35,23 +35,12 @@ impl From<StoreError> for DbError {
     }
 }
 
-impl From<bson::ser::Error> for DbError {
-    fn from(e: bson::ser::Error) -> Self {
+impl From<bson::error::Error> for DbError {
+    fn from(e: bson::error::Error) -> Self {
         DbError::Serialization(e.to_string())
     }
 }
 
-impl From<bson::de::Error> for DbError {
-    fn from(e: bson::de::Error) -> Self {
-        DbError::Serialization(e.to_string())
-    }
-}
-
-impl From<bson::raw::Error> for DbError {
-    fn from(e: bson::raw::Error) -> Self {
-        DbError::Serialization(e.to_string())
-    }
-}
 
 impl From<slate_query::ParseError> for DbError {
     fn from(e: slate_query::ParseError) -> Self {

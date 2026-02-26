@@ -31,7 +31,7 @@ pub fn temp_db() -> (Database<MemoryStore>, tempfile::TempDir) {
 pub fn eq_filter(field: &str, value: Bson) -> bson::RawDocumentBuf {
     let mut doc = bson::Document::new();
     doc.insert(field.to_string(), value);
-    bson::RawDocumentBuf::from_document(&doc).unwrap()
+    bson::RawDocumentBuf::try_from(&doc).unwrap()
 }
 
 pub fn create_collection(db: &Database<MemoryStore>, name: &str) {

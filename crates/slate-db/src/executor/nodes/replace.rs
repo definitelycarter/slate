@@ -29,12 +29,12 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         // Rebuild doc: copy _id from old doc (preserves type), then replacement fields
         let mut buf = RawDocumentBuf::new();
         if let Ok(Some(id_ref)) = old_raw.get("_id") {
-            buf.append_ref("_id", id_ref);
+            buf.append(bson::cstr!("_id"), id_ref);
         }
         for entry in replacement_raw.iter() {
             let (k, v) = entry?;
             if k != "_id" {
-                buf.append_ref(k, v);
+                buf.append(k, v);
             }
         }
 

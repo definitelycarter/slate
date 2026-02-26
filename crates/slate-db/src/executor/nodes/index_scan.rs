@@ -100,6 +100,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         None
     };
 
+    let field_cstr = bson::raw::CString::try_from(field.as_str())
+        .map_err(|e| DbError::InvalidQuery(format!("invalid field name: {e}")))?;
     let mut iter = txn.scan_index(&handle, &field, engine_range, reverse, now_millis)?;
     let mut count = 0usize;
     let mut done = false;
@@ -140,8 +142,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                         // Coerce the query value to the type stored in the index.
                         let coerced = coerce_to_stored_type(rv, &entry.metadata);
                         let mut doc = RawDocumentBuf::new();
-                        doc.append("_id", id_raw);
-                        doc.append(&field, coerced);
+                        doc.append(bson::cstr!("_id"), id_raw);
+                        doc.append(&field_cstr, coerced);
                         return Some(Ok(Some(RawBson::Document(doc))));
                     } else {
                         // Standard path: yield bare ID for ReadRecord

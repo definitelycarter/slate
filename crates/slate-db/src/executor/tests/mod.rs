@@ -137,7 +137,7 @@ impl EngineTransaction for MockTransaction {
         _doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
-            doc: doc.to_raw_document_buf(),
+            doc: doc.to_owned(),
         });
         Ok(())
     }
@@ -150,7 +150,7 @@ impl EngineTransaction for MockTransaction {
         _ttl: i64,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
-            doc: doc.to_raw_document_buf(),
+            doc: doc.to_owned(),
         });
         Ok(())
     }
@@ -216,7 +216,7 @@ fn collect_docs(iter: RawIter) -> Vec<Option<bson::Document>> {
         let opt_val = r.unwrap();
         opt_val.and_then(|v| match v {
             bson::RawBson::Document(raw) => {
-                Some(bson::from_slice::<bson::Document>(raw.as_bytes()).unwrap())
+                Some(bson::deserialize_from_slice::<bson::Document>(raw.as_bytes()).unwrap())
             }
             _ => None,
         })

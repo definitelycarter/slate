@@ -29,7 +29,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             Some(id) => id,
             None => {
                 let oid = bson::oid::ObjectId::new();
-                doc.append("_id", oid);
+                doc.append(bson::cstr!("_id"), oid);
                 BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::ObjectId(oid))
                     .expect("ObjectId is always valid")
             }

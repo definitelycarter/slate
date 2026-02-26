@@ -49,7 +49,7 @@ impl SlateDatabase {
 
     fn parse_options(options: Option<Vec<u8>>) -> Result<FindOptions, SlateError> {
         match options {
-            Some(bytes) => bson::from_slice(&bytes).map_err(|e| SlateError::InvalidQuery {
+            Some(bytes) => bson::deserialize_from_slice(&bytes).map_err(|e| SlateError::InvalidQuery {
                 message: e.to_string(),
             }),
             None => Ok(FindOptions::default()),

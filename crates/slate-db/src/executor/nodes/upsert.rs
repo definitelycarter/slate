@@ -32,7 +32,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             Some(id) => id,
             None => {
                 let oid = bson::oid::ObjectId::new();
-                new_doc.append("_id", oid);
+                new_doc.append(bson::cstr!("_id"), oid);
                 slate_engine::BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::ObjectId(oid))
                     .expect("ObjectId is always valid")
             }
@@ -71,12 +71,12 @@ fn build_doc(
             // Copy _id from old doc (preserves original type), then new fields
             let mut buf = RawDocumentBuf::new();
             if let Ok(Some(id_ref)) = old_raw.get("_id") {
-                buf.append_ref("_id", id_ref);
+                buf.append(bson::cstr!("_id"), id_ref);
             }
             for entry in new_raw.iter() {
                 let (k, v) = entry?;
                 if k != "_id" {
-                    buf.append_ref(k, v);
+                    buf.append(k, v);
                 }
             }
             Ok(Some(buf))
@@ -115,7 +115,7 @@ mod tests {
         let result = build_doc(&UpsertMode::Replace, &new, &old)
             .unwrap()
             .unwrap();
-        let keys: Vec<&str> = result.iter().map(|e| e.unwrap().0).collect();
+        let keys: Vec<&str> = result.iter().map(|e| e.unwrap().0.as_str()).collect();
         assert_eq!(keys.iter().filter(|&&k| k == "_id").count(), 1);
     }
 

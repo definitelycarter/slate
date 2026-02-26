@@ -11,7 +11,7 @@ pub trait IntoRawDocumentBuf {
 
 impl IntoRawDocumentBuf for bson::Document {
     fn into_raw_document_buf(self) -> Result<RawDocumentBuf, DbError> {
-        Ok(RawDocumentBuf::from_document(&self)?)
+        Ok(RawDocumentBuf::try_from(&self)?)
     }
 }
 
@@ -29,7 +29,7 @@ impl IntoRawDocumentBuf for &RawDocumentBuf {
 
 impl IntoRawDocumentBuf for &bson::Document {
     fn into_raw_document_buf(self) -> Result<RawDocumentBuf, DbError> {
-        Ok(RawDocumentBuf::from_document(self)?)
+        Ok(RawDocumentBuf::try_from(self)?)
     }
 }
 

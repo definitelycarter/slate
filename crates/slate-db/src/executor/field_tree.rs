@@ -59,7 +59,7 @@ fn walk_inner<'a, F>(
             Ok(kv) => kv,
             Err(_) => continue,
         };
-        match tree.get(key) {
+        match tree.get(key.as_str()) {
             Some(FieldTree::Leaf(full_path)) => {
                 if expand_leaf_arrays {
                     if let RawBsonRef::Array(arr) = value {

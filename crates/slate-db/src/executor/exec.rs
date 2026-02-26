@@ -187,7 +187,7 @@ pub(crate) fn apply_mutation(
     }
 
     // Slow path: full deserialization
-    let mut doc: bson::Document = bson::from_slice(old_raw.as_bytes())?;
+    let mut doc: bson::Document = bson::deserialize_from_slice(old_raw.as_bytes())?;
     let mut changed = false;
 
     for fm in &mutation.ops {
@@ -257,7 +257,7 @@ pub(crate) fn apply_mutation(
         return Ok(None);
     }
 
-    let raw = bson::RawDocumentBuf::from_document(&doc)?;
+    let raw = bson::RawDocumentBuf::try_from(&doc)?;
     Ok(Some(raw))
 }
 
@@ -423,8 +423,8 @@ pub(crate) fn push_raw(buf: &mut bson::RawArrayBuf, raw_ref: RawBsonRef<'_>) {
         RawBsonRef::Boolean(b) => buf.push(b),
         RawBsonRef::DateTime(dt) => buf.push(dt),
         RawBsonRef::ObjectId(oid) => buf.push(oid),
-        RawBsonRef::Document(d) => buf.push(d.to_raw_document_buf()),
-        RawBsonRef::Array(a) => buf.push(a.to_raw_array_buf()),
+        RawBsonRef::Document(d) => buf.push(d.to_owned()),
+        RawBsonRef::Array(a) => buf.push(a.to_owned()),
         _ => {}
     }
 }
@@ -449,8 +449,8 @@ pub(crate) fn to_raw_bson(raw_ref: RawBsonRef<'_>) -> Option<RawBson> {
         RawBsonRef::Boolean(b) => RawBson::Boolean(b),
         RawBsonRef::DateTime(dt) => RawBson::DateTime(dt),
         RawBsonRef::ObjectId(oid) => RawBson::ObjectId(oid),
-        RawBsonRef::Document(d) => RawBson::Document(d.to_raw_document_buf()),
-        RawBsonRef::Array(a) => RawBson::Array(a.to_raw_array_buf()),
+        RawBsonRef::Document(d) => RawBson::Document(d.to_owned()),
+        RawBsonRef::Array(a) => RawBson::Array(a.to_owned()),
         _ => return None,
     })
 }
@@ -463,7 +463,7 @@ mod tests {
     // ── Raw BSON tests ──────────────────────────────────────────
 
     fn make_raw(doc: &bson::Document) -> RawDocumentBuf {
-        let bytes = bson::to_vec(doc).unwrap();
+        let bytes = bson::serialize_to_vec(doc).unwrap();
         RawDocumentBuf::from_bytes(bytes).unwrap()
     }
 

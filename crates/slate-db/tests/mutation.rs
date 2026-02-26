@@ -8,7 +8,7 @@ use slate_query::FindOptions;
 // ── Mutation operator tests ─────────────────────────────────────
 
 fn get_str_array(doc: &bson::RawDocumentBuf, path: &str) -> Vec<String> {
-    let parsed: bson::Document = bson::from_slice(doc.as_bytes()).unwrap();
+    let parsed: bson::Document = bson::deserialize_from_slice(doc.as_bytes()).unwrap();
     let segments: Vec<&str> = path.split('.').collect();
     let mut current = &parsed;
     for seg in &segments[..segments.len() - 1] {
