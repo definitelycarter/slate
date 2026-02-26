@@ -7,6 +7,7 @@ use slate_store::{Store, StoreError, Transaction};
 use crate::encoding::bson_value::{self, BsonValue};
 use crate::encoding::{IndexMeta, Record};
 use crate::error::EngineError;
+use crate::index_diff;
 use crate::key::{Key, KeyPrefix};
 use crate::traits::{
     Catalog, CollectionConfig, CollectionHandle, EngineTransaction, IndexEntry, IndexRange,
@@ -75,23 +76,33 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
         let encoded_key = key.encode();
 
-        // Index maintenance: remove old entries via IndexMap, insert new ones.
         if !handle.indexes.is_empty() {
-            let new_ttl = Record::ttl_millis(doc);
+            index_diff::diff_indexes(&self.txn, handle, doc, doc_id)?;
+        }
 
-            for field in &handle.indexes {
-                // Remove all old index entries for this (field, doc_id).
-                self.delete_index(handle, field, doc_id)?;
+        let encoded_value = Record::encode(doc);
+        Ok(self.txn.put(&handle.cf, &encoded_key, &encoded_value)?)
+    }
 
-                // Insert new index entries from the new document.
-                for val in bson_value::extract_all(doc, field) {
-                    let meta = IndexMeta {
-                        type_byte: val.tag,
-                        ttl_millis: new_ttl,
-                    };
-                    self.put_index(handle, field, &val.to_vec(), doc_id, &meta.encode())?;
-                }
+    fn put_nx(
+        &self,
+        handle: &CollectionHandle<Self::Cf>,
+        doc: &RawDocument,
+        doc_id: &BsonValue<'_>,
+        ttl: i64,
+    ) -> Result<(), EngineError> {
+        let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
+        let encoded_key = key.encode();
+
+        // Check existence — expired docs are treated as non-existent.
+        if let Some(data) = self.txn.get(&handle.cf, &encoded_key)? {
+            if !Record::is_expired(&data, ttl) {
+                return Err(EngineError::DuplicateKey(doc_id.to_string()));
             }
+        }
+
+        if !handle.indexes.is_empty() {
+            index_diff::insert_indexes(&self.txn, handle, doc, doc_id)?;
         }
 
         let encoded_value = Record::encode(doc);
@@ -293,33 +304,6 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         Ok(())
     }
 
-    fn put_index(
-        &self,
-        handle: &CollectionHandle<<S::Txn<'a> as Transaction>::Cf>,
-        field: &str,
-        value: &[u8],
-        doc_id: &BsonValue<'_>,
-        metadata: &[u8],
-    ) -> Result<(), EngineError> {
-        let key = Key::Index(
-            Cow::Borrowed(&handle.name),
-            Cow::Borrowed(field),
-            doc_id.clone(),
-        );
-        let index_key = key.encode_index(value);
-        self.txn.put(&handle.cf, &index_key, metadata)?;
-
-        // Write the reverse map entry: IndexMap key → Index key bytes.
-        let map_key = Key::IndexMap(
-            Cow::Borrowed(&handle.name),
-            Cow::Borrowed(field),
-            doc_id.clone(),
-        );
-        let map_encoded = map_key.encode_index_map(value);
-        self.txn.put(&handle.cf, &map_encoded, &index_key)?;
-        Ok(())
-    }
-
     fn delete_index(
         &self,
         handle: &CollectionHandle<<S::Txn<'a> as Transaction>::Cf>,
@@ -485,7 +469,15 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
                     type_byte: field_val.tag,
                     ttl_millis: record.ttl_millis,
                 };
-                self.put_index(&handle, field, &field_val.to_vec(), &doc_id, &meta.encode())?;
+                index_diff::put_index(
+                    &self.txn,
+                    &handle.cf,
+                    &handle.name,
+                    field,
+                    &field_val.to_vec(),
+                    &doc_id,
+                    &meta.encode(),
+                )?;
             }
         }
 

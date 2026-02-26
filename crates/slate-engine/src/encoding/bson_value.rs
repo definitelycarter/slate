@@ -18,7 +18,6 @@ fn encode_i32_sortable(n: i32) -> [u8; 4] {
     ((n as u32) ^ 0x8000_0000).to_be_bytes()
 }
 
-#[cfg(test)]
 #[inline]
 fn decode_i32_sortable(b: [u8; 4]) -> i32 {
     (u32::from_be_bytes(b) ^ 0x8000_0000) as i32
@@ -29,7 +28,6 @@ fn encode_i64_sortable(n: i64) -> [u8; 8] {
     ((n as u64) ^ 0x8000_0000_0000_0000).to_be_bytes()
 }
 
-#[cfg(test)]
 #[inline]
 fn decode_i64_sortable(b: [u8; 8]) -> i64 {
     (u64::from_be_bytes(b) ^ 0x8000_0000_0000_0000) as i64
@@ -46,7 +44,6 @@ fn encode_f64_sortable(f: f64) -> [u8; 8] {
     encoded.to_be_bytes()
 }
 
-#[cfg(test)]
 #[inline]
 fn decode_f64_sortable(b: [u8; 8]) -> f64 {
     let encoded = u64::from_be_bytes(b);
@@ -67,7 +64,7 @@ fn decode_f64_sortable(b: [u8; 8]) -> f64 {
 /// Construction from `RawBsonRef`:
 /// - `ObjectId`, `String` → zero-alloc (borrows from source)
 /// - `Int32`, `Int64`, `Double`, `DateTime`, `Boolean` → small owned allocation
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BsonValue<'a> {
     pub tag: u8,
     pub bytes: Cow<'a, [u8]>,
@@ -107,6 +104,41 @@ impl<'a> BsonValue<'a> {
             RawBsonRef::Boolean(b) => Some(BsonValue {
                 tag: 0x08,
                 bytes: Cow::Owned(vec![b as u8]),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Create a `BsonValue` from a `RawBson`.
+    pub fn from_raw_bson(val: &bson::RawBson) -> Option<BsonValue<'static>> {
+        match val {
+            bson::RawBson::ObjectId(oid) => Some(BsonValue {
+                tag: 0x07,
+                bytes: Cow::Owned(oid.bytes().to_vec()),
+            }),
+            bson::RawBson::String(s) => Some(BsonValue {
+                tag: 0x02,
+                bytes: Cow::Owned(s.as_bytes().to_vec()),
+            }),
+            bson::RawBson::Int32(n) => Some(BsonValue {
+                tag: 0x10,
+                bytes: Cow::Owned(encode_i32_sortable(*n).to_vec()),
+            }),
+            bson::RawBson::Int64(n) => Some(BsonValue {
+                tag: 0x12,
+                bytes: Cow::Owned(encode_i64_sortable(*n).to_vec()),
+            }),
+            bson::RawBson::Double(f) => Some(BsonValue {
+                tag: 0x01,
+                bytes: Cow::Owned(encode_f64_sortable(*f).to_vec()),
+            }),
+            bson::RawBson::DateTime(dt) => Some(BsonValue {
+                tag: 0x09,
+                bytes: Cow::Owned(encode_i64_sortable(dt.timestamp_millis()).to_vec()),
+            }),
+            bson::RawBson::Boolean(b) => Some(BsonValue {
+                tag: 0x08,
+                bytes: Cow::Owned(vec![*b as u8]),
             }),
             _ => None,
         }
@@ -236,11 +268,79 @@ impl<'a> BsonValue<'a> {
         ))
     }
 
+    /// Convert back to a `RawBson`, decoding sortable-encoded values.
+    pub fn to_raw_bson(&self) -> Option<bson::RawBson> {
+        Some(match self.tag {
+            0x02 => bson::RawBson::String(
+                std::str::from_utf8(&self.bytes).ok()?.to_string(),
+            ),
+            0x07 if self.bytes.len() == 12 => {
+                let oid = bson::oid::ObjectId::from_bytes(self.bytes[..12].try_into().ok()?);
+                bson::RawBson::ObjectId(oid)
+            }
+            0x10 if self.bytes.len() == 4 => {
+                bson::RawBson::Int32(decode_i32_sortable(self.bytes[..4].try_into().ok()?))
+            }
+            0x12 if self.bytes.len() == 8 => {
+                bson::RawBson::Int64(decode_i64_sortable(self.bytes[..8].try_into().ok()?))
+            }
+            0x01 if self.bytes.len() == 8 => {
+                bson::RawBson::Double(decode_f64_sortable(self.bytes[..8].try_into().ok()?))
+            }
+            0x09 if self.bytes.len() == 8 => {
+                let millis = decode_i64_sortable(self.bytes[..8].try_into().ok()?);
+                bson::RawBson::DateTime(bson::DateTime::from_millis(millis))
+            }
+            0x08 => bson::RawBson::Boolean(self.bytes.first().map_or(false, |&v| v != 0)),
+            _ => return None,
+        })
+    }
+
     /// Convert to owned, producing a `BsonValue<'static>`.
     pub fn into_owned(self) -> BsonValue<'static> {
         BsonValue {
             tag: self.tag,
             bytes: Cow::Owned(self.bytes.into_owned()),
+        }
+    }
+}
+
+impl std::fmt::Display for BsonValue<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.tag {
+            0x02 => {
+                // String — bytes are raw UTF-8
+                let s = std::str::from_utf8(&self.bytes).unwrap_or("<invalid utf8>");
+                write!(f, "{s}")
+            }
+            0x07 => {
+                // ObjectId — 12 raw bytes → hex
+                for b in self.bytes.iter() {
+                    write!(f, "{b:02x}")?;
+                }
+                Ok(())
+            }
+            0x10 if self.bytes.len() == 4 => {
+                // Int32 — sortable-encoded
+                let n = decode_i32_sortable(self.bytes[..4].try_into().unwrap());
+                write!(f, "{n}")
+            }
+            0x12 | 0x09 if self.bytes.len() == 8 => {
+                // Int64 or DateTime — sortable-encoded i64
+                let n = decode_i64_sortable(self.bytes[..8].try_into().unwrap());
+                write!(f, "{n}")
+            }
+            0x01 if self.bytes.len() == 8 => {
+                // Double — sortable-encoded f64
+                let n = decode_f64_sortable(self.bytes[..8].try_into().unwrap());
+                write!(f, "{n}")
+            }
+            0x08 => {
+                // Boolean
+                let b = self.bytes.first().map_or(false, |&v| v != 0);
+                write!(f, "{b}")
+            }
+            _ => write!(f, "<bson 0x{:02x}>", self.tag),
         }
     }
 }

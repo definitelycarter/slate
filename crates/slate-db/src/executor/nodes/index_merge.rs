@@ -3,13 +3,16 @@ use crate::executor::RawIter;
 use crate::executor::exec;
 use crate::expression::LogicalOp;
 use bson::RawBson;
+use slate_engine::BsonValue;
 use std::collections::HashSet;
 
-fn extract_id(v: &RawBson) -> Option<&str> {
+fn extract_id(v: &RawBson) -> Option<BsonValue<'static>> {
     match v {
-        RawBson::String(s) => Some(s.as_str()),
-        RawBson::Document(doc) => exec::raw_extract_id(doc).ok().flatten(),
-        _ => None,
+        RawBson::Document(doc) => exec::extract_doc_id(doc)
+            .ok()
+            .flatten()
+            .map(|id| id.into_owned()),
+        other => BsonValue::from_raw_bson(other),
     }
 }
 
@@ -27,8 +30,8 @@ pub(crate) fn execute<'a>(
             let mut result = Vec::with_capacity(left.len() + right.len());
             for val in left.into_iter().chain(right) {
                 if let Some(ref v) = val {
-                    if let Some(id_str) = extract_id(v) {
-                        if !seen.insert(id_str.to_string()) {
+                    if let Some(id) = extract_id(v) {
+                        if !seen.insert(id) {
                             continue;
                         }
                     }
@@ -43,7 +46,7 @@ pub(crate) fn execute<'a>(
             for result in right_source {
                 if let Some(val) = result? {
                     if let Some(id) = extract_id(&val) {
-                        right_set.insert(id.to_string());
+                        right_set.insert(id);
                     }
                 }
             }
@@ -55,7 +58,7 @@ pub(crate) fn execute<'a>(
                 .filter(|val| {
                     val.as_ref()
                         .and_then(|v| extract_id(v))
-                        .map(|id| right_set.contains(id))
+                        .map(|id| right_set.contains(&id))
                         .unwrap_or(false)
                 })
                 .collect()

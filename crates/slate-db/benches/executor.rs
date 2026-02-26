@@ -43,6 +43,16 @@ impl EngineTransaction for NoopTransaction {
         panic!("NoopTransaction::put called");
     }
 
+    fn put_nx(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        _doc: &bson::raw::RawDocument,
+        _doc_id: &BsonValue<'_>,
+        _ttl: i64,
+    ) -> Result<(), EngineError> {
+        panic!("NoopTransaction::put_nx called");
+    }
+
     fn delete(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
@@ -124,7 +134,7 @@ fn seeded_engine(n: usize) -> Database<MemoryStore> {
             }
         })
         .collect();
-    txn.insert_many("test", docs).unwrap();
+    txn.insert_many("test", docs).unwrap().drain().unwrap();
     txn.commit().unwrap();
     engine
 }
@@ -982,7 +992,7 @@ fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     .unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
-        txn.insert_many("bench", chunk.to_vec()).unwrap();
+        txn.insert_many("bench", chunk.to_vec()).unwrap().drain().unwrap();
     }
     txn.commit().unwrap();
     engine
@@ -1013,7 +1023,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     (txn, docs.clone())
                 },
                 |(mut txn, docs)| {
-                    txn.insert_many("bench", docs).unwrap();
+                    txn.insert_many("bench", docs).unwrap().drain().unwrap();
                     // Don't commit — let txn drop so engine stays empty for next iteration
                 },
                 BatchSize::PerIteration,

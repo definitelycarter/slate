@@ -21,18 +21,18 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             Some(v) => v,
             None => return None,
         };
-        // Accept bare String id (from IndexScan) or Document with _id
-        let id_str = match &val {
-            RawBson::String(s) => s.clone(),
-            RawBson::Document(d) => match exec::raw_extract_id(d) {
-                Ok(Some(s)) => s.to_string(),
-                Ok(None) => return None,
-                Err(e) => return Some(Err(e)),
+        // Accept bare id (from IndexScan) or Document with _id
+        let doc_id = match &val {
+            RawBson::Document(d) => match exec::extract_doc_id(d) {
+                Ok(Some(id)) => Some(id.into_owned()),
+                _ => return None,
             },
-            _ => return None,
+            other => BsonValue::from_raw_bson(other),
         };
-        let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(&id_str))
-            .expect("string is always a valid BsonValue");
+        let doc_id = match doc_id {
+            Some(id) => id,
+            None => return None,
+        };
         match txn.get(&handle, &doc_id, now_millis) {
             Ok(Some(doc)) => Some(Ok(Some(RawBson::Document(doc)))),
             Ok(None) => None,

@@ -72,6 +72,7 @@ impl From<slate_engine::EngineError> for DbError {
             slate_engine::EngineError::CollectionNotFound(name) => {
                 DbError::CollectionNotFound(name)
             }
+            slate_engine::EngineError::DuplicateKey(id) => DbError::DuplicateKey(id),
             other => DbError::InvalidQuery(other.to_string()),
         }
     }

@@ -7,7 +7,6 @@ mod executor;
 mod expression;
 pub(crate) mod parser;
 mod planner;
-mod result;
 mod statement;
 mod sweep;
 
@@ -17,7 +16,6 @@ pub use convert::IntoRawDocumentBuf;
 pub use cursor::{Cursor, CursorIter};
 pub use database::{Database, DatabaseConfig, Transaction as DatabaseTransaction};
 pub use error::DbError;
-pub use result::InsertResult;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench {

@@ -1,5 +1,5 @@
 use bson::RawBson;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
+use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
@@ -13,11 +13,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         if let Some(RawBson::Document(ref d)) = opt_val {
-            if let Some(id_str) = exec::raw_extract_id(d)? {
-                let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(id_str))
-                    .ok_or_else(|| DbError::Serialization("invalid _id".into()))?;
-                txn.delete(&handle, &doc_id)?;
-            }
+            let doc_id = exec::extract_doc_id(d)?
+                .ok_or_else(|| DbError::InvalidQuery("missing _id".into()))?;
+            txn.delete(&handle, &doc_id)?;
         }
         Ok(None)
     })))

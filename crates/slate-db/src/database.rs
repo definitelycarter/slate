@@ -10,11 +10,9 @@ use crate::convert::IntoRawDocumentBuf;
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::executor;
-use crate::executor::exec;
 use crate::expression::Expression;
 use crate::parser;
 use crate::planner::planner::Planner;
-use crate::result::InsertResult;
 use crate::statement::Statement;
 use crate::sweep::{self, TtlHandle};
 
@@ -95,15 +93,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Insert operations ───────────────────────────────────────
 
     /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
-    /// If the document has no `_id`, a UUID is generated.
+    /// If the document has no `_id`, an ObjectId is generated.
     pub fn insert_one(
         &mut self,
         collection: &str,
         doc: impl IntoRawDocumentBuf,
-    ) -> Result<InsertResult, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw = doc.into_raw_document_buf()?;
-        let mut results = self.insert_many(collection, vec![raw])?;
-        Ok(results.remove(0))
+        self.insert_many(collection, vec![raw])
     }
 
     /// Insert multiple documents. Fails per-doc on duplicate `_id`.
@@ -111,7 +108,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         &mut self,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
-    ) -> Result<Vec<InsertResult>, DbError> {
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
             .map(|doc| doc.into_raw_document_buf())
@@ -121,20 +118,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             collection,
             docs: raw_docs,
         };
-        let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut ids = Vec::new();
-        for result in iter {
-            if let Some(val) = result? {
-                if let Some(raw) = val.as_document() {
-                    if let Some(id_str) = exec::raw_extract_id(raw)? {
-                        ids.push(id_str.to_string());
-                    }
-                }
-            }
-        }
-        Ok(ids.into_iter().map(|id| InsertResult { id }).collect())
+        self.prepare_cursor(stmt)
     }
 
     // ── Query operations ────────────────────────────────────────

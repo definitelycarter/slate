@@ -69,7 +69,7 @@ fn seed_records(db: &Database<MemoryStore>) {
             doc! { "_id": "acct-5", "name": "Stark Industries", "revenue": 200000.0, "status": "active", "active": false },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 }
 
@@ -81,13 +81,13 @@ fn insert_one_and_find_one() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    let result = txn
-        .insert_one(
-            COLLECTION,
-            doc! { "_id": "acct-1", "name": "Acme", "revenue": 50000.0 },
-        )
-        .unwrap();
-    assert_eq!(result.id, "acct-1");
+    txn.insert_one(
+        COLLECTION,
+        doc! { "_id": "acct-1", "name": "Acme", "revenue": 50000.0 },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -107,10 +107,10 @@ fn insert_one_duplicate_id_fails() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "acct-1", "name": "Acme" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     let err = txn
         .insert_one(COLLECTION, doc! { "_id": "acct-1", "name": "Duplicate" })
-        .unwrap_err();
+        .unwrap().drain().unwrap_err();
     assert!(err.to_string().contains("duplicate key"));
 }
 
@@ -120,15 +120,13 @@ fn insert_one_auto_generated_id() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    let result = txn
-        .insert_one(COLLECTION, doc! { "name": "No ID" })
+    txn.insert_one(COLLECTION, doc! { "name": "No ID" })
+        .unwrap()
+        .drain()
         .unwrap();
     txn.commit().unwrap();
 
-    // ID should be a UUID
-    assert!(!result.id.is_empty());
-    assert!(result.id.contains('-')); // UUID format
-
+    // Verify the auto-generated _id is an ObjectId
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(COLLECTION, rawdoc! {}, FindOptions::default())
@@ -138,7 +136,8 @@ fn insert_one_auto_generated_id() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get_str("_id").unwrap(), result.id);
+    let oid = results[0].get_object_id("_id").unwrap();
+    assert_eq!(oid.to_hex().len(), 24);
 }
 
 #[test]
@@ -147,7 +146,7 @@ fn insert_many_batch() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    let results = txn
+    let count = txn
         .insert_many(
             COLLECTION,
             vec![
@@ -155,10 +154,10 @@ fn insert_many_batch() {
                 doc! { "_id": "acct-2", "name": "Globex" },
             ],
         )
+        .unwrap()
+        .drain()
         .unwrap();
-    assert_eq!(results.len(), 2);
-    assert_eq!(results[0].id, "acct-1");
-    assert_eq!(results[1].id, "acct-2");
+    assert_eq!(count, 2);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -237,12 +236,12 @@ fn find_isnull_filter() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "acct-x", "name": "NoStatus" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -503,7 +502,7 @@ fn update_one_merge() {
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -615,7 +614,7 @@ fn replace_one_full_replacement() {
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active", "revenue": 50000.0 },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -655,7 +654,7 @@ fn delete_one_removes_record() {
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -744,7 +743,7 @@ fn create_and_use_index() {
             doc! { "_id": "r3", "name": "Charlie", "status": "active" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     // Create index after data exists (tests backfill)
     txn.create_index(COLLECTION, "status").unwrap();
     txn.commit().unwrap();
@@ -803,9 +802,9 @@ fn list_collections() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one("accounts", doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -821,7 +820,7 @@ fn drop_collection() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
@@ -850,9 +849,9 @@ fn collection_isolation() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one("accounts", doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -891,12 +890,12 @@ fn index_maintained_on_insert() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "_id": "r2", "name": "Bob", "status": "rejected" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Index scan should work
@@ -927,7 +926,7 @@ fn index_maintained_on_update() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Update the indexed field
@@ -980,7 +979,7 @@ fn index_maintained_on_delete() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -1027,7 +1026,7 @@ fn nested_doc_write_and_read() {
             }
         },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1061,7 +1060,7 @@ fn dot_notation_filter_eq() {
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1099,7 +1098,7 @@ fn dot_notation_sort() {
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Denver" } },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1144,7 +1143,7 @@ fn dot_notation_projection() {
             }
         },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1189,7 +1188,7 @@ fn dot_notation_projection_multiple_subfields() {
             }
         },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1229,9 +1228,9 @@ fn dot_notation_isnull_missing_parent() {
         "nested",
         doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one("nested", doc! { "_id": "r2", "name": "Bob" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1260,7 +1259,7 @@ fn dot_notation_deep_nesting() {
         "deep",
         doc! { "_id": "r1", "data": { "level1": { "level2": { "value": "found" } } } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -1398,7 +1397,7 @@ fn index_on_nested_path() {
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Index scan on address.city
@@ -1440,7 +1439,7 @@ fn index_on_array_of_scalars() {
             doc! { "_id": "r3", "name": "Post C", "tags": ["rust", "api"] },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Query for tag "rust" via index
@@ -1502,7 +1501,7 @@ fn index_on_array_of_objects() {
             doc! { "_id": "order-3", "items": [{ "sku": "A1", "qty": 1 }, { "sku": "C3", "qty": 3 }] },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Query for sku "A1"
@@ -1557,7 +1556,7 @@ fn multikey_index_maintained_on_update() {
     })
     .unwrap();
     txn.insert_one("tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Update tags
@@ -1610,7 +1609,7 @@ fn multikey_index_maintained_on_delete() {
     })
     .unwrap();
     txn.insert_one("tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Delete
@@ -1653,7 +1652,7 @@ fn multikey_index_backfill() {
             doc! { "_id": "r3", "tags": ["rust", "api"] },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Now create the index — should backfill
@@ -1693,7 +1692,7 @@ fn multikey_index_replace_one() {
     })
     .unwrap();
     txn.insert_one("tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Replace entirely
@@ -1772,7 +1771,7 @@ fn create_collection_idempotent() {
     // Insert data
     let mut txn = db.begin(false).unwrap();
     txn.insert_one("idem", doc! { "_id": "r1", "status": "active" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Create again — should be a no-op, data preserved
@@ -1816,7 +1815,7 @@ fn seed_or_test_data(db: &Database<MemoryStore>) {
             doc! { "_id": "o6", "user_id": "def", "status": "pending", "score": 60, "name": "Order 6" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 }
 
@@ -2022,7 +2021,7 @@ fn ttl_expired_docs_hidden_before_purge() {
             doc! { "_id": "c", "name": "Permanent" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Expired docs are immediately invisible (TTL read filtering)
@@ -2057,7 +2056,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
             doc! { "_id": "c", "name": "Permanent" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Purge removes expired docs
@@ -2103,7 +2102,7 @@ fn ttl_purge_deletes_expired_docs() {
             doc! { "_id": "c", "name": "Permanent" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let purged = db.purge_expired(COLLECTION).unwrap();
@@ -2141,7 +2140,7 @@ fn ttl_purge_skips_unexpired_docs() {
             doc! { "_id": "b", "name": "Permanent" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let purged = db.purge_expired(COLLECTION).unwrap();
@@ -2165,7 +2164,7 @@ fn ttl_purge_cleans_user_indexes() {
             doc! { "_id": "b", "status": "active", "ttl": future_ttl() },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let purged = db.purge_expired("purge_idx").unwrap();
@@ -2199,7 +2198,7 @@ fn ttl_index_maintained_on_update() {
         COLLECTION,
         doc! { "_id": "a", "name": "Doc", "ttl": old_ttl },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Update ttl to the past
@@ -2241,7 +2240,7 @@ fn ttl_purge_multiple_expired() {
             doc! { "_id": "d", "ttl": future_ttl() },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let purged = db.purge_expired(COLLECTION).unwrap();
@@ -2269,12 +2268,12 @@ fn ttl_find_by_id_hides_expired() {
         COLLECTION,
         doc! { "_id": "x", "name": "Expired", "ttl": past_ttl() },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "_id": "y", "name": "Fresh", "ttl": future_ttl() },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2300,7 +2299,7 @@ fn ttl_update_skips_expired() {
         COLLECTION,
         doc! { "_id": "a", "status": "old", "ttl": past_ttl() },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // update_one should match 0 — expired doc is invisible
@@ -2324,7 +2323,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
         COLLECTION,
         doc! { "_id": "a", "old_field": true, "ttl": past_ttl() },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Merge with same _id — expired doc treated as non-existent, takes insert path
@@ -2363,7 +2362,7 @@ fn ttl_no_ttl_field_always_visible() {
             doc! { "_id": "b", "name": "Permanent2" },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Docs without ttl are always visible
@@ -2398,11 +2397,11 @@ fn distinct_scalar_field() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "inactive" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2425,11 +2424,11 @@ fn distinct_nested_path() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "address": { "city": "Denver" } })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2457,9 +2456,9 @@ fn distinct_array_field() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "tags": ["rust", "db"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "tags": ["db", "perf"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2483,11 +2482,11 @@ fn distinct_with_filter() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "gold" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "inactive", "tier": "silver" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "silver" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2515,11 +2514,11 @@ fn distinct_with_sort_asc() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "apple" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "banana" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2555,11 +2554,11 @@ fn distinct_with_sort_desc() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "apple" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "banana" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2595,8 +2594,8 @@ fn distinct_missing_field() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "name": "alice" })
-        .unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap();
+        .unwrap().drain().unwrap();
+    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2622,10 +2621,10 @@ fn distinct_mixed_presence() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active" })
-        .unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap();
+        .unwrap().drain().unwrap();
+    txn.insert_one(COLLECTION, doc! { "name": "bob" }).unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "inactive" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2651,12 +2650,12 @@ fn distinct_array_of_sub_documents() {
         COLLECTION,
         doc! { "triggers": [{ "type": "email" }, { "type": "sms" }] },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "triggers": [{ "type": "sms" }, { "type": "push" }] },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2695,17 +2694,17 @@ fn distinct_sub_document() {
         COLLECTION,
         doc! { "address": { "city": "Austin", "state": "TX" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "address": { "city": "Denver", "state": "CO" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.insert_one(
         COLLECTION,
         doc! { "address": { "city": "Austin", "state": "TX" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2733,13 +2732,13 @@ fn distinct_with_take() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "apple" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "banana" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "date" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2772,13 +2771,13 @@ fn distinct_with_skip_take() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "apple" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "banana" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "date" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2811,15 +2810,15 @@ fn distinct_with_sort_and_limit() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "apple" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "banana" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "date" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "elderberry" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2856,7 +2855,7 @@ fn index_covered_preserves_int32_type() {
     .unwrap();
     // Insert with Int32
     txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     // Query with Int64 -- same encoded bytes, different BSON type
@@ -2895,7 +2894,7 @@ fn index_covered_preserves_string_type() {
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "status": "active" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -2958,7 +2957,7 @@ fn upsert_many_replaces_existing() {
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active", "score": 100 },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     // Upsert replaces entirely
     let docs = vec![doc! { "_id": "u1", "name": "Alice Updated", "status": "inactive" }];
@@ -2986,7 +2985,7 @@ fn upsert_many_mixed() {
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     let docs = vec![
         doc! { "_id": "u1", "name": "Alice v2", "status": "inactive" },
@@ -3016,7 +3015,7 @@ fn upsert_many_updates_indexes() {
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     // Verify index works before upsert
     let active = txn
@@ -3105,7 +3104,7 @@ fn merge_many_merges_existing() {
         COLLECTION,
         doc! { "_id": "m1", "name": "Alice", "status": "active", "score": 100 },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     // Merge only updates status — score should remain
     let docs = vec![doc! { "_id": "m1", "status": "inactive" }];
@@ -3132,7 +3131,7 @@ fn merge_many_index_maintenance() {
         COLLECTION,
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     // Merge changes status
     txn.merge_many(COLLECTION, vec![doc! { "_id": "m1", "status": "inactive" }])
@@ -3179,7 +3178,7 @@ fn merge_many_unchanged_noop() {
         COLLECTION,
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     // Merge with same values — updated count should still be 1 (we count the attempt, not actual changes)
     // But internally raw_merge_update returns false for no-op, so updated stays at 1 because merge_many
@@ -3196,7 +3195,7 @@ fn merge_many_adds_new_field() {
     let mut txn = db.begin(false).unwrap();
 
     txn.insert_one(COLLECTION, doc! { "_id": "m1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
 
     // Merge adds a new field
     txn.merge_many(COLLECTION, vec![doc! { "_id": "m1", "status": "active" }])
@@ -3222,7 +3221,7 @@ fn merge_many_mixed_insert_and_merge() {
         COLLECTION,
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
 
     let docs = vec![
         doc! { "_id": "m1", "status": "inactive" }, // merge
@@ -3264,7 +3263,7 @@ fn find_gt_on_indexed_field() {
             doc! { "_id": "3", "name": "Charlie", "score": 80 },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3309,7 +3308,7 @@ fn find_gte_lte_on_indexed_field() {
             doc! { "_id": "4", "name": "Diana", "score": 60 },
         ],
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -3364,7 +3363,7 @@ fn mutation_set_explicit() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3399,7 +3398,7 @@ fn mutation_unset() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active", "score": 50 },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3427,7 +3426,7 @@ fn mutation_inc_i32() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "score": 10_i32 })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3453,7 +3452,7 @@ fn mutation_inc_missing_field() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3479,7 +3478,7 @@ fn mutation_inc_negative_decrement() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "score": 100_i32 })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3505,7 +3504,7 @@ fn mutation_inc_f64() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "balance": 100.50_f64 })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3538,7 +3537,7 @@ fn mutation_rename() {
         COLLECTION,
         doc! { "_id": "r1", "old_name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3570,7 +3569,7 @@ fn mutation_push() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3596,7 +3595,7 @@ fn mutation_push_creates_array() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3625,7 +3624,7 @@ fn mutation_lpush() {
         COLLECTION,
         doc! { "_id": "r1", "queue": ["second", "third"] },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3651,7 +3650,7 @@ fn mutation_pop() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "stack": ["a", "b", "c"] })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3680,7 +3679,7 @@ fn mutation_multiple_operators() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "score": 10_i32, "tags": ["a"] },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3719,7 +3718,7 @@ fn mutation_bare_fields_implicit_set() {
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3754,7 +3753,7 @@ fn mutation_dot_path_set() {
         COLLECTION,
         doc! { "_id": "r1", "address": { "city": "Austin", "state": "TX" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3789,7 +3788,7 @@ fn mutation_dot_path_inc() {
         COLLECTION,
         doc! { "_id": "r1", "stats": { "views": 100_i32, "likes": 10_i32 } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3821,7 +3820,7 @@ fn mutation_dot_path_creates_intermediates() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3856,7 +3855,7 @@ fn mutation_dot_path_unset() {
         COLLECTION,
         doc! { "_id": "r1", "address": { "city": "Austin", "state": "TX", "zip": "78701" } },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3889,7 +3888,7 @@ fn mutation_dot_path_push() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "data": { "items": ["a"] } })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -3966,7 +3965,7 @@ fn mutation_index_maintained_on_set() {
         "idx_mut",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -4023,7 +4022,7 @@ fn mutation_index_maintained_on_unset() {
         "idx_unset",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
-    .unwrap();
+    .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -4063,7 +4062,7 @@ fn mutation_push_pop_as_stack() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "stack" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     for val in ["a", "b", "c"] {
@@ -4106,7 +4105,7 @@ fn mutation_lpush_pop_as_queue() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "queue" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     for val in ["first", "second", "third"] {
@@ -4149,7 +4148,7 @@ fn mutation_unknown_operator_rejected() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
@@ -4172,11 +4171,272 @@ fn mutation_id_rejected() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
-        .unwrap();
+        .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     let result = txn.update_one(COLLECTION, &filter, doc! { "$set": { "_id": "r2" } });
     assert!(result.is_err());
+}
+
+// ── _id type roundtrips ─────────────────────────────────────────
+
+#[test]
+fn insert_and_find_string_id() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": "my-string", "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": "my-string" })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_str("_id").unwrap(), "my-string");
+}
+
+#[test]
+fn insert_and_find_objectid_id() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_object_id("_id").unwrap(), oid);
+}
+
+#[test]
+fn insert_and_find_i32_id() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": 42_i32, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": 42_i32 })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_i32("_id").unwrap(), 42);
+}
+
+#[test]
+fn insert_and_find_i64_id() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": 999_i64, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": 999_i64 })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_i64("_id").unwrap(), 999);
+}
+
+#[test]
+fn insert_objectid_duplicate_fails() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    let err = txn
+        .insert_one(COLLECTION, doc! { "_id": oid, "v": 2 })
+        .unwrap()
+        .drain()
+        .unwrap_err();
+    assert!(err.to_string().contains("duplicate key"));
+}
+
+#[test]
+fn insert_i32_duplicate_fails() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": 7_i32, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    let err = txn
+        .insert_one(COLLECTION, doc! { "_id": 7_i32, "v": 2 })
+        .unwrap()
+        .drain()
+        .unwrap_err();
+    assert!(err.to_string().contains("duplicate key"));
+}
+
+#[test]
+fn delete_by_objectid() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    txn.delete_one(COLLECTION, rawdoc! { "_id": oid })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn.find_one(COLLECTION, rawdoc! { "_id": oid }).unwrap();
+    assert!(found.is_none());
+}
+
+#[test]
+fn upsert_with_objectid() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let txn = db.begin(false).unwrap();
+    txn.upsert_many(COLLECTION, vec![doc! { "_id": oid, "v": 1 }])
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_i32("v").unwrap(), 1);
+}
+
+#[test]
+fn replace_with_i32_id() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": 10_i32, "name": "Alice", "age": 30 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    txn.replace_one(
+        COLLECTION,
+        rawdoc! { "_id": 10_i32 },
+        doc! { "_id": 10_i32, "name": "Bob", "age": 25 },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": 10_i32 })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_str("name").unwrap(), "Bob");
+}
+
+#[test]
+fn update_with_objectid() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": oid, "score": 10 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    txn.update_one(
+        COLLECTION,
+        rawdoc! { "_id": oid },
+        doc! { "$set": { "score": 99 } },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.get_i32("score").unwrap(), 99);
+}
+
+#[test]
+fn mixed_id_types_in_collection() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let oid = bson::oid::ObjectId::new();
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_many(
+        COLLECTION,
+        vec![
+            doc! { "_id": "str-1", "t": "string" },
+            doc! { "_id": oid, "t": "oid" },
+            doc! { "_id": 42_i32, "t": "i32" },
+            doc! { "_id": 100_i64, "t": "i64" },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let results = txn
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(results.len(), 4);
 }

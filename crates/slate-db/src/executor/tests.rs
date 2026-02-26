@@ -37,6 +37,16 @@ impl EngineTransaction for NoopTransaction {
         panic!("NoopTransaction::put called");
     }
 
+    fn put_nx(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        _doc: &bson::RawDocument,
+        _doc_id: &BsonValue<'_>,
+        _ttl: i64,
+    ) -> Result<(), EngineError> {
+        panic!("NoopTransaction::put_nx called");
+    }
+
     fn delete(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
@@ -119,6 +129,19 @@ impl EngineTransaction for MockTransaction {
         _handle: &CollectionHandle<Self::Cf>,
         doc: &bson::RawDocument,
         _doc_id: &BsonValue<'_>,
+    ) -> Result<(), EngineError> {
+        self.puts.borrow_mut().push(PutRecord {
+            doc: doc.to_raw_document_buf(),
+        });
+        Ok(())
+    }
+
+    fn put_nx(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        doc: &bson::RawDocument,
+        _doc_id: &BsonValue<'_>,
+        _ttl: i64,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
             doc: doc.to_raw_document_buf(),
@@ -598,6 +621,8 @@ fn seeded_db() -> Database<MemoryStore> {
             bson::doc! { "_id": "3", "name": "Charlie", "status": "active", "score": 80 },
         ],
     )
+    .unwrap()
+    .drain()
     .unwrap();
     txn.commit().unwrap();
     db

@@ -6,27 +6,20 @@ use crate::expression::Expression;
 use bson::RawBson;
 use bson::raw::RawBsonRef;
 use bson::{Bson, RawDocument};
+use slate_engine::BsonValue;
 
 use crate::error::DbError;
 
 // ── Raw BSON _id extraction ─────────────────────────────────────
 
-/// Extract `_id` from a raw document as a zero-copy `&str` borrow.
-/// Returns `Ok(None)` if `_id` is missing or not a string.
-pub(crate) fn raw_extract_id(raw: &RawDocument) -> Result<Option<&str>, DbError> {
-    let bytes = raw.as_bytes();
-    match super::raw_bson::find_field(bytes, "_id") {
-        Some(loc) if loc.type_byte == 0x02 => {
-            let len = i32::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 4]
-                    .try_into()
-                    .map_err(|_| DbError::Serialization("truncated _id".into()))?,
-            ) as usize;
-            std::str::from_utf8(&bytes[loc.value_start + 4..loc.value_start + 4 + len - 1])
-                .map(Some)
-                .map_err(|_| DbError::Serialization("invalid _id utf8".into()))
-        }
-        _ => Ok(None),
+/// Extract `_id` from a raw document as a `BsonValue`.
+/// Returns `Ok(None)` if `_id` is missing, `Err` if unsupported type.
+pub(crate) fn extract_doc_id(raw: &RawDocument) -> Result<Option<BsonValue<'_>>, DbError> {
+    match raw.get("_id").map_err(|e| DbError::Serialization(e.to_string()))? {
+        Some(val) => BsonValue::from_raw_bson_ref(val)
+            .map(Some)
+            .ok_or_else(|| DbError::InvalidQuery("unsupported _id type".into())),
+        None => Ok(None),
     }
 }
 
@@ -506,48 +499,57 @@ mod tests {
         assert_eq!(val, Some(RawBsonRef::String("abc123")));
     }
 
-    // ── raw_extract_id ──────────────────────────────────────────
+    // ── extract_doc_id ─────────────────────────────────────────
 
     #[test]
-    fn raw_extract_id_string() {
+    fn extract_doc_id_string() {
         let raw = make_raw(&doc! { "_id": "doc123", "name": "test" });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, Some("doc123"));
+        let id = extract_doc_id(&raw).unwrap().unwrap();
+        assert_eq!(id.tag, 0x02);
+        assert_eq!(&*id.bytes, b"doc123");
     }
 
     #[test]
-    fn raw_extract_id_missing() {
+    fn extract_doc_id_missing_returns_none() {
         let raw = make_raw(&doc! { "name": "test" });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, None);
+        assert!(extract_doc_id(&raw).unwrap().is_none());
     }
 
     #[test]
-    fn raw_extract_id_non_string() {
-        // ObjectId _id should return None (we only extract string _ids)
-        let raw = make_raw(&doc! { "_id": bson::oid::ObjectId::new(), "name": "test" });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, None);
+    fn extract_doc_id_objectid() {
+        let oid = bson::oid::ObjectId::new();
+        let raw = make_raw(&doc! { "_id": oid, "name": "test" });
+        let id = extract_doc_id(&raw).unwrap().unwrap();
+        assert_eq!(id.tag, 0x07);
+        assert_eq!(id.bytes.len(), 12);
     }
 
     #[test]
-    fn raw_extract_id_int_returns_none() {
+    fn extract_doc_id_int32() {
         let raw = make_raw(&doc! { "_id": 42_i32 });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, None);
+        let id = extract_doc_id(&raw).unwrap().unwrap();
+        assert_eq!(id.tag, 0x10);
     }
 
     #[test]
-    fn raw_extract_id_empty_string() {
+    fn extract_doc_id_empty_string() {
         let raw = make_raw(&doc! { "_id": "", "name": "test" });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, Some(""));
+        let id = extract_doc_id(&raw).unwrap().unwrap();
+        assert_eq!(id.tag, 0x02);
+        assert_eq!(&*id.bytes, b"");
     }
 
     #[test]
-    fn raw_extract_id_unicode() {
+    fn extract_doc_id_unicode() {
         let raw = make_raw(&doc! { "_id": "日本語キー", "name": "test" });
-        let id = raw_extract_id(&raw).unwrap();
-        assert_eq!(id, Some("日本語キー"));
+        let id = extract_doc_id(&raw).unwrap().unwrap();
+        assert_eq!(id.tag, 0x02);
+        assert_eq!(&*id.bytes, "日本語キー".as_bytes());
+    }
+
+    #[test]
+    fn extract_doc_id_null_errors() {
+        let raw = make_raw(&doc! { "_id": bson::Bson::Null });
+        assert!(extract_doc_id(&raw).is_err());
     }
 }

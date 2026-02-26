@@ -86,10 +86,10 @@ impl SlateDatabase {
 impl SlateDatabase {
     // --- Insert ---
 
-    pub fn insert_one(&self, collection: String, doc: Vec<u8>) -> Result<String, SlateError> {
+    pub fn insert_one(&self, collection: String, doc: Vec<u8>) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let result = txn.insert_one(&collection, doc)?;
-            Ok(result.id)
+            let affected = txn.insert_one(&collection, doc)?.drain()?;
+            Ok(affected)
         })
     }
 
@@ -97,10 +97,10 @@ impl SlateDatabase {
         &self,
         collection: String,
         docs: Vec<Vec<u8>>,
-    ) -> Result<Vec<String>, SlateError> {
+    ) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let results = txn.insert_many(&collection, docs)?;
-            Ok(results.into_iter().map(|r| r.id).collect())
+            let affected = txn.insert_many(&collection, docs)?.drain()?;
+            Ok(affected)
         })
     }
 

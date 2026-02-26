@@ -213,6 +213,40 @@ fn bench_put(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Put NX (insert-only) ────────────────────────────────────
+
+fn bench_put_nx(c: &mut Criterion) {
+    let mut group = c.benchmark_group("put_nx");
+    for n in [100, 1_000] {
+        let engine = {
+            let engine = KvEngine::new(MemoryStore::new());
+            let mut txn = engine.begin(false).unwrap();
+            txn.create_collection(None, "bench").unwrap();
+            txn.create_index("bench", "status").unwrap();
+            txn.create_index("bench", "age").unwrap();
+            txn.commit().unwrap();
+            engine
+        };
+        let docs = generate_docs(n);
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter_batched(
+                || docs.clone(),
+                |docs| {
+                    let txn = engine.begin(false).unwrap();
+                    let handle = txn.collection("bench").unwrap();
+                    for doc in &docs {
+                        let id = BsonValue::extract(doc, "_id").unwrap();
+                        txn.put_nx(&handle, doc, &id, i64::MIN).unwrap();
+                    }
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
 // ── Put (overwrite / upsert) ────────────────────────────────
 
 fn bench_put_overwrite(c: &mut Criterion) {
@@ -241,6 +275,31 @@ fn bench_put_overwrite(c: &mut Criterion) {
                         txn.put(&handle, doc, &id).unwrap();
                     }
                     // Don't commit — engine stays seeded for next iteration.
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
+fn bench_put_overwrite_no_change(c: &mut Criterion) {
+    let mut group = c.benchmark_group("put_overwrite_no_change");
+    for n in [100, 1_000] {
+        let engine = seeded_engine(n);
+        // Same docs as seeded — diff should find zero changes per field.
+        let same_docs = generate_docs(n);
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter_batched(
+                || same_docs.clone(),
+                |docs| {
+                    let txn = engine.begin(false).unwrap();
+                    let handle = txn.collection("bench").unwrap();
+                    for doc in &docs {
+                        let id = BsonValue::extract(doc, "_id").unwrap();
+                        txn.put(&handle, doc, &id).unwrap();
+                    }
                 },
                 BatchSize::PerIteration,
             )
@@ -320,7 +379,9 @@ criterion_group!(
     bench_index_scan_range,
     // Writes
     bench_put,
+    bench_put_nx,
     bench_put_overwrite,
+    bench_put_overwrite_no_change,
     bench_delete,
     // Catalog
     bench_create_index_backfill,

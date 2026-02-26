@@ -14,6 +14,24 @@ fn str_id(s: &str) -> BsonValue<'static> {
         .into_owned()
 }
 
+fn oid_id(oid: bson::oid::ObjectId) -> BsonValue<'static> {
+    BsonValue::from_raw_bson_ref(RawBsonRef::ObjectId(oid))
+        .unwrap()
+        .into_owned()
+}
+
+fn i32_id(n: i32) -> BsonValue<'static> {
+    BsonValue::from_raw_bson_ref(RawBsonRef::Int32(n))
+        .unwrap()
+        .into_owned()
+}
+
+fn i64_id(n: i64) -> BsonValue<'static> {
+    BsonValue::from_raw_bson_ref(RawBsonRef::Int64(n))
+        .unwrap()
+        .into_owned()
+}
+
 // ── Catalog ──────────────────────────────────────────────────
 
 #[test]
@@ -482,5 +500,166 @@ fn rollback_discards_changes() {
             .unwrap()
             .is_none()
     );
+    txn.rollback().unwrap();
+}
+
+// ── _id type roundtrips ─────────────────────────────────────
+
+#[test]
+fn put_get_string_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let id = str_id("hello");
+    let doc = bson::rawdoc! { "_id": "hello", "v": 1 };
+    txn.put(&handle, &doc, &id).unwrap();
+
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
+    assert_eq!(fetched.get_str("_id").unwrap(), "hello");
+    txn.commit().unwrap();
+}
+
+#[test]
+fn put_get_objectid_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let oid = bson::oid::ObjectId::new();
+    let id = oid_id(oid);
+    let doc = bson::rawdoc! { "_id": oid, "v": 1 };
+    txn.put(&handle, &doc, &id).unwrap();
+
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
+    assert_eq!(fetched.get_object_id("_id").unwrap(), oid);
+    txn.commit().unwrap();
+}
+
+#[test]
+fn put_get_i32_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let id = i32_id(42);
+    let doc = bson::rawdoc! { "_id": 42_i32, "v": 1 };
+    txn.put(&handle, &doc, &id).unwrap();
+
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
+    assert_eq!(fetched.get_i32("_id").unwrap(), 42);
+    txn.commit().unwrap();
+}
+
+#[test]
+fn put_get_i64_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let id = i64_id(999_999_999_999);
+    let doc = bson::rawdoc! { "_id": 999_999_999_999_i64, "v": 1 };
+    txn.put(&handle, &doc, &id).unwrap();
+
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
+    assert_eq!(fetched.get_i64("_id").unwrap(), 999_999_999_999);
+    txn.commit().unwrap();
+}
+
+#[test]
+fn put_nx_objectid_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let oid = bson::oid::ObjectId::new();
+    let id = oid_id(oid);
+    let doc = bson::rawdoc! { "_id": oid, "v": 1 };
+    txn.put_nx(&handle, &doc, &id, i64::MIN).unwrap();
+
+    let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
+    assert_eq!(fetched.get_object_id("_id").unwrap(), oid);
+    txn.commit().unwrap();
+}
+
+#[test]
+fn put_nx_i32_id_duplicate_errors() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let id = i32_id(7);
+    let doc = bson::rawdoc! { "_id": 7_i32, "v": 1 };
+    txn.put_nx(&handle, &doc, &id, i64::MIN).unwrap();
+
+    let err = txn.put_nx(&handle, &doc, &id, i64::MIN);
+    assert!(err.is_err());
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn delete_objectid_id() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let oid = bson::oid::ObjectId::new();
+    let id = oid_id(oid);
+    let doc = bson::rawdoc! { "_id": oid, "v": 1 };
+    txn.put(&handle, &doc, &id).unwrap();
+    txn.delete(&handle, &id).unwrap();
+
+    assert!(txn.get(&handle, &id, i64::MIN).unwrap().is_none());
+    txn.commit().unwrap();
+}
+
+#[test]
+fn scan_mixed_id_types() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection(None, "c").unwrap();
+    let handle = txn.collection("c").unwrap();
+
+    let oid = bson::oid::ObjectId::new();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "str", "v": 1 },
+        &str_id("str"),
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": oid, "v": 2 },
+        &oid_id(oid),
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": 42_i32, "v": 3 },
+        &i32_id(42),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection("c").unwrap();
+    let results: Vec<_> = txn
+        .scan(&handle, i64::MIN)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(results.len(), 3);
+
+    // Verify each can be fetched individually.
+    assert!(txn.get(&handle, &str_id("str"), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &oid_id(oid), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &i32_id(42), i64::MIN).unwrap().is_some());
     txn.rollback().unwrap();
 }

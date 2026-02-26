@@ -1169,7 +1169,6 @@ dependencies = [
  "slate-query",
  "slate-store",
  "tempfile",
- "uuid",
 ]
 
 [[package]]

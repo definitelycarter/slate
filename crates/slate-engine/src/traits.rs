@@ -49,6 +49,14 @@ pub trait EngineTransaction {
         doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError>;
 
+    fn put_nx(
+        &self,
+        handle: &CollectionHandle<Self::Cf>,
+        doc: &RawDocument,
+        doc_id: &BsonValue<'_>,
+        ttl: i64,
+    ) -> Result<(), EngineError>;
+
     fn delete(
         &self,
         handle: &CollectionHandle<Self::Cf>,

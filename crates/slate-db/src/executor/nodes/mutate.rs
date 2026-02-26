@@ -1,5 +1,5 @@
 use bson::RawBson;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
+use slate_engine::{CollectionHandle, EngineTransaction};
 use slate_query::Mutation;
 
 use crate::error::DbError;
@@ -20,15 +20,13 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => return Ok(None),
         };
 
-        let id_str = match exec::raw_extract_id(old_raw)? {
-            Some(s) => s.to_string(),
-            None => return Ok(None),
+        let doc_id = match exec::extract_doc_id(old_raw) {
+            Ok(Some(id)) => id,
+            _ => return Ok(None),
         };
 
         match exec::apply_mutation(old_raw, &mutation)? {
             Some(mutated) => {
-                let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(&id_str))
-                    .expect("string is always a valid BsonValue");
                 txn.put(&handle, &mutated, &doc_id)?;
                 Ok(Some(RawBson::Document(mutated)))
             }

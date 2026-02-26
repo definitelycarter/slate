@@ -130,19 +130,22 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
 
                     count += 1;
 
+                    let id_raw = match entry.doc_id.to_raw_bson() {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
                     if let Some(ref rv) = raw_value {
                         // Build a minimal document with _id + the indexed field.
                         // Coerce the query value to the type stored in the index.
                         let coerced = coerce_to_stored_type(rv, &entry.metadata);
-                        let id_str = bson_value_to_string(&entry.doc_id);
                         let mut doc = RawDocumentBuf::new();
-                        doc.append("_id", RawBson::String(id_str));
+                        doc.append("_id", id_raw);
                         doc.append(&field, coerced);
                         return Some(Ok(Some(RawBson::Document(doc))));
                     } else {
-                        // Standard path: yield bare ID string for KeyLookup
-                        let id_str = bson_value_to_string(&entry.doc_id);
-                        return Some(Ok(Some(RawBson::String(id_str))));
+                        // Standard path: yield bare ID for ReadRecord
+                        return Some(Ok(Some(id_raw)));
                     }
                 }
                 Err(e) => {
@@ -155,21 +158,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         done = true;
         None
     })))
-}
-
-/// Convert a `BsonValue` doc_id to a string representation.
-fn bson_value_to_string(bv: &BsonValue<'_>) -> String {
-    match bv.tag {
-        0x02 => {
-            // String type: bytes are UTF-8
-            String::from_utf8_lossy(&bv.bytes).to_string()
-        }
-        0x07 => {
-            // ObjectId: 12 bytes → hex
-            bson::oid::ObjectId::from_bytes(bv.bytes[..12].try_into().unwrap_or([0u8; 12])).to_hex()
-        }
-        _ => format!("{:?}", bv),
-    }
 }
 
 /// Decode index value_bytes (sortable-encoded) as i64 for cross-type comparison.
