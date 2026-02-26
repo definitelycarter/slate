@@ -30,3 +30,13 @@ required-features = ["bench-internals"]
 name = "planner"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "mutation"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "query"
+harness = false
+required-features = ["bench-internals"]

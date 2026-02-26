@@ -15,7 +15,10 @@ use crate::error::DbError;
 /// Extract `_id` from a raw document as a `BsonValue`.
 /// Returns `Ok(None)` if `_id` is missing, `Err` if unsupported type.
 pub(crate) fn extract_doc_id(raw: &RawDocument) -> Result<Option<BsonValue<'_>>, DbError> {
-    match raw.get("_id").map_err(|e| DbError::Serialization(e.to_string()))? {
+    match raw
+        .get("_id")
+        .map_err(|e| DbError::Serialization(e.to_string()))?
+    {
         Some(val) => BsonValue::from_raw_bson_ref(val)
             .map(Some)
             .ok_or_else(|| DbError::InvalidQuery("unsupported _id type".into())),

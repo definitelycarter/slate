@@ -33,10 +33,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => {
                 let oid = bson::oid::ObjectId::new();
                 new_doc.append("_id", oid);
-                slate_engine::BsonValue::from_raw_bson_ref(
-                    bson::raw::RawBsonRef::ObjectId(oid),
-                )
-                .expect("ObjectId is always valid")
+                slate_engine::BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::ObjectId(oid))
+                    .expect("ObjectId is always valid")
             }
         };
 
@@ -139,9 +137,7 @@ mod tests {
         let old = rawdoc! { "_id": "1", "name": "Alice", "score": 70 };
         let new = rawdoc! { "_id": "1", "score": 99 };
 
-        let result = build_doc(&UpsertMode::Merge, &new, &old)
-            .unwrap()
-            .unwrap();
+        let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap().unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_i32("score").unwrap(), 99);
     }
@@ -151,9 +147,7 @@ mod tests {
         let old = rawdoc! { "_id": "1", "name": "Alice" };
         let new = rawdoc! { "_id": "1", "email": "a@test.com" };
 
-        let result = build_doc(&UpsertMode::Merge, &new, &old)
-            .unwrap()
-            .unwrap();
+        let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap().unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_str("email").unwrap(), "a@test.com");
     }
