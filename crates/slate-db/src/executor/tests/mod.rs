@@ -28,7 +28,7 @@ impl EngineTransaction for NoopTransaction {
     fn get(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        _doc_id: &BsonValue<'_>,
+        _doc_id: &bson::raw::RawBsonRef<'_>,
         _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         panic!("NoopTransaction::get called");
@@ -38,7 +38,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc: &bson::RawDocument,
-        _doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put called");
     }
@@ -47,7 +46,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc: &bson::RawDocument,
-        _doc_id: &BsonValue<'_>,
         _ttl: i64,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put_nx called");
@@ -56,7 +54,7 @@ impl EngineTransaction for NoopTransaction {
     fn delete(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        _doc_id: &BsonValue<'_>,
+        _doc_id: &bson::raw::RawBsonRef<'_>,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::delete called");
     }
@@ -124,7 +122,7 @@ impl EngineTransaction for MockTransaction {
     fn get(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        _doc_id: &BsonValue<'_>,
+        _doc_id: &bson::raw::RawBsonRef<'_>,
         _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         Ok(None)
@@ -134,7 +132,6 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         doc: &bson::RawDocument,
-        _doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
             doc: doc.to_owned(),
@@ -146,7 +143,6 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         doc: &bson::RawDocument,
-        _doc_id: &BsonValue<'_>,
         _ttl: i64,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
@@ -158,7 +154,7 @@ impl EngineTransaction for MockTransaction {
     fn delete(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        doc_id: &BsonValue<'_>,
+        doc_id: &bson::raw::RawBsonRef<'_>,
     ) -> Result<(), EngineError> {
         let id_str = format!("{:?}", doc_id);
         self.deletes.borrow_mut().push(id_str);

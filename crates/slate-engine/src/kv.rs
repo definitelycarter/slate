@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use bson::raw::{RawDocument, RawDocumentBuf};
+use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use slate_store::{Store, StoreError, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
@@ -13,6 +13,7 @@ use crate::key::{Key, KeyPrefix};
 use crate::traits::{
     Catalog, CollectionConfig, CollectionHandle, EngineTransaction, IndexEntry, IndexRange,
 };
+use crate::validate::validate_raw_document;
 
 pub const SYS_CF: &str = "_sys_";
 const DEFAULT_CF: &str = "default_cf";
@@ -53,11 +54,12 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     fn get(
         &self,
         handle: &CollectionHandle<Self::Cf>,
-        doc_id: &BsonValue<'_>,
+        doc_id: &RawBsonRef<'_>,
         ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
-        let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
-        let encoded = key.encode();
+        let doc_id = BsonValue::from_raw_bson_ref(*doc_id)
+            .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?;
+        let encoded = Key::encode_record_key(&handle.name, &doc_id);
         match self.txn.get(&handle.cf, &encoded)? {
             None => Ok(None),
             Some(data) if Record::is_expired(&data, ttl) => Ok(None),
@@ -72,30 +74,31 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
-        let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
-        let encoded_key = key.encode();
+        let doc_id = match doc.get("_id") {
+            Ok(Some(val)) => BsonValue::from_raw_bson_ref(val)
+                .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?,
+            _ => return Err(EngineError::InvalidDocument("missing _id".into())),
+        };
+
+        validate_raw_document(doc)?;
+
+        let encoded_key = Key::encode_record_key(&handle.name, &doc_id);
         let encoded_value = Record::encode(doc);
 
         if handle.indexes.is_empty() {
             return Ok(self.txn.put(&handle.cf, &encoded_key, &encoded_value)?);
         }
 
-        // Scan IndexMap to discover old index keys: map_key → index_key.
+        // Scan IndexMap to discover old index keys.
         let mut old: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-        let prefix = KeyPrefix::IndexMapRecord(
-            Cow::Borrowed(&handle.name),
-            doc_id.clone(),
-        )
-        .encode();
+        let prefix = Key::encode_index_map_prefix(&handle.name, &doc_id);
         for result in self.txn.scan_prefix(&handle.cf, &prefix)? {
             let (map_key, index_key) = result?;
             old.insert(map_key, index_key);
         }
 
-        // Compute new index entries and diff against old.
-        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, doc_id);
+        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, &doc_id);
 
         let mut deletes: Vec<&[u8]> = Vec::new();
         let mut puts: Vec<(&[u8], &[u8])> = Vec::with_capacity(new_entries.len() + 1);
@@ -103,14 +106,12 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         for pair in new_entries.chunks(2) {
             let (map_key, _) = &pair[0];
             if old.remove(map_key.as_slice()).is_none() {
-                // New entry — not in old set.
                 for (k, v) in pair {
                     puts.push((k.as_slice(), v.as_slice()));
                 }
             }
         }
 
-        // Remaining old entries were not matched → stale, delete both keys.
         for (map_key, index_key) in &old {
             deletes.push(map_key.as_slice());
             deletes.push(index_key.as_slice());
@@ -129,13 +130,18 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        doc_id: &BsonValue<'_>,
         ttl: i64,
     ) -> Result<(), EngineError> {
-        let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
-        let encoded_key = key.encode();
+        let doc_id = match doc.get("_id") {
+            Ok(Some(val)) => BsonValue::from_raw_bson_ref(val)
+                .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?,
+            _ => return Err(EngineError::InvalidDocument("missing _id".into())),
+        };
 
-        // Check existence — expired docs are treated as non-existent.
+        validate_raw_document(doc)?;
+
+        let encoded_key = Key::encode_record_key(&handle.name, &doc_id);
+
         if let Some(data) = self.txn.get(&handle.cf, &encoded_key)? {
             if !Record::is_expired(&data, ttl) {
                 return Err(EngineError::DuplicateKey(doc_id.to_string()));
@@ -148,7 +154,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             return Ok(self.txn.put(&handle.cf, &encoded_key, &encoded_value)?);
         }
 
-        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, doc_id);
+        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, &doc_id);
         let mut puts: Vec<(&[u8], &[u8])> = new_entries
             .iter()
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
@@ -162,10 +168,11 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     fn delete(
         &self,
         handle: &CollectionHandle<Self::Cf>,
-        doc_id: &BsonValue<'_>,
+        doc_id: &RawBsonRef<'_>,
     ) -> Result<(), EngineError> {
-        let key = Key::Record(Cow::Borrowed(&handle.name), doc_id.clone());
-        let encoded = key.encode();
+        let doc_id = BsonValue::from_raw_bson_ref(*doc_id)
+            .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?;
+        let encoded = Key::encode_record_key(&handle.name, &doc_id);
 
         if handle.indexes.is_empty() {
             return Ok(self.txn.delete(&handle.cf, &encoded)?);
@@ -173,11 +180,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
         // Scan IndexMap to discover old index keys (no doc decode needed).
         let mut keys: Vec<Vec<u8>> = Vec::new();
-        let prefix = KeyPrefix::IndexMapRecord(
-            Cow::Borrowed(&handle.name),
-            doc_id.clone(),
-        )
-        .encode();
+        let prefix = Key::encode_index_map_prefix(&handle.name, &doc_id);
         for result in self.txn.scan_prefix(&handle.cf, &prefix)? {
             let (map_key, index_key) = result?;
             keys.push(index_key);

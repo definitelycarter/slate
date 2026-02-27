@@ -12,7 +12,7 @@ use slate_query::{Mutation, MutationOp};
 
 use super::raw_bson::find_field;
 use crate::error::DbError;
-use slate_engine::encoding::skip_bson_value;
+use slate_engine::skip_bson_value;
 
 // ── Result type ─────────────────────────────────────────────────
 

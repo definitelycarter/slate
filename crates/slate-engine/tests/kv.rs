@@ -8,30 +8,6 @@ fn engine() -> KvEngine<MemoryStore> {
     KvEngine::new(MemoryStore::new())
 }
 
-fn str_id(s: &str) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::String(s))
-        .unwrap()
-        .into_owned()
-}
-
-fn oid_id(oid: bson::oid::ObjectId) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::ObjectId(oid))
-        .unwrap()
-        .into_owned()
-}
-
-fn i32_id(n: i32) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::Int32(n))
-        .unwrap()
-        .into_owned()
-}
-
-fn i64_id(n: i64) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::Int64(n))
-        .unwrap()
-        .into_owned()
-}
-
 // ── Catalog ──────────────────────────────────────────────────
 
 #[test]
@@ -94,8 +70,8 @@ fn put_get_roundtrip() {
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice", "name": "Alice" };
-    let id = str_id("alice");
-    txn.put(&handle, &doc, &id).unwrap();
+    let id = RawBsonRef::String("alice");
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -112,7 +88,7 @@ fn get_missing_returns_none() {
     txn.create_collection(None, "users").unwrap();
     let handle = txn.collection("users").unwrap();
 
-    let id = str_id("missing");
+    let id = RawBsonRef::String("missing");
     assert!(txn.get(&handle, &id, i64::MIN).unwrap().is_none());
     txn.rollback().unwrap();
 }
@@ -124,11 +100,11 @@ fn put_overwrite() {
     txn.create_collection(None, "users").unwrap();
     let handle = txn.collection("users").unwrap();
 
-    let id = str_id("alice");
+    let id = RawBsonRef::String("alice");
     let doc1 = bson::rawdoc! { "_id": "alice", "v": 1 };
     let doc2 = bson::rawdoc! { "_id": "alice", "v": 2 };
-    txn.put(&handle, &doc1, &id).unwrap();
-    txn.put(&handle, &doc2, &id).unwrap();
+    txn.put(&handle, &doc1).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -145,9 +121,9 @@ fn delete_removes_document() {
     txn.create_collection(None, "users").unwrap();
     let handle = txn.collection("users").unwrap();
 
-    let id = str_id("alice");
+    let id = RawBsonRef::String("alice");
     let doc = bson::rawdoc! { "_id": "alice" };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.delete(&handle, &id).unwrap();
     txn.commit().unwrap();
 
@@ -167,8 +143,7 @@ fn scan_returns_all_documents() {
     for i in 0..3 {
         let name = format!("user-{i}");
         let doc = bson::rawdoc! { "_id": name.as_str() };
-        let id = str_id(&name);
-        txn.put(&handle, &doc, &id).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
     txn.commit().unwrap();
 
@@ -193,8 +168,7 @@ fn drop_collection_removes_records() {
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice" };
-    let id = str_id("alice");
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let mut txn = engine.begin(false).unwrap();
@@ -227,9 +201,9 @@ fn create_index_backfills_existing_records() {
     let doc1 = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
     let doc2 = bson::rawdoc! { "_id": "b", "email": "b@test.com" };
     let doc3 = bson::rawdoc! { "_id": "c" }; // no email field
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
-    txn.put(&handle, &doc2, &str_id("b")).unwrap();
-    txn.put(&handle, &doc3, &str_id("c")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
+    txn.put(&handle, &doc2).unwrap();
+    txn.put(&handle, &doc3).unwrap();
 
     // Create index — should backfill a and b but not c.
     txn.create_index("users", "email").unwrap();
@@ -254,7 +228,7 @@ fn drop_index_removes_entries() {
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.create_index("users", "email").unwrap();
     txn.commit().unwrap();
 
@@ -289,9 +263,9 @@ fn put_maintains_index() {
     let doc1 = bson::rawdoc! { "_id": "a", "age": 25 };
     let doc2 = bson::rawdoc! { "_id": "b", "age": 30 };
     let doc3 = bson::rawdoc! { "_id": "c", "age": 25 };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
-    txn.put(&handle, &doc2, &str_id("b")).unwrap();
-    txn.put(&handle, &doc3, &str_id("c")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
+    txn.put(&handle, &doc2).unwrap();
+    txn.put(&handle, &doc3).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -331,14 +305,14 @@ fn put_overwrite_updates_index() {
     let handle = txn.collection("users").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "email": "old@test.com" };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
     txn.commit().unwrap();
 
     // Overwrite with a new email.
     let txn = engine.begin(false).unwrap();
     let handle = txn.collection("users").unwrap();
     let doc2 = bson::rawdoc! { "_id": "a", "email": "new@test.com" };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     // Should have exactly 1 index entry (the new one), not 2.
@@ -362,13 +336,13 @@ fn delete_removes_index_entries() {
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     // Delete the document.
     let txn = engine.begin(false).unwrap();
     let handle = txn.collection("users").unwrap();
-    txn.delete(&handle, &str_id("a")).unwrap();
+    txn.delete(&handle, &RawBsonRef::String("a")).unwrap();
     txn.commit().unwrap();
 
     // Index should be empty.
@@ -391,7 +365,7 @@ fn drop_collection_removes_index_entries() {
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.create_index("users", "email").unwrap();
     txn.commit().unwrap();
 
@@ -439,14 +413,14 @@ fn stale_handle_misses_index_on_put() {
     stale_handle.indexes.clear(); // simulate stale snapshot
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
-    txn3.put(&stale_handle, &doc, &str_id("a")).unwrap();
+    txn3.put(&stale_handle, &doc).unwrap();
     txn3.commit().unwrap();
 
     // Verify: the record exists but the index entry is missing.
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     assert!(handle.indexes.contains(&"email".to_string()));
-    assert!(txn.get(&handle, &str_id("a"), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &RawBsonRef::String("a"), i64::MIN).unwrap().is_some());
 
     let entries: Vec<_> = txn
         .scan_index(&handle, "email", IndexRange::Full, false, i64::MIN)
@@ -467,13 +441,13 @@ fn commit_persists_across_transactions() {
     txn.create_collection(None, "users").unwrap();
     let handle = txn.collection("users").unwrap();
     let doc = bson::rawdoc! { "_id": "alice" };
-    txn.put(&handle, &doc, &str_id("alice")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     assert!(
-        txn.get(&handle, &str_id("alice"), i64::MIN)
+        txn.get(&handle, &RawBsonRef::String("alice"), i64::MIN)
             .unwrap()
             .is_some()
     );
@@ -490,13 +464,13 @@ fn rollback_discards_changes() {
     let txn = engine.begin(false).unwrap();
     let handle = txn.collection("users").unwrap();
     let doc = bson::rawdoc! { "_id": "alice" };
-    txn.put(&handle, &doc, &str_id("alice")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.rollback().unwrap();
 
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
     assert!(
-        txn.get(&handle, &str_id("alice"), i64::MIN)
+        txn.get(&handle, &RawBsonRef::String("alice"), i64::MIN)
             .unwrap()
             .is_none()
     );
@@ -512,9 +486,9 @@ fn put_get_string_id() {
     txn.create_collection(None, "c").unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let id = str_id("hello");
+    let id = RawBsonRef::String("hello");
     let doc = bson::rawdoc! { "_id": "hello", "v": 1 };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
 
     let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched.get_str("_id").unwrap(), "hello");
@@ -529,9 +503,9 @@ fn put_get_objectid_id() {
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
-    let id = oid_id(oid);
+    let id = RawBsonRef::ObjectId(oid);
     let doc = bson::rawdoc! { "_id": oid, "v": 1 };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
 
     let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched.get_object_id("_id").unwrap(), oid);
@@ -545,9 +519,9 @@ fn put_get_i32_id() {
     txn.create_collection(None, "c").unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let id = i32_id(42);
+    let id = RawBsonRef::Int32(42);
     let doc = bson::rawdoc! { "_id": 42_i32, "v": 1 };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
 
     let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched.get_i32("_id").unwrap(), 42);
@@ -561,9 +535,9 @@ fn put_get_i64_id() {
     txn.create_collection(None, "c").unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let id = i64_id(999_999_999_999);
+    let id = RawBsonRef::Int64(999_999_999_999);
     let doc = bson::rawdoc! { "_id": 999_999_999_999_i64, "v": 1 };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
 
     let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched.get_i64("_id").unwrap(), 999_999_999_999);
@@ -578,9 +552,9 @@ fn put_nx_objectid_id() {
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
-    let id = oid_id(oid);
+    let id = RawBsonRef::ObjectId(oid);
     let doc = bson::rawdoc! { "_id": oid, "v": 1 };
-    txn.put_nx(&handle, &doc, &id, i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
 
     let fetched = txn.get(&handle, &id, i64::MIN).unwrap().unwrap();
     assert_eq!(fetched.get_object_id("_id").unwrap(), oid);
@@ -594,11 +568,10 @@ fn put_nx_i32_id_duplicate_errors() {
     txn.create_collection(None, "c").unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let id = i32_id(7);
     let doc = bson::rawdoc! { "_id": 7_i32, "v": 1 };
-    txn.put_nx(&handle, &doc, &id, i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
 
-    let err = txn.put_nx(&handle, &doc, &id, i64::MIN);
+    let err = txn.put_nx(&handle, &doc, i64::MIN);
     assert!(err.is_err());
     txn.rollback().unwrap();
 }
@@ -611,9 +584,9 @@ fn delete_objectid_id() {
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
-    let id = oid_id(oid);
+    let id = RawBsonRef::ObjectId(oid);
     let doc = bson::rawdoc! { "_id": oid, "v": 1 };
-    txn.put(&handle, &doc, &id).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.delete(&handle, &id).unwrap();
 
     assert!(txn.get(&handle, &id, i64::MIN).unwrap().is_none());
@@ -628,24 +601,9 @@ fn scan_mixed_id_types() {
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
-    txn.put(
-        &handle,
-        &bson::rawdoc! { "_id": "str", "v": 1 },
-        &str_id("str"),
-    )
-    .unwrap();
-    txn.put(
-        &handle,
-        &bson::rawdoc! { "_id": oid, "v": 2 },
-        &oid_id(oid),
-    )
-    .unwrap();
-    txn.put(
-        &handle,
-        &bson::rawdoc! { "_id": 42_i32, "v": 3 },
-        &i32_id(42),
-    )
-    .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "str", "v": 1 }).unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": oid, "v": 2 }).unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": 42_i32, "v": 3 }).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -658,8 +616,8 @@ fn scan_mixed_id_types() {
     assert_eq!(results.len(), 3);
 
     // Verify each can be fetched individually.
-    assert!(txn.get(&handle, &str_id("str"), i64::MIN).unwrap().is_some());
-    assert!(txn.get(&handle, &oid_id(oid), i64::MIN).unwrap().is_some());
-    assert!(txn.get(&handle, &i32_id(42), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &RawBsonRef::String("str"), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &RawBsonRef::ObjectId(oid), i64::MIN).unwrap().is_some());
+    assert!(txn.get(&handle, &RawBsonRef::Int32(42), i64::MIN).unwrap().is_some());
     txn.rollback().unwrap();
 }

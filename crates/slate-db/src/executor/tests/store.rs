@@ -58,10 +58,7 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
             rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 90 },
             rawdoc! { "_id": "3", "name": "Charlie", "status": "active", "score": 80 },
         ] {
-            let id_str = doc.get_str("_id").unwrap();
-            let doc_id =
-                BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String(id_str)).unwrap();
-            txn.put(&handle, &doc, &doc_id).unwrap();
+            txn.put(&handle, &doc).unwrap();
         }
         txn.commit().unwrap();
     }
@@ -262,13 +259,12 @@ fn read_record_skips_dangling_index() {
     {
         let txn = engine.begin(false).unwrap();
         let handle = txn.collection("test").unwrap();
-        let doc_id = BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::String("2")).unwrap();
         // Use engine delete which cleans up indexes too — so let's use raw store delete instead
         // Actually, we want a dangling index. Let's delete only the record, not the indexes.
         // But EngineTransaction::delete removes indexes too. We need to go lower.
         // Alternative: just test via the Database API directly (integration-level test).
         // For now, verify that delete + re-lookup works correctly through the API.
-        txn.delete(&handle, &doc_id).unwrap();
+        txn.delete(&handle, &bson::raw::RawBsonRef::String("2")).unwrap();
         txn.commit().unwrap();
     }
 

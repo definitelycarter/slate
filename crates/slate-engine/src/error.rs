@@ -9,6 +9,7 @@ pub enum EngineError {
     Encoding(String),
     CollectionNotFound(String),
     DuplicateKey(String),
+    InvalidDocument(String),
 }
 
 impl fmt::Display for EngineError {
@@ -19,6 +20,7 @@ impl fmt::Display for EngineError {
             Self::Encoding(msg) => write!(f, "encoding error: {msg}"),
             Self::CollectionNotFound(name) => write!(f, "collection not found: {name}"),
             Self::DuplicateKey(id) => write!(f, "duplicate key: {id}"),
+            Self::InvalidDocument(msg) => write!(f, "invalid document: {msg}"),
         }
     }
 }

@@ -20,14 +20,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => return Ok(None),
         };
 
-        let doc_id = match exec::extract_doc_id(old_raw) {
-            Ok(Some(id)) => id,
-            _ => return Ok(None),
-        };
-
         match exec::apply_mutation(old_raw, &mutation)? {
             Some(mutated) => {
-                txn.put(&handle, &mutated, &doc_id)?;
+                txn.put(&handle, &mutated)?;
                 Ok(Some(RawBson::Document(mutated)))
             }
             None => Ok(None),

@@ -3,7 +3,6 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
 
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
@@ -13,9 +12,11 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         if let Some(RawBson::Document(ref d)) = opt_val {
-            let doc_id = exec::extract_doc_id(d)?
+            let raw_id = d
+                .get("_id")
+                .map_err(|e| DbError::Serialization(e.to_string()))?
                 .ok_or_else(|| DbError::InvalidQuery("missing _id".into()))?;
-            txn.delete(&handle, &doc_id)?;
+            txn.delete(&handle, &raw_id)?;
         }
         Ok(None)
     })))

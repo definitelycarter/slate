@@ -28,17 +28,18 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => return Err(DbError::InvalidQuery("Upsert requires document".into())),
         };
 
-        let doc_id = match exec::extract_doc_id(&new_doc)? {
-            Some(id) => id,
-            None => {
-                let oid = bson::oid::ObjectId::new();
-                new_doc.append(bson::cstr!("_id"), oid);
-                slate_engine::BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::ObjectId(oid))
-                    .expect("ObjectId is always valid")
-            }
-        };
+        // Ensure _id exists, generating one if missing.
+        if exec::extract_doc_id(&new_doc)?.is_none() {
+            let oid = bson::oid::ObjectId::new();
+            new_doc.append(bson::cstr!("_id"), oid);
+        }
 
-        let old_doc = txn.get(&handle, &doc_id, now_millis)?;
+        let raw_id = new_doc
+            .get("_id")
+            .map_err(|e| DbError::Serialization(e.to_string()))?
+            .expect("_id was just ensured");
+
+        let old_doc = txn.get(&handle, &raw_id, now_millis)?;
 
         if let Some(ref old_raw_doc) = old_doc {
             let written = build_doc(&mode, &new_doc, old_raw_doc)?;
@@ -50,10 +51,10 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                 }
             };
 
-            txn.put(&handle, &written, &doc_id)?;
+            txn.put(&handle, &written)?;
             Ok(Some(RawBson::Document(written)))
         } else {
-            txn.put_nx(&handle, &new_doc, &doc_id, now_millis)?;
+            txn.put_nx(&handle, &new_doc, now_millis)?;
             Ok(Some(RawBson::Document(new_doc)))
         }
     })))

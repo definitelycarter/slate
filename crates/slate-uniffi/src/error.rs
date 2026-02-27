@@ -36,6 +36,7 @@ impl From<DbError> for SlateError {
             DbError::Store(e) => SlateError::Store {
                 message: e.to_string(),
             },
+            DbError::InvalidDocument(msg) => SlateError::Serialization { message: msg },
             DbError::Serialization(msg) => SlateError::Serialization { message: msg },
         }
     }

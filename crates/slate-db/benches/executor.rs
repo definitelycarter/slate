@@ -22,7 +22,7 @@ impl EngineTransaction for NoopTransaction {
     fn get(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        _doc_id: &BsonValue<'_>,
+        _doc_id: &bson::raw::RawBsonRef<'_>,
         _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         panic!("NoopTransaction::get called");
@@ -32,7 +32,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc: &bson::raw::RawDocument,
-        _doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put called");
     }
@@ -41,7 +40,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc: &bson::raw::RawDocument,
-        _doc_id: &BsonValue<'_>,
         _ttl: i64,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put_nx called");
@@ -50,7 +48,7 @@ impl EngineTransaction for NoopTransaction {
     fn delete(
         &self,
         _handle: &CollectionHandle<Self::Cf>,
-        _doc_id: &BsonValue<'_>,
+        _doc_id: &bson::raw::RawBsonRef<'_>,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::delete called");
     }

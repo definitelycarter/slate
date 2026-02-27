@@ -8,12 +8,6 @@ use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────
 
-fn str_id(s: &str) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::String(s))
-        .unwrap()
-        .into_owned()
-}
-
 fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
     (0..n)
         .map(|i| {
@@ -37,8 +31,7 @@ fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
     txn.create_index("bench", "age").unwrap();
     let handle = txn.collection("bench").unwrap();
     for doc in generate_docs(n) {
-        let id_val = BsonValue::extract(&doc, "_id").unwrap();
-        txn.put(&handle, &doc, &id_val).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
     txn.commit().unwrap();
     engine
@@ -50,17 +43,17 @@ fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let ids: Vec<BsonValue<'static>> = (0..100)
-            .map(|i| str_id(&format!("rec-{}", i * (n / 100))))
+        let id_strings: Vec<String> = (0..100)
+            .map(|i| format!("rec-{}", i * (n / 100)))
             .collect();
 
-        group.bench_with_input(BenchmarkId::from_parameter(n), &ids, |b, ids| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &id_strings, |b, ids| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
                 let mut found = 0usize;
                 for id in ids {
-                    if txn.get(&handle, id, i64::MIN).unwrap().is_some() {
+                    if txn.get(&handle, &RawBsonRef::String(id), i64::MIN).unwrap().is_some() {
                         found += 1;
                     }
                 }
@@ -201,8 +194,7 @@ fn bench_put(c: &mut Criterion) {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for doc in &docs {
-                        let id = BsonValue::extract(doc, "_id").unwrap();
-                        txn.put(&handle, doc, &id).unwrap();
+                        txn.put(&handle, doc).unwrap();
                     }
                     // Don't commit — keep engine empty for next iteration.
                 },
@@ -236,8 +228,7 @@ fn bench_put_nx(c: &mut Criterion) {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for doc in &docs {
-                        let id = BsonValue::extract(doc, "_id").unwrap();
-                        txn.put_nx(&handle, doc, &id, i64::MIN).unwrap();
+                        txn.put_nx(&handle, doc, i64::MIN).unwrap();
                     }
                 },
                 BatchSize::PerIteration,
@@ -271,8 +262,7 @@ fn bench_put_overwrite(c: &mut Criterion) {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for doc in &docs {
-                        let id = BsonValue::extract(doc, "_id").unwrap();
-                        txn.put(&handle, doc, &id).unwrap();
+                        txn.put(&handle, doc).unwrap();
                     }
                     // Don't commit — engine stays seeded for next iteration.
                 },
@@ -297,8 +287,7 @@ fn bench_put_overwrite_no_change(c: &mut Criterion) {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for doc in &docs {
-                        let id = BsonValue::extract(doc, "_id").unwrap();
-                        txn.put(&handle, doc, &id).unwrap();
+                        txn.put(&handle, doc).unwrap();
                     }
                 },
                 BatchSize::PerIteration,
@@ -314,16 +303,16 @@ fn bench_delete(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete");
     for n in [100, 1_000] {
         let engine = seeded_engine(n);
-        let ids: Vec<BsonValue<'static>> = (0..n).map(|i| str_id(&format!("rec-{i}"))).collect();
+        let id_strings: Vec<String> = (0..n).map(|i| format!("rec-{i}")).collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter_batched(
-                || ids.clone(),
+                || id_strings.clone(),
                 |ids| {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for id in &ids {
-                        txn.delete(&handle, id).unwrap();
+                        txn.delete(&handle, &RawBsonRef::String(id)).unwrap();
                     }
                     // Don't commit.
                 },
@@ -346,8 +335,7 @@ fn bench_create_index_backfill(c: &mut Criterion) {
             txn.create_collection(None, "bench").unwrap();
             let handle = txn.collection("bench").unwrap();
             for doc in generate_docs(n) {
-                let id = BsonValue::extract(&doc, "_id").unwrap();
-                txn.put(&handle, &doc, &id).unwrap();
+                txn.put(&handle, &doc).unwrap();
             }
             txn.commit().unwrap();
             engine

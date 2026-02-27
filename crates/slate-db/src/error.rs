@@ -10,6 +10,7 @@ pub enum DbError {
     DuplicateKey(String),
     InvalidQuery(String),
     InvalidKey(String),
+    InvalidDocument(String),
     Serialization(String),
 }
 
@@ -22,6 +23,7 @@ impl fmt::Display for DbError {
             DbError::DuplicateKey(id) => write!(f, "duplicate key: {id}"),
             DbError::InvalidQuery(msg) => write!(f, "invalid query: {msg}"),
             DbError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
+            DbError::InvalidDocument(msg) => write!(f, "invalid document: {msg}"),
             DbError::Serialization(msg) => write!(f, "serialization error: {msg}"),
         }
     }
@@ -62,6 +64,7 @@ impl From<slate_engine::EngineError> for DbError {
                 DbError::CollectionNotFound(name)
             }
             slate_engine::EngineError::DuplicateKey(id) => DbError::DuplicateKey(id),
+            slate_engine::EngineError::InvalidDocument(msg) => DbError::InvalidDocument(msg),
             other => DbError::InvalidQuery(other.to_string()),
         }
     }

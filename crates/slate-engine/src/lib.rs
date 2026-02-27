@@ -1,12 +1,13 @@
-pub mod encoding;
+mod encoding;
 mod error;
 mod index;
 mod key;
 mod kv;
 mod traits;
+mod validate;
 
 pub use encoding::bson_value::BsonValue;
-pub use encoding::{IndexMeta, Record};
+pub use encoding::skip_bson_value;
 pub use error::EngineError;
 pub use kv::KvEngine;
 pub use traits::{

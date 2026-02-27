@@ -9,7 +9,7 @@
 //! key extraction, and projection.
 
 use bson::raw::{RawArray, RawBsonRef, RawDocument};
-use slate_engine::encoding::skip_bson_value;
+use slate_engine::skip_bson_value;
 
 // ── Field location ──────────────────────────────────────────────
 

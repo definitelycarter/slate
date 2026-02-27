@@ -21,10 +21,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             _ => return Ok(None),
         };
 
-        let doc_id = match exec::extract_doc_id(old_raw)? {
-            Some(id) => id,
-            None => return Err(DbError::InvalidQuery("missing _id".into())),
-        };
+        if exec::extract_doc_id(old_raw)?.is_none() {
+            return Err(DbError::InvalidQuery("missing _id".into()));
+        }
 
         // Rebuild doc: copy _id from old doc (preserves type), then replacement fields
         let mut buf = RawDocumentBuf::new();
@@ -38,7 +37,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             }
         }
 
-        txn.put(&handle, &buf, &doc_id)?;
+        txn.put(&handle, &buf)?;
         Ok(Some(RawBson::Document(buf)))
     })))
 }

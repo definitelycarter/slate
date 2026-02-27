@@ -1,5 +1,5 @@
 use bson::RawBson;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
+use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
@@ -25,17 +25,13 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             }
         };
 
-        let doc_id = match exec::extract_doc_id(&doc)? {
-            Some(id) => id,
-            None => {
-                let oid = bson::oid::ObjectId::new();
-                doc.append(bson::cstr!("_id"), oid);
-                BsonValue::from_raw_bson_ref(bson::raw::RawBsonRef::ObjectId(oid))
-                    .expect("ObjectId is always valid")
-            }
-        };
+        // Generate _id if missing.
+        if exec::extract_doc_id(&doc)?.is_none() {
+            let oid = bson::oid::ObjectId::new();
+            doc.append(bson::cstr!("_id"), oid);
+        }
 
-        txn.put_nx(&handle, &doc, &doc_id, now_millis)?;
+        txn.put_nx(&handle, &doc, now_millis)?;
         Ok(Some(RawBson::Document(doc)))
     })))
 }

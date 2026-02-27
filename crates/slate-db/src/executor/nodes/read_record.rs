@@ -1,9 +1,8 @@
 use bson::RawBson;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction};
+use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
 
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
@@ -22,18 +21,14 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => return None,
         };
         // Accept bare id (from IndexScan) or Document with _id
-        let doc_id = match &val {
-            RawBson::Document(d) => match exec::extract_doc_id(d) {
-                Ok(Some(id)) => Some(id.into_owned()),
+        let raw_ref = match &val {
+            RawBson::Document(d) => match d.get("_id") {
+                Ok(Some(id)) => id,
                 _ => return None,
             },
-            other => BsonValue::from_raw_bson(other),
+            other => other.as_raw_bson_ref(),
         };
-        let doc_id = match doc_id {
-            Some(id) => id,
-            None => return None,
-        };
-        match txn.get(&handle, &doc_id, now_millis) {
+        match txn.get(&handle, &raw_ref, now_millis) {
             Ok(Some(doc)) => Some(Ok(Some(RawBson::Document(doc)))),
             Ok(None) => None,
             Err(e) => Some(Err(DbError::from(e))),

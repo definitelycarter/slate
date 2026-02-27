@@ -170,6 +170,32 @@ impl<'a> Key<'a> {
         buf
     }
 
+    /// Encode a record key from borrowed parts, avoiding `BsonValue` clone.
+    ///
+    /// Layout: `r\x00{collection}\x00[doc_id_encoded]`
+    pub fn encode_record_key(collection: &str, doc_id: &BsonValue<'_>) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(2 + collection.len() + 1 + 3 + doc_id.bytes.len());
+        buf.push(RECORD_TAG);
+        buf.push(SEP);
+        buf.extend_from_slice(collection.as_bytes());
+        buf.push(SEP);
+        doc_id.write_length_prefixed(&mut buf);
+        buf
+    }
+
+    /// Encode an IndexMap record prefix from borrowed parts.
+    ///
+    /// Layout: `j\x00{collection}\x00[doc_id_encoded]`
+    pub fn encode_index_map_prefix(collection: &str, doc_id: &BsonValue<'_>) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(2 + collection.len() + 1 + 3 + doc_id.bytes.len());
+        buf.push(INDEX_MAP_TAG);
+        buf.push(SEP);
+        buf.extend_from_slice(collection.as_bytes());
+        buf.push(SEP);
+        doc_id.write_length_prefixed(&mut buf);
+        buf
+    }
+
     /// Decode a key from its byte representation.
     ///
     /// Returns `None` if the bytes don't match any known key format.

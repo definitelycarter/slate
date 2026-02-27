@@ -1,4 +1,4 @@
-use bson::raw::{RawDocument, RawDocumentBuf};
+use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 
 use crate::encoding::bson_value::BsonValue;
 use crate::error::EngineError;
@@ -35,32 +35,37 @@ pub trait EngineTransaction {
 
     // ── Document operations ────────────────────────────────────
 
+    /// Fetch a document by `_id`. Constructs the internal key encoding
+    /// from the raw BSON reference.
     fn get(
         &self,
         handle: &CollectionHandle<Self::Cf>,
-        doc_id: &BsonValue<'_>,
+        doc_id: &RawBsonRef<'_>,
         ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError>;
 
+    /// Insert or overwrite a document, extracting `_id` internally.
     fn put(
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        doc_id: &BsonValue<'_>,
     ) -> Result<(), EngineError>;
 
+    /// Insert a document if no existing doc with the same `_id` exists.
+    /// Extracts `_id` internally.
     fn put_nx(
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        doc_id: &BsonValue<'_>,
         ttl: i64,
     ) -> Result<(), EngineError>;
 
+    /// Delete a document by `_id`. Constructs the internal key encoding
+    /// from the raw BSON reference.
     fn delete(
         &self,
         handle: &CollectionHandle<Self::Cf>,
-        doc_id: &BsonValue<'_>,
+        doc_id: &RawBsonRef<'_>,
     ) -> Result<(), EngineError>;
 
     fn scan<'a>(

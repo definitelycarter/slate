@@ -8,12 +8,6 @@ fn engine() -> KvEngine<MemoryStore> {
     KvEngine::new(MemoryStore::new())
 }
 
-fn str_id(s: &str) -> BsonValue<'static> {
-    BsonValue::from_raw_bson_ref(RawBsonRef::String(s))
-        .unwrap()
-        .into_owned()
-}
-
 /// Count all index entries for a field across all values.
 fn count_index<Txn: EngineTransaction>(
     txn: &Txn,
@@ -43,7 +37,7 @@ fn put_nx_creates_index_entries() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put_nx(&handle, &doc, &str_id("a"), i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -61,7 +55,7 @@ fn put_nx_no_indexed_field_creates_no_entries() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "age": 30 };
-    txn.put_nx(&handle, &doc, &str_id("a"), i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -81,9 +75,9 @@ fn put_overwrite_same_value_exactly_one_entry() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
+    txn.put(&handle, &doc).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -104,8 +98,8 @@ fn put_overwrite_changed_value_replaces_entry() {
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice" };
     let doc2 = bson::rawdoc! { "_id": "a", "name": "Bob" };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -134,10 +128,10 @@ fn put_overwrite_removing_field_deletes_entry() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
 
     let doc2 = bson::rawdoc! { "_id": "a", "age": 30 };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -157,11 +151,11 @@ fn put_overwrite_adding_field_creates_entry() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "age": 30 };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 0);
 
     let doc2 = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -182,7 +176,7 @@ fn multiple_indexes_maintained() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -202,11 +196,11 @@ fn multiple_indexes_overwrite_partial_change() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
 
     // Change name but keep age.
     let doc2 = bson::rawdoc! { "_id": "a", "name": "Bob", "age": 30 };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -226,8 +220,8 @@ fn delete_cleans_all_indexes() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
-    txn.delete(&handle, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
+    txn.delete(&handle, &RawBsonRef::String("a")).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -248,7 +242,7 @@ fn index_on_nested_path() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "address": { "city": "Austin", "state": "TX" } };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -266,7 +260,7 @@ fn index_on_nested_path_missing_parent() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -284,10 +278,10 @@ fn index_on_nested_path_overwrite() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "address": { "city": "Austin" } };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
 
     let doc2 = bson::rawdoc! { "_id": "a", "address": { "city": "Denver" } };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -307,7 +301,7 @@ fn array_multikey_creates_entry_per_element() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "tags": ["rust", "db", "engine"] };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -325,10 +319,10 @@ fn array_multikey_overwrite_partial_change() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
 
     let doc2 = bson::rawdoc! { "_id": "a", "tags": ["rust", "engine"] };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -347,10 +341,10 @@ fn array_multikey_overwrite_to_empty_array() {
     let handle = txn.collection("c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
 
     let doc2 = bson::rawdoc! { "_id": "a", "tags": [] };
-    txn.put(&handle, &doc2, &str_id("a")).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -368,8 +362,8 @@ fn array_multikey_delete_cleans_all() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "tags": ["rust", "db", "engine"] };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
-    txn.delete(&handle, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
+    txn.delete(&handle, &RawBsonRef::String("a")).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -388,8 +382,8 @@ fn array_multikey_multiple_docs() {
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
     let doc2 = bson::rawdoc! { "_id": "b", "tags": ["rust", "engine"] };
-    txn.put(&handle, &doc1, &str_id("a")).unwrap();
-    txn.put(&handle, &doc2, &str_id("b")).unwrap();
+    txn.put(&handle, &doc1).unwrap();
+    txn.put(&handle, &doc2).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -426,7 +420,7 @@ fn nested_array_objects_multikey() {
             { "sku": "C3", "qty": 5 }
         ]
     };
-    txn.put(&handle, &doc, &str_id("order1")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -449,7 +443,7 @@ fn ttl_expired_doc_hidden_from_index_scan() {
 
     let expired_dt = bson::DateTime::from_millis(1_000_000); // long past
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "ttl": expired_dt };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -476,7 +470,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
 
     let future_dt = bson::DateTime::from_millis(i64::MAX / 2); // far future
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "ttl": future_dt };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -501,7 +495,7 @@ fn ttl_no_ttl_field_always_visible() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put(&handle, &doc, &str_id("a")).unwrap();
+    txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -530,7 +524,7 @@ fn many_docs_exact_index_count() {
     for i in 0..100 {
         let name = format!("doc-{i}");
         let doc = bson::rawdoc! { "_id": name.as_str(), "v": i };
-        txn.put(&handle, &doc, &str_id(&name)).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
     txn.commit().unwrap();
 
@@ -551,13 +545,13 @@ fn many_docs_delete_half_exact_count() {
     for i in 0..100 {
         let name = format!("doc-{i}");
         let doc = bson::rawdoc! { "_id": name.as_str(), "v": i };
-        txn.put(&handle, &doc, &str_id(&name)).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
 
     // Delete even-numbered docs.
     for i in (0..100).step_by(2) {
         let name = format!("doc-{i}");
-        txn.delete(&handle, &str_id(&name)).unwrap();
+        txn.delete(&handle, &RawBsonRef::String(&name)).unwrap();
     }
     txn.commit().unwrap();
 
@@ -578,14 +572,14 @@ fn many_docs_overwrite_all_exact_count() {
     for i in 0..50 {
         let name = format!("doc-{i}");
         let doc = bson::rawdoc! { "_id": name.as_str(), "v": i };
-        txn.put(&handle, &doc, &str_id(&name)).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
 
     // Overwrite all docs with new value.
     for i in 0..50 {
         let name = format!("doc-{i}");
         let doc = bson::rawdoc! { "_id": name.as_str(), "v": i + 1000 };
-        txn.put(&handle, &doc, &str_id(&name)).unwrap();
+        txn.put(&handle, &doc).unwrap();
     }
     txn.commit().unwrap();
 
