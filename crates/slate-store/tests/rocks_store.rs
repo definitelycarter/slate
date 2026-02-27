@@ -1,3 +1,5 @@
+#![cfg(feature = "rocksdb")]
+
 use slate_store::{RocksStore, Store, Transaction};
 
 fn temp_store() -> (RocksStore, tempfile::TempDir) {
