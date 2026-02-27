@@ -6,6 +6,7 @@ use slate_query::{Sort, SortDirection};
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
+use crate::executor::raw_bson::RawField;
 
 fn as_document(val: &RawBson) -> Option<&bson::RawDocument> {
     match val {
@@ -35,8 +36,8 @@ pub(crate) fn execute<'a>(
                 let b_ref = b.as_raw_bson_ref();
                 let ord = match (&a_ref, &b_ref) {
                     (RawBsonRef::Document(a_doc), RawBsonRef::Document(b_doc)) => {
-                        let a_field = exec::raw_get_path(a_doc, &sort.field).ok().flatten();
-                        let b_field = exec::raw_get_path(b_doc, &sort.field).ok().flatten();
+                        let a_field = RawField::get_value(a_doc.as_bytes(), &sort.field);
+                        let b_field = RawField::get_value(b_doc.as_bytes(), &sort.field);
                         exec::raw_compare_field_values(a_field, b_field)
                     }
                     _ => exec::raw_compare_field_values(Some(a_ref), Some(b_ref)),
@@ -73,11 +74,11 @@ fn sort_records<'a>(sorts: &[Sort], source: RawIter<'a>) -> Result<RawIter<'a>, 
             let a_field = a_opt
                 .as_ref()
                 .and_then(as_document)
-                .and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
+                .and_then(|r| RawField::get_value(r.as_bytes(), &sort.field));
             let b_field = b_opt
                 .as_ref()
                 .and_then(as_document)
-                .and_then(|r| exec::raw_get_path(r, &sort.field).ok().flatten());
+                .and_then(|r| RawField::get_value(r.as_bytes(), &sort.field));
             let ord = exec::raw_compare_field_values(a_field, b_field);
             let ord = match sort.direction {
                 SortDirection::Asc => ord,

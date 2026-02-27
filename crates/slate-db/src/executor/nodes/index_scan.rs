@@ -1,15 +1,10 @@
 use bson::RawBson;
 use bson::raw::RawDocumentBuf;
-use slate_engine::{BsonValue, CollectionHandle, EngineTransaction, IndexRange};
+use slate_engine::{CollectionHandle, EngineTransaction, IndexRange};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::planner::plan::{IndexScanRange, ScanDirection};
-
-/// Convert a `bson::Bson` value to its encoded bytes via `BsonValue`.
-fn bson_to_value_bytes(val: &bson::Bson) -> Option<Vec<u8>> {
-    BsonValue::from_bson(val).map(|bv| bv.to_vec())
-}
 
 /// Convert an owned `Bson` to `RawBson` for covered projection output.
 fn bson_to_raw_bson(val: &bson::Bson) -> Option<RawBson> {
@@ -24,6 +19,16 @@ fn bson_to_raw_bson(val: &bson::Bson) -> Option<RawBson> {
     })
 }
 
+/// Extract a numeric value as i64 from a RawBson for cross-type comparison.
+fn raw_bson_as_i64(val: &RawBson) -> Option<i64> {
+    match val {
+        RawBson::Int32(n) => Some(*n as i64),
+        RawBson::Int64(n) => Some(*n),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
@@ -34,26 +39,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     covered: bool,
     now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
-    // Pre-encode range values for the engine's IndexRange.
-    let eq_bytes = match range {
-        IndexScanRange::Eq(v) => bson_to_value_bytes(v),
-        _ => None,
-    };
-    let lower_bytes = match range {
-        IndexScanRange::Range {
-            lower: Some((v, _)),
-            ..
-        } => bson_to_value_bytes(v),
-        _ => None,
-    };
-    let upper_bytes = match range {
-        IndexScanRange::Range {
-            upper: Some((v, _)),
-            ..
-        } => bson_to_value_bytes(v),
-        _ => None,
-    };
-
     // For Eq with numeric types (Int32/Int64), use a full field scan with post-filter
     // to handle cross-type matching (e.g. query Int64(100) matching stored Int32(100)).
     let is_numeric_eq = matches!(
@@ -64,15 +49,10 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     let engine_range = match range {
         IndexScanRange::Full => IndexRange::Full,
         IndexScanRange::Eq(_) if is_numeric_eq => IndexRange::Full,
-        IndexScanRange::Eq(_) => match &eq_bytes {
-            Some(b) => IndexRange::Eq(b),
-            None => IndexRange::Full,
-        },
+        IndexScanRange::Eq(v) => IndexRange::Eq(v),
         IndexScanRange::Range { lower, upper } => IndexRange::Range {
-            lower: lower_bytes.as_deref(),
-            lower_inclusive: lower.as_ref().map_or(false, |(_, incl)| *incl),
-            upper: upper_bytes.as_deref(),
-            upper_inclusive: upper.as_ref().map_or(false, |(_, incl)| *incl),
+            lower: lower.as_ref().map(|(v, incl)| (v, *incl)),
+            upper: upper.as_ref().map(|(v, incl)| (v, *incl)),
         },
     };
 
@@ -116,38 +96,33 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                 Ok(entry) => {
                     // Numeric Eq post-filter: compare as i64 to handle Int32/Int64 cross-matching
                     if let Some(query_val) = numeric_eq_value {
-                        let entry_val = decode_index_value_as_i64(&entry.value_bytes);
+                        let entry_val = raw_bson_as_i64(&entry.value);
                         if entry_val != Some(query_val) {
                             continue;
                         }
                     }
 
                     // Limit logic
-                    if let Some(n) = limit {
-                        if count >= n {
-                            done = true;
-                            return None;
-                        }
+                    if let Some(n) = limit
+                        && count >= n
+                    {
+                        done = true;
+                        return None;
                     }
 
                     count += 1;
 
-                    let id_raw = match entry.doc_id.to_raw_bson() {
-                        Some(v) => v,
-                        None => continue,
-                    };
-
                     if let Some(ref rv) = raw_value {
                         // Build a minimal document with _id + the indexed field.
                         // Coerce the query value to the type stored in the index.
-                        let coerced = coerce_to_stored_type(rv, &entry.metadata);
+                        let coerced = coerce_to_stored_type(rv, &entry.value);
                         let mut doc = RawDocumentBuf::new();
-                        doc.append(bson::cstr!("_id"), id_raw);
+                        doc.append(bson::cstr!("_id"), entry.doc_id);
                         doc.append(&field_cstr, coerced);
                         return Some(Ok(Some(RawBson::Document(doc))));
                     } else {
                         // Standard path: yield bare ID for ReadRecord
-                        return Some(Ok(Some(id_raw)));
+                        return Some(Ok(Some(entry.doc_id)));
                     }
                 }
                 Err(e) => {
@@ -162,43 +137,16 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     })))
 }
 
-/// Decode index value_bytes (sortable-encoded) as i64 for cross-type comparison.
+/// Coerce a query value to match the stored type in the index.
 ///
-/// Handles both Int32 (tag 0x10, 4 bytes) and Int64 (tag 0x12, 8 bytes).
-fn decode_index_value_as_i64(value_bytes: &[u8]) -> Option<i64> {
-    if value_bytes.is_empty() {
-        return None;
-    }
-    match value_bytes[0] {
-        0x10 if value_bytes.len() == 5 => {
-            let b: [u8; 4] = value_bytes[1..5].try_into().ok()?;
-            let n = (u32::from_be_bytes(b) ^ 0x8000_0000) as i32;
-            Some(n as i64)
-        }
-        0x12 if value_bytes.len() == 9 => {
-            let b: [u8; 8] = value_bytes[1..9].try_into().ok()?;
-            let n = (u64::from_be_bytes(b) ^ 0x8000_0000_0000_0000) as i64;
-            Some(n)
-        }
-        _ => None,
-    }
-}
-
-/// Coerce a query value to match the stored type in the index metadata.
-///
-/// The metadata's first byte is the BSON type tag of the stored value.
-/// If the query value (e.g. Int64) differs from the stored type (e.g. Int32),
+/// If the query value (e.g. Int64) differs from the stored value type (e.g. Int32),
 /// we coerce to avoid type mismatches in the covered output.
-fn coerce_to_stored_type(query_val: &RawBson, metadata: &[u8]) -> RawBson {
-    if metadata.is_empty() {
-        return query_val.clone();
-    }
-    let stored_type = metadata[0];
-    match (stored_type, query_val) {
-        // Int64 query → Int32 stored
-        (0x10, RawBson::Int64(n)) => RawBson::Int32(*n as i32),
-        // Int32 query → Int64 stored
-        (0x12, RawBson::Int32(n)) => RawBson::Int64(*n as i64),
+fn coerce_to_stored_type(query_val: &RawBson, stored_val: &RawBson) -> RawBson {
+    match (stored_val, query_val) {
+        // Stored Int32, query Int64 → coerce to Int32
+        (RawBson::Int32(_), RawBson::Int64(n)) => RawBson::Int32(*n as i32),
+        // Stored Int64, query Int32 → coerce to Int64
+        (RawBson::Int64(_), RawBson::Int32(n)) => RawBson::Int64(*n as i64),
         _ => query_val.clone(),
     }
 }

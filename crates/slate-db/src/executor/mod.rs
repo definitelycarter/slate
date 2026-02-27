@@ -1,9 +1,7 @@
 pub(crate) mod exec;
 pub(crate) mod field_tree;
-pub(crate) mod mutation_ops;
 mod nodes;
 pub(crate) mod raw_bson;
-pub(crate) mod raw_mutation;
 #[cfg(test)]
 mod tests;
 

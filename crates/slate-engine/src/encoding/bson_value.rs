@@ -109,41 +109,6 @@ impl<'a> BsonValue<'a> {
         }
     }
 
-    /// Create a `BsonValue` from a `RawBson`.
-    pub fn from_raw_bson(val: &bson::RawBson) -> Option<BsonValue<'static>> {
-        match val {
-            bson::RawBson::ObjectId(oid) => Some(BsonValue {
-                tag: 0x07,
-                bytes: Cow::Owned(oid.bytes().to_vec()),
-            }),
-            bson::RawBson::String(s) => Some(BsonValue {
-                tag: 0x02,
-                bytes: Cow::Owned(s.as_bytes().to_vec()),
-            }),
-            bson::RawBson::Int32(n) => Some(BsonValue {
-                tag: 0x10,
-                bytes: Cow::Owned(encode_i32_sortable(*n).to_vec()),
-            }),
-            bson::RawBson::Int64(n) => Some(BsonValue {
-                tag: 0x12,
-                bytes: Cow::Owned(encode_i64_sortable(*n).to_vec()),
-            }),
-            bson::RawBson::Double(f) => Some(BsonValue {
-                tag: 0x01,
-                bytes: Cow::Owned(encode_f64_sortable(*f).to_vec()),
-            }),
-            bson::RawBson::DateTime(dt) => Some(BsonValue {
-                tag: 0x09,
-                bytes: Cow::Owned(encode_i64_sortable(dt.timestamp_millis()).to_vec()),
-            }),
-            bson::RawBson::Boolean(b) => Some(BsonValue {
-                tag: 0x08,
-                bytes: Cow::Owned(vec![*b as u8]),
-            }),
-            _ => None,
-        }
-    }
-
     /// Create a `BsonValue` from an owned `bson::Bson`.
     ///
     /// Returns `None` for types that aren't supported (Document, Array, Null, etc.).
@@ -291,7 +256,7 @@ impl<'a> BsonValue<'a> {
                 let millis = decode_i64_sortable(self.bytes[..8].try_into().ok()?);
                 bson::RawBson::DateTime(bson::DateTime::from_millis(millis))
             }
-            0x08 => bson::RawBson::Boolean(self.bytes.first().map_or(false, |&v| v != 0)),
+            0x08 => bson::RawBson::Boolean(self.bytes.first().is_some_and(|&v| v != 0)),
             _ => return None,
         })
     }
@@ -337,7 +302,7 @@ impl std::fmt::Display for BsonValue<'_> {
             }
             0x08 => {
                 // Boolean
-                let b = self.bytes.first().map_or(false, |&v| v != 0);
+                let b = self.bytes.first().is_some_and(|&v| v != 0);
                 write!(f, "{b}")
             }
             _ => write!(f, "<bson 0x{:02x}>", self.tag),
@@ -419,11 +384,9 @@ fn collect_from_value(
         // Terminal: try to convert to BsonValue
         match value {
             RawBsonRef::Array(arr) => {
-                for elem in arr.into_iter() {
-                    if let Ok(v) = elem {
-                        if let Some(bv) = BsonValue::from_raw_bson_ref(v) {
-                            out.push(bv.into_owned());
-                        }
+                for v in arr.into_iter().flatten() {
+                    if let Some(bv) = BsonValue::from_raw_bson_ref(v) {
+                        out.push(bv.into_owned());
                     }
                 }
             }
@@ -440,10 +403,8 @@ fn collect_from_value(
     if seg == "[]" {
         // Traverse array elements
         if let RawBsonRef::Array(arr) = value {
-            for elem in arr.into_iter() {
-                if let Ok(v) = elem {
-                    collect_from_value(v, segments, idx + 1, out);
-                }
+            for v in arr.into_iter().flatten() {
+                collect_from_value(v, segments, idx + 1, out);
             }
         }
     } else if let RawBsonRef::Document(d) = value {
@@ -497,9 +458,9 @@ mod tests {
 
     #[test]
     fn double_roundtrip() {
-        let val = BsonValue::from_raw_bson_ref(RawBsonRef::Double(3.14)).unwrap();
+        let val = BsonValue::from_raw_bson_ref(RawBsonRef::Double(2.78)).unwrap();
         assert_eq!(val.tag, 0x01);
-        assert_eq!(&*val.bytes, &encode_f64_sortable(3.14));
+        assert_eq!(&*val.bytes, &encode_f64_sortable(2.78));
     }
 
     #[test]
@@ -633,7 +594,7 @@ mod tests {
         // Double
         let d1 = BsonValue::from_raw_bson_ref(RawBsonRef::Double(-1.5)).unwrap();
         let d2 = BsonValue::from_raw_bson_ref(RawBsonRef::Double(0.0)).unwrap();
-        let d3 = BsonValue::from_raw_bson_ref(RawBsonRef::Double(3.14)).unwrap();
+        let d3 = BsonValue::from_raw_bson_ref(RawBsonRef::Double(2.78)).unwrap();
         assert!(d1.to_vec() < d2.to_vec());
         assert!(d2.to_vec() < d3.to_vec());
     }
@@ -656,8 +617,8 @@ mod tests {
             -1_000_000
         );
 
-        assert_eq!(decode_f64_sortable(encode_f64_sortable(3.14)), 3.14);
-        assert_eq!(decode_f64_sortable(encode_f64_sortable(-3.14)), -3.14);
+        assert_eq!(decode_f64_sortable(encode_f64_sortable(2.78)), 2.78);
+        assert_eq!(decode_f64_sortable(encode_f64_sortable(-2.78)), -2.78);
         assert_eq!(decode_f64_sortable(encode_f64_sortable(0.0)), 0.0);
     }
 }

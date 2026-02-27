@@ -58,9 +58,8 @@ const TAG_NO_TTL: u8 = 0x00;
 const TAG_TTL: u8 = 0x01;
 const TTL_SIZE: usize = 8;
 
-/// A decoded record: optional TTL + raw BSON document.
+/// A decoded record: raw BSON document.
 pub struct Record {
-    pub ttl_millis: Option<i64>,
     pub doc: RawDocumentBuf,
 }
 
@@ -98,15 +97,14 @@ impl Record {
         if data.is_empty() {
             return Err(EngineError::Encoding("empty record".into()));
         }
-        let (ttl_millis, bson_bytes) = match data[0] {
-            TAG_NO_TTL => (None, &data[1..]),
+        let bson_bytes = match data[0] {
+            TAG_NO_TTL => &data[1..],
             TAG_TTL => {
                 let header_len = 1 + TTL_SIZE;
                 if data.len() < header_len {
                     return Err(EngineError::Encoding("truncated TTL header".into()));
                 }
-                let millis = i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
-                (Some(millis), &data[header_len..])
+                &data[header_len..]
             }
             tag => {
                 return Err(EngineError::Encoding(format!(
@@ -116,7 +114,7 @@ impl Record {
         };
         let doc = RawDocumentBuf::from_bytes(bson_bytes.to_vec())
             .map_err(|e| EngineError::Encoding(format!("invalid BSON: {e}")))?;
-        Ok(Record { ttl_millis, doc })
+        Ok(Record { doc })
     }
 
     /// Decode a record from owned bytes, reusing the allocation.
@@ -124,15 +122,14 @@ impl Record {
         if data.is_empty() {
             return Err(EngineError::Encoding("empty record".into()));
         }
-        let (ttl_millis, bson_start) = match data[0] {
-            TAG_NO_TTL => (None, 1),
+        let bson_start = match data[0] {
+            TAG_NO_TTL => 1,
             TAG_TTL => {
                 let header_len = 1 + TTL_SIZE;
                 if data.len() < header_len {
                     return Err(EngineError::Encoding("truncated TTL header".into()));
                 }
-                let millis = i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
-                (Some(millis), header_len)
+                header_len
             }
             tag => {
                 return Err(EngineError::Encoding(format!(
@@ -144,13 +141,13 @@ impl Record {
         bson_bytes.drain(..bson_start);
         let doc = RawDocumentBuf::from_bytes(bson_bytes)
             .map_err(|e| EngineError::Encoding(format!("invalid BSON: {e}")))?;
-        Ok(Record { ttl_millis, doc })
+        Ok(Record { doc })
     }
 
     /// O(1) TTL expiry check on raw encoded bytes without full decode.
     #[inline]
     pub fn is_expired(data: &[u8], now_millis: i64) -> bool {
-        if data.len() >= 1 + TTL_SIZE && data[0] == TAG_TTL {
+        if data.len() > TTL_SIZE && data[0] == TAG_TTL {
             let millis = i64::from_le_bytes(data[1..1 + TTL_SIZE].try_into().unwrap());
             millis < now_millis
         } else {
@@ -189,6 +186,7 @@ impl IndexMeta {
     }
 
     /// Decode index metadata from bytes.
+    #[cfg(test)]
     pub fn decode(data: &[u8]) -> Result<Self, EngineError> {
         if data.is_empty() {
             return Err(EngineError::Encoding("empty index metadata".into()));
@@ -268,8 +266,8 @@ mod tests {
         let doc = bson::rawdoc! { "_id": "a", "name": "test" };
         let encoded = Record::encode(&doc);
         assert_eq!(encoded[0], TAG_NO_TTL);
+        assert!(!Record::is_expired(&encoded, i64::MAX));
         let record = Record::decode(&encoded).unwrap();
-        assert!(record.ttl_millis.is_none());
         assert_eq!(record.doc, doc);
     }
 
@@ -279,8 +277,9 @@ mod tests {
         let doc = bson::rawdoc! { "_id": "a", "ttl": dt };
         let encoded = Record::encode(&doc);
         assert_eq!(encoded[0], TAG_TTL);
+        assert!(Record::is_expired(&encoded, 1_800_000_000_000));
+        assert!(!Record::is_expired(&encoded, 1_600_000_000_000));
         let record = Record::decode(&encoded).unwrap();
-        assert_eq!(record.ttl_millis, Some(1_700_000_000_000));
         assert_eq!(record.doc, doc);
     }
 

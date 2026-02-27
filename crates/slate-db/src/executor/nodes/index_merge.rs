@@ -3,17 +3,40 @@ use crate::executor::RawIter;
 use crate::executor::exec;
 use crate::expression::LogicalOp;
 use bson::RawBson;
-use slate_engine::BsonValue;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
-fn extract_id(v: &RawBson) -> Option<BsonValue<'static>> {
+fn id_hash(v: &RawBson) -> Option<u64> {
     match v {
-        RawBson::Document(doc) => exec::extract_doc_id(doc)
-            .ok()
-            .flatten()
-            .map(|id| id.into_owned()),
-        other => BsonValue::from_raw_bson(other),
+        RawBson::Document(doc) => doc.get("_id").ok().flatten().map(exec::hash_raw),
+        other => Some(hash_owned(other)),
     }
+}
+
+fn hash_owned(v: &RawBson) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    match v {
+        RawBson::String(s) => {
+            0u8.hash(&mut h);
+            s.hash(&mut h);
+        }
+        RawBson::Int32(i) => {
+            1u8.hash(&mut h);
+            i.hash(&mut h);
+        }
+        RawBson::Int64(i) => {
+            2u8.hash(&mut h);
+            i.hash(&mut h);
+        }
+        RawBson::ObjectId(oid) => {
+            6u8.hash(&mut h);
+            oid.bytes().hash(&mut h);
+        }
+        _ => {
+            255u8.hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 pub(crate) fn execute<'a>(
@@ -29,12 +52,11 @@ pub(crate) fn execute<'a>(
             let mut seen = HashSet::with_capacity(left.len() + right.len());
             let mut result = Vec::with_capacity(left.len() + right.len());
             for val in left.into_iter().chain(right) {
-                if let Some(ref v) = val {
-                    if let Some(id) = extract_id(v) {
-                        if !seen.insert(id) {
-                            continue;
-                        }
-                    }
+                if let Some(ref v) = val
+                    && let Some(id) = id_hash(v)
+                    && !seen.insert(id)
+                {
+                    continue;
                 }
                 result.push(val);
             }
@@ -44,10 +66,10 @@ pub(crate) fn execute<'a>(
             // Build ID set from right side.
             let mut right_set = HashSet::new();
             for result in right_source {
-                if let Some(val) = result? {
-                    if let Some(id) = extract_id(&val) {
-                        right_set.insert(id);
-                    }
+                if let Some(val) = result?
+                    && let Some(id) = id_hash(&val)
+                {
+                    right_set.insert(id);
                 }
             }
 
@@ -57,7 +79,7 @@ pub(crate) fn execute<'a>(
                 .into_iter()
                 .filter(|val| {
                     val.as_ref()
-                        .and_then(|v| extract_id(v))
+                        .and_then(id_hash)
                         .map(|id| right_set.contains(&id))
                         .unwrap_or(false)
                 })

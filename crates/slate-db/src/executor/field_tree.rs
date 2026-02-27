@@ -61,15 +61,13 @@ fn walk_inner<'a, F>(
         };
         match tree.get(key.as_str()) {
             Some(FieldTree::Leaf(full_path)) => {
-                if expand_leaf_arrays {
-                    if let RawBsonRef::Array(arr) = value {
-                        for elem in arr {
-                            if let Ok(v) = elem {
-                                visitor(full_path, v);
-                            }
-                        }
-                        continue;
+                if expand_leaf_arrays
+                    && let RawBsonRef::Array(arr) = value
+                {
+                    for v in arr.into_iter().flatten() {
+                        visitor(full_path, v);
                     }
+                    continue;
                 }
                 visitor(full_path, value);
             }

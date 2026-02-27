@@ -3,8 +3,6 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
-
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
@@ -26,7 +24,11 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         };
 
         // Generate _id if missing.
-        if exec::extract_doc_id(&doc)?.is_none() {
+        let has_id = doc
+            .get("_id")
+            .map_err(|e| DbError::Serialization(e.to_string()))?
+            .is_some();
+        if !has_id {
             let oid = bson::oid::ObjectId::new();
             doc.append(bson::cstr!("_id"), oid);
         }

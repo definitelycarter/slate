@@ -5,8 +5,7 @@ use bson::raw::RawDocumentBuf;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
 use slate_engine::{
-    BsonValue, Catalog, CollectionHandle, Engine, EngineError, EngineTransaction, IndexEntry,
-    IndexRange,
+    Catalog, CollectionHandle, Engine, EngineError, EngineTransaction, IndexEntry, IndexRange,
 };
 
 // ── NoopTransaction ─────────────────────────────────────────
@@ -58,7 +57,7 @@ impl EngineTransaction for NoopTransaction {
         _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
+        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
     > {
         panic!("NoopTransaction::scan called");
@@ -71,7 +70,7 @@ impl EngineTransaction for NoopTransaction {
         _range: IndexRange<'_>,
         _reverse: bool,
         _ttl: i64,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
     {
         panic!("NoopTransaction::scan_index called");
     }

@@ -292,7 +292,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         &self,
         collection: &str,
         predicate: &Expression,
-        mutation: slate_query::Mutation,
+        mutation: crate::mutation::Mutation,
         limit: Option<usize>,
     ) -> Result<Plan<Cf>, DbError> {
         let handle = (self.resolve)(collection)?;
@@ -418,10 +418,10 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         predicate: &Expression,
     ) -> (Node<Cf>, Option<Expression>) {
         // Fast path: _id equality → direct key lookup, no scan needed.
-        if let Expression::Eq(field, value) = predicate {
-            if field == "_id" {
-                return (Self::id_lookup(handle, value), None);
-            }
+        if let Expression::Eq(field, value) = predicate
+            && field == "_id"
+        {
+            return (Self::id_lookup(handle, value), None);
         }
 
         match predicate {
@@ -458,33 +458,33 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     ) -> (Node<Cf>, Option<Expression>) {
         // Priority 0: _id equality — direct key lookup, always wins.
         for (i, child) in children.iter().enumerate() {
-            if let Expression::Eq(field, value) = child {
-                if field == "_id" {
-                    let node = Self::id_lookup(handle, value);
-                    let residual = residual_from_and(children, &[i]);
-                    return (node, residual);
-                }
+            if let Expression::Eq(field, value) = child
+                && field == "_id"
+            {
+                let node = Self::id_lookup(handle, value);
+                let residual = residual_from_and(children, &[i]);
+                return (node, residual);
             }
         }
 
         // Priority 1: Eq on an indexed field (most selective).
         for (i, child) in children.iter().enumerate() {
-            if let Expression::Eq(field, _) = child {
-                if handle.indexes.contains(field) {
-                    let node = self.try_index_scan(handle, child).unwrap();
-                    let residual = residual_from_and(children, &[i]);
-                    return (node, residual);
-                }
+            if let Expression::Eq(field, _) = child
+                && handle.indexes.contains(field)
+            {
+                let node = self.try_index_scan(handle, child).unwrap();
+                let residual = residual_from_and(children, &[i]);
+                return (node, residual);
             }
         }
 
         // Priority 2: Fully-indexable OR sub-groups.
         for (i, child) in children.iter().enumerate() {
-            if let Expression::Or(or_children) = child {
-                if let Some(node) = self.try_or_index_merge(handle, or_children) {
-                    let residual = residual_from_and(children, &[i]);
-                    return (node, residual);
-                }
+            if let Expression::Or(or_children) = child
+                && let Some(node) = self.try_or_index_merge(handle, or_children)
+            {
+                let residual = residual_from_and(children, &[i]);
+                return (node, residual);
             }
         }
 

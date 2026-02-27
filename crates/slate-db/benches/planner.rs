@@ -2,7 +2,8 @@ use bson::Bson;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Expression, Planner, Statement};
 use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
-use slate_query::{Mutation, Sort, SortDirection};
+use slate_db::bench::Mutation;
+use slate_query::{Sort, SortDirection};
 use slate_store::MemoryStore;
 
 // ── Setup ──────────────────────────────────────────────────────

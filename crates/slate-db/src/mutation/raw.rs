@@ -7,10 +7,11 @@
 //! Document/Array `$set` values).
 
 use bson::raw::RawDocument;
+use bson::spec::ElementType;
 use bson::{Bson, RawDocumentBuf};
-use slate_query::{Mutation, MutationOp};
+use super::{Mutation, MutationOp};
 
-use super::raw_bson::find_field;
+use crate::executor::raw_bson::{RawField, RawFieldLoc};
 use crate::error::DbError;
 use slate_engine::skip_bson_value;
 
@@ -27,31 +28,34 @@ pub(crate) enum RawMutationResult {
 
 /// Encode a scalar `Bson` value into its raw BSON bytes and type tag.
 /// Returns `None` for Document/Array (triggers fallback).
-fn encode_bson_value(value: &Bson) -> Option<(u8, Vec<u8>)> {
+fn encode_bson_value(value: &Bson) -> Option<(ElementType, Vec<u8>)> {
     match value {
-        Bson::Int32(n) => Some((0x10, n.to_le_bytes().to_vec())),
-        Bson::Int64(n) => Some((0x12, n.to_le_bytes().to_vec())),
-        Bson::Double(f) => Some((0x01, f.to_le_bytes().to_vec())),
-        Bson::Boolean(b) => Some((0x08, vec![*b as u8])),
+        Bson::Int32(n) => Some((ElementType::Int32, n.to_le_bytes().to_vec())),
+        Bson::Int64(n) => Some((ElementType::Int64, n.to_le_bytes().to_vec())),
+        Bson::Double(f) => Some((ElementType::Double, f.to_le_bytes().to_vec())),
+        Bson::Boolean(b) => Some((ElementType::Boolean, vec![*b as u8])),
         Bson::String(s) => {
             let len = (s.len() + 1) as i32;
             let mut buf = Vec::with_capacity(4 + s.len() + 1);
             buf.extend_from_slice(&len.to_le_bytes());
             buf.extend_from_slice(s.as_bytes());
             buf.push(0x00);
-            Some((0x02, buf))
+            Some((ElementType::String, buf))
         }
-        Bson::DateTime(dt) => Some((0x09, dt.timestamp_millis().to_le_bytes().to_vec())),
-        Bson::Null => Some((0x0A, vec![])),
-        Bson::ObjectId(oid) => Some((0x07, oid.bytes().to_vec())),
+        Bson::DateTime(dt) => Some((
+            ElementType::DateTime,
+            dt.timestamp_millis().to_le_bytes().to_vec(),
+        )),
+        Bson::Null => Some((ElementType::Null, vec![])),
+        Bson::ObjectId(oid) => Some((ElementType::ObjectId, oid.bytes().to_vec())),
         _ => None,
     }
 }
 
 /// Build a complete BSON element: `[type_byte][field_name\0][value_bytes]`.
-fn encode_element(field_name: &str, type_byte: u8, value_bytes: &[u8]) -> Vec<u8> {
+fn encode_element(field_name: &str, element_type: ElementType, value_bytes: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + field_name.len() + 1 + value_bytes.len());
-    buf.push(type_byte);
+    buf.push(element_type as u8);
     buf.extend_from_slice(field_name.as_bytes());
     buf.push(0x00);
     buf.extend_from_slice(value_bytes);
@@ -59,9 +63,14 @@ fn encode_element(field_name: &str, type_byte: u8, value_bytes: &[u8]) -> Vec<u8
 }
 
 /// Overwrite the 4-byte document length header with the current vec length.
-fn update_doc_length(bytes: &mut Vec<u8>) {
+fn update_doc_length(bytes: &mut [u8]) {
     let len = bytes.len() as i32;
     bytes[0..4].copy_from_slice(&len.to_le_bytes());
+}
+
+/// Look up a field and return a borrow-free location snapshot.
+fn locate(bytes: &[u8], field: &str) -> Option<RawFieldLoc> {
+    RawField::get(bytes, field).map(|f| f.loc())
 }
 
 // ── Operator implementations ────────────────────────────────────
@@ -70,20 +79,20 @@ fn update_doc_length(bytes: &mut Vec<u8>) {
 fn raw_set(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Option<bool> {
     let (new_type, new_val) = encode_bson_value(value)?;
 
-    match find_field(bytes, field) {
+    match locate(bytes, field) {
         Some(loc) => {
-            let old_val = &bytes[loc.value_start..loc.element_end];
-            if loc.type_byte == new_type && old_val == new_val.as_slice() {
+            let old_val = &bytes[loc.value_start()..loc.element_end()];
+            if loc.element_type() == new_type && old_val == new_val.as_slice() {
                 return Some(false); // no-op
             }
             // Same type + same value length → overwrite in place
-            if loc.type_byte == new_type && old_val.len() == new_val.len() {
-                bytes[loc.value_start..loc.element_end].copy_from_slice(&new_val);
+            if loc.element_type() == new_type && old_val.len() == new_val.len() {
+                bytes[loc.value_start()..loc.element_end()].copy_from_slice(&new_val);
                 return Some(true);
             }
             // Different size or type → splice the whole element
             let new_elem = encode_element(field, new_type, &new_val);
-            bytes.splice(loc.element_start..loc.element_end, new_elem);
+            bytes.splice(loc.element_start()..loc.element_end(), new_elem);
             update_doc_length(bytes);
             Some(true)
         }
@@ -100,9 +109,9 @@ fn raw_set(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Option<bool> {
 
 /// `$unset` on a flat field. Returns true if the document changed.
 fn raw_unset(bytes: &mut Vec<u8>, field: &str) -> bool {
-    match find_field(bytes, field) {
+    match locate(bytes, field) {
         Some(loc) => {
-            bytes.drain(loc.element_start..loc.element_end);
+            bytes.drain(loc.element_start()..loc.element_end());
             update_doc_length(bytes);
             true
         }
@@ -111,126 +120,132 @@ fn raw_unset(bytes: &mut Vec<u8>, field: &str) -> bool {
 }
 
 /// `$inc` on a flat field. Returns `Ok(true)` if changed, `Err` on type error.
-/// Returns `Ok(None)` via the outer Option if encoding is unsupported (shouldn't happen).
 fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbError> {
-    match find_field(bytes, field) {
+    match locate(bytes, field) {
         Some(loc) => {
-            match (loc.type_byte, amount) {
+            match (loc.element_type(), amount) {
                 // i32 + i32 → i32 (or promote to i64 on overflow)
-                (0x10, Bson::Int32(b)) => {
+                (ElementType::Int32, Bson::Int32(b)) => {
                     let a = i32::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 4]
+                        bytes[loc.value_start()..loc.value_start() + 4]
                             .try_into()
                             .unwrap(),
                     );
                     match a.checked_add(*b) {
                         Some(sum) => {
-                            bytes[loc.value_start..loc.value_start + 4]
+                            bytes[loc.value_start()..loc.value_start() + 4]
                                 .copy_from_slice(&sum.to_le_bytes());
                             Ok(true)
                         }
                         None => {
                             // Overflow → promote to i64, element grows
                             let sum = a as i64 + *b as i64;
-                            let new_elem = encode_element(field, 0x12, &sum.to_le_bytes());
-                            bytes.splice(loc.element_start..loc.element_end, new_elem);
+                            let new_elem =
+                                encode_element(field, ElementType::Int64, &sum.to_le_bytes());
+                            bytes.splice(loc.element_start()..loc.element_end(), new_elem);
                             update_doc_length(bytes);
                             Ok(true)
                         }
                     }
                 }
                 // i32 + i64 → i64
-                (0x10, Bson::Int64(b)) => {
+                (ElementType::Int32, Bson::Int64(b)) => {
                     let a = i32::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 4]
+                        bytes[loc.value_start()..loc.value_start() + 4]
                             .try_into()
                             .unwrap(),
                     ) as i64;
                     let sum = a + b;
-                    let new_elem = encode_element(field, 0x12, &sum.to_le_bytes());
-                    bytes.splice(loc.element_start..loc.element_end, new_elem);
+                    let new_elem = encode_element(field, ElementType::Int64, &sum.to_le_bytes());
+                    bytes.splice(loc.element_start()..loc.element_end(), new_elem);
                     update_doc_length(bytes);
                     Ok(true)
                 }
                 // i64 + i32 → i64
-                (0x12, Bson::Int32(b)) => {
+                (ElementType::Int64, Bson::Int32(b)) => {
                     let a = i64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     );
                     let sum = a + *b as i64;
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 // i64 + i64 → i64
-                (0x12, Bson::Int64(b)) => {
+                (ElementType::Int64, Bson::Int64(b)) => {
                     let a = i64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     );
                     let sum = a + b;
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 // f64 + f64 → f64
-                (0x01, Bson::Double(b)) => {
+                (ElementType::Double, Bson::Double(b)) => {
                     let a = f64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     );
                     let sum = a + b;
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 // i32 + f64 → f64
-                (0x10, Bson::Double(b)) => {
+                (ElementType::Int32, Bson::Double(b)) => {
                     let a = i32::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 4]
+                        bytes[loc.value_start()..loc.value_start() + 4]
                             .try_into()
                             .unwrap(),
                     ) as f64;
                     let sum = a + b;
-                    let new_elem = encode_element(field, 0x01, &sum.to_le_bytes());
-                    bytes.splice(loc.element_start..loc.element_end, new_elem);
+                    let new_elem = encode_element(field, ElementType::Double, &sum.to_le_bytes());
+                    bytes.splice(loc.element_start()..loc.element_end(), new_elem);
                     update_doc_length(bytes);
                     Ok(true)
                 }
                 // i64 + f64 → f64
-                (0x12, Bson::Double(b)) => {
+                (ElementType::Int64, Bson::Double(b)) => {
                     let a = i64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     ) as f64;
                     let sum = a + b;
-                    // Type changes from i64(0x12, 8 bytes) to f64(0x01, 8 bytes) — same size!
-                    bytes[loc.element_start] = 0x01; // change type byte
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    // Type changes from i64 to f64 — same size (8 bytes)
+                    bytes[loc.element_start()] = ElementType::Double as u8;
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 // f64 + i32 → f64
-                (0x01, Bson::Int32(b)) => {
+                (ElementType::Double, Bson::Int32(b)) => {
                     let a = f64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     );
                     let sum = a + *b as f64;
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 // f64 + i64 → f64
-                (0x01, Bson::Int64(b)) => {
+                (ElementType::Double, Bson::Int64(b)) => {
                     let a = f64::from_le_bytes(
-                        bytes[loc.value_start..loc.value_start + 8]
+                        bytes[loc.value_start()..loc.value_start() + 8]
                             .try_into()
                             .unwrap(),
                     );
                     let sum = a + *b as f64;
-                    bytes[loc.value_start..loc.value_start + 8].copy_from_slice(&sum.to_le_bytes());
+                    bytes[loc.value_start()..loc.value_start() + 8]
+                        .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
                 _ => Err(DbError::InvalidQuery(format!(
@@ -240,15 +255,15 @@ fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbEr
         }
         None => {
             // Missing field → default to 0 + amount
-            let (type_byte, val_bytes) = match amount {
-                Bson::Int32(n) => (0x10_u8, n.to_le_bytes().to_vec()),
-                Bson::Int64(n) => (0x12_u8, n.to_le_bytes().to_vec()),
-                Bson::Double(f) => (0x01_u8, f.to_le_bytes().to_vec()),
+            let (element_type, val_bytes) = match amount {
+                Bson::Int32(n) => (ElementType::Int32, n.to_le_bytes().to_vec()),
+                Bson::Int64(n) => (ElementType::Int64, n.to_le_bytes().to_vec()),
+                Bson::Double(f) => (ElementType::Double, f.to_le_bytes().to_vec()),
                 _ => {
                     return Err(DbError::InvalidQuery("$inc: amount is not numeric".into()));
                 }
             };
-            let new_elem = encode_element(field, type_byte, &val_bytes);
+            let new_elem = encode_element(field, element_type, &val_bytes);
             let insert_pos = bytes.len() - 1;
             bytes.splice(insert_pos..insert_pos, new_elem);
             update_doc_length(bytes);
@@ -264,15 +279,15 @@ fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<boo
         None => return Ok(None), // unsupported value type → fallback
     };
 
-    match find_field(bytes, field) {
+    match locate(bytes, field) {
         Some(loc) => {
-            if loc.type_byte != 0x04 {
+            if loc.element_type() != ElementType::Array {
                 return Err(DbError::InvalidQuery(format!(
                     "$push: field '{field}' is not an array"
                 )));
             }
             // Count existing elements to determine the next index key
-            let arr_start = loc.value_start;
+            let arr_start = loc.value_start();
             let arr_size =
                 i32::from_le_bytes(bytes[arr_start..arr_start + 4].try_into().unwrap()) as usize;
             let arr_end = arr_start + arr_size; // includes terminator
@@ -324,7 +339,7 @@ fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<boo
             arr_bytes.extend_from_slice(&inner_elem);
             arr_bytes.push(0x00);
 
-            let outer_elem = encode_element(field, 0x04, &arr_bytes);
+            let outer_elem = encode_element(field, ElementType::Array, &arr_bytes);
             let insert_pos = bytes.len() - 1;
             bytes.splice(insert_pos..insert_pos, outer_elem);
             update_doc_length(bytes);
@@ -335,19 +350,20 @@ fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<boo
 
 /// `$pop` on a flat field — remove last element from array.
 fn raw_pop(bytes: &mut Vec<u8>, field: &str) -> Result<bool, DbError> {
-    let loc = match find_field(bytes, field) {
+    let loc = match locate(bytes, field) {
         Some(l) => l,
         None => return Ok(false),
     };
 
-    if loc.type_byte != 0x04 {
+    if loc.element_type() != ElementType::Array {
         return Err(DbError::InvalidQuery(format!(
             "$pop: field '{field}' is not an array"
         )));
     }
 
-    let arr_start = loc.value_start;
-    let arr_size = i32::from_le_bytes(bytes[arr_start..arr_start + 4].try_into().unwrap()) as usize;
+    let arr_start = loc.value_start();
+    let arr_size =
+        i32::from_le_bytes(bytes[arr_start..arr_start + 4].try_into().unwrap()) as usize;
 
     // Walk array elements to find the last one
     let mut last_start: Option<usize> = None;
@@ -392,23 +408,14 @@ fn raw_pop(bytes: &mut Vec<u8>, field: &str) -> Result<bool, DbError> {
 // ── Orchestrator ────────────────────────────────────────────────
 
 /// Check whether a mutation op is eligible for the raw byte path.
-fn op_eligible(fm: &slate_query::FieldMutation) -> bool {
-    // Dot-paths require walking into nested sub-documents, each with its
-    // own i32 length header. After splicing bytes in the innermost doc we'd
-    // have to patch the length prefix of every ancestor back up to the root.
-    // The deserialization fallback handles this correctly already, and flat
-    // field mutations are the common case, so the complexity isn't worth it yet.
+fn op_eligible(fm: &super::FieldMutation) -> bool {
     if fm.field.contains('.') {
         return false;
     }
     match &fm.op {
-        // $rename and $lpush are too complex at the byte level
         MutationOp::Rename(_) | MutationOp::LPush(_) => false,
-        // $set with Document/Array values can't be encoded by encode_bson_value
         MutationOp::Set(val) => encode_bson_value(val).is_some(),
-        // $push with non-scalar values
         MutationOp::Push(val) => encode_bson_value(val).is_some(),
-        // Everything else is fine
         _ => true,
     }
 }
@@ -430,8 +437,6 @@ pub(crate) fn raw_apply_mutation(
     for fm in &mutation.ops {
         match &fm.op {
             MutationOp::Set(val) => {
-                // raw_set returns None only if encode_bson_value fails,
-                // which we already checked in pre-scan.
                 if let Some(c) = raw_set(&mut bytes, &fm.field, val) {
                     changed |= c;
                 }
@@ -480,48 +485,39 @@ pub(crate) fn raw_merge(
         if key == "_id" {
             continue;
         }
-        // Try to find a matching field and overwrite at the byte level.
-        // We work with the raw value bytes directly — extract type + value
-        // from the update doc and splice them into the target.
-        match find_field(&bytes, key.as_str()) {
+
+        // Look up the field in the update document (borrow-free).
+        let update_bytes = update.as_bytes();
+        let Some(update_loc) = locate(update_bytes, key.as_str()) else {
+            continue;
+        };
+        let new_type = update_loc.element_type();
+        let new_val = &update_bytes[update_loc.value_start()..update_loc.element_end()];
+
+        match locate(&bytes, key.as_str()) {
             Some(loc) => {
-                // Extract the raw value bytes from the update element
-                let update_bytes = update.as_bytes();
-                let Some(update_loc) = find_field(update_bytes, key.as_str()) else {
-                    continue;
-                };
-                let new_type = update_loc.type_byte;
-                let new_val = &update_bytes[update_loc.value_start..update_loc.element_end];
+                let old_val = &bytes[loc.value_start()..loc.element_end()];
 
                 // Check if unchanged
-                if loc.type_byte == new_type && bytes[loc.value_start..loc.element_end] == *new_val
-                {
+                if loc.element_type() == new_type && old_val == new_val {
                     continue;
                 }
 
                 // Same type + same value length → overwrite in place
-                if loc.type_byte == new_type && (loc.element_end - loc.value_start) == new_val.len()
-                {
-                    bytes[loc.value_start..loc.element_end].copy_from_slice(new_val);
+                if loc.element_type() == new_type && old_val.len() == new_val.len() {
+                    bytes[loc.value_start()..loc.element_end()].copy_from_slice(new_val);
                     changed = true;
                     continue;
                 }
 
                 // Different size or type → splice the whole element
                 let new_elem = encode_element(key.as_str(), new_type, new_val);
-                bytes.splice(loc.element_start..loc.element_end, new_elem);
+                bytes.splice(loc.element_start()..loc.element_end(), new_elem);
                 update_doc_length(&mut bytes);
                 changed = true;
             }
             None => {
                 // Field missing → append before trailing 0x00
-                let update_bytes = update.as_bytes();
-                let Some(update_loc) = find_field(update_bytes, key.as_str()) else {
-                    continue;
-                };
-                let new_type = update_loc.type_byte;
-                let new_val = &update_bytes[update_loc.value_start..update_loc.element_end];
-
                 let new_elem = encode_element(key.as_str(), new_type, new_val);
                 let insert_pos = bytes.len() - 1;
                 bytes.splice(insert_pos..insert_pos, new_elem);
@@ -545,6 +541,7 @@ pub(crate) fn raw_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bson::spec::ElementType;
     use bson::{doc, rawdoc};
 
     fn make_raw(doc: &bson::Document) -> bson::RawDocumentBuf {
@@ -561,88 +558,87 @@ mod tests {
     #[test]
     fn skip_int32() {
         let raw = make_raw(&doc! { "a": 42_i32 });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x10);
-        assert_eq!(loc.element_end - loc.value_start, 4);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::Int32);
+        assert_eq!(field.element_end() - field.value_start(), 4);
     }
 
     #[test]
     fn skip_int64() {
         let raw = make_raw(&doc! { "a": 42_i64 });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x12);
-        assert_eq!(loc.element_end - loc.value_start, 8);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::Int64);
+        assert_eq!(field.element_end() - field.value_start(), 8);
     }
 
     #[test]
     fn skip_double() {
-        let raw = make_raw(&doc! { "a": 3.14_f64 });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x01);
-        assert_eq!(loc.element_end - loc.value_start, 8);
+        let raw = make_raw(&doc! { "a": 2.78_f64 });
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::Double);
+        assert_eq!(field.element_end() - field.value_start(), 8);
     }
 
     #[test]
     fn skip_string() {
         let raw = make_raw(&doc! { "a": "hello" });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x02);
-        // String: 4 (len header) + 5 (chars) + 1 (nul) = 10
-        assert_eq!(loc.element_end - loc.value_start, 10);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::String);
+        assert_eq!(field.element_end() - field.value_start(), 10);
     }
 
     #[test]
     fn skip_boolean() {
         let raw = make_raw(&doc! { "a": true });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x08);
-        assert_eq!(loc.element_end - loc.value_start, 1);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::Boolean);
+        assert_eq!(field.element_end() - field.value_start(), 1);
     }
 
     #[test]
     fn skip_document() {
         let raw = make_raw(&doc! { "a": { "x": 1 } });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x03);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::EmbeddedDocument);
     }
 
     #[test]
     fn skip_array() {
         let raw = make_raw(&doc! { "a": [1, 2, 3] });
-        let loc = find_field(raw.as_bytes(), "a").unwrap();
-        assert_eq!(loc.type_byte, 0x04);
+        let field = RawField::get(raw.as_bytes(), "a").unwrap();
+        assert_eq!(field.element_type(), ElementType::Array);
     }
 
-    // ── find_field ──────────────────────────────────────────────
+    // ── RawField::get ─────────────────────────────────────────
 
     #[test]
     fn find_field_exists() {
         let raw = make_raw(&doc! { "x": 1, "y": 2 });
-        assert!(find_field(raw.as_bytes(), "x").is_some());
-        assert!(find_field(raw.as_bytes(), "y").is_some());
+        assert!(RawField::get(raw.as_bytes(), "x").is_some());
+        assert!(RawField::get(raw.as_bytes(), "y").is_some());
     }
 
     #[test]
     fn find_field_missing() {
         let raw = make_raw(&doc! { "x": 1 });
-        assert!(find_field(raw.as_bytes(), "z").is_none());
+        assert!(RawField::get(raw.as_bytes(), "z").is_none());
     }
 
     // ── encode_bson_value ───────────────────────────────────────
 
     #[test]
     fn encode_round_trip_i32() {
-        let (tb, bytes) = encode_bson_value(&Bson::Int32(42)).unwrap();
-        assert_eq!(tb, 0x10);
+        let (et, bytes) = encode_bson_value(&Bson::Int32(42)).unwrap();
+        assert_eq!(et, ElementType::Int32);
         assert_eq!(i32::from_le_bytes(bytes.try_into().unwrap()), 42);
     }
 
     #[test]
     fn encode_round_trip_string() {
-        let (tb, bytes) = encode_bson_value(&Bson::String("hi".into())).unwrap();
-        assert_eq!(tb, 0x02);
+        let (et, bytes) = encode_bson_value(&Bson::String("hi".into())).unwrap();
+        assert_eq!(et, ElementType::String);
         let len = i32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        assert_eq!(len, 3); // "hi" + nul
+        assert_eq!(len, 3);
         assert_eq!(&bytes[4..6], b"hi");
         assert_eq!(bytes[6], 0x00);
     }
@@ -650,8 +646,8 @@ mod tests {
     #[test]
     fn encode_round_trip_objectid() {
         let oid = bson::oid::ObjectId::new();
-        let (tb, bytes) = encode_bson_value(&Bson::ObjectId(oid)).unwrap();
-        assert_eq!(tb, 0x07);
+        let (et, bytes) = encode_bson_value(&Bson::ObjectId(oid)).unwrap();
+        assert_eq!(et, ElementType::ObjectId);
         assert_eq!(bytes.len(), 12);
         assert_eq!(&bytes, &oid.bytes());
     }
@@ -670,7 +666,7 @@ mod tests {
         let orig_len = bytes.len();
         let c = raw_set(&mut bytes, "score", &Bson::Int32(20)).unwrap();
         assert!(c);
-        assert_eq!(bytes.len(), orig_len); // no realloc
+        assert_eq!(bytes.len(), orig_len);
         let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("score").unwrap(), 20);
     }
@@ -744,7 +740,7 @@ mod tests {
         let orig_len = bytes.len();
         let c = raw_inc(&mut bytes, "count", &Bson::Int32(5)).unwrap();
         assert!(c);
-        assert_eq!(bytes.len(), orig_len); // in-place
+        assert_eq!(bytes.len(), orig_len);
         let result: bson::Document = bson::deserialize_from_slice(&bytes).unwrap();
         assert_eq!(result.get_i32("count").unwrap(), 15);
     }
@@ -891,7 +887,7 @@ mod tests {
     #[test]
     fn orchestrator_inc_produces_valid_bson() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "name": "Alice" });
-        let mutation = slate_query::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }).unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -913,7 +909,7 @@ mod tests {
     #[test]
     fn orchestrator_unset() {
         let raw = make_raw(&doc! { "_id": "r1", "a": 1, "b": 2 });
-        let mutation = slate_query::parse_mutation(&rawdoc! { "$unset": { "a": "" } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }).unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -927,7 +923,7 @@ mod tests {
     #[test]
     fn orchestrator_noop_returns_unchanged() {
         let raw = make_raw(&doc! { "a": 10_i32 });
-        let mutation = slate_query::parse_mutation(&rawdoc! { "$set": { "a": 10 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }).unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Unchanged
@@ -937,7 +933,7 @@ mod tests {
     #[test]
     fn orchestrator_dot_path_falls_back() {
         let raw = make_raw(&doc! { "a": { "b": 1 } });
-        let mutation = slate_query::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }).unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -948,7 +944,7 @@ mod tests {
     fn orchestrator_rename_falls_back() {
         let raw = make_raw(&doc! { "old": 1 });
         let mutation =
-            slate_query::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }).unwrap();
+            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }).unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -958,7 +954,7 @@ mod tests {
     #[test]
     fn orchestrator_lpush_falls_back() {
         let raw = make_raw(&doc! { "tags": ["a"] });
-        let mutation = slate_query::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }).unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -968,7 +964,7 @@ mod tests {
     #[test]
     fn orchestrator_multiple_ops() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "status": "active" });
-        let mutation = slate_query::parse_mutation(
+        let mutation = crate::mutation::parse_mutation(
             &rawdoc! { "$inc": { "score": 5 }, "$set": { "status": "done" } },
         )
         .unwrap();

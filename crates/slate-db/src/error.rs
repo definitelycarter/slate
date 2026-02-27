@@ -44,8 +44,8 @@ impl From<bson::error::Error> for DbError {
 }
 
 
-impl From<slate_query::ParseError> for DbError {
-    fn from(e: slate_query::ParseError) -> Self {
+impl From<crate::mutation::ParseError> for DbError {
+    fn from(e: crate::mutation::ParseError) -> Self {
         DbError::InvalidQuery(e.to_string())
     }
 }

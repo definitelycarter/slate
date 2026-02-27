@@ -171,7 +171,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
-        let mutation = slate_query::parse_mutation(&raw)?;
+        let mutation = crate::mutation::parse_mutation(&raw)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             collection,
@@ -191,7 +191,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
-        let mutation = slate_query::parse_mutation(&raw)?;
+        let mutation = crate::mutation::parse_mutation(&raw)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             collection,
@@ -416,7 +416,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let handle = self.txn.collection(&config.name)?;
         let existing = handle.indexes;
         let mut fields: Vec<&str> = config.indexes.iter().map(|s| s.as_str()).collect();
-        if !fields.iter().any(|&f| f == "ttl") {
+        if !fields.contains(&"ttl") {
             fields.push("ttl");
         }
         for field in &fields {
@@ -438,7 +438,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         DbError,
     > {
         let planner =
-            Planner::new(|name: &str| self.txn.collection(name).map_err(|e| DbError::from(e)));
+            Planner::new(|name: &str| self.txn.collection(name).map_err(DbError::from));
         planner.plan(stmt)
     }
 

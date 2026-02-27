@@ -21,10 +21,10 @@ fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_>)> {
     // Scan backwards for a valid doc_id header.
     for start in (0..=bytes.len().saturating_sub(LP_HEADER)).rev() {
         let candidate = &bytes[start..];
-        if let Some((bv, rest)) = BsonValue::parse_length_prefixed(candidate) {
-            if rest.is_empty() {
-                return Some((&bytes[..start], bv));
-            }
+        if let Some((bv, rest)) = BsonValue::parse_length_prefixed(candidate)
+            && rest.is_empty()
+        {
+            return Some((&bytes[..start], bv));
         }
     }
     None
@@ -289,7 +289,6 @@ impl<'a> Key<'a> {
 /// - `Record(collection)` — all document records in a collection (`r\x00{collection}\x00`)
 /// - `IndexField(collection, field)` — index entries for a field (`i\x00{collection}\x00{field}\x00`)
 /// - `IndexValue(collection, field, value)` — index entries for a specific value
-/// - `IndexMapRecord(collection, doc_id)` — index map entries for a specific record (all fields)
 /// - `IndexMapCollection(collection)` — all index map entries for a collection
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
@@ -298,7 +297,6 @@ pub enum KeyPrefix<'a> {
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
-    IndexMapRecord(Cow<'a, str>, BsonValue<'a>),
     IndexMapCollection(Cow<'a, str>),
 }
 
@@ -342,17 +340,6 @@ impl<'a> KeyPrefix<'a> {
                 buf.extend_from_slice(field.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(value);
-                buf
-            }
-            KeyPrefix::IndexMapRecord(collection, doc_id) => {
-                let mut buf = Vec::with_capacity(
-                    2 + collection.len() + 1 + 3 + doc_id.bytes.len(),
-                );
-                buf.push(INDEX_MAP_TAG);
-                buf.push(SEP);
-                buf.extend_from_slice(collection.as_bytes());
-                buf.push(SEP);
-                doc_id.write_length_prefixed(&mut buf);
                 buf
             }
             KeyPrefix::IndexMapCollection(collection) => {

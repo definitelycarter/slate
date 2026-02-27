@@ -12,7 +12,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     let iter = txn.scan(&handle, now_millis)?;
 
     Ok(Box::new(iter.map(|result| match result {
-        Ok((_doc_id, doc)) => Ok(Some(RawBson::Document(doc))),
+        Ok(doc) => Ok(Some(RawBson::Document(doc))),
         Err(e) => Err(DbError::from(e)),
     })))
 }

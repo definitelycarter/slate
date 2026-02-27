@@ -3,7 +3,7 @@ use std::i64;
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -91,9 +91,7 @@ fn bench_index_scan_eq(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_scan_eq");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let active = BsonValue::from_raw_bson_ref(RawBsonRef::String("active"))
-            .unwrap()
-            .to_vec();
+        let active = bson::Bson::String("active".to_string());
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
@@ -136,12 +134,8 @@ fn bench_index_scan_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_scan_range");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let lower = BsonValue::from_raw_bson_ref(RawBsonRef::Int32(20))
-            .unwrap()
-            .to_vec();
-        let upper = BsonValue::from_raw_bson_ref(RawBsonRef::Int32(60))
-            .unwrap()
-            .to_vec();
+        let lower = bson::Bson::Int32(20);
+        let upper = bson::Bson::Int32(60);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
@@ -152,10 +146,8 @@ fn bench_index_scan_range(c: &mut Criterion) {
                         &handle,
                         "age",
                         IndexRange::Range {
-                            lower: Some(&lower),
-                            lower_inclusive: true,
-                            upper: Some(&upper),
-                            upper_inclusive: false,
+                            lower: Some((&lower, true)),
+                            upper: Some((&upper, false)),
                         },
                         false,
                         i64::MIN,

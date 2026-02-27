@@ -1,6 +1,8 @@
 use bson::RawDocumentBuf;
 use slate_engine::CollectionHandle;
-use slate_query::{Mutation, Sort};
+use slate_query::Sort;
+
+use crate::mutation::Mutation;
 
 use crate::expression::{Expression, LogicalOp};
 

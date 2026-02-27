@@ -223,7 +223,7 @@ mod tests {
             "_id": "x",
             "i32": 42_i32,
             "i64": 99_i64,
-            "f64": 3.14_f64,
+            "f64": 2.78_f64,
             "str": "hello",
             "bool": true,
             "dt": dt,
@@ -234,7 +234,7 @@ mod tests {
 
         assert_eq!(result.get("i32").unwrap(), Some(RawBsonRef::Int32(42)));
         assert_eq!(result.get("i64").unwrap(), Some(RawBsonRef::Int64(99)));
-        assert_eq!(result.get("f64").unwrap(), Some(RawBsonRef::Double(3.14)));
+        assert_eq!(result.get("f64").unwrap(), Some(RawBsonRef::Double(2.78)));
         assert_eq!(
             result.get("str").unwrap(),
             Some(RawBsonRef::String("hello"))

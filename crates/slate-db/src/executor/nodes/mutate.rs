@@ -1,10 +1,9 @@
 use bson::RawBson;
 use slate_engine::{CollectionHandle, EngineTransaction};
-use slate_query::Mutation;
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
+use crate::mutation::Mutation;
 
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
@@ -20,7 +19,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             None => return Ok(None),
         };
 
-        match exec::apply_mutation(old_raw, &mutation)? {
+        match mutation.apply(old_raw)? {
             Some(mutated) => {
                 txn.put(&handle, &mutated)?;
                 Ok(Some(RawBson::Document(mutated)))

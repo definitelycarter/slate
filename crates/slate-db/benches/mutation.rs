@@ -68,7 +68,7 @@ fn bench_update(c: &mut Criterion) {
                     let collection = txn.collection("test").unwrap();
                     let plan = Plan::Update {
                         collection: collection.clone(),
-                        mutation: slate_query::parse_mutation(
+                        mutation: slate_db::bench::parse_mutation(
                             &bson::rawdoc! { "$set": { "status": "updated" } },
                         )
                         .unwrap(),

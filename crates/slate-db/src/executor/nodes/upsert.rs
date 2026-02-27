@@ -4,8 +4,7 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
-use crate::executor::raw_mutation;
+use crate::mutation::raw as raw_mutation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpsertMode {
@@ -29,7 +28,11 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         };
 
         // Ensure _id exists, generating one if missing.
-        if exec::extract_doc_id(&new_doc)?.is_none() {
+        let has_id = new_doc
+            .get("_id")
+            .map_err(|e| DbError::Serialization(e.to_string()))?
+            .is_some();
+        if !has_id {
             let oid = bson::oid::ObjectId::new();
             new_doc.append(bson::cstr!("_id"), oid);
         }
@@ -162,34 +165,4 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ── extract_doc_id ────────────────────────────────────────
-
-    #[test]
-    fn extract_doc_id_string() {
-        let doc = rawdoc! { "_id": "abc", "name": "Alice" };
-        let id = exec::extract_doc_id(&doc).unwrap().unwrap();
-        assert_eq!(id.tag, 0x02);
-        assert_eq!(&*id.bytes, b"abc");
-    }
-
-    #[test]
-    fn extract_doc_id_objectid() {
-        let oid = bson::oid::ObjectId::new();
-        let doc = rawdoc! { "_id": oid, "name": "Alice" };
-        let id = exec::extract_doc_id(&doc).unwrap().unwrap();
-        assert_eq!(id.tag, 0x07);
-    }
-
-    #[test]
-    fn extract_doc_id_int() {
-        let doc = rawdoc! { "_id": 42_i32, "name": "Alice" };
-        let id = exec::extract_doc_id(&doc).unwrap().unwrap();
-        assert_eq!(id.tag, 0x10);
-    }
-
-    #[test]
-    fn extract_doc_id_missing_returns_none() {
-        let doc = rawdoc! { "name": "Alice", "score": 100 };
-        assert!(exec::extract_doc_id(&doc).unwrap().is_none());
-    }
 }

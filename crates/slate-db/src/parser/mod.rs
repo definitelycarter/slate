@@ -119,12 +119,11 @@ fn parse_field_condition(
     value: RawBsonRef<'_>,
 ) -> Result<Expression, FilterParseError> {
     // If value is a document whose first key starts with $, it's an operator doc
-    if let RawBsonRef::Document(sub_doc) = value {
-        if let Some(Ok((first_key, _))) = sub_doc.iter().next() {
-            if first_key.as_str().starts_with('$') {
-                return parse_operator_doc(field, sub_doc);
-            }
-        }
+    if let RawBsonRef::Document(sub_doc) = value
+        && let Some(Ok((first_key, _))) = sub_doc.iter().next()
+        && first_key.as_str().starts_with('$')
+    {
+        return parse_operator_doc(field, sub_doc);
     }
 
     // Otherwise: implicit $eq

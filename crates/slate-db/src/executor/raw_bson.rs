@@ -9,30 +9,231 @@
 //! key extraction, and projection.
 
 use bson::raw::{RawArray, RawBsonRef, RawDocument};
+use bson::spec::ElementType;
 use slate_engine::skip_bson_value;
 
-// ── Field location ──────────────────────────────────────────────
+// ── RawField ────────────────────────────────────────────────────
 
-/// Location of a BSON element within a document's byte buffer.
-pub(crate) struct FieldLocation {
-    /// Offset of the type byte.
-    pub element_start: usize,
-    /// BSON element type tag.
-    pub type_byte: u8,
-    /// Offset where the value bytes begin.
-    pub value_start: usize,
-    /// Offset immediately after the value bytes.
-    pub element_end: usize,
+/// A located field within raw BSON bytes.
+///
+/// Holds a reference to the document bytes and the field's position
+/// metadata. Value parsing is deferred until `.value()` is called.
+pub(crate) struct RawField<'a> {
+    bytes: &'a [u8],
+    element_type: ElementType,
+    element_start: usize,
+    value_start: usize,
+    element_end: usize,
 }
 
-/// Walk a BSON document's raw bytes to find a top-level field by name.
-pub(crate) fn find_field(bytes: &[u8], field_name: &str) -> Option<FieldLocation> {
-    find_field_in(bytes, 0, field_name)
+impl<'a> RawField<'a> {
+    // ── Constructors ────────────────────────────────────────────
+
+    /// Find a top-level field by name.
+    pub fn get(bytes: &'a [u8], name: &str) -> Option<Self> {
+        scan_field(bytes, 0, name).map(|loc| loc.bind(bytes))
+    }
+
+    /// Find a field by dot-path (e.g. `"address.city"` or `"a.b.c"`).
+    pub fn get_path(bytes: &'a [u8], path: &str) -> Option<Self> {
+        resolve_path(bytes, 0, path).map(|loc| loc.bind(bytes))
+    }
+
+    /// Resolve a dot-path and return the parsed value.
+    ///
+    /// Returns `None` if the path is missing or the value is Null.
+    pub fn get_value(bytes: &'a [u8], path: &str) -> Option<RawBsonRef<'a>> {
+        let field = Self::get_path(bytes, path)?;
+        if field.is_null() {
+            return None;
+        }
+        field.value()
+    }
+
+    // ── Accessors ───────────────────────────────────────────────
+
+    /// The BSON element type.
+    #[cfg(test)]
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
+    }
+
+    /// Whether this field is Null.
+    pub fn is_null(&self) -> bool {
+        self.element_type == ElementType::Null
+    }
+
+    /// Parse the value bytes into a `RawBsonRef`.
+    pub fn value(&self) -> Option<RawBsonRef<'a>> {
+        match self.element_type {
+            ElementType::Double => {
+                let v = f64::from_le_bytes(
+                    self.bytes[self.value_start..self.value_start + 8]
+                        .try_into()
+                        .ok()?,
+                );
+                Some(RawBsonRef::Double(v))
+            }
+            ElementType::String => {
+                let len = i32::from_le_bytes(
+                    self.bytes[self.value_start..self.value_start + 4]
+                        .try_into()
+                        .ok()?,
+                ) as usize;
+                let s = std::str::from_utf8(
+                    &self.bytes[self.value_start + 4..self.value_start + 4 + len - 1],
+                )
+                .ok()?;
+                Some(RawBsonRef::String(s))
+            }
+            ElementType::EmbeddedDocument => {
+                let doc =
+                    RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end]).ok()?;
+                Some(RawBsonRef::Document(doc))
+            }
+            ElementType::Array => {
+                let doc =
+                    RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end]).ok()?;
+                // SAFETY: RawArray is repr-transparent over RawDocument.
+                // The bson crate's own RawArray::from_doc does this same pointer cast.
+                let arr: &RawArray =
+                    unsafe { &*(doc as *const RawDocument as *const RawArray) };
+                Some(RawBsonRef::Array(arr))
+            }
+            ElementType::ObjectId => {
+                let oid = bson::oid::ObjectId::from_bytes(
+                    self.bytes[self.value_start..self.value_start + 12]
+                        .try_into()
+                        .ok()?,
+                );
+                Some(RawBsonRef::ObjectId(oid))
+            }
+            ElementType::Boolean => {
+                Some(RawBsonRef::Boolean(self.bytes[self.value_start] != 0))
+            }
+            ElementType::DateTime => {
+                let ms = i64::from_le_bytes(
+                    self.bytes[self.value_start..self.value_start + 8]
+                        .try_into()
+                        .ok()?,
+                );
+                Some(RawBsonRef::DateTime(bson::DateTime::from_millis(ms)))
+            }
+            ElementType::Null => Some(RawBsonRef::Null),
+            ElementType::Int32 => {
+                let v = i32::from_le_bytes(
+                    self.bytes[self.value_start..self.value_start + 4]
+                        .try_into()
+                        .ok()?,
+                );
+                Some(RawBsonRef::Int32(v))
+            }
+            ElementType::Int64 => {
+                let v = i64::from_le_bytes(
+                    self.bytes[self.value_start..self.value_start + 8]
+                        .try_into()
+                        .ok()?,
+                );
+                Some(RawBsonRef::Int64(v))
+            }
+            _ => None,
+        }
+    }
+
+    // ── Byte-level access (for tests) ──────────────────────────
+
+    /// The raw value bytes (`value_start..element_end`).
+    #[cfg(test)]
+    pub fn value_bytes(&self) -> &'a [u8] {
+        &self.bytes[self.value_start..self.element_end]
+    }
+
+    /// Byte offset where the value bytes begin.
+    #[cfg(test)]
+    pub fn value_start(&self) -> usize {
+        self.value_start
+    }
+
+    /// Byte offset immediately after the value bytes.
+    #[cfg(test)]
+    pub fn element_end(&self) -> usize {
+        self.element_end
+    }
+
+    /// Extract a borrow-free location snapshot.
+    ///
+    /// Useful when you need the field's position and type but also need
+    /// to mutate the underlying byte buffer (which requires dropping
+    /// the `RawField` borrow first).
+    pub fn loc(&self) -> RawFieldLoc {
+        RawFieldLoc {
+            element_type: self.element_type,
+            element_start: self.element_start,
+            value_start: self.value_start,
+            element_end: self.element_end,
+        }
+    }
 }
 
-/// Find a field within a sub-document starting at byte offset `base`.
-/// `base` is the offset of the sub-document's i32 length header.
-pub(crate) fn find_field_in(bytes: &[u8], base: usize, field_name: &str) -> Option<FieldLocation> {
+/// Borrow-free field location snapshot.
+///
+/// Contains the same position/type metadata as [`RawField`] but without
+/// holding a reference to the document bytes. Used by the mutation engine
+/// to capture a field's location then mutate the buffer.
+#[derive(Clone, Copy)]
+pub(crate) struct RawFieldLoc {
+    element_type: ElementType,
+    element_start: usize,
+    value_start: usize,
+    element_end: usize,
+}
+
+impl RawFieldLoc {
+    pub fn element_type(&self) -> ElementType {
+        self.element_type
+    }
+
+    pub fn element_start(&self) -> usize {
+        self.element_start
+    }
+
+    pub fn value_start(&self) -> usize {
+        self.value_start
+    }
+
+    pub fn element_end(&self) -> usize {
+        self.element_end
+    }
+}
+
+// ── Internal scanning primitives ────────────────────────────────
+//
+// These return a lightweight `FieldLoc` (no byte reference) to avoid
+// carrying the lifetime through recursive dot-path descent. The final
+// result is wrapped into a `RawField` via `FieldLoc::bind`.
+
+/// Lightweight field location without a byte reference.
+struct FieldLoc {
+    element_type: ElementType,
+    element_start: usize,
+    value_start: usize,
+    element_end: usize,
+}
+
+impl FieldLoc {
+    fn bind(self, bytes: &[u8]) -> RawField<'_> {
+        RawField {
+            bytes,
+            element_type: self.element_type,
+            element_start: self.element_start,
+            value_start: self.value_start,
+            element_end: self.element_end,
+        }
+    }
+}
+
+/// Scan a document's raw bytes for a field by name, starting at `base`.
+fn scan_field(bytes: &[u8], base: usize, field_name: &str) -> Option<FieldLoc> {
     let target = field_name.as_bytes();
     if base + 4 > bytes.len() {
         return None;
@@ -46,6 +247,7 @@ pub(crate) fn find_field_in(bytes: &[u8], base: usize, field_name: &str) -> Opti
         if type_byte == 0x00 {
             break;
         }
+        let element_type = ElementType::from(type_byte)?;
         let element_start = pos;
         pos += 1; // skip type byte
 
@@ -64,9 +266,9 @@ pub(crate) fn find_field_in(bytes: &[u8], base: usize, field_name: &str) -> Opti
         let element_end = skip_bson_value(type_byte, bytes, pos)?;
 
         if name == target {
-            return Some(FieldLocation {
+            return Some(FieldLoc {
+                element_type,
                 element_start,
-                type_byte,
                 value_start,
                 element_end,
             });
@@ -76,124 +278,17 @@ pub(crate) fn find_field_in(bytes: &[u8], base: usize, field_name: &str) -> Opti
     None
 }
 
-// ── Dot-path resolution ─────────────────────────────────────────
-
-/// Find a field by dot-path (e.g. `"address.city"` or `"a.b.c"`).
-/// Walks into nested sub-documents at the byte level.
-pub(crate) fn find_field_path(bytes: &[u8], path: &str) -> Option<FieldLocation> {
+/// Resolve a dot-path (or flat field name) within a document at `base`.
+fn resolve_path(bytes: &[u8], base: usize, path: &str) -> Option<FieldLoc> {
     if !path.contains('.') {
-        return find_field(bytes, path);
+        return scan_field(bytes, base, path);
     }
     let (first, rest) = path.split_once('.')?;
-    let loc = find_field(bytes, first)?;
-    // Must be a sub-document (0x03) to descend
-    if loc.type_byte != 0x03 {
+    let loc = scan_field(bytes, base, first)?;
+    if loc.element_type != ElementType::EmbeddedDocument {
         return None;
     }
-    find_field_path_in(bytes, loc.value_start, rest)
-}
-
-/// Recursive dot-path descent within a sub-document at `base`.
-fn find_field_path_in(bytes: &[u8], base: usize, path: &str) -> Option<FieldLocation> {
-    if !path.contains('.') {
-        return find_field_in(bytes, base, path);
-    }
-    let (first, rest) = path.split_once('.')?;
-    let loc = find_field_in(bytes, base, first)?;
-    if loc.type_byte != 0x03 {
-        return None;
-    }
-    find_field_path_in(bytes, loc.value_start, rest)
-}
-
-// ── Bridge: byte offset → RawBsonRef ────────────────────────────
-
-/// Construct a `RawBsonRef` from a `FieldLocation` + document bytes.
-///
-/// This is the zero-cost bridge between raw byte lookup and typed comparison.
-/// The field has already been located by `find_field` / `find_field_path`;
-/// this just reads the value bytes and wraps them in the appropriate variant.
-pub(crate) fn field_to_raw_bson_ref<'a>(
-    bytes: &'a [u8],
-    loc: &FieldLocation,
-) -> Option<RawBsonRef<'a>> {
-    match loc.type_byte {
-        0x01 => {
-            // Double
-            let v = f64::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 8]
-                    .try_into()
-                    .ok()?,
-            );
-            Some(RawBsonRef::Double(v))
-        }
-        0x02 => {
-            // String
-            let len = i32::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 4]
-                    .try_into()
-                    .ok()?,
-            ) as usize;
-            let s = std::str::from_utf8(&bytes[loc.value_start + 4..loc.value_start + 4 + len - 1])
-                .ok()?;
-            Some(RawBsonRef::String(s))
-        }
-        0x03 => {
-            // Document
-            let doc = RawDocument::from_bytes(&bytes[loc.value_start..loc.element_end]).ok()?;
-            Some(RawBsonRef::Document(doc))
-        }
-        0x04 => {
-            // Array — RawArray is a newtype over RawDocument with identical layout
-            let doc = RawDocument::from_bytes(&bytes[loc.value_start..loc.element_end]).ok()?;
-            // SAFETY: RawArray is repr-transparent over RawDocument (single field `doc: RawDocument`).
-            // The bson crate's own RawArray::from_doc does this same pointer cast.
-            let arr: &RawArray = unsafe { &*(doc as *const RawDocument as *const RawArray) };
-            Some(RawBsonRef::Array(arr))
-        }
-        0x07 => {
-            // ObjectId
-            let oid = bson::oid::ObjectId::from_bytes(
-                bytes[loc.value_start..loc.value_start + 12]
-                    .try_into()
-                    .ok()?,
-            );
-            Some(RawBsonRef::ObjectId(oid))
-        }
-        0x08 => {
-            // Boolean
-            Some(RawBsonRef::Boolean(bytes[loc.value_start] != 0))
-        }
-        0x09 => {
-            // DateTime
-            let ms = i64::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 8]
-                    .try_into()
-                    .ok()?,
-            );
-            Some(RawBsonRef::DateTime(bson::DateTime::from_millis(ms)))
-        }
-        0x0A => Some(RawBsonRef::Null), // Null
-        0x10 => {
-            // Int32
-            let v = i32::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 4]
-                    .try_into()
-                    .ok()?,
-            );
-            Some(RawBsonRef::Int32(v))
-        }
-        0x12 => {
-            // Int64
-            let v = i64::from_le_bytes(
-                bytes[loc.value_start..loc.value_start + 8]
-                    .try_into()
-                    .ok()?,
-            );
-            Some(RawBsonRef::Int64(v))
-        }
-        _ => None,
-    }
+    resolve_path(bytes, loc.value_start, rest)
 }
 
 #[cfg(test)]
@@ -205,128 +300,121 @@ mod tests {
         doc.as_bytes()
     }
 
-    // ── find_field ──────────────────────────────────────────────
+    // ── RawField::get ─────────────────────────────────────────
 
     #[test]
-    fn find_field_exists() {
+    fn get_exists() {
         let doc = rawdoc! { "a": 1_i32, "b": "hello" };
-        let loc = find_field(doc_bytes(&doc), "b").unwrap();
-        assert_eq!(loc.type_byte, 0x02); // String
+        let field = RawField::get(doc_bytes(&doc), "b").unwrap();
+        assert_eq!(field.element_type(), ElementType::String);
     }
 
     #[test]
-    fn find_field_missing() {
+    fn get_missing() {
         let doc = rawdoc! { "a": 1_i32 };
-        assert!(find_field(doc_bytes(&doc), "z").is_none());
+        assert!(RawField::get(doc_bytes(&doc), "z").is_none());
     }
 
-    // ── find_field_path ─────────────────────────────────────────
+    // ── RawField::get_path ────────────────────────────────────
 
     #[test]
-    fn find_field_path_flat() {
+    fn get_path_flat() {
         let doc = rawdoc! { "score": 42_i32 };
-        let loc = find_field_path(doc_bytes(&doc), "score").unwrap();
-        assert_eq!(loc.type_byte, 0x10);
+        let field = RawField::get_path(doc_bytes(&doc), "score").unwrap();
+        assert_eq!(field.element_type(), ElementType::Int32);
     }
 
     #[test]
-    fn find_field_path_one_level() {
+    fn get_path_one_level() {
         let doc = rawdoc! { "address": { "city": "Austin" } };
-        let loc = find_field_path(doc_bytes(&doc), "address.city").unwrap();
-        assert_eq!(loc.type_byte, 0x02);
+        let field = RawField::get_path(doc_bytes(&doc), "address.city").unwrap();
+        assert_eq!(field.element_type(), ElementType::String);
     }
 
     #[test]
-    fn find_field_path_two_levels() {
+    fn get_path_two_levels() {
         let doc = rawdoc! { "a": { "b": { "c": 99_i32 } } };
-        let loc = find_field_path(doc_bytes(&doc), "a.b.c").unwrap();
-        assert_eq!(loc.type_byte, 0x10);
+        let field = RawField::get_path(doc_bytes(&doc), "a.b.c").unwrap();
+        assert_eq!(field.element_type(), ElementType::Int32);
     }
 
     #[test]
-    fn find_field_path_miss_at_top() {
+    fn get_path_miss_at_top() {
         let doc = rawdoc! { "a": { "b": 1_i32 } };
-        assert!(find_field_path(doc_bytes(&doc), "z.b").is_none());
+        assert!(RawField::get_path(doc_bytes(&doc), "z.b").is_none());
     }
 
     #[test]
-    fn find_field_path_miss_at_nested() {
+    fn get_path_miss_at_nested() {
         let doc = rawdoc! { "a": { "b": 1_i32 } };
-        assert!(find_field_path(doc_bytes(&doc), "a.z").is_none());
+        assert!(RawField::get_path(doc_bytes(&doc), "a.z").is_none());
     }
 
     #[test]
-    fn find_field_path_non_document_intermediate() {
+    fn get_path_non_document_intermediate() {
         let doc = rawdoc! { "a": "not a doc" };
-        assert!(find_field_path(doc_bytes(&doc), "a.b").is_none());
+        assert!(RawField::get_path(doc_bytes(&doc), "a.b").is_none());
     }
 
-    // ── field_to_raw_bson_ref ───────────────────────────────────
+    // ── value() ───────────────────────────────────────────────
 
     #[test]
-    fn bridge_i32() {
+    fn value_i32() {
         let doc = rawdoc! { "n": 42_i32 };
-        let loc = find_field(doc_bytes(&doc), "n").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Int32(42));
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Int32(42)));
     }
 
     #[test]
-    fn bridge_i64() {
+    fn value_i64() {
         let doc = rawdoc! { "n": 123_i64 };
-        let loc = find_field(doc_bytes(&doc), "n").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Int64(123));
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Int64(123)));
     }
 
     #[test]
-    fn bridge_double() {
-        let doc = rawdoc! { "n": 3.14_f64 };
-        let loc = find_field(doc_bytes(&doc), "n").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Double(3.14));
+    fn value_double() {
+        let doc = rawdoc! { "n": 2.78_f64 };
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Double(2.78)));
     }
 
     #[test]
-    fn bridge_string() {
+    fn value_string() {
         let doc = rawdoc! { "s": "hello" };
-        let loc = find_field(doc_bytes(&doc), "s").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::String("hello"));
+        let field = RawField::get(doc_bytes(&doc), "s").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::String("hello")));
     }
 
     #[test]
-    fn bridge_bool() {
+    fn value_bool() {
         let doc = rawdoc! { "b": true };
-        let loc = find_field(doc_bytes(&doc), "b").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Boolean(true));
+        let field = RawField::get(doc_bytes(&doc), "b").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Boolean(true)));
     }
 
     #[test]
-    fn bridge_null() {
+    fn value_null() {
         let doc = rawdoc! { "n": null };
-        let loc = find_field(doc_bytes(&doc), "n").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Null);
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Null));
+        assert!(field.is_null());
     }
 
     #[test]
-    fn bridge_datetime() {
+    fn value_datetime() {
         let dt = bson::DateTime::from_millis(1_700_000_000_000);
         let doc = rawdoc! { "t": dt };
-        let loc = find_field(doc_bytes(&doc), "t").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        assert_eq!(val, RawBsonRef::DateTime(dt));
+        let field = RawField::get(doc_bytes(&doc), "t").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::DateTime(dt)));
     }
 
     #[test]
-    fn bridge_document() {
+    fn value_document() {
         let doc = rawdoc! { "sub": { "x": 1_i32 } };
-        let loc = find_field(doc_bytes(&doc), "sub").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        match val {
-            RawBsonRef::Document(d) => {
+        let field = RawField::get(doc_bytes(&doc), "sub").unwrap();
+        match field.value() {
+            Some(RawBsonRef::Document(d)) => {
                 assert_eq!(d.get("x").unwrap(), Some(RawBsonRef::Int32(1)));
             }
             _ => panic!("expected Document"),
@@ -334,12 +422,11 @@ mod tests {
     }
 
     #[test]
-    fn bridge_array() {
+    fn value_array() {
         let doc = rawdoc! { "arr": [1_i32, 2_i32, 3_i32] };
-        let loc = find_field(doc_bytes(&doc), "arr").unwrap();
-        let val = field_to_raw_bson_ref(doc_bytes(&doc), &loc).unwrap();
-        match val {
-            RawBsonRef::Array(arr) => {
+        let field = RawField::get(doc_bytes(&doc), "arr").unwrap();
+        match field.value() {
+            Some(RawBsonRef::Array(arr)) => {
                 let items: Vec<_> = arr.into_iter().flatten().collect();
                 assert_eq!(items.len(), 3);
             }
@@ -347,214 +434,175 @@ mod tests {
         }
     }
 
-    // ── bridge: ObjectId ────────────────────────────────────────
-
     #[test]
-    fn bridge_objectid() {
+    fn value_objectid() {
         let oid = bson::oid::ObjectId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         let doc = rawdoc! { "oid": oid };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "oid").unwrap();
-        assert_eq!(loc.type_byte, 0x07);
-        let val = field_to_raw_bson_ref(bytes, &loc).unwrap();
-        assert_eq!(val, RawBsonRef::ObjectId(oid));
+        let field = RawField::get(doc_bytes(&doc), "oid").unwrap();
+        assert_eq!(field.element_type(), ElementType::ObjectId);
+        assert_eq!(field.value(), Some(RawBsonRef::ObjectId(oid)));
     }
 
-    // ── find_field_in: direct sub-document tests ────────────────
+    // ── Sub-document scanning ─────────────────────────────────
 
     #[test]
-    fn find_field_in_sub_document() {
+    fn get_in_sub_document() {
         let doc = rawdoc! { "outer": { "inner": 42_i32 } };
         let bytes = doc_bytes(&doc);
-        // First find "outer" to get sub-document offset
-        let outer = find_field(bytes, "outer").unwrap();
-        assert_eq!(outer.type_byte, 0x03);
-        // Now scan within the sub-document
-        let inner = find_field_in(bytes, outer.value_start, "inner").unwrap();
-        assert_eq!(inner.type_byte, 0x10);
-        let val = field_to_raw_bson_ref(bytes, &inner).unwrap();
-        assert_eq!(val, RawBsonRef::Int32(42));
+        let outer = RawField::get(bytes, "outer").unwrap();
+        assert_eq!(outer.element_type(), ElementType::EmbeddedDocument);
+        // Scan within the sub-document using get on the sub-doc bytes
+        let inner_bytes = outer.value_bytes();
+        let inner = RawField::get(inner_bytes, "inner").unwrap();
+        assert_eq!(inner.value(), Some(RawBsonRef::Int32(42)));
     }
 
     #[test]
-    fn find_field_in_sub_document_miss() {
+    fn get_in_sub_document_miss() {
         let doc = rawdoc! { "outer": { "inner": 1_i32 } };
         let bytes = doc_bytes(&doc);
-        let outer = find_field(bytes, "outer").unwrap();
-        assert!(find_field_in(bytes, outer.value_start, "missing").is_none());
+        let outer = RawField::get(bytes, "outer").unwrap();
+        let inner_bytes = outer.value_bytes();
+        assert!(RawField::get(inner_bytes, "missing").is_none());
     }
 
     #[test]
-    fn find_field_in_multiple_fields() {
+    fn get_in_multiple_fields() {
         let doc = rawdoc! { "sub": { "a": 1_i32, "b": "two", "c": true } };
         let bytes = doc_bytes(&doc);
-        let sub = find_field(bytes, "sub").unwrap();
-        let a = find_field_in(bytes, sub.value_start, "a").unwrap();
-        let b = find_field_in(bytes, sub.value_start, "b").unwrap();
-        let c = find_field_in(bytes, sub.value_start, "c").unwrap();
-        assert_eq!(field_to_raw_bson_ref(bytes, &a), Some(RawBsonRef::Int32(1)));
+        let sub = RawField::get(bytes, "sub").unwrap();
+        let sub_bytes = sub.value_bytes();
         assert_eq!(
-            field_to_raw_bson_ref(bytes, &b),
+            RawField::get(sub_bytes, "a").unwrap().value(),
+            Some(RawBsonRef::Int32(1))
+        );
+        assert_eq!(
+            RawField::get(sub_bytes, "b").unwrap().value(),
             Some(RawBsonRef::String("two"))
         );
         assert_eq!(
-            field_to_raw_bson_ref(bytes, &c),
+            RawField::get(sub_bytes, "c").unwrap().value(),
             Some(RawBsonRef::Boolean(true))
         );
     }
 
-    // ── skip_bson_value edge cases ──────────────────────────────
+    // ── skip_bson_value edge cases ────────────────────────────
 
     #[test]
-    fn skip_bson_value_binary() {
-        // Binary: i32(len) + subtype(1) + data(len)
+    fn skip_binary() {
         let doc = rawdoc! { "bin": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] } };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "bin").unwrap();
-        assert_eq!(loc.type_byte, 0x05);
-        // Verify skip lands correctly by checking element_end is in range
-        assert!(loc.element_end <= bytes.len());
-        assert!(loc.element_end > loc.value_start);
+        let field = RawField::get(doc_bytes(&doc), "bin").unwrap();
+        assert_eq!(field.element_type(), ElementType::Binary);
+        assert!(field.element_end() <= doc_bytes(&doc).len());
+        assert!(field.element_end() > field.value_start());
     }
 
     #[test]
-    fn skip_bson_value_objectid() {
+    fn skip_objectid() {
         let oid = bson::oid::ObjectId::from_bytes([0; 12]);
         let doc = rawdoc! { "oid": oid };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "oid").unwrap();
-        assert_eq!(loc.type_byte, 0x07);
-        // ObjectId is 12 bytes
-        assert_eq!(loc.element_end - loc.value_start, 12);
+        let field = RawField::get(doc_bytes(&doc), "oid").unwrap();
+        assert_eq!(field.element_type(), ElementType::ObjectId);
+        assert_eq!(field.element_end() - field.value_start(), 12);
     }
 
     #[test]
-    fn skip_bson_value_timestamp() {
+    fn skip_timestamp() {
         let ts = bson::Timestamp {
             time: 12345,
             increment: 1,
         };
         let doc = rawdoc! { "ts": ts };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "ts").unwrap();
-        assert_eq!(loc.type_byte, 0x11);
-        // Timestamp is 8 bytes
-        assert_eq!(loc.element_end - loc.value_start, 8);
+        let field = RawField::get(doc_bytes(&doc), "ts").unwrap();
+        assert_eq!(field.element_type(), ElementType::Timestamp);
+        assert_eq!(field.element_end() - field.value_start(), 8);
     }
 
     #[test]
-    fn skip_bson_value_decimal128() {
+    fn skip_decimal128() {
         let dec = bson::Decimal128::from_bytes([0u8; 16]);
         let doc = rawdoc! { "dec": dec };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "dec").unwrap();
-        assert_eq!(loc.type_byte, 0x13);
-        // Decimal128 is 16 bytes
-        assert_eq!(loc.element_end - loc.value_start, 16);
+        let field = RawField::get(doc_bytes(&doc), "dec").unwrap();
+        assert_eq!(field.element_type(), ElementType::Decimal128);
+        assert_eq!(field.element_end() - field.value_start(), 16);
     }
 
     #[test]
-    fn skip_bson_value_null() {
+    fn skip_null() {
         let doc = rawdoc! { "n": null };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "n").unwrap();
-        assert_eq!(loc.type_byte, 0x0A);
-        // Null is 0 bytes
-        assert_eq!(loc.element_end, loc.value_start);
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.element_type(), ElementType::Null);
+        assert_eq!(field.element_end(), field.value_start());
     }
 
     #[test]
-    fn skip_bson_value_unknown_type_returns_none() {
-        // Directly test that an unrecognised type byte returns None
+    fn skip_unknown_type_returns_none() {
         assert!(skip_bson_value(0xFF, &[0; 32], 0).is_none());
         assert!(skip_bson_value(0x06, &[0; 32], 0).is_none()); // Undefined (deprecated)
     }
 
     #[test]
-    fn skip_bson_value_truncated_string() {
-        // String needs at least 4 bytes for the length prefix
+    fn skip_truncated_string() {
         assert!(skip_bson_value(0x02, &[0, 0], 0).is_none());
     }
 
     #[test]
-    fn skip_bson_value_truncated_document() {
-        // Document needs at least 4 bytes for the length prefix
+    fn skip_truncated_document() {
         assert!(skip_bson_value(0x03, &[0, 0], 0).is_none());
     }
 
     #[test]
-    fn skip_bson_value_truncated_binary() {
-        // Binary needs at least 4 bytes for the length prefix
+    fn skip_truncated_binary() {
         assert!(skip_bson_value(0x05, &[0, 0], 0).is_none());
     }
 
-    // ── field_to_raw_bson_ref edge cases ────────────────────────
+    // ── value() edge cases ────────────────────────────────────
 
     #[test]
-    fn bridge_unknown_type_returns_none() {
-        // Build a location with an unrecognised type byte
-        let doc = rawdoc! { "n": 1_i32 };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "n").unwrap();
-        let fake_loc = FieldLocation {
-            element_start: loc.element_start,
-            type_byte: 0xFF, // unknown
-            value_start: loc.value_start,
-            element_end: loc.element_end,
-        };
-        assert!(field_to_raw_bson_ref(bytes, &fake_loc).is_none());
+    fn value_unknown_type_returns_none() {
+        // Build a field with a fake unknown type by overriding element_type
+        // We use Timestamp which our value() doesn't handle → returns None
+        let doc = rawdoc! { "ts": bson::Timestamp { time: 1, increment: 1 } };
+        let field = RawField::get(doc_bytes(&doc), "ts").unwrap();
+        // Timestamp is a known ElementType that our value() doesn't convert
+        assert!(field.value().is_none());
     }
 
     #[test]
-    fn bridge_bool_false() {
+    fn value_bool_false() {
         let doc = rawdoc! { "b": false };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "b").unwrap();
-        let val = field_to_raw_bson_ref(bytes, &loc).unwrap();
-        assert_eq!(val, RawBsonRef::Boolean(false));
+        let field = RawField::get(doc_bytes(&doc), "b").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Boolean(false)));
     }
 
     #[test]
-    fn bridge_negative_numbers() {
-        let doc = rawdoc! { "i32": -42_i32, "i64": -999_i64, "f64": -3.14_f64 };
+    fn value_negative_numbers() {
+        let doc = rawdoc! { "i32": -42_i32, "i64": -999_i64, "f64": -2.78_f64 };
         let bytes = doc_bytes(&doc);
 
-        let loc = find_field(bytes, "i32").unwrap();
-        assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::Int32(-42))
-        );
+        let field = RawField::get(bytes, "i32").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Int32(-42)));
 
-        let loc = find_field(bytes, "i64").unwrap();
-        assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::Int64(-999))
-        );
+        let field = RawField::get(bytes, "i64").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Int64(-999)));
 
-        let loc = find_field(bytes, "f64").unwrap();
-        assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::Double(-3.14))
-        );
+        let field = RawField::get(bytes, "f64").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Double(-2.78)));
     }
 
     #[test]
-    fn bridge_empty_string() {
+    fn value_empty_string() {
         let doc = rawdoc! { "s": "" };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "s").unwrap();
-        let val = field_to_raw_bson_ref(bytes, &loc).unwrap();
-        assert_eq!(val, RawBsonRef::String(""));
+        let field = RawField::get(doc_bytes(&doc), "s").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::String("")));
     }
 
     #[test]
-    fn bridge_empty_document() {
+    fn value_empty_document() {
         let doc = rawdoc! { "sub": {} };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "sub").unwrap();
-        let val = field_to_raw_bson_ref(bytes, &loc).unwrap();
-        match val {
-            RawBsonRef::Document(d) => {
+        let field = RawField::get(doc_bytes(&doc), "sub").unwrap();
+        match field.value() {
+            Some(RawBsonRef::Document(d)) => {
                 assert_eq!(d.iter().count(), 0);
             }
             _ => panic!("expected Document"),
@@ -562,75 +610,100 @@ mod tests {
     }
 
     #[test]
-    fn bridge_empty_array() {
+    fn value_empty_array() {
         let doc = rawdoc! { "arr": [] };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "arr").unwrap();
-        let val = field_to_raw_bson_ref(bytes, &loc).unwrap();
-        match val {
-            RawBsonRef::Array(arr) => {
+        let field = RawField::get(doc_bytes(&doc), "arr").unwrap();
+        match field.value() {
+            Some(RawBsonRef::Array(arr)) => {
                 assert_eq!(arr.into_iter().count(), 0);
             }
             _ => panic!("expected Array"),
         }
     }
 
-    // ── find_field: can find fields after various types ─────────
+    // ── Finding fields after various types ────────────────────
 
     #[test]
-    fn find_field_after_binary() {
-        // Ensure skip_bson_value correctly skips a binary value so we can find the next field
+    fn get_after_binary() {
         let doc = rawdoc! {
             "bin": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1, 2, 3] },
             "after": "found"
         };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "after").unwrap();
-        assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::String("found"))
-        );
+        let field = RawField::get(doc_bytes(&doc), "after").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::String("found")));
     }
 
     #[test]
-    fn find_field_after_timestamp() {
+    fn get_after_timestamp() {
         let doc = rawdoc! {
             "ts": bson::Timestamp { time: 1, increment: 2 },
             "after": 99_i32
         };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "after").unwrap();
-        assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::Int32(99))
-        );
+        let field = RawField::get(doc_bytes(&doc), "after").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Int32(99)));
     }
 
     #[test]
-    fn find_field_after_decimal128() {
+    fn get_after_decimal128() {
         let doc = rawdoc! {
             "dec": bson::Decimal128::from_bytes([0u8; 16]),
             "after": true
         };
-        let bytes = doc_bytes(&doc);
-        let loc = find_field(bytes, "after").unwrap();
+        let field = RawField::get(doc_bytes(&doc), "after").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Boolean(true)));
+    }
+
+    // ── get_value ─────────────────────────────────────────────
+
+    #[test]
+    fn get_value_simple() {
+        let doc = rawdoc! { "status": "active", "count": 42_i32 };
         assert_eq!(
-            field_to_raw_bson_ref(bytes, &loc),
-            Some(RawBsonRef::Boolean(true))
+            RawField::get_value(doc_bytes(&doc), "status"),
+            Some(RawBsonRef::String("active"))
         );
     }
 
-    // ── Cross-check: find_field_path + bridge matches RawDocument::get() ─
+    #[test]
+    fn get_value_dotted() {
+        let doc = rawdoc! { "address": { "city": "Austin" } };
+        assert_eq!(
+            RawField::get_value(doc_bytes(&doc), "address.city"),
+            Some(RawBsonRef::String("Austin"))
+        );
+    }
+
+    #[test]
+    fn get_value_missing() {
+        let doc = rawdoc! { "name": "test" };
+        assert_eq!(RawField::get_value(doc_bytes(&doc), "missing"), None);
+    }
+
+    #[test]
+    fn get_value_null() {
+        let doc = rawdoc! { "status": null };
+        assert_eq!(RawField::get_value(doc_bytes(&doc), "status"), None);
+    }
+
+    #[test]
+    fn get_value_id() {
+        let doc = rawdoc! { "_id": "abc123", "name": "test" };
+        assert_eq!(
+            RawField::get_value(doc_bytes(&doc), "_id"),
+            Some(RawBsonRef::String("abc123"))
+        );
+    }
+
+    // ── Cross-check: get_path + value matches RawDocument::get() ─
 
     #[test]
     fn cross_check_flat_fields() {
-        let doc = rawdoc! { "a": 1_i32, "b": "hello", "c": true, "d": 3.14_f64 };
+        let doc = rawdoc! { "a": 1_i32, "b": "hello", "c": true, "d": 2.78_f64 };
         let bytes = doc_bytes(&doc);
-        for field in &["a", "b", "c", "d"] {
-            let expected = doc.get(field).unwrap();
-            let loc = find_field_path(bytes, field).unwrap();
-            let got = field_to_raw_bson_ref(bytes, &loc);
-            assert_eq!(got, expected, "mismatch for field '{}'", field);
+        for name in &["a", "b", "c", "d"] {
+            let expected = doc.get(name).unwrap();
+            let field = RawField::get_path(bytes, name).unwrap();
+            assert_eq!(field.value(), expected, "mismatch for field '{}'", name);
         }
     }
 
@@ -661,9 +734,8 @@ mod tests {
                 current
             };
 
-            let loc = find_field_path(bytes, path).unwrap();
-            let got = field_to_raw_bson_ref(bytes, &loc);
-            assert_eq!(got, expected, "mismatch for path '{}'", path);
+            let field = RawField::get_path(bytes, path).unwrap();
+            assert_eq!(field.value(), expected, "mismatch for path '{}'", path);
         }
     }
 }

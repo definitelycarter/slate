@@ -5,6 +5,7 @@ pub(crate) mod database;
 mod error;
 mod executor;
 mod expression;
+pub(crate) mod mutation;
 pub(crate) mod parser;
 mod planner;
 mod statement;
@@ -22,6 +23,7 @@ pub mod bench {
     pub use crate::database::Database;
     pub use crate::executor::{Executor, RawIter};
     pub use crate::expression::{Expression, LogicalOp};
+    pub use crate::mutation::{Mutation, parse_mutation};
     pub use crate::planner::plan::{IndexScanRange, Node, Plan, ScanDirection};
     pub use crate::planner::planner::Planner;
     pub use crate::statement::Statement;

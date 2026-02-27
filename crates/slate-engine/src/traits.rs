@@ -1,6 +1,6 @@
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
+use bson::RawBson;
 
-use crate::encoding::bson_value::BsonValue;
 use crate::error::EngineError;
 
 /// Configuration for a collection stored in the catalog.
@@ -73,7 +73,7 @@ pub trait EngineTransaction {
         handle: &CollectionHandle<Self::Cf>,
         ttl: i64,
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
+        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
     >;
 
@@ -86,7 +86,7 @@ pub trait EngineTransaction {
         range: IndexRange<'_>,
         reverse: bool,
         ttl: i64,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>;
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>;
 
     // ── Lifecycle ──────────────────────────────────────────────
 
@@ -95,24 +95,25 @@ pub trait EngineTransaction {
 }
 
 /// Range filter for index scans.
+///
+/// Values are high-level `bson::Bson`; the engine encodes them
+/// internally into its sortable representation.
 pub enum IndexRange<'a> {
     /// Scan all entries for the field.
     Full,
     /// Exact value match (narrow prefix scan).
-    Eq(&'a [u8]),
+    Eq(&'a bson::Bson),
     /// One- or two-sided range with inclusive/exclusive bounds.
     Range {
-        lower: Option<&'a [u8]>,
-        lower_inclusive: bool,
-        upper: Option<&'a [u8]>,
-        upper_inclusive: bool,
+        lower: Option<(&'a bson::Bson, bool)>,
+        upper: Option<(&'a bson::Bson, bool)>,
     },
 }
 
 /// A decoded index scan entry.
-pub struct IndexEntry<'a> {
-    pub doc_id: BsonValue<'a>,
-    pub value_bytes: Vec<u8>,
+pub struct IndexEntry {
+    pub doc_id: RawBson,
+    pub value: RawBson,
     pub metadata: Vec<u8>,
 }
 

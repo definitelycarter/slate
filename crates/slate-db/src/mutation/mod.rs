@@ -1,5 +1,10 @@
+mod ops;
+pub(crate) mod raw;
+
 use bson::Bson;
 use bson::raw::{RawBsonRef, RawDocument};
+
+use crate::error::DbError;
 
 /// A single field-level mutation operator.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +36,101 @@ pub struct FieldMutation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mutation {
     pub ops: Vec<FieldMutation>,
+}
+
+impl Mutation {
+    /// Apply this mutation to a raw document.
+    ///
+    /// Fast path: the raw byte-level mutation engine handles flat-field operators
+    /// (`$set`, `$unset`, `$inc`, `$push`, `$pop`) by splicing/overwriting bytes
+    /// directly — no deserialization. Falls back to full `bson::Document` round-trip
+    /// for dot-paths, `$rename`, `$lpush`, and Document/Array `$set` values.
+    ///
+    /// Returns `Ok(None)` if the document is unchanged.
+    pub(crate) fn apply(&self, raw: &RawDocument) -> Result<Option<bson::RawDocumentBuf>, DbError> {
+        use crate::mutation::raw::{RawMutationResult, raw_apply_mutation};
+        use crate::mutation::ops;
+
+        // Fast path: raw byte-level mutation engine
+        match raw_apply_mutation(raw, self)? {
+            RawMutationResult::Applied(buf) => return Ok(Some(buf)),
+            RawMutationResult::Unchanged => return Ok(None),
+            RawMutationResult::Fallback => { /* continue to slow path */ }
+        }
+
+        // Slow path: full deserialization
+        let mut doc: bson::Document = bson::deserialize_from_slice(raw.as_bytes())?;
+        let mut changed = false;
+
+        for fm in &self.ops {
+            let creates = matches!(
+                fm.op,
+                MutationOp::Set(_)
+                    | MutationOp::Inc(_)
+                    | MutationOp::Push(_)
+                    | MutationOp::LPush(_)
+            );
+
+            match &fm.op {
+                MutationOp::Set(val) => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                    {
+                        changed |= ops::op_set(parent, leaf, val)?;
+                    }
+                }
+                MutationOp::Unset => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                    {
+                        changed |= ops::op_unset(parent, leaf)?;
+                    }
+                }
+                MutationOp::Inc(amount) => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                    {
+                        changed |= ops::op_inc(parent, leaf, amount)?;
+                    }
+                }
+                MutationOp::Rename(new_name) => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                    {
+                        changed |= ops::op_rename(parent, leaf, new_name)?;
+                    }
+                }
+                MutationOp::Push(val) => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                    {
+                        changed |= ops::op_push(parent, leaf, val)?;
+                    }
+                }
+                MutationOp::LPush(val) => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, creates)?
+                    {
+                        changed |= ops::op_lpush(parent, leaf, val)?;
+                    }
+                }
+                MutationOp::Pop => {
+                    if let Some((parent, leaf)) =
+                        ops::resolve_parent_mut(&mut doc, &fm.field, false)?
+                    {
+                        changed |= ops::op_pop(parent, leaf)?;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        let raw = bson::RawDocumentBuf::try_from(&doc)?;
+        Ok(Some(raw))
+    }
 }
 
 /// Parse a BSON update document into a validated `Mutation`.

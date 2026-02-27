@@ -17,12 +17,18 @@ pub struct MemoryStore {
     write_lock: Mutex<()>,
 }
 
-impl MemoryStore {
-    pub fn new() -> Self {
+impl Default for MemoryStore {
+    fn default() -> Self {
         Self {
             cfs: RwLock::new(HashMap::new()),
             write_lock: Mutex::new(()),
         }
+    }
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Acquire the write lock. Only one write transaction can exist at a time.

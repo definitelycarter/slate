@@ -142,10 +142,10 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
         let encoded_key = Key::encode_record_key(&handle.name, &doc_id);
 
-        if let Some(data) = self.txn.get(&handle.cf, &encoded_key)? {
-            if !Record::is_expired(&data, ttl) {
-                return Err(EngineError::DuplicateKey(doc_id.to_string()));
-            }
+        if let Some(data) = self.txn.get(&handle.cf, &encoded_key)?
+            && !Record::is_expired(&data, ttl)
+        {
+            return Err(EngineError::DuplicateKey(doc_id.to_string()));
         }
 
         let encoded_value = Record::encode(doc);
@@ -199,26 +199,19 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         handle: &CollectionHandle<Self::Cf>,
         ttl: i64,
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(BsonValue<'b>, RawDocumentBuf), EngineError>> + 'b>,
+        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'b>,
         EngineError,
     > {
         let prefix = KeyPrefix::Record(Cow::Borrowed(&handle.name)).encode();
         let iter = self.txn.scan_prefix(&handle.cf, &prefix)?;
         Ok(Box::new(iter.filter_map(move |result| match result {
             Err(e) => Some(Err(EngineError::Store(e))),
-            Ok((key_bytes, value_bytes)) => {
+            Ok((_key_bytes, value_bytes)) => {
                 if Record::is_expired(&value_bytes, ttl) {
                     return None;
                 }
-                let key = match Key::decode(&key_bytes) {
-                    Some(k) => k,
-                    None => return Some(Err(EngineError::InvalidKey("invalid record key".into()))),
-                };
-                let Key::Record(_, doc_id) = key else {
-                    return Some(Err(EngineError::InvalidKey("expected record key".into())));
-                };
                 match Record::decode_owned(value_bytes) {
-                    Ok(record) => Some(Ok((doc_id.into_owned(), record.doc))),
+                    Ok(record) => Some(Ok(record.doc)),
                     Err(e) => Some(Err(e)),
                 }
             }
@@ -232,38 +225,43 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         range: IndexRange<'_>,
         reverse: bool,
         ttl: i64,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'b>, EngineError>> + 'b>, EngineError>
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError>
     {
         let collection = &handle.name;
 
         // Build scan prefix based on range type.
         let field_prefix =
             KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
-        let prefix = match &range {
-            IndexRange::Eq(value) => {
-                KeyPrefix::IndexValue(Cow::Borrowed(collection), Cow::Borrowed(field), value)
-                    .encode()
+        let eq_encoded = match &range {
+            IndexRange::Eq(val) => BsonValue::from_bson(val).map(|bv| bv.to_vec()),
+            _ => None,
+        };
+        let prefix = match &eq_encoded {
+            Some(bytes) => {
+                KeyPrefix::IndexValue(
+                    Cow::Borrowed(collection),
+                    Cow::Borrowed(field),
+                    bytes,
+                )
+                .encode()
             }
-            _ => field_prefix.clone(),
+            None => field_prefix.clone(),
         };
         let field_prefix_len = field_prefix.len();
 
         // Pre-encode range bounds for filtering.
-        let bounds: Option<(Option<Vec<u8>>, bool, Option<Vec<u8>>, bool)> = match &range {
-            IndexRange::Range {
-                lower,
-                lower_inclusive,
-                upper,
-                upper_inclusive,
-            } => Some((
-                lower.map(|v| v.to_vec()),
-                *lower_inclusive,
-                upper.map(|v| v.to_vec()),
-                *upper_inclusive,
+        #[allow(clippy::type_complexity)]
+        let bounds: Option<(Option<Vec<u8>>, bool, Option<Vec<u8>>, bool)> = match range {
+            IndexRange::Range { lower, upper } => Some((
+                lower.as_ref().and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.to_vec())),
+                lower.as_ref().is_some_and(|(_, incl)| *incl),
+                upper.as_ref().and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.to_vec())),
+                upper.as_ref().is_some_and(|(_, incl)| *incl),
             )),
             _ => None,
         };
 
+        #[allow(clippy::type_complexity)]
         let mut iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b> =
             if reverse {
                 self.txn.scan_prefix_rev(&handle.cf, &prefix)?
@@ -326,9 +324,20 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                             continue;
                         }
 
+                        let doc_id_raw = match doc_id.to_raw_bson() {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let value_raw = match BsonValue::from_slice(value_bytes)
+                            .and_then(|bv| bv.to_raw_bson())
+                        {
+                            Some(v) => v,
+                            None => continue,
+                        };
+
                         return Some(Ok(IndexEntry {
-                            doc_id: doc_id.into_owned(),
-                            value_bytes: value_bytes.to_vec(),
+                            doc_id: doc_id_raw,
+                            value: value_raw,
                             metadata: metadata_bytes,
                         }));
                     }

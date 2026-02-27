@@ -2,7 +2,6 @@ use bson::RawBson;
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
 use crate::expression::Expression;
 
 pub(crate) fn execute<'a>(
@@ -18,7 +17,7 @@ pub(crate) fn execute<'a>(
                     return Some(Err(DbError::InvalidQuery("expected document".into())));
                 }
             };
-            match exec::raw_matches_expr(raw, &predicate) {
+            match predicate.matches(raw) {
                 Ok(true) => Some(Ok(Some(val))),
                 Ok(false) => None,
                 Err(e) => Some(Err(e)),

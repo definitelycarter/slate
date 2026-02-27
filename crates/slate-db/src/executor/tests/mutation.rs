@@ -31,7 +31,7 @@ fn update_writes_merged_doc() {
     let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "score": 70 }];
     let plan = Plan::Update {
         collection: mock_collection(vec![]),
-        mutation: slate_query::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
+        mutation: crate::mutation::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn);
@@ -61,7 +61,7 @@ fn update_unchanged_skips_write() {
     let docs = vec![rawdoc! { "_id": "1", "name": "Alice", "status": "active" }];
     let plan = Plan::Update {
         collection: mock_collection(vec![]),
-        mutation: slate_query::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
+        mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn);
@@ -107,7 +107,7 @@ fn replace_writes_replacement() {
     let puts = txn.puts.borrow();
     assert_eq!(puts.len(), 1);
     let written: bson::Document = bson::deserialize_from_slice(puts[0].doc.as_bytes()).unwrap();
-    assert_eq!(written.get_bool("replaced").unwrap(), true);
+    assert!(written.get_bool("replaced").unwrap());
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn full_update_pipeline() {
     let docs = vec![rawdoc! { "_id": "1", "status": "active" }];
     let plan = Plan::Update {
         collection: mock_collection(vec!["status".into()]),
-        mutation: slate_query::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
+        mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn);

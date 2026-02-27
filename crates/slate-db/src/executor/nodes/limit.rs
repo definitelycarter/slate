@@ -14,10 +14,8 @@ pub(crate) fn execute<'a>(
         Some(Ok(Some(RawBson::Array(arr)))) => {
             let take_n = take.unwrap_or(usize::MAX);
             let mut buf = RawArrayBuf::new();
-            for elem in arr.into_iter().skip(skip).take(take_n) {
-                if let Ok(val) = elem {
-                    exec::push_raw(&mut buf, val);
-                }
+            for val in arr.into_iter().skip(skip).take(take_n).flatten() {
+                exec::push_raw(&mut buf, val);
             }
             Ok(Box::new(std::iter::once(Ok(Some(RawBson::Array(buf))))))
         }

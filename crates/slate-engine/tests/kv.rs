@@ -1,7 +1,5 @@
-use std::i64;
-
 use bson::raw::RawBsonRef;
-use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -280,12 +278,12 @@ fn put_maintains_index() {
     assert_eq!(all.len(), 3);
 
     // Eq scan for age=25 should match 2.
-    let age_25 = BsonValue::from_raw_bson_ref(RawBsonRef::Int32(25)).unwrap();
+    let age_25 = bson::Bson::Int32(25);
     let entries: Vec<_> = txn
         .scan_index(
             &handle,
             "age",
-            IndexRange::Eq(&age_25.to_vec()),
+            IndexRange::Eq(&age_25),
             false,
             i64::MIN,
         )

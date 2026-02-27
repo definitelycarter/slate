@@ -21,6 +21,7 @@ pub trait Store {
     fn delete_range(&self, cf: &str, range: impl RangeBounds<Vec<u8>>) -> Result<(), StoreError>;
 }
 
+#[allow(clippy::type_complexity)]
 pub trait Transaction {
     /// Backend-specific column family handle.
     /// Must be cheaply cloneable (all backends use Arc-based handles).

@@ -4,7 +4,7 @@ use crate::planner::plan::{IndexScanRange, Node, Plan, ScanDirection};
 use bson::raw::RawDocumentBuf;
 use bson::rawdoc;
 use slate_engine::{
-    BsonValue, Catalog, CollectionHandle, EngineError, EngineTransaction, IndexEntry, IndexRange,
+    Catalog, CollectionHandle, EngineError, EngineTransaction, IndexEntry, IndexRange,
 };
 use slate_query::{Sort, SortDirection};
 use std::cell::RefCell;
@@ -64,7 +64,7 @@ impl EngineTransaction for NoopTransaction {
         _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
+        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
     > {
         panic!("NoopTransaction::scan called");
@@ -77,7 +77,7 @@ impl EngineTransaction for NoopTransaction {
         _range: IndexRange<'_>,
         _reverse: bool,
         _ttl: i64,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
     {
         panic!("NoopTransaction::scan_index called");
     }
@@ -166,7 +166,7 @@ impl EngineTransaction for MockTransaction {
         _handle: &CollectionHandle<Self::Cf>,
         _ttl: i64,
     ) -> Result<
-        Box<dyn Iterator<Item = Result<(BsonValue<'a>, RawDocumentBuf), EngineError>> + 'a>,
+        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
     > {
         Ok(Box::new(std::iter::empty()))
@@ -179,7 +179,7 @@ impl EngineTransaction for MockTransaction {
         _range: IndexRange<'_>,
         _reverse: bool,
         _ttl: i64,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry<'a>, EngineError>> + 'a>, EngineError>
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
     {
         Ok(Box::new(std::iter::empty()))
     }

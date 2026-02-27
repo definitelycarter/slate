@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bson::raw::RawBsonRef;
-use slate_engine::{BsonValue, Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -107,9 +107,9 @@ fn put_overwrite_changed_value_replaces_entry() {
     assert_eq!(count_index(&txn, &handle, "name"), 1);
 
     // Verify it's "Bob", not "Alice".
-    let bob = BsonValue::from_raw_bson_ref(RawBsonRef::String("Bob")).unwrap();
+    let bob = bson::Bson::String("Bob".to_string());
     let entries: Vec<_> = txn
-        .scan_index(&handle, "name", IndexRange::Eq(&bob.to_vec()), false, i64::MIN)
+        .scan_index(&handle, "name", IndexRange::Eq(&bob), false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -392,9 +392,9 @@ fn array_multikey_multiple_docs() {
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 4);
 
     // EQ scan for "rust" should match both docs.
-    let rust = BsonValue::from_raw_bson_ref(RawBsonRef::String("rust")).unwrap();
+    let rust = bson::Bson::String("rust".to_string());
     let entries: Vec<_> = txn
-        .scan_index(&handle, "tags.[]", IndexRange::Eq(&rust.to_vec()), false, i64::MIN)
+        .scan_index(&handle, "tags.[]", IndexRange::Eq(&rust), false, i64::MIN)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();

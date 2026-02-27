@@ -4,8 +4,6 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::executor::exec;
-
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
@@ -21,7 +19,11 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             _ => return Ok(None),
         };
 
-        if exec::extract_doc_id(old_raw)?.is_none() {
+        let has_id = old_raw
+            .get("_id")
+            .map_err(|e| DbError::Serialization(e.to_string()))?
+            .is_some();
+        if !has_id {
             return Err(DbError::InvalidQuery("missing _id".into()));
         }
 
