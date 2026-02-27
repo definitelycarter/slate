@@ -12,8 +12,7 @@ slate/
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
   ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
   ├── slate-db               → Filter parser, expression tree, query planner + executor
-  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
-  └── slate-store-bench      → Store-level stress test (500k records, race conditions, data integrity)
+  └── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
@@ -301,4 +300,3 @@ For index-covered queries, the index value is carried directly as `RawBson` — 
 - **Priority-based index selection** — `CollectionConfig.indexes` order determines which index is preferred for AND groups.
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
-

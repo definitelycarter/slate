@@ -1203,15 +1203,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "slate-store-bench"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.5",
- "slate-store",
- "tempfile",
-]
-
-[[package]]
 name = "slate-uniffi"
 version = "0.1.0"
 dependencies = [

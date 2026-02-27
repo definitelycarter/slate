@@ -20,8 +20,7 @@ slate/
   ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
   ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
   ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
-  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
-  └── slate-store-bench      → Store-level benchmark suite (raw read/write throughput)
+  └─── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
 ```
 
 ## Quick Start
