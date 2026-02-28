@@ -17,7 +17,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: RawIter<'a>,
-    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -42,7 +41,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .expect("_id was just ensured");
 
-        let old_doc = txn.get(&handle, &raw_id, now_millis)?;
+        let old_doc = txn.get(&handle, &raw_id)?;
 
         if let Some(ref old_raw_doc) = old_doc {
             let written = build_doc(&mode, &new_doc, old_raw_doc)?;
@@ -57,7 +56,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             txn.put(&handle, &written)?;
             Ok(Some(RawBson::Document(written)))
         } else {
-            txn.put_nx(&handle, &new_doc, now_millis)?;
+            txn.put_nx(&handle, &new_doc)?;
             Ok(Some(RawBson::Document(new_doc)))
         }
     })))

@@ -1,5 +1,3 @@
-use std::i64;
-
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -53,7 +51,7 @@ fn bench_get(c: &mut Criterion) {
                 let handle = txn.collection("bench").unwrap();
                 let mut found = 0usize;
                 for id in ids {
-                    if txn.get(&handle, &RawBsonRef::String(id), i64::MIN).unwrap().is_some() {
+                    if txn.get(&handle, &RawBsonRef::String(id)).unwrap().is_some() {
                         found += 1;
                     }
                 }
@@ -76,7 +74,7 @@ fn bench_scan(c: &mut Criterion) {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
-                let count = txn.scan(&handle, i64::MIN).unwrap().count();
+                let count = txn.scan(&handle).unwrap().count();
                 txn.rollback().unwrap();
                 count
             })
@@ -98,7 +96,7 @@ fn bench_index_scan_eq(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
                 let count = txn
-                    .scan_index(&handle, "status", IndexRange::Eq(&active), false, i64::MIN)
+                    .scan_index(&handle, "status", IndexRange::Eq(&active), false)
                     .unwrap()
                     .count();
                 txn.rollback().unwrap();
@@ -119,7 +117,7 @@ fn bench_index_scan_full(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let handle = txn.collection("bench").unwrap();
                 let count = txn
-                    .scan_index(&handle, "age", IndexRange::Full, false, i64::MIN)
+                    .scan_index(&handle, "age", IndexRange::Full, false)
                     .unwrap()
                     .count();
                 txn.rollback().unwrap();
@@ -150,7 +148,6 @@ fn bench_index_scan_range(c: &mut Criterion) {
                             upper: Some((&upper, false)),
                         },
                         false,
-                        i64::MIN,
                     )
                     .unwrap()
                     .count();
@@ -220,7 +217,7 @@ fn bench_put_nx(c: &mut Criterion) {
                     let txn = engine.begin(false).unwrap();
                     let handle = txn.collection("bench").unwrap();
                     for doc in &docs {
-                        txn.put_nx(&handle, doc, i64::MIN).unwrap();
+                        txn.put_nx(&handle, doc).unwrap();
                     }
                 },
                 BatchSize::PerIteration,

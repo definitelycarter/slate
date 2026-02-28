@@ -42,7 +42,7 @@ impl<S: Store> Database<S> {
 
     /// Purge expired documents from a collection.
     pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
-        let mut txn = self.begin(false)?;
+        let txn = self.begin(false)?;
         let deleted = txn.purge_expired(collection)?;
         txn.commit()?;
         Ok(deleted)
@@ -84,12 +84,6 @@ pub struct Transaction<'db, S: Store + 'db> {
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
-    /// Construct a `Transaction` from a raw engine transaction.
-    /// Used internally by the sweep module.
-    pub(crate) fn from_engine_txn(txn: <KvEngine<S> as Engine>::Txn<'db>) -> Self {
-        Self { txn }
-    }
-
     // ── Insert operations ───────────────────────────────────────
 
     /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
@@ -333,24 +327,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── TTL operations ──────────────────────────────────────────
 
     /// Purge expired documents from a collection.
-    pub fn purge_expired(&mut self, collection: &str) -> Result<u64, DbError> {
-        let filter_doc = bson::rawdoc! { "ttl": { "$lt": bson::DateTime::now() } };
-        let predicate = Self::parse_required_filter(&filter_doc)?;
-        let stmt = Statement::Delete {
-            collection,
-            predicate,
-            limit: None,
-        };
-        let plan = self.plan(stmt)?;
-        // Use no-TTL-filter executor so the delete pipeline can read expired docs
-        let exec = executor::Executor::new_no_ttl_filter(&self.txn);
-        let iter = exec.execute(plan)?;
-        let mut deleted = 0u64;
-        for result in iter {
-            result?;
-            deleted += 1;
-        }
-        Ok(deleted)
+    pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
+        let handle = self.txn.collection(collection)?;
+        Ok(self.txn.purge(&handle)?)
     }
 
     // ── Index operations ────────────────────────────────────────

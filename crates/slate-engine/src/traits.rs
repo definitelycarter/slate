@@ -36,12 +36,11 @@ pub trait EngineTransaction {
     // ── Document operations ────────────────────────────────────
 
     /// Fetch a document by `_id`. Constructs the internal key encoding
-    /// from the raw BSON reference.
+    /// from the raw BSON reference. Expired documents are filtered internally.
     fn get(
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc_id: &RawBsonRef<'_>,
-        ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError>;
 
     /// Insert or overwrite a document, extracting `_id` internally.
@@ -52,12 +51,11 @@ pub trait EngineTransaction {
     ) -> Result<(), EngineError>;
 
     /// Insert a document if no existing doc with the same `_id` exists.
-    /// Extracts `_id` internally.
+    /// Treats expired documents as absent. Extracts `_id` internally.
     fn put_nx(
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        ttl: i64,
     ) -> Result<(), EngineError>;
 
     /// Delete a document by `_id`. Constructs the internal key encoding
@@ -68,10 +66,11 @@ pub trait EngineTransaction {
         doc_id: &RawBsonRef<'_>,
     ) -> Result<(), EngineError>;
 
+    /// Scan all live documents in a collection. Expired documents are
+    /// filtered internally.
     fn scan<'a>(
         &'a self,
         handle: &CollectionHandle<Self::Cf>,
-        ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
@@ -79,14 +78,28 @@ pub trait EngineTransaction {
 
     // ── Index operations ───────────────────────────────────────
 
+    /// Scan an index, returning entries in sort order. Expired entries
+    /// are filtered internally.
     fn scan_index<'a>(
         &'a self,
         handle: &CollectionHandle<Self::Cf>,
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
-        ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>;
+
+    // ── Purge ──────────────────────────────────────────────────
+
+    /// Physically delete all expired documents and their index entries.
+    /// Uses the engine's internal clock.
+    fn purge(&self, handle: &CollectionHandle<Self::Cf>) -> Result<u64, EngineError>;
+
+    /// Physically delete documents expired before `as_of_millis`.
+    fn purge_before(
+        &self,
+        handle: &CollectionHandle<Self::Cf>,
+        as_of_millis: i64,
+    ) -> Result<u64, EngineError>;
 
     // ── Lifecycle ──────────────────────────────────────────────
 

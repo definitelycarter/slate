@@ -29,7 +29,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc_id: &bson::raw::RawBsonRef<'_>,
-        _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         panic!("NoopTransaction::get called");
     }
@@ -46,7 +45,6 @@ impl EngineTransaction for NoopTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc: &bson::RawDocument,
-        _ttl: i64,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::put_nx called");
     }
@@ -62,7 +60,6 @@ impl EngineTransaction for NoopTransaction {
     fn scan<'a>(
         &'a self,
         _handle: &CollectionHandle<Self::Cf>,
-        _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
@@ -76,10 +73,17 @@ impl EngineTransaction for NoopTransaction {
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
-        _ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
     {
         panic!("NoopTransaction::scan_index called");
+    }
+
+    fn purge(&self, _handle: &CollectionHandle<Self::Cf>) -> Result<u64, EngineError> {
+        panic!("NoopTransaction::purge called");
+    }
+
+    fn purge_before(&self, _handle: &CollectionHandle<Self::Cf>, _as_of_millis: i64) -> Result<u64, EngineError> {
+        panic!("NoopTransaction::purge_before called");
     }
 
     fn commit(self) -> Result<(), EngineError> {
@@ -123,7 +127,6 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         _doc_id: &bson::raw::RawBsonRef<'_>,
-        _ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         Ok(None)
     }
@@ -143,7 +146,6 @@ impl EngineTransaction for MockTransaction {
         &self,
         _handle: &CollectionHandle<Self::Cf>,
         doc: &bson::RawDocument,
-        _ttl: i64,
     ) -> Result<(), EngineError> {
         self.puts.borrow_mut().push(PutRecord {
             doc: doc.to_owned(),
@@ -164,7 +166,6 @@ impl EngineTransaction for MockTransaction {
     fn scan<'a>(
         &'a self,
         _handle: &CollectionHandle<Self::Cf>,
-        _ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
         EngineError,
@@ -178,10 +179,17 @@ impl EngineTransaction for MockTransaction {
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
-        _ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
     {
         Ok(Box::new(std::iter::empty()))
+    }
+
+    fn purge(&self, _handle: &CollectionHandle<Self::Cf>) -> Result<u64, EngineError> {
+        Ok(0)
+    }
+
+    fn purge_before(&self, _handle: &CollectionHandle<Self::Cf>, _as_of_millis: i64) -> Result<u64, EngineError> {
+        Ok(0)
     }
 
     fn commit(self) -> Result<(), EngineError> {

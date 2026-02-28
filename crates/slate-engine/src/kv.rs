@@ -1,10 +1,13 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use slate_store::{Store, StoreError, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
+use crate::encoding::index_record::is_index_expired;
 use crate::encoding::{IndexRecord, Key, KeyPrefix, Record};
 use crate::error::EngineError;
 use crate::index_sync::{IndexChanges, IndexDiff};
@@ -16,17 +19,35 @@ use crate::validate::validate_raw_document;
 pub const SYS_CF: &str = "_sys_";
 const DEFAULT_CF: &str = "default_cf";
 
+fn default_clock() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
 // ── KvEngine ───────────────────────────────────────────────────
 
 pub struct KvEngine<S> {
     store: S,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl<S: Store> KvEngine<S> {
     pub fn new(store: S) -> Self {
-        // Ensure _sys_ CF exists.
         let _ = store.create_cf(SYS_CF);
-        Self { store }
+        Self {
+            store,
+            clock: Arc::new(default_clock),
+        }
+    }
+
+    pub fn with_clock(store: S, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        let _ = store.create_cf(SYS_CF);
+        Self {
+            store,
+            clock: Arc::new(clock),
+        }
     }
 }
 
@@ -37,13 +58,15 @@ impl<S: Store> crate::traits::Engine for KvEngine<S> {
         S: 'a;
 
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, EngineError> {
+        let now_millis = (self.clock)();
         let txn = self.store.begin(read_only)?;
-        Ok(KvTransaction { txn })
+        Ok(KvTransaction { txn, now_millis })
     }
 }
 
 pub struct KvTransaction<'a, S: Store + 'a> {
     txn: S::Txn<'a>,
+    now_millis: i64,
 }
 
 impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
@@ -53,14 +76,13 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc_id: &RawBsonRef<'_>,
-        ttl: i64,
     ) -> Result<Option<RawDocumentBuf>, EngineError> {
         let doc_id = BsonValue::from_raw_bson_ref(*doc_id)
             .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?;
         let encoded = Key::encode_record_key(&handle.name, &doc_id);
         match self.txn.get(&handle.cf, &encoded)? {
             None => Ok(None),
-            Some(data) if Record::is_expired(&data, ttl) => Ok(None),
+            Some(data) if Record::is_expired(&data, self.now_millis) => Ok(None),
             Some(data) => Ok(Some(RawDocumentBuf::try_from(Record::from_bytes(data)?)?)),
         }
     }
@@ -98,7 +120,6 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         &self,
         handle: &CollectionHandle<Self::Cf>,
         doc: &RawDocument,
-        ttl: i64,
     ) -> Result<(), EngineError> {
         let doc_id = match doc.get("_id") {
             Ok(Some(val)) => BsonValue::from_raw_bson_ref(val)
@@ -112,7 +133,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let old_data = self.txn.get(&handle.cf, &encoded_key)?;
 
         if let Some(ref data) = old_data
-            && !Record::is_expired(data, ttl)
+            && !Record::is_expired(data, self.now_millis)
         {
             return Err(EngineError::DuplicateKey(doc_id.to_string()));
         }
@@ -158,17 +179,17 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     fn scan<'b>(
         &'b self,
         handle: &CollectionHandle<Self::Cf>,
-        ttl: i64,
     ) -> Result<
         Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'b>,
         EngineError,
     > {
+        let now = self.now_millis;
         let prefix = KeyPrefix::Record(Cow::Borrowed(&handle.name)).encode();
         let iter = self.txn.scan_prefix(&handle.cf, &prefix)?;
         Ok(Box::new(iter.filter_map(move |result| match result {
             Err(e) => Some(Err(EngineError::Store(e))),
             Ok((_key_bytes, value_bytes)) => {
-                if Record::is_expired(&value_bytes, ttl) {
+                if Record::is_expired(&value_bytes, now) {
                     return None;
                 }
                 match Record::from_bytes(value_bytes)
@@ -187,9 +208,9 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
-        ttl: i64,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError>
     {
+        let ttl = self.now_millis;
         let collection = &handle.name;
 
         // Build scan prefix based on range type.
@@ -314,6 +335,56 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             done = true;
             None
         })))
+    }
+
+    fn purge(&self, handle: &CollectionHandle<Self::Cf>) -> Result<u64, EngineError> {
+        self.purge_before(handle, self.now_millis)
+    }
+
+    fn purge_before(
+        &self,
+        handle: &CollectionHandle<Self::Cf>,
+        as_of_millis: i64,
+    ) -> Result<u64, EngineError> {
+        let ttl_prefix =
+            KeyPrefix::IndexField(Cow::Borrowed(&handle.name), Cow::Borrowed("ttl")).encode();
+        let iter = self.txn.scan_prefix(&handle.cf, &ttl_prefix)?;
+
+        // Collect expired doc_ids. TTL index entries are sorted chronologically,
+        // so we can stop as soon as we hit a non-expired entry.
+        let mut expired_ids: Vec<BsonValue<'static>> = Vec::new();
+        for result in iter {
+            let (key_bytes, metadata_bytes) = result?;
+            if !is_index_expired(&metadata_bytes, as_of_millis) {
+                break;
+            }
+            let Some(record) = IndexRecord::from_pair(key_bytes, metadata_bytes) else {
+                continue;
+            };
+            let id = record.doc_id();
+            expired_ids.push(BsonValue {
+                tag: id.tag,
+                bytes: Cow::Owned(id.bytes.into_owned()),
+            });
+        }
+
+        let mut deleted = 0u64;
+        for doc_id in &expired_ids {
+            let encoded = Key::encode_record_key(&handle.name, doc_id);
+            let old_data = self.txn.get(&handle.cf, &encoded)?;
+            if let Some(ref data) = old_data {
+                let changes = IndexDiff::for_delete(doc_id)
+                    .with_old_record(Some(data.as_slice()))
+                    .with_property_paths(&handle.indexes)
+                    .with_property_path("ttl")
+                    .diff(&handle.name)?;
+                self.apply_index_changes(&handle.cf, &changes)?;
+                self.txn.delete(&handle.cf, &encoded)?;
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
     }
 
     fn commit(self) -> Result<(), EngineError> {

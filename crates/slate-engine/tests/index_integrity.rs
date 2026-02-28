@@ -1,4 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use bson::raw::RawBsonRef;
 use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
@@ -14,16 +15,9 @@ fn count_index<Txn: EngineTransaction>(
     handle: &slate_engine::CollectionHandle<Txn::Cf>,
     field: &str,
 ) -> usize {
-    txn.scan_index(handle, field, IndexRange::Full, false, i64::MIN)
+    txn.scan_index(handle, field, IndexRange::Full, false)
         .unwrap()
         .count()
-}
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
 }
 
 // ── put_nx creates index entries ────────────────────────────
@@ -37,7 +31,7 @@ fn put_nx_creates_index_entries() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
-    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -55,7 +49,7 @@ fn put_nx_no_indexed_field_creates_no_entries() {
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "age": 30 };
-    txn.put_nx(&handle, &doc, i64::MIN).unwrap();
+    txn.put_nx(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -109,7 +103,7 @@ fn put_overwrite_changed_value_replaces_entry() {
     // Verify it's "Bob", not "Alice".
     let bob = bson::Bson::String("Bob".to_string());
     let entries: Vec<_> = txn
-        .scan_index(&handle, "name", IndexRange::Eq(&bob), false, i64::MIN)
+        .scan_index(&handle, "name", IndexRange::Eq(&bob), false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -394,7 +388,7 @@ fn array_multikey_multiple_docs() {
     // EQ scan for "rust" should match both docs.
     let rust = bson::Bson::String("rust".to_string());
     let entries: Vec<_> = txn
-        .scan_index(&handle, "tags.[]", IndexRange::Eq(&rust), false, i64::MIN)
+        .scan_index(&handle, "tags.[]", IndexRange::Eq(&rust), false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -435,13 +429,19 @@ fn nested_array_objects_multikey() {
 
 #[test]
 fn ttl_expired_doc_hidden_from_index_scan() {
-    let engine = engine();
+    // Use a controllable clock so the engine sees the doc as expired.
+    let clock = Arc::new(AtomicI64::new(2_000_000)); // well after the TTL
+    let clock2 = clock.clone();
+    let engine = KvEngine::with_clock(MemoryStore::new(), move || {
+        clock2.load(Ordering::Relaxed)
+    });
+
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(None, "c").unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let expired_dt = bson::DateTime::from_millis(1_000_000); // long past
+    let expired_dt = bson::DateTime::from_millis(1_000_000); // before the clock
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "ttl": expired_dt };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
@@ -450,17 +450,16 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     let handle = txn.collection("c").unwrap();
 
     // Index entries carry TTL in metadata — expired entries are filtered
-    // during scan_index.
-    let now = now_millis();
+    // during scan_index using the engine's internal clock.
     let entries: Vec<_> = txn
-        .scan_index(&handle, "name", IndexRange::Full, false, now)
+        .scan_index(&handle, "name", IndexRange::Full, false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(entries.len(), 0);
 
     // The document itself is also expired via get().
-    let doc = txn.get(&handle, &bson::raw::RawBsonRef::String("a"), now).unwrap();
+    let doc = txn.get(&handle, &bson::raw::RawBsonRef::String("a")).unwrap();
     assert!(doc.is_none());
 
     txn.rollback().unwrap();
@@ -468,7 +467,13 @@ fn ttl_expired_doc_hidden_from_index_scan() {
 
 #[test]
 fn ttl_unexpired_doc_visible_in_index_scan() {
-    let engine = engine();
+    // Use a controllable clock set before the TTL expiry.
+    let clock = Arc::new(AtomicI64::new(1_000));
+    let clock2 = clock.clone();
+    let engine = KvEngine::with_clock(MemoryStore::new(), move || {
+        clock2.load(Ordering::Relaxed)
+    });
+
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(None, "c").unwrap();
     txn.create_index("c", "name").unwrap();
@@ -482,9 +487,8 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let now = now_millis();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "name", IndexRange::Full, false, now)
+        .scan_index(&handle, "name", IndexRange::Full, false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -507,9 +511,8 @@ fn ttl_no_ttl_field_always_visible() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("c").unwrap();
 
-    let now = now_millis();
     let entries: Vec<_> = txn
-        .scan_index(&handle, "name", IndexRange::Full, false, now)
+        .scan_index(&handle, "name", IndexRange::Full, false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();

@@ -4,10 +4,8 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use slate_engine::{Engine, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
 use slate_store::Store;
-
-use crate::database::Transaction;
 
 pub(crate) struct TtlHandle {
     shutdown: Arc<AtomicBool>,
@@ -56,26 +54,33 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
             }
             let collections = {
                 let txn = match engine.begin(true) {
-                    Ok(t) => Transaction::from_engine_txn(t),
+                    Ok(t) => t,
                     Err(_) => continue,
                 };
-                let names = match txn.list_collections() {
-                    Ok(n) => n,
+                let configs = match txn.list_collections() {
+                    Ok(c) => c,
                     Err(_) => {
                         let _ = txn.rollback();
                         continue;
                     }
                 };
+                let names: Vec<String> = configs.into_iter().map(|c| c.name).collect();
                 let _ = txn.rollback();
                 names
             };
             for col in &collections {
                 let txn = match engine.begin(false) {
-                    Ok(t) => Transaction::from_engine_txn(t),
+                    Ok(t) => t,
                     Err(_) => continue,
                 };
-                let mut txn = txn;
-                match txn.purge_expired(col) {
+                let handle = match txn.collection(col) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        let _ = txn.rollback();
+                        continue;
+                    }
+                };
+                match txn.purge(&handle) {
                     Ok(_) => {
                         let _ = txn.commit();
                     }

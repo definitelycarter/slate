@@ -8,7 +8,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,
-    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     // IndexScan/IndexMerge path: extract _id, fetch full record
     Ok(Box::new(source.filter_map(move |result| {
@@ -28,7 +27,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             },
             other => other.as_raw_bson_ref(),
         };
-        match txn.get(&handle, &raw_ref, now_millis) {
+        match txn.get(&handle, &raw_ref) {
             Ok(Some(doc)) => Some(Ok(Some(RawBson::Document(doc)))),
             Ok(None) => None,
             Err(e) => Some(Err(DbError::from(e))),

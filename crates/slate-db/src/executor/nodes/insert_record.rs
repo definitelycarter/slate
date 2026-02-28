@@ -7,7 +7,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,
-    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -33,7 +32,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             doc.append(bson::cstr!("_id"), oid);
         }
 
-        txn.put_nx(&handle, &doc, now_millis)?;
+        txn.put_nx(&handle, &doc)?;
         Ok(Some(RawBson::Document(doc)))
     })))
 }

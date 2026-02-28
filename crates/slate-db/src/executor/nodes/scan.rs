@@ -7,9 +7,8 @@ use crate::executor::RawIter;
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
-    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
-    let iter = txn.scan(&handle, now_millis)?;
+    let iter = txn.scan(&handle)?;
 
     Ok(Box::new(iter.map(|result| match result {
         Ok(doc) => Ok(Some(RawBson::Document(doc))),

@@ -28,7 +28,6 @@ fn raw_bson_as_i64(val: &RawBson) -> Option<i64> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,
     handle: CollectionHandle<T::Cf>,
@@ -37,7 +36,6 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     direction: ScanDirection,
     limit: Option<usize>,
     covered: bool,
-    now_millis: i64,
 ) -> Result<RawIter<'a>, DbError> {
     // For Eq with numeric types (Int32/Int64), use a full field scan with post-filter
     // to handle cross-type matching (e.g. query Int64(100) matching stored Int32(100)).
@@ -82,7 +80,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
 
     let field_cstr = bson::raw::CString::try_from(field.as_str())
         .map_err(|e| DbError::InvalidQuery(format!("invalid field name: {e}")))?;
-    let mut iter = txn.scan_index(&handle, &field, engine_range, reverse, now_millis)?;
+    let mut iter = txn.scan_index(&handle, &field, engine_range, reverse)?;
     let mut count = 0usize;
     let mut done = false;
 

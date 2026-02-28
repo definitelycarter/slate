@@ -25,23 +25,11 @@ pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>>
 /// ```
 pub struct Executor<'a, T: EngineTransaction> {
     txn: &'a T,
-    now_millis: i64,
 }
 
 impl<'a, T: EngineTransaction> Executor<'a, T> {
     pub fn new(txn: &'a T) -> Self {
-        Self {
-            txn,
-            now_millis: bson::DateTime::now().timestamp_millis(),
-        }
-    }
-
-    /// Create an executor that skips TTL filtering.
-    pub fn new_no_ttl_filter(txn: &'a T) -> Self {
-        Self {
-            txn,
-            now_millis: i64::MIN,
-        }
+        Self { txn }
     }
 
     /// Execute a plan, returning a streaming iterator of rows.
@@ -51,7 +39,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
 
             Plan::Insert { collection, source } => {
                 let source = self.execute_node(source)?;
-                nodes::insert_record::execute(self.txn, collection, source, self.now_millis)
+                nodes::insert_record::execute(self.txn, collection, source)
             }
 
             Plan::Update {
@@ -84,7 +72,6 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                     collection,
                     nodes::upsert::UpsertMode::Merge,
                     source,
-                    self.now_millis,
                 )
             }
 
@@ -95,7 +82,6 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                     collection,
                     nodes::upsert::UpsertMode::Replace,
                     source,
-                    self.now_millis,
                 )
             }
         }
@@ -105,9 +91,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
 
-            Node::Scan { collection } => {
-                nodes::scan::execute(self.txn, collection, self.now_millis)
-            }
+            Node::Scan { collection } => nodes::scan::execute(self.txn, collection),
 
             Node::IndexScan {
                 collection,
@@ -124,7 +108,6 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                 direction,
                 limit,
                 covered,
-                self.now_millis,
             ),
 
             Node::IndexMerge { logical, lhs, rhs } => {
@@ -135,7 +118,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
 
             Node::KeyLookup { collection, source } => {
                 let source = self.execute_node(*source)?;
-                nodes::read_record::execute(self.txn, collection, source, self.now_millis)
+                nodes::read_record::execute(self.txn, collection, source)
             }
 
             Node::Filter { predicate, source } => {
