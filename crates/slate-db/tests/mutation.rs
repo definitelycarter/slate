@@ -664,6 +664,7 @@ fn mutation_index_maintained_on_set() {
     txn.create_collection(&CollectionConfig {
         name: "idx_mut".to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(
@@ -723,6 +724,7 @@ fn mutation_index_maintained_on_unset() {
     txn.create_collection(&CollectionConfig {
         name: "idx_unset".to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(

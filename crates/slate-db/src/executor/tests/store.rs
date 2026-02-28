@@ -11,6 +11,7 @@ fn seeded_db() -> Database<MemoryStore> {
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         indexes: vec!["status".into(), "score".into()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -44,7 +45,7 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     {
         let mut txn = engine.begin(false).unwrap();
-        txn.create_collection(None, "test").unwrap();
+        txn.create_collection("test", &Default::default()).unwrap();
         txn.create_index("test", "status").unwrap();
         txn.create_index("test", "score").unwrap();
         txn.create_index("test", "ttl").unwrap();

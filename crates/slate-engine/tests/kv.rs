@@ -1,5 +1,5 @@
 use bson::raw::RawBsonRef;
-use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, CollectionHandle, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -12,10 +12,10 @@ fn engine() -> KvEngine<MemoryStore> {
 fn create_and_list_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let configs = txn.list_collections().unwrap();
     assert_eq!(configs.len(), 1);
-    assert_eq!(configs[0].name, "users");
+    assert_eq!(configs[0].name(), "users");
     txn.commit().unwrap();
 }
 
@@ -32,8 +32,8 @@ fn collection_not_found() {
 fn create_collection_idempotent() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let configs = txn.list_collections().unwrap();
     assert_eq!(configs.len(), 1);
     txn.commit().unwrap();
@@ -43,7 +43,7 @@ fn create_collection_idempotent() {
 fn drop_collection_removes_metadata() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.drop_collection("users").unwrap();
     let configs = txn.list_collections().unwrap();
     assert_eq!(configs.len(), 0);
@@ -64,7 +64,7 @@ fn drop_nonexistent_collection_is_noop() {
 fn put_get_roundtrip() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice", "name": "Alice" };
@@ -83,7 +83,7 @@ fn put_get_roundtrip() {
 fn get_missing_returns_none() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let id = RawBsonRef::String("missing");
@@ -95,7 +95,7 @@ fn get_missing_returns_none() {
 fn put_overwrite() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let id = RawBsonRef::String("alice");
@@ -116,7 +116,7 @@ fn put_overwrite() {
 fn delete_removes_document() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let id = RawBsonRef::String("alice");
@@ -135,7 +135,7 @@ fn delete_removes_document() {
 fn scan_returns_all_documents() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     for i in 0..3 {
@@ -162,7 +162,7 @@ fn scan_returns_all_documents() {
 fn drop_collection_removes_records() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice" };
@@ -175,7 +175,7 @@ fn drop_collection_removes_records() {
 
     // Recreate and verify empty.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
     let results: Vec<_> = txn
         .scan(&handle)
@@ -192,7 +192,7 @@ fn drop_collection_removes_records() {
 fn create_index_backfills_existing_records() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     // Insert docs before index exists.
@@ -207,7 +207,7 @@ fn create_index_backfills_existing_records() {
     txn.create_index("users", "email").unwrap();
 
     let handle = txn.collection("users").unwrap();
-    assert!(handle.indexes.contains(&"email".to_string()));
+    assert!(handle.indexes().contains(&"email".to_string()));
 
     let entries: Vec<_> = txn
         .scan_index(&handle, "email", IndexRange::Full, false)
@@ -222,7 +222,7 @@ fn create_index_backfills_existing_records() {
 fn drop_index_removes_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
@@ -238,7 +238,7 @@ fn drop_index_removes_entries() {
     // Verify index is gone from config.
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    assert!(!handle.indexes.contains(&"email".to_string()));
+    assert!(!handle.indexes().contains(&"email".to_string()));
 
     // Verify no index entries remain.
     let entries: Vec<_> = txn
@@ -254,7 +254,7 @@ fn drop_index_removes_entries() {
 fn put_maintains_index() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "age").unwrap();
     let handle = txn.collection("users").unwrap();
 
@@ -297,7 +297,7 @@ fn put_maintains_index() {
 fn put_overwrite_updates_index() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "email").unwrap();
     let handle = txn.collection("users").unwrap();
 
@@ -328,7 +328,7 @@ fn put_overwrite_updates_index() {
 fn delete_removes_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "email").unwrap();
     let handle = txn.collection("users").unwrap();
 
@@ -358,7 +358,7 @@ fn delete_removes_index_entries() {
 fn drop_collection_removes_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
@@ -373,7 +373,7 @@ fn drop_collection_removes_index_entries() {
 
     // Recreate and verify no index entries leak.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "email").unwrap();
     let handle = txn.collection("users").unwrap();
     let entries: Vec<_> = txn
@@ -393,7 +393,7 @@ fn stale_handle_misses_index_on_put() {
 
     // Setup: create collection, no indexes.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.commit().unwrap();
 
     // Another transaction creates an index and commits.
@@ -401,13 +401,19 @@ fn stale_handle_misses_index_on_put() {
     txn2.create_index("users", "email").unwrap();
     txn2.commit().unwrap();
 
-    // Simulate a stale handle: resolve the collection fresh (loads CF into
-    // the snapshot) but replace indexes with an empty vec — as if this handle
-    // had been resolved before the index existed.
+    // Simulate a stale handle: resolve the collection to get the CF, then
+    // construct a new handle with empty indexes — as if resolved before the
+    // index existed.
     let txn3 = engine.begin(false).unwrap();
-    let mut stale_handle = txn3.collection("users").unwrap();
-    assert!(stale_handle.indexes.contains(&"email".to_string()));
-    stale_handle.indexes.clear(); // simulate stale snapshot
+    let fresh_handle = txn3.collection("users").unwrap();
+    assert!(fresh_handle.indexes().contains(&"email".to_string()));
+    let stale_handle = CollectionHandle::new(
+        "users".to_string(),
+        fresh_handle.cf().clone(),
+        vec![],
+        "_id".to_string(),
+        "ttl".to_string(),
+    );
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
     txn3.put(&stale_handle, &doc).unwrap();
@@ -416,7 +422,7 @@ fn stale_handle_misses_index_on_put() {
     // Verify: the record exists but the index entry is missing.
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("users").unwrap();
-    assert!(handle.indexes.contains(&"email".to_string()));
+    assert!(handle.indexes().contains(&"email".to_string()));
     assert!(txn.get(&handle, &RawBsonRef::String("a")).unwrap().is_some());
 
     let entries: Vec<_> = txn
@@ -435,7 +441,7 @@ fn stale_handle_misses_index_on_put() {
 fn commit_persists_across_transactions() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     let handle = txn.collection("users").unwrap();
     let doc = bson::rawdoc! { "_id": "alice" };
     txn.put(&handle, &doc).unwrap();
@@ -455,7 +461,7 @@ fn commit_persists_across_transactions() {
 fn rollback_discards_changes() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(false).unwrap();
@@ -480,7 +486,7 @@ fn rollback_discards_changes() {
 fn put_get_string_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let id = RawBsonRef::String("hello");
@@ -496,7 +502,7 @@ fn put_get_string_id() {
 fn put_get_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -513,7 +519,7 @@ fn put_get_objectid_id() {
 fn put_get_i32_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let id = RawBsonRef::Int32(42);
@@ -529,7 +535,7 @@ fn put_get_i32_id() {
 fn put_get_i64_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let id = RawBsonRef::Int64(999_999_999_999);
@@ -545,7 +551,7 @@ fn put_get_i64_id() {
 fn put_nx_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -562,7 +568,7 @@ fn put_nx_objectid_id() {
 fn put_nx_i32_id_duplicate_errors() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let doc = bson::rawdoc! { "_id": 7_i32, "v": 1 };
@@ -577,7 +583,7 @@ fn put_nx_i32_id_duplicate_errors() {
 fn delete_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -594,7 +600,7 @@ fn delete_objectid_id() {
 fn scan_mixed_id_types() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     let handle = txn.collection("c").unwrap();
 
     let oid = bson::oid::ObjectId::new();

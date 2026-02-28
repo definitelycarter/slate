@@ -51,6 +51,7 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         indexes: vec!["status".into(), "contacts_count".into()],
+        ..Default::default()
     })
     .unwrap();
     let docs: Vec<bson::Document> = (0..n)
@@ -114,6 +115,7 @@ pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
         indexes: vec!["status".into(), "contacts_count".into()],
+        ..Default::default()
     })
     .unwrap();
     let docs = generate_realistic_batch(n);

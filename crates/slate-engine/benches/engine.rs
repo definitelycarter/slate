@@ -24,7 +24,7 @@ fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
 fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "bench").unwrap();
+    txn.create_collection("bench", &Default::default()).unwrap();
     txn.create_index("bench", "status").unwrap();
     txn.create_index("bench", "age").unwrap();
     let handle = txn.collection("bench").unwrap();
@@ -168,7 +168,7 @@ fn bench_put(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(None, "bench").unwrap();
+            txn.create_collection("bench", &Default::default()).unwrap();
             txn.create_index("bench", "status").unwrap();
             txn.create_index("bench", "age").unwrap();
             txn.commit().unwrap();
@@ -202,7 +202,7 @@ fn bench_put_nx(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(None, "bench").unwrap();
+            txn.create_collection("bench", &Default::default()).unwrap();
             txn.create_index("bench", "status").unwrap();
             txn.create_index("bench", "age").unwrap();
             txn.commit().unwrap();
@@ -321,7 +321,7 @@ fn bench_create_index_backfill(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(None, "bench").unwrap();
+            txn.create_collection("bench", &Default::default()).unwrap();
             let handle = txn.collection("bench").unwrap();
             for doc in generate_docs(n) {
                 txn.put(&handle, &doc).unwrap();

@@ -175,6 +175,7 @@ fn ttl_purge_cleans_user_indexes() {
     txn.create_collection(&CollectionConfig {
         name: "purge_idx".to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(

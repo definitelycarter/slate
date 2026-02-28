@@ -26,7 +26,7 @@ fn count_index<Txn: EngineTransaction>(
 fn put_nx_creates_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -44,7 +44,7 @@ fn put_nx_creates_index_entries() {
 fn put_nx_no_indexed_field_creates_no_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -64,7 +64,7 @@ fn put_nx_no_indexed_field_creates_no_entries() {
 fn put_overwrite_same_value_exactly_one_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -86,7 +86,7 @@ fn put_overwrite_same_value_exactly_one_entry() {
 fn put_overwrite_changed_value_replaces_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -117,7 +117,7 @@ fn put_overwrite_changed_value_replaces_entry() {
 fn put_overwrite_removing_field_deletes_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -140,7 +140,7 @@ fn put_overwrite_removing_field_deletes_entry() {
 fn put_overwrite_adding_field_creates_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -164,7 +164,7 @@ fn put_overwrite_adding_field_creates_entry() {
 fn multiple_indexes_maintained() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     txn.create_index("c", "age").unwrap();
     let handle = txn.collection("c").unwrap();
@@ -184,7 +184,7 @@ fn multiple_indexes_maintained() {
 fn multiple_indexes_overwrite_partial_change() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     txn.create_index("c", "age").unwrap();
     let handle = txn.collection("c").unwrap();
@@ -208,7 +208,7 @@ fn multiple_indexes_overwrite_partial_change() {
 fn delete_cleans_all_indexes() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     txn.create_index("c", "age").unwrap();
     let handle = txn.collection("c").unwrap();
@@ -231,7 +231,7 @@ fn delete_cleans_all_indexes() {
 fn index_on_nested_path() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "address.city").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -249,7 +249,7 @@ fn index_on_nested_path() {
 fn index_on_nested_path_missing_parent() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "address.city").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -267,7 +267,7 @@ fn index_on_nested_path_missing_parent() {
 fn index_on_nested_path_overwrite() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "address.city").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -290,7 +290,7 @@ fn index_on_nested_path_overwrite() {
 fn array_multikey_creates_entry_per_element() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "tags.[]").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -308,7 +308,7 @@ fn array_multikey_creates_entry_per_element() {
 fn array_multikey_overwrite_partial_change() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "tags.[]").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -330,7 +330,7 @@ fn array_multikey_overwrite_partial_change() {
 fn array_multikey_overwrite_to_empty_array() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "tags.[]").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -351,7 +351,7 @@ fn array_multikey_overwrite_to_empty_array() {
 fn array_multikey_delete_cleans_all() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "tags.[]").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -370,7 +370,7 @@ fn array_multikey_delete_cleans_all() {
 fn array_multikey_multiple_docs() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "tags.[]").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -402,7 +402,7 @@ fn array_multikey_multiple_docs() {
 fn nested_array_objects_multikey() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "items.[].sku").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -437,7 +437,7 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     });
 
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -475,7 +475,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
     });
 
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -500,7 +500,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
 fn ttl_no_ttl_field_always_visible() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "name").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -526,7 +526,7 @@ fn ttl_no_ttl_field_always_visible() {
 fn many_docs_exact_index_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "v").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -547,7 +547,7 @@ fn many_docs_exact_index_count() {
 fn many_docs_delete_half_exact_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "v").unwrap();
     let handle = txn.collection("c").unwrap();
 
@@ -574,7 +574,7 @@ fn many_docs_delete_half_exact_count() {
 fn many_docs_overwrite_all_exact_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "c").unwrap();
+    txn.create_collection("c", &Default::default()).unwrap();
     txn.create_index("c", "v").unwrap();
     let handle = txn.collection("c").unwrap();
 

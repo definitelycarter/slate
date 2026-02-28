@@ -25,6 +25,7 @@ fn bench_insert(c: &mut Criterion) {
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
+        ..Default::default()
             })
             .unwrap();
             txn.commit().unwrap();
@@ -251,6 +252,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
+        ..Default::default()
             })
             .unwrap();
             txn.commit().unwrap();

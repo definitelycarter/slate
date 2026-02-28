@@ -223,7 +223,11 @@ impl SlateDatabase {
     // --- Collections ---
 
     pub fn create_collection(&self, name: String, indexes: Vec<String>) -> Result<(), SlateError> {
-        let config = slate_db::CollectionConfig { name, indexes };
+        let config = slate_db::CollectionConfig {
+            name,
+            indexes,
+            ..Default::default()
+        };
         self.write(|txn| {
             txn.create_collection(&config)?;
             Ok(())

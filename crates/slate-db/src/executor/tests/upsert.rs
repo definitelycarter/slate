@@ -10,6 +10,7 @@ fn seeded_db() -> Database<MemoryStore> {
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         indexes: vec!["status".into(), "score".into()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(

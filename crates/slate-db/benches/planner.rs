@@ -12,7 +12,7 @@ use slate_store::MemoryStore;
 fn setup() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "status").unwrap();
     txn.create_index("users", "age").unwrap();
     txn.commit().unwrap();

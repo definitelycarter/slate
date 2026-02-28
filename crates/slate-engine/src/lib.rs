@@ -9,5 +9,6 @@ pub use encoding::skip_bson_value;
 pub use error::{EncodingError, EngineError};
 pub use kv::KvEngine;
 pub use traits::{
-    Catalog, CollectionConfig, CollectionHandle, Engine, EngineTransaction, IndexEntry, IndexRange,
+    Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineTransaction, IndexEntry,
+    IndexRange,
 };

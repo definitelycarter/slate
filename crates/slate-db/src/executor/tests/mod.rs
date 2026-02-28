@@ -229,9 +229,11 @@ fn collect_docs(iter: RawIter) -> Vec<Option<bson::Document>> {
 }
 
 fn mock_collection(indexes: Vec<String>) -> CollectionHandle<()> {
-    CollectionHandle {
-        name: "test".to_string(),
-        cf: (),
+    CollectionHandle::new(
+        "test".to_string(),
+        (),
         indexes,
-    }
+        "_id".to_string(),
+        "ttl".to_string(),
+    )
 }

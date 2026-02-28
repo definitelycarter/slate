@@ -19,7 +19,7 @@ fn engine() -> KvEngine<MemoryStore> {
 fn setup() -> KvEngine<MemoryStore> {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.create_index("users", "status").unwrap();
     txn.create_index("users", "age").unwrap();
     txn.commit().unwrap();
@@ -719,7 +719,7 @@ fn upsert_plan() {
 fn collection_not_found() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(None, "users").unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();

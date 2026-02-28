@@ -219,6 +219,7 @@ fn index_on_nested_path() {
     txn.create_collection(&CollectionConfig {
         name: "nested_idx".to_string(),
         indexes: vec!["address.city".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -263,6 +264,7 @@ fn index_on_array_of_scalars() {
     txn.create_collection(&CollectionConfig {
         name: "tags_idx".to_string(),
         indexes: vec!["tags.[]".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -327,6 +329,7 @@ fn index_on_array_of_objects() {
     txn.create_collection(&CollectionConfig {
         name: "items_idx".to_string(),
         indexes: vec!["items.[].sku".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -389,6 +392,7 @@ fn multikey_index_maintained_on_update() {
     txn.create_collection(&CollectionConfig {
         name: "tags_upd".to_string(),
         indexes: vec!["tags.[]".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one("tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
@@ -444,6 +448,7 @@ fn multikey_index_maintained_on_delete() {
     txn.create_collection(&CollectionConfig {
         name: "tags_del".to_string(),
         indexes: vec!["tags.[]".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one("tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
@@ -531,6 +536,7 @@ fn multikey_index_replace_one() {
     txn.create_collection(&CollectionConfig {
         name: "tags_rep".to_string(),
         indexes: vec!["tags.[]".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one("tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
@@ -588,6 +594,7 @@ fn create_collection_with_indexes() {
     txn.create_collection(&CollectionConfig {
         name: "configured".to_string(),
         indexes: vec!["status".to_string(), "tags.[]".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.commit().unwrap();
@@ -608,6 +615,7 @@ fn create_collection_idempotent() {
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.commit().unwrap();
@@ -625,6 +633,7 @@ fn create_collection_idempotent() {
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.commit().unwrap();

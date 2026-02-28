@@ -24,6 +24,7 @@ fn distinct_scalar_field() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active" })
@@ -57,6 +58,7 @@ fn distinct_nested_path() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
@@ -95,6 +97,7 @@ fn distinct_array_field() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "tags": ["rust", "db"] })
@@ -125,6 +128,7 @@ fn distinct_with_filter() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "gold" })
@@ -163,6 +167,7 @@ fn distinct_with_sort_asc() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
@@ -209,6 +214,7 @@ fn distinct_with_sort_desc() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
@@ -255,6 +261,7 @@ fn distinct_missing_field() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "name": "alice" })
@@ -287,6 +294,7 @@ fn distinct_mixed_presence() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "active" })
@@ -320,6 +328,7 @@ fn distinct_array_of_sub_documents() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(
@@ -368,6 +377,7 @@ fn distinct_sub_document() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(
@@ -415,6 +425,7 @@ fn distinct_with_take() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
@@ -462,6 +473,7 @@ fn distinct_with_skip_take() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })
@@ -509,6 +521,7 @@ fn distinct_with_sort_and_limit() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec![],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "status": "cherry" })

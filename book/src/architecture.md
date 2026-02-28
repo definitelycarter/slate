@@ -227,6 +227,7 @@ let mut txn = db.begin(false)?;
 txn.create_collection(&CollectionConfig {
     name: "users".into(),
     indexes: vec!["status".into()],
+    ..Default::default()
 })?;
 
 // Insert

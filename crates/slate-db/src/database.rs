@@ -349,7 +349,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// List indexed fields for a collection.
     pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>, DbError> {
         let handle = self.txn.collection(collection)?;
-        Ok(handle.indexes)
+        Ok(handle.indexes().to_vec())
     }
 
     // ── Collection operations ───────────────────────────────────
@@ -357,7 +357,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// List all known collection names.
     pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
         let configs = self.txn.list_collections()?;
-        Ok(configs.into_iter().map(|c| c.name).collect())
+        Ok(configs.into_iter().map(|c| c.name().to_string()).collect())
     }
 
     /// Drop a collection and all its data, indexes, and metadata.
@@ -383,7 +383,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Create a collection with the given config and ensure its indexes exist.
     pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
         // Create the collection in the engine catalog
-        self.txn.create_collection(None, &config.name)?;
+        let options = slate_engine::CreateCollectionOptions {
+            cf: None,
+            pk_path: Some(config.pk_path.clone()),
+            ttl_path: Some(config.ttl_path.clone()),
+        };
+        self.txn.create_collection(&config.name, &options)?;
 
         // Ensure required indexes exist
         self.ensure_indexes(config)?;
@@ -393,10 +398,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Ensure all indexes declared in the config exist, creating any that are missing.
     pub fn ensure_indexes(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
         let handle = self.txn.collection(&config.name)?;
-        let existing = handle.indexes;
+        let existing = handle.indexes().to_vec();
         let mut fields: Vec<&str> = config.indexes.iter().map(|s| s.as_str()).collect();
-        if !fields.contains(&"ttl") {
-            fields.push("ttl");
+        if !fields.contains(&config.ttl_path.as_str()) {
+            fields.push(&config.ttl_path);
         }
         for field in &fields {
             if !existing.iter().any(|e| e == field) {

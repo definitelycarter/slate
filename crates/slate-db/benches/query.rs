@@ -19,6 +19,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),
                 indexes: vec!["status".into(), "contacts_count".into()],
+        ..Default::default()
             })
             .unwrap();
             txn.commit().unwrap();

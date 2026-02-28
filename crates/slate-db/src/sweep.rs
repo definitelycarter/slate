@@ -64,7 +64,7 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
                         continue;
                     }
                 };
-                let names: Vec<String> = configs.into_iter().map(|c| c.name).collect();
+                let names: Vec<String> = configs.into_iter().map(|c| c.name().to_string()).collect();
                 let _ = txn.rollback();
                 names
             };

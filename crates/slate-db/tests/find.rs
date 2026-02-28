@@ -726,6 +726,7 @@ fn seed_or_test_data(db: &Database<MemoryStore>) {
     txn.create_collection(&CollectionConfig {
         name: "orders".to_string(),
         indexes: vec!["user_id".to_string(), "status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -926,6 +927,7 @@ fn index_covered_preserves_int32_type() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec!["score".to_string()],
+        ..Default::default()
     })
     .unwrap();
     // Insert with Int32
@@ -968,6 +970,7 @@ fn index_covered_preserves_string_type() {
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         indexes: vec!["status".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "status": "active" })
@@ -1009,6 +1012,7 @@ fn find_gt_on_indexed_field() {
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
         indexes: vec!["score".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(
@@ -1055,6 +1059,7 @@ fn find_gte_lte_on_indexed_field() {
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
         indexes: vec!["score".to_string()],
+        ..Default::default()
     })
     .unwrap();
     txn.insert_many(

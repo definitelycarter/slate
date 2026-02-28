@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bson = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 slate-store = { path = "../slate-store", default-features = false }
 
 [dev-dependencies]

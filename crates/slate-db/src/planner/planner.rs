@@ -134,7 +134,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         // Sort — try to use an index-ordered scan when possible.
         let can_use_indexed_sort = !sort.is_empty()
             && take.is_some()
-            && handle.indexes.contains(&sort[0].field)
+            && handle.indexes().contains(&sort[0].field)
             && source_is_scan;
 
         let node = if can_use_indexed_sort && sort.len() == 1 {
@@ -470,7 +470,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         // Priority 1: Eq on an indexed field (most selective).
         for (i, child) in children.iter().enumerate() {
             if let Expression::Eq(field, _) = child
-                && handle.indexes.contains(field)
+                && handle.indexes().contains(field)
             {
                 let node = self.try_index_scan(handle, child).unwrap();
                 let residual = residual_from_and(children, &[i]);
@@ -489,7 +489,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
         }
 
         // Priority 3: Range conditions on an indexed field.
-        for field in &handle.indexes {
+        for field in handle.indexes() {
             let mut lower_idx = None;
             let mut upper_idx = None;
 
@@ -571,7 +571,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
         for child in children {
             match child {
-                Expression::Eq(field, _) if handle.indexes.contains(field) => {
+                Expression::Eq(field, _) if handle.indexes().contains(field) => {
                     nodes.push(self.try_index_scan(handle, child)?);
                 }
                 Expression::And(sub_children) => {
@@ -655,7 +655,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
             _ => return None,
         };
 
-        if !handle.indexes.contains(field) {
+        if !handle.indexes().contains(field) {
             return None;
         }
 
