@@ -6,8 +6,22 @@ const COLLECTION_TAG: u8 = b'c';
 const INDEX_CONFIG_TAG: u8 = b'x';
 const RECORD_TAG: u8 = b'r';
 const INDEX_TAG: u8 = b'i';
-const INDEX_MAP_TAG: u8 = b'j';
 const SEP: u8 = 0x00;
+
+/// Parse the index-specific parts of an `i`-tagged key.
+///
+/// Input: `rest` is the bytes after `i\x00` (i.e. `{collection}\x00{field}\x00{value_bytes}{doc_id_lp}`).
+/// Returns `(collection, field, value_bytes, doc_id)`.
+fn parse_index_rest(rest: &[u8]) -> Option<(&str, &str, &[u8], BsonValue<'_>)> {
+    let first_sep = rest.iter().position(|&b| b == SEP)?;
+    let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
+    let after_collection = &rest[first_sep + 1..];
+    let second_sep = after_collection.iter().position(|&b| b == SEP)?;
+    let field = std::str::from_utf8(&after_collection[..second_sep]).ok()?;
+    let after_field = &after_collection[second_sep + 1..];
+    let (value_bytes, bv) = split_trailing_doc_id(after_field)?;
+    Some((collection, field, value_bytes, bv))
+}
 
 /// Find the trailing length-prefixed doc_id at the end of a byte slice.
 ///
@@ -35,7 +49,6 @@ fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_>)> {
 /// - `Collection(name)` — collection metadata in `_sys_`
 /// - `IndexConfig(collection, field)` — index metadata in `_sys_`
 /// - `Index(collection, field, doc_id)` — value-first index entry (`i` tag)
-/// - `IndexMap(collection, field, doc_id)` — doc-first reverse index entry (`j` tag, internal)
 /// - `Record(collection, doc_id)` — document record addressing
 ///
 /// `doc_id` is encoded as `[bson_type: 1][len: 2 BE][id_bytes]` in keys,
@@ -45,7 +58,6 @@ pub enum Key<'a> {
     Collection(Cow<'a, str>),
     IndexConfig(Cow<'a, str>, Cow<'a, str>),
     Index(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
-    IndexMap(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
     Record(Cow<'a, str>, BsonValue<'a>),
 }
 
@@ -56,10 +68,8 @@ impl<'a> Key<'a> {
     /// - `IndexConfig`: `x\x00{collection}\x00{field}`
     /// - `Record`: `r\x00{collection}\x00[doc_id_encoded]`
     /// - `Index` (no value): `i\x00{collection}\x00{field}\x00\x00[doc_id_encoded]`
-    /// - `IndexMap` (no value): `j\x00{collection}\x00[doc_id_encoded]\x00{field}\x00`
     ///
-    /// For `Index`/`IndexMap` keys with value bytes, use
-    /// [`encode_index`](Key::encode_index) / [`encode_index_map`](Key::encode_index_map).
+    /// For `Index` keys with value bytes, use [`encode_index`](Key::encode_index).
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Key::Collection(name) => {
@@ -102,21 +112,6 @@ impl<'a> Key<'a> {
                 doc_id.write_length_prefixed(&mut buf);
                 buf
             }
-            Key::IndexMap(collection, field, doc_id) => {
-                let mut buf = Vec::with_capacity(
-                    2 + collection.len() + 1 + 3 + doc_id.bytes.len() + 1 + field.len() + 1,
-                );
-                buf.push(INDEX_MAP_TAG);
-                buf.push(SEP);
-                buf.extend_from_slice(collection.as_bytes());
-                buf.push(SEP);
-                doc_id.write_length_prefixed(&mut buf);
-                buf.push(SEP);
-                buf.extend_from_slice(field.as_bytes());
-                buf.push(SEP);
-                // empty value bytes
-                buf
-            }
         }
     }
 
@@ -146,49 +141,12 @@ impl<'a> Key<'a> {
         buf
     }
 
-    /// Encode an `IndexMap` key with the given encoded value bytes.
-    ///
-    /// Layout: `j\x00{collection}\x00[doc_id_encoded]\x00{field}\x00{value_bytes}`
-    ///
-    /// Panics if `self` is not an `IndexMap` variant.
-    pub fn encode_index_map(&self, value_bytes: &[u8]) -> Vec<u8> {
-        let Key::IndexMap(collection, field, doc_id) = self else {
-            panic!("encode_index_map called on non-IndexMap key");
-        };
-        let mut buf = Vec::with_capacity(
-            2 + collection.len() + 1 + 3 + doc_id.bytes.len() + 1 + field.len() + 1 + value_bytes.len(),
-        );
-        buf.push(INDEX_MAP_TAG);
-        buf.push(SEP);
-        buf.extend_from_slice(collection.as_bytes());
-        buf.push(SEP);
-        doc_id.write_length_prefixed(&mut buf);
-        buf.push(SEP);
-        buf.extend_from_slice(field.as_bytes());
-        buf.push(SEP);
-        buf.extend_from_slice(value_bytes);
-        buf
-    }
-
     /// Encode a record key from borrowed parts, avoiding `BsonValue` clone.
     ///
     /// Layout: `r\x00{collection}\x00[doc_id_encoded]`
     pub fn encode_record_key(collection: &str, doc_id: &BsonValue<'_>) -> Vec<u8> {
         let mut buf = Vec::with_capacity(2 + collection.len() + 1 + 3 + doc_id.bytes.len());
         buf.push(RECORD_TAG);
-        buf.push(SEP);
-        buf.extend_from_slice(collection.as_bytes());
-        buf.push(SEP);
-        doc_id.write_length_prefixed(&mut buf);
-        buf
-    }
-
-    /// Encode an IndexMap record prefix from borrowed parts.
-    ///
-    /// Layout: `j\x00{collection}\x00[doc_id_encoded]`
-    pub fn encode_index_map_prefix(collection: &str, doc_id: &BsonValue<'_>) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(2 + collection.len() + 1 + 3 + doc_id.bytes.len());
-        buf.push(INDEX_MAP_TAG);
         buf.push(SEP);
         buf.extend_from_slice(collection.as_bytes());
         buf.push(SEP);
@@ -229,31 +187,8 @@ impl<'a> Key<'a> {
                 ))
             }
             INDEX_TAG => {
-                // i\x00{collection}\x00{field}\x00{value_bytes}[type][len][id_bytes]
-                let first_sep = rest.iter().position(|&b| b == SEP)?;
-                let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
-                let after_collection = &rest[first_sep + 1..];
-                let second_sep = after_collection.iter().position(|&b| b == SEP)?;
-                let field = std::str::from_utf8(&after_collection[..second_sep]).ok()?;
-                let after_field = &after_collection[second_sep + 1..];
-                let (_value_bytes, bv) = split_trailing_doc_id(after_field)?;
+                let (collection, field, _value_bytes, bv) = parse_index_rest(rest)?;
                 Some(Key::Index(
-                    Cow::Borrowed(collection),
-                    Cow::Borrowed(field),
-                    bv,
-                ))
-            }
-            INDEX_MAP_TAG => {
-                // j\x00{collection}\x00[doc_id_lp]\x00{field}\x00{value_bytes}
-                let first_sep = rest.iter().position(|&b| b == SEP)?;
-                let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
-                let after_collection = &rest[first_sep + 1..];
-                let (bv, after_docid) = BsonValue::parse_length_prefixed(after_collection)?;
-                // after_docid = \x00{field}\x00{value_bytes}
-                let after_docid = after_docid.strip_prefix(&[SEP])?;
-                let field_sep = after_docid.iter().position(|&b| b == SEP)?;
-                let field = std::str::from_utf8(&after_docid[..field_sep]).ok()?;
-                Some(Key::IndexMap(
                     Cow::Borrowed(collection),
                     Cow::Borrowed(field),
                     bv,
@@ -263,21 +198,27 @@ impl<'a> Key<'a> {
         }
     }
 
-    /// Parse the value bytes and doc_id from raw index key bytes,
-    /// given the byte offset where the field separator ends.
+    /// Parse an index key, returning the Key and the raw value bytes
+    /// embedded in the key tail.
     ///
-    /// The slice after `field_sep_offset` has layout:
-    /// `{value_bytes}[type][len_be16][id_bytes]`
+    /// Index key layout: `i\x00{collection}\x00{field}\x00{value_bytes}{doc_id_lp}`
     ///
-    /// Returns `(value_bytes, raw_doc_id)` where raw_doc_id is `[type][id_bytes]`.
-    pub fn parse_index_tail<'b>(
-        key_bytes: &'b [u8],
-        field_sep_offset: usize,
-    ) -> Option<(&'b [u8], BsonValue<'b>)> {
-        let after_field = key_bytes.get(field_sep_offset..)?;
-        let (value_bytes, bv) = split_trailing_doc_id(after_field)?;
-        Some((value_bytes, bv))
+    /// Returns `(Key::Index(...), value_bytes)`.
+    pub fn decode_index(key_bytes: &'a [u8]) -> Option<(Key<'a>, &'a [u8])> {
+        if key_bytes.len() < 2 || key_bytes[0] != INDEX_TAG || key_bytes[1] != SEP {
+            return None;
+        }
+        let (collection, field, value_bytes, bv) = parse_index_rest(&key_bytes[2..])?;
+        Some((
+            Key::Index(
+                Cow::Borrowed(collection),
+                Cow::Borrowed(field),
+                bv,
+            ),
+            value_bytes,
+        ))
     }
+
 }
 
 /// Structured prefix for scan operations.
@@ -289,7 +230,6 @@ impl<'a> Key<'a> {
 /// - `Record(collection)` — all document records in a collection (`r\x00{collection}\x00`)
 /// - `IndexField(collection, field)` — index entries for a field (`i\x00{collection}\x00{field}\x00`)
 /// - `IndexValue(collection, field, value)` — index entries for a specific value
-/// - `IndexMapCollection(collection)` — all index map entries for a collection
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     Collection,
@@ -297,7 +237,6 @@ pub enum KeyPrefix<'a> {
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
-    IndexMapCollection(Cow<'a, str>),
 }
 
 impl<'a> KeyPrefix<'a> {
@@ -342,14 +281,6 @@ impl<'a> KeyPrefix<'a> {
                 buf.extend_from_slice(value);
                 buf
             }
-            KeyPrefix::IndexMapCollection(collection) => {
-                let mut buf = Vec::with_capacity(2 + collection.len() + 1);
-                buf.push(INDEX_MAP_TAG);
-                buf.push(SEP);
-                buf.extend_from_slice(collection.as_bytes());
-                buf.push(SEP);
-                buf
-            }
         }
     }
 }
@@ -357,11 +288,12 @@ impl<'a> KeyPrefix<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bson::spec::ElementType;
 
     /// Helper: build a string BsonValue.
     fn str_id(s: &str) -> BsonValue<'_> {
         BsonValue {
-            tag: 0x02,
+            tag: ElementType::String,
             bytes: Cow::Borrowed(s.as_bytes()),
         }
     }
@@ -369,7 +301,7 @@ mod tests {
     /// Helper: build an ObjectId BsonValue.
     fn oid_id(bytes: &[u8; 12]) -> BsonValue<'_> {
         BsonValue {
-            tag: 0x07,
+            tag: ElementType::ObjectId,
             bytes: Cow::Borrowed(bytes.as_slice()),
         }
     }
@@ -443,20 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn index_map_key_roundtrip() {
-        let key = Key::IndexMap(
-            Cow::Borrowed("users"),
-            Cow::Borrowed("email"),
-            str_id("doc-123"),
-        );
-        let value_bytes = b"alice@example.com";
-        let bytes = key.encode_index_map(value_bytes);
-        let decoded = Key::decode(&bytes).unwrap();
-        assert_eq!(decoded, key);
-    }
-
-    #[test]
-    fn parse_index_tail_with_typed_id() {
+    fn decode_index_with_typed_id() {
         let key = Key::Index(
             Cow::Borrowed("users"),
             Cow::Borrowed("age"),
@@ -465,12 +384,9 @@ mod tests {
         let value_bytes: &[u8] = &[0x80, 0x00, 0x00, 0x19]; // encoded 25
         let encoded = key.encode_index(value_bytes);
 
-        let field_prefix =
-            KeyPrefix::IndexField(Cow::Borrowed("users"), Cow::Borrowed("age")).encode();
-        let (parsed_value, parsed_id) =
-            Key::parse_index_tail(&encoded, field_prefix.len()).unwrap();
+        let (parsed_key, parsed_value) = Key::decode_index(&encoded).unwrap();
+        assert_eq!(parsed_key, key);
         assert_eq!(parsed_value, value_bytes);
-        assert_eq!(parsed_id, str_id("doc-1"));
     }
 
     #[test]

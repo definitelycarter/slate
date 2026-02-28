@@ -449,7 +449,8 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection("c").unwrap();
 
-    // With current TTL, index entry should be filtered out.
+    // Index entries carry TTL in metadata — expired entries are filtered
+    // during scan_index.
     let now = now_millis();
     let entries: Vec<_> = txn
         .scan_index(&handle, "name", IndexRange::Full, false, now)
@@ -457,6 +458,11 @@ fn ttl_expired_doc_hidden_from_index_scan() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(entries.len(), 0);
+
+    // The document itself is also expired via get().
+    let doc = txn.get(&handle, &bson::raw::RawBsonRef::String("a"), now).unwrap();
+    assert!(doc.is_none());
+
     txn.rollback().unwrap();
 }
 

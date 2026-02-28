@@ -1,15 +1,13 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use slate_store::{Store, StoreError, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
-use crate::encoding::{IndexMeta, Record};
+use crate::encoding::{IndexRecord, Key, KeyPrefix, Record};
 use crate::error::EngineError;
-use crate::index;
-use crate::key::{Key, KeyPrefix};
+use crate::index_sync::{IndexChanges, IndexDiff};
 use crate::traits::{
     Catalog, CollectionConfig, CollectionHandle, EngineTransaction, IndexEntry, IndexRange,
 };
@@ -63,10 +61,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         match self.txn.get(&handle.cf, &encoded)? {
             None => Ok(None),
             Some(data) if Record::is_expired(&data, ttl) => Ok(None),
-            Some(data) => {
-                let record = Record::decode_owned(data)?;
-                Ok(Some(record.doc))
-            }
+            Some(data) => Ok(Some(RawDocumentBuf::try_from(Record::from_bytes(data)?)?)),
         }
     }
 
@@ -84,44 +79,17 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         validate_raw_document(doc)?;
 
         let encoded_key = Key::encode_record_key(&handle.name, &doc_id);
-        let encoded_value = Record::encode(doc);
+        let record = Record::encoder().with_ttl_at_path("ttl").encode(doc);
+        let old_data = self.txn.get(&handle.cf, &encoded_key)?;
 
-        if handle.indexes.is_empty() {
-            return Ok(self.txn.put(&handle.cf, &encoded_key, &encoded_value)?);
-        }
+        let changes = IndexDiff::new(&record, &doc_id)
+            .with_old_record(old_data.as_deref())
+            .with_property_paths(&handle.indexes)
+            .with_property_path("ttl")
+            .diff(&handle.name)?;
 
-        // Scan IndexMap to discover old index keys.
-        let mut old: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-        let prefix = Key::encode_index_map_prefix(&handle.name, &doc_id);
-        for result in self.txn.scan_prefix(&handle.cf, &prefix)? {
-            let (map_key, index_key) = result?;
-            old.insert(map_key, index_key);
-        }
-
-        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, &doc_id);
-
-        let mut deletes: Vec<&[u8]> = Vec::new();
-        let mut puts: Vec<(&[u8], &[u8])> = Vec::with_capacity(new_entries.len() + 1);
-
-        for pair in new_entries.chunks(2) {
-            let (map_key, _) = &pair[0];
-            if old.remove(map_key.as_slice()).is_none() {
-                for (k, v) in pair {
-                    puts.push((k.as_slice(), v.as_slice()));
-                }
-            }
-        }
-
-        for (map_key, index_key) in &old {
-            deletes.push(map_key.as_slice());
-            deletes.push(index_key.as_slice());
-        }
-
-        if !deletes.is_empty() {
-            self.txn.delete_batch(&handle.cf, &deletes)?;
-        }
-        puts.push((&encoded_key, &encoded_value));
-        self.txn.put_batch(&handle.cf, &puts)?;
+        self.apply_index_changes(&handle.cf, &changes)?;
+        self.txn.put(&handle.cf, &encoded_key, record.as_bytes())?;
 
         Ok(())
     }
@@ -141,26 +109,24 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         validate_raw_document(doc)?;
 
         let encoded_key = Key::encode_record_key(&handle.name, &doc_id);
+        let old_data = self.txn.get(&handle.cf, &encoded_key)?;
 
-        if let Some(data) = self.txn.get(&handle.cf, &encoded_key)?
-            && !Record::is_expired(&data, ttl)
+        if let Some(ref data) = old_data
+            && !Record::is_expired(data, ttl)
         {
             return Err(EngineError::DuplicateKey(doc_id.to_string()));
         }
 
-        let encoded_value = Record::encode(doc);
+        let record = Record::encoder().with_ttl_at_path("ttl").encode(doc);
 
-        if handle.indexes.is_empty() {
-            return Ok(self.txn.put(&handle.cf, &encoded_key, &encoded_value)?);
-        }
+        let changes = IndexDiff::new(&record, &doc_id)
+            .with_old_record(old_data.as_deref())
+            .with_property_paths(&handle.indexes)
+            .with_property_path("ttl")
+            .diff(&handle.name)?;
 
-        let new_entries = index::index_entries(&handle.name, &handle.indexes, doc, &doc_id);
-        let mut puts: Vec<(&[u8], &[u8])> = new_entries
-            .iter()
-            .map(|(k, v)| (k.as_slice(), v.as_slice()))
-            .collect();
-        puts.push((&encoded_key, &encoded_value));
-        self.txn.put_batch(&handle.cf, &puts)?;
+        self.apply_index_changes(&handle.cf, &changes)?;
+        self.txn.put(&handle.cf, &encoded_key, record.as_bytes())?;
 
         Ok(())
     }
@@ -174,22 +140,17 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .ok_or_else(|| EngineError::InvalidDocument("unsupported _id type".into()))?;
         let encoded = Key::encode_record_key(&handle.name, &doc_id);
 
-        if handle.indexes.is_empty() {
-            return Ok(self.txn.delete(&handle.cf, &encoded)?);
-        }
+        let old_data = self.txn.get(&handle.cf, &encoded)?;
+        if let Some(ref data) = old_data {
+            let changes = IndexDiff::for_delete(&doc_id)
+                .with_old_record(Some(data.as_slice()))
+                .with_property_paths(&handle.indexes)
+                .with_property_path("ttl")
+                .diff(&handle.name)?;
 
-        // Scan IndexMap to discover old index keys (no doc decode needed).
-        let mut keys: Vec<Vec<u8>> = Vec::new();
-        let prefix = Key::encode_index_map_prefix(&handle.name, &doc_id);
-        for result in self.txn.scan_prefix(&handle.cf, &prefix)? {
-            let (map_key, index_key) = result?;
-            keys.push(index_key);
-            keys.push(map_key);
+            self.apply_index_changes(&handle.cf, &changes)?;
+            self.txn.delete(&handle.cf, &encoded)?;
         }
-
-        let mut refs: Vec<&[u8]> = keys.iter().map(|k| k.as_slice()).collect();
-        refs.push(&encoded);
-        self.txn.delete_batch(&handle.cf, &refs)?;
 
         Ok(())
     }
@@ -210,8 +171,10 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 if Record::is_expired(&value_bytes, ttl) {
                     return None;
                 }
-                match Record::decode_owned(value_bytes) {
-                    Ok(record) => Some(Ok(record.doc)),
+                match Record::from_bytes(value_bytes)
+                    .and_then(|r| RawDocumentBuf::try_from(r))
+                {
+                    Ok(doc) => Some(Ok(doc)),
                     Err(e) => Some(Err(e)),
                 }
             }
@@ -233,7 +196,9 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let field_prefix =
             KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
         let eq_encoded = match &range {
-            IndexRange::Eq(val) => BsonValue::from_bson(val).map(|bv| bv.to_vec()),
+            IndexRange::Eq(val) => {
+                BsonValue::from_bson(val).map(|bv| bv.bytes.into_owned())
+            }
             _ => None,
         };
         let prefix = match &eq_encoded {
@@ -247,15 +212,18 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             }
             None => field_prefix.clone(),
         };
-        let field_prefix_len = field_prefix.len();
 
-        // Pre-encode range bounds for filtering.
+        // Pre-encode range bounds for filtering (raw value bytes, no type tag).
         #[allow(clippy::type_complexity)]
         let bounds: Option<(Option<Vec<u8>>, bool, Option<Vec<u8>>, bool)> = match range {
             IndexRange::Range { lower, upper } => Some((
-                lower.as_ref().and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.to_vec())),
+                lower
+                    .as_ref()
+                    .and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.bytes.into_owned())),
                 lower.as_ref().is_some_and(|(_, incl)| *incl),
-                upper.as_ref().and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.to_vec())),
+                upper
+                    .as_ref()
+                    .and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.bytes.into_owned())),
                 upper.as_ref().is_some_and(|(_, incl)| *incl),
             )),
             _ => None,
@@ -283,19 +251,19 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         return Some(Err(EngineError::Store(e)));
                     }
                     Ok((key_bytes, metadata_bytes)) => {
-                        let (value_bytes, doc_id) =
-                            match Key::parse_index_tail(&key_bytes, field_prefix_len) {
-                                Some(pair) => pair,
-                                None => {
-                                    done = true;
-                                    return Some(Err(EngineError::InvalidKey(
-                                        "missing doc_id separator".into(),
-                                    )));
-                                }
-                            };
+                        let record = match IndexRecord::from_pair(key_bytes, metadata_bytes) {
+                            Some(r) => r,
+                            None => {
+                                done = true;
+                                return Some(Err(EngineError::InvalidKey(
+                                    "invalid index key".into(),
+                                )));
+                            }
+                        };
 
-                        // Range filtering
+                        // Range filtering on raw value bytes
                         if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {
+                            let value_bytes = record.value_bytes();
                             if let Some(lb) = lower {
                                 let cmp = value_bytes.cmp(lb.as_slice());
                                 if cmp == Ordering::Less || (cmp == Ordering::Equal && !lower_inc) {
@@ -320,25 +288,24 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                             }
                         }
 
-                        if IndexMeta::is_expired(&metadata_bytes, ttl) {
+                        if record.is_expired(ttl) {
                             continue;
                         }
 
-                        let doc_id_raw = match doc_id.to_raw_bson() {
+                        let doc_id = match record.doc_id_bson() {
                             Some(v) => v,
                             None => continue,
                         };
-                        let value_raw = match BsonValue::from_slice(value_bytes)
-                            .and_then(|bv| bv.to_raw_bson())
-                        {
+                        let value = match record.value_bson() {
                             Some(v) => v,
                             None => continue,
                         };
+                        let (_, metadata) = record.into_parts();
 
                         return Some(Ok(IndexEntry {
-                            doc_id: doc_id_raw,
-                            value: value_raw,
-                            metadata: metadata_bytes,
+                            doc_id,
+                            value,
+                            metadata,
                         }));
                     }
                 }
@@ -363,6 +330,27 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     fn sys_cf(&self) -> Result<<S::Txn<'a> as Transaction>::Cf, EngineError> {
         Ok(self.txn.cf(SYS_CF)?)
+    }
+
+    /// Apply index changes: delete removed entries, write new entries.
+    fn apply_index_changes(
+        &self,
+        cf: &<S::Txn<'a> as Transaction>::Cf,
+        changes: &IndexChanges,
+    ) -> Result<(), EngineError> {
+        if !changes.deletes.is_empty() {
+            let refs: Vec<&[u8]> = changes.deletes.iter().map(|k| k.as_slice()).collect();
+            self.txn.delete_batch(cf, &refs)?;
+        }
+        if !changes.puts.is_empty() {
+            let refs: Vec<(&[u8], &[u8])> = changes
+                .puts
+                .iter()
+                .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                .collect();
+            self.txn.put_batch(cf, &refs)?;
+        }
+        Ok(())
     }
 
     /// Delete all keys under a prefix.
@@ -390,7 +378,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         match self.txn.get(&sys, &key)? {
             Some(value) => {
                 let cf = std::str::from_utf8(&value)
-                    .map_err(|e| EngineError::Encoding(format!("invalid cf name: {e}")))?;
+                    .map_err(|e| EngineError::InvalidDocument(format!("invalid cf name: {e}")))?;
                 Ok(cf.to_string())
             }
             None => Err(EngineError::CollectionNotFound(name.to_string())),
@@ -435,7 +423,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let (key_bytes, value) = result?;
             if let Some(Key::Collection(name)) = Key::decode(&key_bytes) {
                 let cf = std::str::from_utf8(&value)
-                    .map_err(|e| EngineError::Encoding(format!("invalid cf name: {e}")))?;
+                    .map_err(|e| EngineError::InvalidDocument(format!("invalid cf name: {e}")))?;
                 let indexes = self.load_indexes(&name)?;
                 configs.push(CollectionConfig {
                     name: name.into_owned(),
@@ -465,7 +453,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         // Check if collection exists; if not, no-op.
         let cf_name = match self.txn.get(&sys, &meta_key)? {
             Some(value) => std::str::from_utf8(&value)
-                .map_err(|e| EngineError::Encoding(format!("invalid cf name: {e}")))?
+                .map_err(|e| EngineError::InvalidDocument(format!("invalid cf name: {e}")))?
                 .to_string(),
             None => return Ok(()),
         };
@@ -475,15 +463,16 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let record_prefix = KeyPrefix::Record(Cow::Borrowed(name)).encode();
         self.delete_prefix(&cf, &record_prefix)?;
 
-        // Delete all index entries and index map entries.
+        // Delete all index entries (catalog indexes + ttl).
         let indexes = self.load_indexes(name)?;
         for field in &indexes {
             let idx_prefix =
                 KeyPrefix::IndexField(Cow::Borrowed(name), Cow::Borrowed(field)).encode();
             self.delete_prefix(&cf, &idx_prefix)?;
         }
-        let map_prefix = KeyPrefix::IndexMapCollection(Cow::Borrowed(name)).encode();
-        self.delete_prefix(&cf, &map_prefix)?;
+        let ttl_prefix =
+            KeyPrefix::IndexField(Cow::Borrowed(name), Cow::Borrowed("ttl")).encode();
+        self.delete_prefix(&cf, &ttl_prefix)?;
 
         // Delete all index config keys from _sys_.
         let idx_config_prefix = KeyPrefix::IndexConfig(Cow::Borrowed(name)).encode();
@@ -501,7 +490,8 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
 
         // Write the index config key.
         let sys = self.sys_cf()?;
-        let config_key = Key::IndexConfig(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+        let config_key =
+            Key::IndexConfig(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
         self.txn.put(&sys, &config_key, &[])?;
 
         // Backfill: scan all existing records and create index entries.
@@ -516,12 +506,15 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let Some(Key::Record(_, doc_id)) = Key::decode(key_bytes) else {
                 continue;
             };
-            let record = Record::decode(value_bytes)?;
-            let entries = index::index_entries(collection, &indexes, &record.doc, &doc_id);
+            let record = Record::from_bytes(value_bytes.clone())?;
+            let ttl = record.ttl_millis();
+            let doc = record.doc()?;
+            let entries =
+                IndexRecord::from_document(collection, &indexes, doc, &doc_id, ttl);
             if !entries.is_empty() {
                 let refs: Vec<(&[u8], &[u8])> = entries
                     .iter()
-                    .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                    .map(|e| (e.key_bytes(), e.metadata()))
                     .collect();
                 self.txn.put_batch(&cf, &refs)?;
             }
@@ -538,23 +531,6 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let idx_prefix =
             KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
         self.delete_prefix(&cf, &idx_prefix)?;
-
-        // Delete all index map entries for this field.
-        let map_prefix = KeyPrefix::IndexMapCollection(Cow::Borrowed(collection)).encode();
-        let map_keys: Vec<Vec<u8>> = self
-            .txn
-            .scan_prefix(&cf, &map_prefix)?
-            .filter_map(|r| match r {
-                Ok((k, _)) => match Key::decode(&k) {
-                    Some(Key::IndexMap(_, f, _)) if f == field => Some(Ok(k)),
-                    _ => None,
-                },
-                Err(e) => Some(Err(e)),
-            })
-            .collect::<Result<_, _>>()?;
-        for k in &map_keys {
-            self.txn.delete(&cf, k)?;
-        }
 
         // Delete the index config key from _sys_.
         let sys = self.sys_cf()?;

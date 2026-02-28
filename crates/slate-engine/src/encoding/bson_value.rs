@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
 
 use bson::raw::{RawBsonRef, RawDocument};
+use bson::spec::ElementType;
 
 /// Length-prefixed header size: 1 type byte + 2 length bytes.
 const LP_HEADER: usize = 3;
@@ -64,10 +66,17 @@ fn decode_f64_sortable(b: [u8; 8]) -> f64 {
 /// Construction from `RawBsonRef`:
 /// - `ObjectId`, `String` → zero-alloc (borrows from source)
 /// - `Int32`, `Int64`, `Double`, `DateTime`, `Boolean` → small owned allocation
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BsonValue<'a> {
-    pub tag: u8,
+    pub tag: ElementType,
     pub bytes: Cow<'a, [u8]>,
+}
+
+impl Hash for BsonValue<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.tag as u8).hash(state);
+        self.bytes.hash(state);
+    }
 }
 
 impl<'a> BsonValue<'a> {
@@ -78,31 +87,31 @@ impl<'a> BsonValue<'a> {
     pub fn from_raw_bson_ref(val: RawBsonRef<'a>) -> Option<Self> {
         match val {
             RawBsonRef::ObjectId(oid) => Some(BsonValue {
-                tag: 0x07,
+                tag: ElementType::ObjectId,
                 bytes: Cow::Owned(oid.bytes().to_vec()),
             }),
             RawBsonRef::String(s) => Some(BsonValue {
-                tag: 0x02,
+                tag: ElementType::String,
                 bytes: Cow::Borrowed(s.as_bytes()),
             }),
             RawBsonRef::Int32(n) => Some(BsonValue {
-                tag: 0x10,
+                tag: ElementType::Int32,
                 bytes: Cow::Owned(encode_i32_sortable(n).to_vec()),
             }),
             RawBsonRef::Int64(n) => Some(BsonValue {
-                tag: 0x12,
+                tag: ElementType::Int64,
                 bytes: Cow::Owned(encode_i64_sortable(n).to_vec()),
             }),
             RawBsonRef::Double(f) => Some(BsonValue {
-                tag: 0x01,
+                tag: ElementType::Double,
                 bytes: Cow::Owned(encode_f64_sortable(f).to_vec()),
             }),
             RawBsonRef::DateTime(dt) => Some(BsonValue {
-                tag: 0x09,
+                tag: ElementType::DateTime,
                 bytes: Cow::Owned(encode_i64_sortable(dt.timestamp_millis()).to_vec()),
             }),
             RawBsonRef::Boolean(b) => Some(BsonValue {
-                tag: 0x08,
+                tag: ElementType::Boolean,
                 bytes: Cow::Owned(vec![b as u8]),
             }),
             _ => None,
@@ -115,31 +124,31 @@ impl<'a> BsonValue<'a> {
     pub fn from_bson(val: &bson::Bson) -> Option<BsonValue<'static>> {
         match val {
             bson::Bson::ObjectId(oid) => Some(BsonValue {
-                tag: 0x07,
+                tag: ElementType::ObjectId,
                 bytes: Cow::Owned(oid.bytes().to_vec()),
             }),
             bson::Bson::String(s) => Some(BsonValue {
-                tag: 0x02,
+                tag: ElementType::String,
                 bytes: Cow::Owned(s.as_bytes().to_vec()),
             }),
             bson::Bson::Int32(n) => Some(BsonValue {
-                tag: 0x10,
+                tag: ElementType::Int32,
                 bytes: Cow::Owned(encode_i32_sortable(*n).to_vec()),
             }),
             bson::Bson::Int64(n) => Some(BsonValue {
-                tag: 0x12,
+                tag: ElementType::Int64,
                 bytes: Cow::Owned(encode_i64_sortable(*n).to_vec()),
             }),
             bson::Bson::Double(f) => Some(BsonValue {
-                tag: 0x01,
+                tag: ElementType::Double,
                 bytes: Cow::Owned(encode_f64_sortable(*f).to_vec()),
             }),
             bson::Bson::DateTime(dt) => Some(BsonValue {
-                tag: 0x09,
+                tag: ElementType::DateTime,
                 bytes: Cow::Owned(encode_i64_sortable(dt.timestamp_millis()).to_vec()),
             }),
             bson::Bson::Boolean(b) => Some(BsonValue {
-                tag: 0x08,
+                tag: ElementType::Boolean,
                 bytes: Cow::Owned(vec![*b as u8]),
             }),
             _ => None,
@@ -181,21 +190,31 @@ impl<'a> BsonValue<'a> {
         Self::from_raw_bson_ref(current)
     }
 
+    /// Construct from a known type tag and raw value bytes.
+    pub fn from_parts(tag: ElementType, bytes: &'a [u8]) -> Self {
+        BsonValue {
+            tag,
+            bytes: Cow::Borrowed(bytes),
+        }
+    }
+
     /// Construct from a raw `[tag][bytes]` slice.
+    #[cfg(test)]
     pub fn from_slice(raw: &'a [u8]) -> Option<Self> {
         if raw.is_empty() {
             return None;
         }
         Some(BsonValue {
-            tag: raw[0],
+            tag: ElementType::from(raw[0])?,
             bytes: Cow::Borrowed(&raw[1..]),
         })
     }
 
     /// Returns `[tag][bytes]` as a new `Vec<u8>`.
+    #[cfg(test)]
     pub fn to_vec(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(1 + self.bytes.len());
-        v.push(self.tag);
+        v.push(self.tag as u8);
         v.extend_from_slice(&self.bytes);
         v
     }
@@ -206,7 +225,7 @@ impl<'a> BsonValue<'a> {
     /// to other variable-length data.
     pub fn write_length_prefixed(&self, buf: &mut Vec<u8>) {
         let len = self.bytes.len() as u16;
-        buf.push(self.tag);
+        buf.push(self.tag as u8);
         buf.extend_from_slice(&len.to_be_bytes());
         buf.extend_from_slice(&self.bytes);
     }
@@ -218,7 +237,7 @@ impl<'a> BsonValue<'a> {
         if bytes.len() < LP_HEADER {
             return None;
         }
-        let tag = bytes[0];
+        let tag = ElementType::from(bytes[0])?;
         let len = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
         let total = LP_HEADER + len;
         if bytes.len() < total {
@@ -236,27 +255,29 @@ impl<'a> BsonValue<'a> {
     /// Convert back to a `RawBson`, decoding sortable-encoded values.
     pub fn to_raw_bson(&self) -> Option<bson::RawBson> {
         Some(match self.tag {
-            0x02 => bson::RawBson::String(
+            ElementType::String => bson::RawBson::String(
                 std::str::from_utf8(&self.bytes).ok()?.to_string(),
             ),
-            0x07 if self.bytes.len() == 12 => {
+            ElementType::ObjectId if self.bytes.len() == 12 => {
                 let oid = bson::oid::ObjectId::from_bytes(self.bytes[..12].try_into().ok()?);
                 bson::RawBson::ObjectId(oid)
             }
-            0x10 if self.bytes.len() == 4 => {
+            ElementType::Int32 if self.bytes.len() == 4 => {
                 bson::RawBson::Int32(decode_i32_sortable(self.bytes[..4].try_into().ok()?))
             }
-            0x12 if self.bytes.len() == 8 => {
+            ElementType::Int64 if self.bytes.len() == 8 => {
                 bson::RawBson::Int64(decode_i64_sortable(self.bytes[..8].try_into().ok()?))
             }
-            0x01 if self.bytes.len() == 8 => {
+            ElementType::Double if self.bytes.len() == 8 => {
                 bson::RawBson::Double(decode_f64_sortable(self.bytes[..8].try_into().ok()?))
             }
-            0x09 if self.bytes.len() == 8 => {
+            ElementType::DateTime if self.bytes.len() == 8 => {
                 let millis = decode_i64_sortable(self.bytes[..8].try_into().ok()?);
                 bson::RawBson::DateTime(bson::DateTime::from_millis(millis))
             }
-            0x08 => bson::RawBson::Boolean(self.bytes.first().is_some_and(|&v| v != 0)),
+            ElementType::Boolean => {
+                bson::RawBson::Boolean(self.bytes.first().is_some_and(|&v| v != 0))
+            }
             _ => return None,
         })
     }
@@ -273,39 +294,33 @@ impl<'a> BsonValue<'a> {
 impl std::fmt::Display for BsonValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.tag {
-            0x02 => {
-                // String — bytes are raw UTF-8
+            ElementType::String => {
                 let s = std::str::from_utf8(&self.bytes).unwrap_or("<invalid utf8>");
                 write!(f, "{s}")
             }
-            0x07 => {
-                // ObjectId — 12 raw bytes → hex
+            ElementType::ObjectId => {
                 for b in self.bytes.iter() {
                     write!(f, "{b:02x}")?;
                 }
                 Ok(())
             }
-            0x10 if self.bytes.len() == 4 => {
-                // Int32 — sortable-encoded
+            ElementType::Int32 if self.bytes.len() == 4 => {
                 let n = decode_i32_sortable(self.bytes[..4].try_into().unwrap());
                 write!(f, "{n}")
             }
-            0x12 | 0x09 if self.bytes.len() == 8 => {
-                // Int64 or DateTime — sortable-encoded i64
+            ElementType::Int64 | ElementType::DateTime if self.bytes.len() == 8 => {
                 let n = decode_i64_sortable(self.bytes[..8].try_into().unwrap());
                 write!(f, "{n}")
             }
-            0x01 if self.bytes.len() == 8 => {
-                // Double — sortable-encoded f64
+            ElementType::Double if self.bytes.len() == 8 => {
                 let n = decode_f64_sortable(self.bytes[..8].try_into().unwrap());
                 write!(f, "{n}")
             }
-            0x08 => {
-                // Boolean
+            ElementType::Boolean => {
                 let b = self.bytes.first().is_some_and(|&v| v != 0);
                 write!(f, "{b}")
             }
-            _ => write!(f, "<bson 0x{:02x}>", self.tag),
+            _ => write!(f, "<bson 0x{:02x}>", self.tag as u8),
         }
     }
 }
@@ -421,7 +436,7 @@ mod tests {
     fn object_id_roundtrip() {
         let oid = ObjectId::new();
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::ObjectId(oid)).unwrap();
-        assert_eq!(val.tag, 0x07);
+        assert_eq!(val.tag, ElementType::ObjectId);
         assert_eq!(val.bytes.len(), 12);
         // to_vec → from_slice roundtrip
         let raw = val.to_vec();
@@ -432,7 +447,7 @@ mod tests {
     #[test]
     fn string_roundtrip() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::String("hello")).unwrap();
-        assert_eq!(val.tag, 0x02);
+        assert_eq!(val.tag, ElementType::String);
         assert_eq!(&*val.bytes, b"hello");
         let raw = val.to_vec();
         let parsed = BsonValue::from_slice(&raw).unwrap();
@@ -442,7 +457,7 @@ mod tests {
     #[test]
     fn int32_roundtrip() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::Int32(42)).unwrap();
-        assert_eq!(val.tag, 0x10);
+        assert_eq!(val.tag, ElementType::Int32);
         assert_eq!(&*val.bytes, &encode_i32_sortable(42));
         let raw = val.to_vec();
         let parsed = BsonValue::from_slice(&raw).unwrap();
@@ -452,14 +467,14 @@ mod tests {
     #[test]
     fn int64_roundtrip() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::Int64(1_000_000)).unwrap();
-        assert_eq!(val.tag, 0x12);
+        assert_eq!(val.tag, ElementType::Int64);
         assert_eq!(&*val.bytes, &encode_i64_sortable(1_000_000));
     }
 
     #[test]
     fn double_roundtrip() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::Double(2.78)).unwrap();
-        assert_eq!(val.tag, 0x01);
+        assert_eq!(val.tag, ElementType::Double);
         assert_eq!(&*val.bytes, &encode_f64_sortable(2.78));
     }
 
@@ -467,14 +482,14 @@ mod tests {
     fn datetime_roundtrip() {
         let dt = bson::DateTime::from_millis(1_700_000_000_000);
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::DateTime(dt)).unwrap();
-        assert_eq!(val.tag, 0x09);
+        assert_eq!(val.tag, ElementType::DateTime);
         assert_eq!(&*val.bytes, &encode_i64_sortable(1_700_000_000_000));
     }
 
     #[test]
     fn boolean_roundtrip() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::Boolean(true)).unwrap();
-        assert_eq!(val.tag, 0x08);
+        assert_eq!(val.tag, ElementType::Boolean);
         assert_eq!(&*val.bytes, &[1]);
 
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::Boolean(false)).unwrap();
@@ -517,11 +532,11 @@ mod tests {
     fn extract_from_document() {
         let doc = bson::rawdoc! { "_id": "abc", "age": 25 };
         let id = BsonValue::extract(&doc, "_id").unwrap();
-        assert_eq!(id.tag, 0x02);
+        assert_eq!(id.tag, ElementType::String);
         assert_eq!(&*id.bytes, b"abc");
 
         let age = BsonValue::extract(&doc, "age").unwrap();
-        assert_eq!(age.tag, 0x10);
+        assert_eq!(age.tag, ElementType::Int32);
         assert_eq!(&*age.bytes, &encode_i32_sortable(25));
     }
 
@@ -535,7 +550,7 @@ mod tests {
     fn into_owned_produces_static() {
         let val = BsonValue::from_raw_bson_ref(RawBsonRef::String("borrowed")).unwrap();
         let owned: BsonValue<'static> = val.into_owned();
-        assert_eq!(owned.tag, 0x02);
+        assert_eq!(owned.tag, ElementType::String);
         assert_eq!(&*owned.bytes, b"borrowed");
     }
 
@@ -560,11 +575,11 @@ mod tests {
     #[test]
     fn try_from_raw_bson_ref() {
         let val: BsonValue<'_> = RawBsonRef::String("hi").try_into().unwrap();
-        assert_eq!(val.tag, 0x02);
+        assert_eq!(val.tag, ElementType::String);
         assert_eq!(&*val.bytes, b"hi");
 
         let val: BsonValue<'_> = RawBsonRef::Int32(7).try_into().unwrap();
-        assert_eq!(val.tag, 0x10);
+        assert_eq!(val.tag, ElementType::Int32);
 
         let err = BsonValue::try_from(RawBsonRef::Null);
         assert!(err.is_err());
