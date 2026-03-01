@@ -147,6 +147,9 @@ read paths. Functions take BSON bytes in and return BSON bytes out.
 - **Custom index key extractors** — produce a synthetic index key from document fields
   (e.g. a normalized/lowercased string, a composite key). The engine indexes the
   output; the function defines *what* to index.
+- **Partial index filters** — a Lua predicate that controls whether a document is
+  included in an index. Evaluated on every insert/update during index maintenance.
+  See the Partial Indexes section below.
 - **Transform pipelines** — chain multiple functions on a document before storage.
   Schema migration, field normalization, enrichment.
 
@@ -176,6 +179,212 @@ Lua is the more practical default for slate's primary use case (short functions 
 compute a field or validate a document). Wasm is the better choice when polyglot
 support or heavy computation is needed. Both can coexist behind a common trait —
 the hook points don't care which runtime evaluates the function.
+
+---
+
+## Platform Adapters
+
+### Problem
+
+`slate-db` currently owns two platform-specific concerns: a `SystemTime::now()` clock
+and a background sweep thread (`std::thread::spawn`). This couples the core to
+platforms that support threading and system time, blocking targets like
+`wasm32-unknown-unknown`.
+
+### Design
+
+Gate platform-specific code behind a `runtime` feature in `slate-db` (default on).
+With `runtime` enabled, `Database::open` uses `SystemTime::now()` as the clock and
+spawns a background sweep thread — batteries included for native Rust consumers.
+Without it, the caller provides a clock function and handles sweep manually via
+`purge_expired()`.
+
+```
+slate-db (features = ["runtime"])   → default: SystemTime clock, sweep thread
+slate-db (default-features = false) → pure logic, caller provides clock, no sweep
+
+slate-uniffi  → depends on slate-db (default features → runtime on)
+                UniFFI bindings for Swift/Kotlin
+
+slate-wasm    → depends on slate-db with default-features = false
+                wasm-bindgen, injects Date.now(), no sweep (or JS setInterval)
+```
+
+### Work
+
+- Add `runtime` feature to `slate-db`. Gate `sweep.rs` and the default
+  `SystemTime::now()` clock behind `#[cfg(feature = "runtime")]`.
+- `Database::open` with `runtime`: current behavior (clock + sweep thread).
+- `Database::open` without `runtime`: takes a clock function, no sweep.
+- Create `slate-wasm` crate: `wasm-bindgen` wrapper over `Database`, `Transaction`,
+  `Cursor`. Depends on `slate-db` with `default-features = false`. Injects
+  `Date.now()` as the clock. Exposes `purge_expired()` for manual or
+  `setInterval`-driven cleanup.
+
+### Compilation status
+
+The full stack (`slate-store`, `slate-engine`, `slate-query`, `slate-db`) already
+compiles for `wasm32-unknown-unknown` with `--features memory`. The remaining
+blockers are runtime, not compile-time:
+
+- **`SystemTime::now()`** — panics on wasm32, but `KvEngine::with_clock()` escape
+  hatch already exists
+- **`std::thread::spawn`** — panics on wasm32, but sweep is already a no-op when
+  `ttl_sweep_interval_secs = u64::MAX`
+- **`getrandom`** — needs `features = ["js"]` for `crypto.getRandomValues()` entropy
+  (used by bson for ObjectId generation)
+
+---
+
+## Browser Playground
+
+### Concept
+
+Ship a single-page app powered by `slate-wasm` where users can create collections,
+insert documents, write queries, attach Lua hooks, and see query plans — all
+client-side with no backend.
+
+An interactive playground sells an embedded DB better than docs or benchmarks. Users
+can feel it working: insert a document, watch a Lua validator reject bad data, edit a
+computed field function, re-query, see results update instantly.
+
+Depends on the platform adapter work above and the `slate-wasm` crate.
+
+---
+
+## Compound Indexes
+
+### Problem
+
+Today, each index covers a single field. A query like `{ "status": "active", "created_at": { "$gt": "2024-01-01" } }` uses one index for `status` (Eq scan) and either a full scan or a second index for `created_at`, merged via `IndexMerge(And)`. This works but requires materializing one side into a hash set for the probe — two index scans plus a set intersection.
+
+### Design
+
+A compound index covers multiple fields in a defined order. The key layout extends naturally:
+
+```
+i\0{collection}\0{field1}+{field2}\0{value1_bytes}{value2_bytes}{doc_id_lp}
+```
+
+The planner recognizes when a compound index satisfies multiple predicates in a single scan. For the query above, a compound index on `["status", "created_at"]` produces a prefix scan on `status = "active"` followed by a range filter on `created_at` — one index walk, no merge.
+
+### Key prefix rules
+
+Compound indexes follow the leftmost prefix rule (same as MongoDB, MySQL):
+
+- Index on `["a", "b", "c"]` can satisfy queries on `{a}`, `{a, b}`, or `{a, b, c}`
+- Cannot satisfy `{b}` or `{b, c}` alone — the leading field must be present
+- Range predicates on a field terminate prefix usage — fields after the range use in-memory filtering
+
+### Work
+
+- Extend `CollectionConfig.indexes` to accept `Vec<String>` per index (single field is `vec!["field"]`)
+- Update key encoding to concatenate multiple value bytes with length prefixes
+- Extend `IndexDiff` to compute entries for multi-field keys
+- Planner: score compound indexes by how many query predicates they cover
+- Backfill: `create_index` with a compound spec re-indexes existing documents
+
+### Interaction with partial indexes
+
+Compound indexes can be combined with Lua-based partial index filters — e.g. a compound index on `["status", "priority"]` that only indexes documents where `is_archived == false`.
+
+---
+
+## SQL Query Surface
+
+### Concept
+
+A SQL-like query language for aggregation and complex reads, inspired by CosmosDB's SQL
+dialect. This is a query surface — it compiles down to the same plan tree nodes that the
+filter/find API uses, plus new aggregation nodes.
+
+```sql
+SELECT c.status, COUNT(1) AS total, AVG(c.score) AS avg_score
+FROM users c
+WHERE c.active = true
+GROUP BY c.status
+ORDER BY total DESC
+```
+
+### Why SQL
+
+SQL is universally understood. Offering a SQL surface for aggregation queries lowers the
+learning curve — users don't need to learn a custom pipeline DSL. The document model stays
+BSON; SQL is just the query language.
+
+### Sub-document joins (CosmosDB-style)
+
+CosmosDB supports `JOIN` within a single document's sub-arrays, not across collections.
+This is a natural fit for an embedded document DB:
+
+```sql
+SELECT c.name, t.tag
+FROM users c
+JOIN t IN c.tags
+WHERE t.tag = "rust"
+```
+
+This flattens the `tags` array, producing one row per element. No cross-collection joins,
+no foreign keys — just array unwinding expressed in SQL syntax.
+
+### Aggregation functions
+
+- **`COUNT`**, **`SUM`**, **`AVG`**, **`MIN`**, **`MAX`** — standard aggregates
+- **`GROUP BY`** — groups by one or more fields, produces one output row per group
+- **`HAVING`** — filter on aggregate results (post-group)
+- **`ARRAY_AGG`** / **`COLLECT`** — gather grouped values into an array
+
+### Execution
+
+Aggregation introduces new plan nodes:
+
+- **`GroupBy`** — materializes input, groups by key fields, computes aggregates
+- **`Having`** — post-group filter (operates on aggregate outputs)
+- **`ArrayUnwind`** — flattens a sub-array for `JOIN ... IN` syntax
+
+These compose with existing nodes (`Filter`, `Sort`, `Limit`, `Projection`, `IndexScan`).
+
+### Parser
+
+A lightweight SQL parser (hand-written recursive descent or `sqlparser-rs`) that emits the
+existing plan tree. The SQL surface is purely additive — the filter/find API continues to
+work unchanged.
+
+---
+
+## Partial Indexes
+
+### Concept
+
+Index only a subset of documents in a collection, controlled by a filter predicate. Reduces
+index size and write amplification for collections where most queries target a known subset.
+
+```rust
+txn.create_index("orders", IndexConfig {
+    fields: vec!["customer_id".into()],
+    filter: Some("status ~= 'cancelled'"),  // Lua expression
+})?;
+```
+
+### Integration with Lua hooks
+
+The filter predicate is a Lua expression evaluated against each document on insert/update.
+If it returns `false`, the document is skipped during index maintenance — no entry is
+written. This reuses the Lua runtime from the user-defined logic system.
+
+### Use cases
+
+- Index `orders.customer_id` only for non-cancelled orders
+- Index `users.email` only for verified users
+- Sparse indexes: skip documents missing the indexed field entirely
+
+### Work
+
+- Extend `IndexConfig` with an optional filter expression (stored in index metadata)
+- `IndexDiff` evaluates the filter before generating index entries
+- `create_index` backfill respects the filter
+- Planner: only consider a partial index when the query's filter is a superset of the
+  index filter (the query must logically guarantee all matching documents are in the index)
 
 ---
 
