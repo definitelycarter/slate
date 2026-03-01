@@ -5,7 +5,7 @@ use std::sync::{Arc, MutexGuard};
 use imbl::ordmap::RangedIter;
 
 use crate::error::StoreError;
-use crate::store::{Store, Transaction};
+use crate::store::{increment_prefix, Store, Transaction};
 
 use super::store::{ColumnFamily, MemoryStore};
 
@@ -39,13 +39,14 @@ impl PrefixIter {
     }
 
     fn reverse(data: Arc<ColumnFamily>, prefix: Vec<u8>) -> Self {
-        let mut upper = prefix.clone();
-        if let Some(last) = upper.last_mut() {
-            *last = last.wrapping_add(1);
-        }
         // SAFETY: same as forward — Arc keeps OrdMap alive for the struct's lifetime.
         let iter: RangedIter<'static, Vec<u8>, Vec<u8>> =
-            unsafe { std::mem::transmute(data.range(prefix.clone()..upper)) };
+            if let Some(upper) = increment_prefix(&prefix) {
+                unsafe { std::mem::transmute(data.range(prefix.clone()..upper)) }
+            } else {
+                // All 0xFF — no upper bound; use open-ended range (starts_with filter applies).
+                unsafe { std::mem::transmute(data.range(prefix.clone()..)) }
+            };
         Self {
             _data: data,
             iter,

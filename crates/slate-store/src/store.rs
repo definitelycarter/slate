@@ -2,6 +2,23 @@ use std::ops::RangeBounds;
 
 use crate::error::StoreError;
 
+/// Increment a prefix byte-string to produce an exclusive upper bound.
+///
+/// Returns `None` when the entire prefix is `0xFF` (no upper bound exists).
+pub(crate) fn increment_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = prefix.to_vec();
+    for byte in upper.iter_mut().rev() {
+        match byte.checked_add(1) {
+            Some(incremented) => {
+                *byte = incremented;
+                return Some(upper);
+            }
+            None => *byte = 0x00, // carry
+        }
+    }
+    None // all 0xFF — no upper bound exists
+}
+
 pub trait Store {
     type Txn<'a>: Transaction
     where

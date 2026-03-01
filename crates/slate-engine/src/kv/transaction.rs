@@ -353,7 +353,9 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             let Some(record) = IndexRecord::from_pair(key_bytes, metadata_bytes) else {
                 continue;
             };
-            let id = record.doc_id();
+            let Some(id) = record.doc_id() else {
+                continue;
+            };
             expired_ids.push(BsonValue {
                 tag: id.tag,
                 bytes: Cow::Owned(id.bytes.into_owned()),

@@ -125,22 +125,21 @@ impl IndexRecord {
     // ── Typed accessors ─────────────────────────────────────────
 
     /// The collection name.
-    pub fn collection(&self) -> &str {
-        // Safety: validated as UTF-8 during construction.
-        std::str::from_utf8(&self.index_key[2..self.field_start - 1]).unwrap()
+    pub fn collection(&self) -> Option<&str> {
+        std::str::from_utf8(&self.index_key[2..self.field_start - 1]).ok()
     }
 
     /// The indexed field name.
-    pub fn field(&self) -> &str {
-        // Safety: validated as UTF-8 during construction.
-        std::str::from_utf8(&self.index_key[self.field_start..self.value_start - 1]).unwrap()
+    pub fn field(&self) -> Option<&str> {
+        std::str::from_utf8(&self.index_key[self.field_start..self.value_start - 1]).ok()
     }
 
     /// The doc_id extracted from the key.
-    pub fn doc_id(&self) -> BsonValue<'_> {
-        BsonValue::parse_length_prefixed(&self.index_key[self.doc_id_start..])
-            .unwrap()
-            .0
+    pub fn doc_id(&self) -> Option<BsonValue<'_>> {
+        Some(
+            BsonValue::parse_length_prefixed(&self.index_key[self.doc_id_start..])?
+                .0,
+        )
     }
 
     /// Raw sortable-encoded value bytes (no type tag).
@@ -157,7 +156,7 @@ impl IndexRecord {
 
     /// Convert the doc_id to `RawBson`.
     pub fn doc_id_bson(&self) -> Option<bson::RawBson> {
-        self.doc_id().to_raw_bson()
+        self.doc_id()?.to_raw_bson()
     }
 
     /// Convert the indexed value to `RawBson`.
@@ -205,9 +204,8 @@ impl IndexRecord {
 pub fn is_index_expired(data: &[u8], now_millis: i64) -> bool {
     const TTL_OFFSET: usize = 1;
     const WITH_TTL_SIZE: usize = 9;
-    if data.len() >= WITH_TTL_SIZE {
-        let millis = i64::from_le_bytes(data[TTL_OFFSET..WITH_TTL_SIZE].try_into().unwrap());
-        millis < now_millis
+    if let Ok(bytes) = data.get(TTL_OFFSET..WITH_TTL_SIZE).unwrap_or_default().try_into() {
+        i64::from_le_bytes(bytes) < now_millis
     } else {
         false
     }
@@ -247,9 +245,9 @@ mod tests {
         let metadata = vec![ElementType::String as u8];
 
         let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
-        assert_eq!(record.collection(), "users");
-        assert_eq!(record.field(), "name");
-        assert_eq!(record.doc_id(), doc_id);
+        assert_eq!(record.collection().unwrap(), "users");
+        assert_eq!(record.field().unwrap(), "name");
+        assert_eq!(record.doc_id().unwrap(), doc_id);
         assert_eq!(record.value_bytes(), value_bytes);
         assert_eq!(record.type_byte(), ElementType::String as u8);
     }
@@ -275,9 +273,9 @@ mod tests {
         };
         let record = IndexRecord::encode("users", "name", &doc_id, &value, None);
 
-        assert_eq!(record.collection(), "users");
-        assert_eq!(record.field(), "name");
-        assert_eq!(record.doc_id(), doc_id);
+        assert_eq!(record.collection().unwrap(), "users");
+        assert_eq!(record.field().unwrap(), "name");
+        assert_eq!(record.doc_id().unwrap(), doc_id);
         assert_eq!(record.value_bytes(), b"Alice");
         assert_eq!(record.type_byte(), ElementType::String as u8);
     }
@@ -409,9 +407,9 @@ mod tests {
         let entries = IndexRecord::from_document("test", &indexes, &doc, &doc_id, None);
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].collection(), "test");
-        assert_eq!(entries[0].field(), "name");
-        assert_eq!(entries[1].field(), "age");
+        assert_eq!(entries[0].collection().unwrap(), "test");
+        assert_eq!(entries[0].field().unwrap(), "name");
+        assert_eq!(entries[1].field().unwrap(), "age");
     }
 
     #[test]

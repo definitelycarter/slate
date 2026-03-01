@@ -1,7 +1,7 @@
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
-use crate::store::Transaction;
+use crate::store::{increment_prefix, Transaction};
 
 enum Inner {
     Read(redb::ReadTransaction),
@@ -53,19 +53,12 @@ impl<'db> RedbTransaction<'db> {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
         let cf = cf.to_string();
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
-
-        let mut upper = prefix.to_vec();
-        let has_upper = if let Some(last) = upper.last_mut() {
-            *last = last.wrapping_add(1);
-            true
-        } else {
-            false
-        };
+        let upper = increment_prefix(prefix);
 
         let table = txn
             .open_table(def)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
-        collect_from_readable(&table, prefix, &upper, has_upper, reverse)
+        collect_from_readable(&table, prefix, upper.as_deref(), reverse)
     }
 }
 
@@ -199,17 +192,11 @@ impl<'db> Transaction for RedbTransaction<'db> {
                 let table = txn
                     .open_table(def)
                     .map_err(|e| StoreError::Storage(e.to_string()))?;
-                let mut upper = prefix.to_vec();
-                let has_upper = if let Some(last) = upper.last_mut() {
-                    *last = last.wrapping_add(1);
-                    true
-                } else {
-                    false
-                };
-                let range = if has_upper {
+                let upper = increment_prefix(prefix);
+                let range = if let Some(ref upper) = upper {
                     table.range::<&[u8]>(prefix..upper.as_slice())
                 } else {
-                    table.range::<&[u8]>(..)
+                    table.range::<&[u8]>(prefix..)
                 }
                 .map_err(|e| StoreError::Storage(e.to_string()))?;
                 Ok(Box::new(range.rev().map(|entry| {
@@ -357,14 +344,13 @@ impl<'db> Transaction for RedbTransaction<'db> {
 fn collect_from_readable<T: ReadableTable<&'static [u8], &'static [u8]>>(
     table: &T,
     prefix: &[u8],
-    upper: &[u8],
-    has_upper: bool,
+    upper: Option<&[u8]>,
     reverse: bool,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-    let range = if has_upper {
+    let range = if let Some(upper) = upper {
         table.range::<&[u8]>(prefix..upper)
     } else {
-        table.range::<&[u8]>(..)
+        table.range::<&[u8]>(prefix..)
     }
     .map_err(|e| StoreError::Storage(e.to_string()))?;
 
