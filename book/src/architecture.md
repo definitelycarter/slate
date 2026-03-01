@@ -168,27 +168,61 @@ pub struct Sort {
 
 The engine layer sits between `slate-store` and `slate-db`. It owns the on-disk format: BSON key encoding, record serialization (with TTL metadata), index maintenance, and the collection catalog. It provides an `EngineTransaction` trait that `slate-db` programs against, hiding all key encoding and storage layout details.
 
+### CollectionHandle
+
+A cheap-to-clone (`Arc`-backed) handle returned by the catalog when resolving a
+collection. Carries the collection's column family reference, index field names,
+primary key path (`pk_path`), and TTL field path (`ttl_path`). Passed to all
+engine operations so the caller never needs to know about key encoding or storage
+layout.
+
 ### Key Encoding
 
-All keys use a tag-prefixed binary format with sort-preserving BSON value encoding:
+All keys use a tag-prefixed binary format with `\x00` separators and sort-preserving
+BSON value encoding. Doc IDs are length-prefixed (`[type:1][len:2 BE][bytes]`) so
+they can be embedded in index keys without ambiguity.
 
-- **Collection metadata** — `c:{name}` stores collection config in the `_sys_` CF.
-- **Index config** — `x:{collection}:{field}` stores index metadata.
-- **Record** — `d:{collection}:{doc_id}` → encoded `Record` (BSON bytes + optional TTL).
-- **Index** — `i:{collection}:{field}:{value}:{doc_id}` → `IndexMeta` (type byte + TTL).
-- **IndexMap** — `m:{collection}:{field}:{doc_id}:{value}` → index key bytes (reverse lookup for O(1) cleanup).
+- **Collection metadata** — `c\x00{name}` stores collection config in the `_sys_` CF.
+- **Index config** — `x\x00{collection}\x00{field}` stores index metadata.
+- **Record** — `r\x00{collection}\x00{doc_id}` → encoded `Record` (BSON bytes + optional TTL).
+- **Index** — `i\x00{collection}\x00{field}\x00{value_bytes}{doc_id}` → metadata (type byte + optional TTL).
+
+### Record Format
+
+Records are stored as a version-tagged byte sequence:
+
+- `[0x00][BSON...]` — no TTL
+- `[0x01][8-byte LE i64 millis][BSON...]` — with TTL expiry timestamp
 
 ### TTL
 
-TTL filtering is handled inside the engine. `get()`, `scan()`, and `scan_index()` accept a `now_millis` timestamp and skip expired records transparently — callers never see expired data.
+TTL filtering is handled inside the engine. The transaction captures `now_millis` at
+creation time. `get()`, `scan()`, and `scan_index()` skip expired records
+transparently — callers never see expired data. A background sweep thread
+(`purge_expired`) deletes expired records and their index entries periodically.
 
 ### Index Maintenance
 
-On `put()`, the engine uses IndexMap reverse lookups to delete old index entries without reading the previous document, then inserts new entries. On `delete()`, the same IndexMap scan removes all index entries for the doc.
+On `put()`, the engine reads the old record (if any), computes an `IndexDiff` between
+the old and new index entries, and applies only the changes (deletes for removed
+values, inserts for new values). A fast path skips the diff entirely when the old and
+new record bytes are identical.
+
+On `delete()`, the engine reads the existing record, generates all its index entries
+via `IndexDiff::for_delete`, and removes them.
+
+### IndexEntry
+
+`scan_index()` returns an iterator of `IndexEntry` values. Each entry holds raw key
+and metadata bytes with pre-computed offsets for lazy decoding — `doc_id()` and
+`value()` are only parsed to `RawBson` when the consumer calls them. In the common
+path (non-covered queries), only `doc_id()` is called, avoiding unnecessary work.
 
 ### Catalog
 
-The `Catalog` trait provides collection and index lifecycle: `create_collection`, `drop_collection`, `create_index` (with backfill), `drop_index`, and `collection` handle resolution.
+The `Catalog` trait provides collection and index lifecycle: `create_collection`,
+`drop_collection`, `create_index` (with backfill), `drop_index`, and `collection`
+handle resolution.
 
 ## Tier 3: Database Layer (`slate-db`)
 
