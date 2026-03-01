@@ -37,6 +37,9 @@ cargo bench -p slate-db --features bench-internals
 
 # Run store benchmarks (500k x 10KB records)
 cargo run --release -p slate-store-bench
+
+# Run examples
+cargo run --example basic -p slate-db
 ```
 
 ## Usage
