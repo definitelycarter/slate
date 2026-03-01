@@ -1,12 +1,33 @@
 use std::borrow::Cow;
 
 use crate::encoding::bson_value::BsonValue;
+use crate::traits::FunctionKind;
 
 const COLLECTION_TAG: u8 = b'c';
 const INDEX_CONFIG_TAG: u8 = b'x';
 const RECORD_TAG: u8 = b'r';
 const INDEX_TAG: u8 = b'i';
+const TRIGGER_TAG: u8 = b't';
+const VALIDATOR_TAG: u8 = b'v';
+const DERIVED_TAG: u8 = b'd';
 const SEP: u8 = 0x00;
+
+fn function_tag(kind: FunctionKind) -> u8 {
+    match kind {
+        FunctionKind::Trigger => TRIGGER_TAG,
+        FunctionKind::Validator => VALIDATOR_TAG,
+        FunctionKind::Udf => DERIVED_TAG,
+    }
+}
+
+fn tag_to_function_kind(tag: u8) -> Option<FunctionKind> {
+    match tag {
+        TRIGGER_TAG => Some(FunctionKind::Trigger),
+        VALIDATOR_TAG => Some(FunctionKind::Validator),
+        DERIVED_TAG => Some(FunctionKind::Udf),
+        _ => None,
+    }
+}
 
 /// Parse the index-specific parts of an `i`-tagged key.
 ///
@@ -57,6 +78,7 @@ pub(crate) fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_
 pub enum Key<'a> {
     Collection(Cow<'a, str>),
     IndexConfig(Cow<'a, str>, Cow<'a, str>),
+    FunctionConfig(FunctionKind, Cow<'a, str>, Cow<'a, str>),
     Index(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
     Record(Cow<'a, str>, BsonValue<'a>),
 }
@@ -86,6 +108,15 @@ impl<'a> Key<'a> {
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(field.as_bytes());
+                buf
+            }
+            Key::FunctionConfig(kind, collection, name) => {
+                let mut buf = Vec::with_capacity(2 + collection.len() + 1 + name.len());
+                buf.push(function_tag(*kind));
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(name.as_bytes());
                 buf
             }
             Key::Record(collection, doc_id) => {
@@ -194,7 +225,17 @@ impl<'a> Key<'a> {
                     bv,
                 ))
             }
-            _ => None,
+            other => {
+                let kind = tag_to_function_kind(other)?;
+                let sep = rest.iter().position(|&b| b == SEP)?;
+                let collection = std::str::from_utf8(&rest[..sep]).ok()?;
+                let name = std::str::from_utf8(&rest[sep + 1..]).ok()?;
+                Some(Key::FunctionConfig(
+                    kind,
+                    Cow::Borrowed(collection),
+                    Cow::Borrowed(name),
+                ))
+            }
         }
     }
 
@@ -234,6 +275,7 @@ impl<'a> Key<'a> {
 pub enum KeyPrefix<'a> {
     Collection,
     IndexConfig(Cow<'a, str>),
+    FunctionConfig(FunctionKind, Cow<'a, str>),
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
@@ -246,6 +288,14 @@ impl<'a> KeyPrefix<'a> {
             KeyPrefix::IndexConfig(collection) => {
                 let mut buf = Vec::with_capacity(2 + collection.len() + 1);
                 buf.push(INDEX_CONFIG_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf
+            }
+            KeyPrefix::FunctionConfig(kind, collection) => {
+                let mut buf = Vec::with_capacity(2 + collection.len() + 1);
+                buf.push(function_tag(*kind));
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
@@ -387,6 +437,48 @@ mod tests {
         let (parsed_key, parsed_value) = Key::decode_index(&encoded).unwrap();
         assert_eq!(parsed_key, key);
         assert_eq!(parsed_value, value_bytes);
+    }
+
+    #[test]
+    fn function_config_key_roundtrip() {
+        for kind in [
+            FunctionKind::Trigger,
+            FunctionKind::Validator,
+            FunctionKind::Udf,
+        ] {
+            let key = Key::FunctionConfig(
+                kind,
+                Cow::Borrowed("users"),
+                Cow::Borrowed("audit_log"),
+            );
+            let bytes = key.encode();
+            let decoded = Key::decode(&bytes).unwrap();
+            assert_eq!(decoded, key);
+        }
+    }
+
+    #[test]
+    fn function_config_tag_bytes() {
+        let trigger = Key::FunctionConfig(
+            FunctionKind::Trigger,
+            Cow::Borrowed("users"),
+            Cow::Borrowed("f"),
+        );
+        assert_eq!(trigger.encode()[0], b't');
+
+        let validator = Key::FunctionConfig(
+            FunctionKind::Validator,
+            Cow::Borrowed("users"),
+            Cow::Borrowed("f"),
+        );
+        assert_eq!(validator.encode()[0], b'v');
+
+        let computed = Key::FunctionConfig(
+            FunctionKind::Udf,
+            Cow::Borrowed("users"),
+            Cow::Borrowed("f"),
+        );
+        assert_eq!(computed.encode()[0], b'd');
     }
 
     #[test]

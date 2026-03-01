@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use bson::RawDocumentBuf;
 use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
+use crate::database::VmFactory;
 use crate::error::DbError;
-use crate::executor::{Executor, RawIter};
+use crate::executor::{Context, Executor, RawIter, VmEntry};
 use crate::planner::plan::Plan;
 
 type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
@@ -16,25 +20,36 @@ type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
     plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
+    vm_registry: &'txn Mutex<HashMap<String, VmEntry>>,
+    vm_factory: Option<&'txn VmFactory>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn KvTxn<'db, S>,
         plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
+        vm_registry: &'txn Mutex<HashMap<String, VmEntry>>,
+        vm_factory: Option<&'txn VmFactory>,
     ) -> Self {
-        Self { txn, plan }
+        Self {
+            txn,
+            plan,
+            vm_registry,
+            vm_factory,
+        }
     }
 
     /// Consume the cursor and return a streaming iterator over documents.
     pub fn iter(self) -> Result<CursorIter<'txn>, DbError> {
-        let iter = Executor::new(self.txn).execute(self.plan)?;
+        let ctx = Context::new(self.txn).with_vm(self.vm_registry, self.vm_factory);
+        let iter = Executor::new(ctx).execute(self.plan)?;
         Ok(CursorIter { inner: iter })
     }
 
     /// Consume the cursor, drain all rows, and return the count of affected rows.
     pub fn drain(self) -> Result<u64, DbError> {
-        let iter = Executor::new(self.txn).execute(self.plan)?;
+        let ctx = Context::new(self.txn).with_vm(self.vm_registry, self.vm_factory);
+        let iter = Executor::new(ctx).execute(self.plan)?;
         let mut count = 0u64;
         for result in iter {
             result?;

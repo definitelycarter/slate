@@ -725,10 +725,11 @@ fn seed_or_test_data(db: &Database<MemoryStore>) {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "orders".to_string(),
-        indexes: vec!["user_id".to_string(), "status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("orders", "user_id").unwrap();
+    txn.create_index("orders", "status").unwrap();
     txn.insert_many(
         "orders",
         vec![
@@ -926,10 +927,10 @@ fn index_covered_preserves_int32_type() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec!["score".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index(COLLECTION, "score").unwrap();
     // Insert with Int32
     txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
         .unwrap()
@@ -969,10 +970,10 @@ fn index_covered_preserves_string_type() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index(COLLECTION, "status").unwrap();
     txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "status": "active" })
         .unwrap()
         .drain()
@@ -1011,10 +1012,10 @@ fn find_gt_on_indexed_field() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
-        indexes: vec!["score".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("scores", "score").unwrap();
     txn.insert_many(
         "scores",
         vec![
@@ -1058,10 +1059,10 @@ fn find_gte_lte_on_indexed_field() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
-        indexes: vec!["score".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("scores", "score").unwrap();
     txn.insert_many(
         "scores",
         vec![

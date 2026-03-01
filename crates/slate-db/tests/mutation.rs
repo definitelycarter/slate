@@ -2,8 +2,10 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, Database, DatabaseConfig};
 use slate_query::FindOptions;
+use slate_store::MemoryStore;
+use slate_vm::LuaVm;
 
 // ── Mutation operator tests ─────────────────────────────────────
 
@@ -663,10 +665,10 @@ fn mutation_index_maintained_on_set() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idx_mut".to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("idx_mut", "status").unwrap();
     txn.insert_one(
         "idx_mut",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
@@ -723,10 +725,10 @@ fn mutation_index_maintained_on_unset() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idx_unset".to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("idx_unset", "status").unwrap();
     txn.insert_one(
         "idx_unset",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
@@ -896,5 +898,132 @@ fn mutation_id_rejected() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     let result = txn.update_one(COLLECTION, &filter, doc! { "$set": { "_id": "r2" } });
+    assert!(result.is_err());
+}
+
+// ── Delete trigger tests ──────────────────────────────────────────
+
+#[test]
+fn delete_fires_trigger_successfully() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": "r2", "name": "Bob" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Delete with trigger registered — should succeed
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("r1".into()));
+    let count = txn
+        .delete_one(COLLECTION, &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
+    assert_eq!(count, 1);
+    txn.commit().unwrap();
+
+    // Verify the record is actually gone
+    let txn = db.begin(true).unwrap();
+    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "r1" }).unwrap();
+    assert!(result.is_none());
+    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "r2" }).unwrap();
+    assert!(result.is_some());
+}
+
+#[test]
+fn delete_many_fires_trigger_successfully() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        COLLECTION,
+        "log_delete",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    for i in 1..=5 {
+        txn.insert_one(
+            COLLECTION,
+            doc! { "_id": format!("r{i}"), "status": if i <= 3 { "active" } else { "inactive" } },
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("status", Bson::String("active".into()));
+    let count = txn
+        .delete_many(COLLECTION, &filter)
+        .unwrap()
+        .drain()
+        .unwrap();
+    assert_eq!(count, 3);
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let remaining = txn
+        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .unwrap()
+        .iter()
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(remaining.len(), 2);
+}
+
+#[test]
+fn delete_trigger_error_propagates() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        COLLECTION,
+        "bad_trigger",
+        "return function(ctx, event) error('trigger failed!') end",
+    )
+    .unwrap();
+    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Delete should fail because the trigger errors
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("r1".into()));
+    let result = txn.delete_one(COLLECTION, &filter).unwrap().drain();
     assert!(result.is_err());
 }

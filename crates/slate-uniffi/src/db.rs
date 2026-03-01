@@ -224,12 +224,14 @@ impl SlateDatabase {
 
     pub fn create_collection(&self, name: String, indexes: Vec<String>) -> Result<(), SlateError> {
         let config = slate_db::CollectionConfig {
-            name,
-            indexes,
+            name: name.clone(),
             ..Default::default()
         };
         self.write(|txn| {
             txn.create_collection(&config)?;
+            for field in &indexes {
+                txn.create_index(&name, field)?;
+            }
             Ok(())
         })
     }

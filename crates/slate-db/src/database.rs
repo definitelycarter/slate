@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use bson::{RawBson, RawDocumentBuf};
-use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
 use slate_query::{DistinctOptions, FindOptions};
 use slate_store::Store;
 
@@ -29,15 +30,24 @@ impl Default for DatabaseConfig {
     }
 }
 
+pub(crate) type VmFactory =
+    Arc<dyn Fn() -> Result<Box<dyn slate_vm::Vm + Send>, slate_vm::VmError> + Send + Sync>;
+
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
+    vm_registry: Mutex<HashMap<String, executor::VmEntry>>,
+    vm_factory: Option<VmFactory>,
     ttl_handle: Option<TtlHandle>,
 }
 
 impl<S: Store> Database<S> {
     pub fn begin(&self, read_only: bool) -> Result<Transaction<'_, S>, DbError> {
         let txn = self.engine.begin(read_only)?;
-        Ok(Transaction { txn })
+        Ok(Transaction {
+            txn,
+            vm_registry: &self.vm_registry,
+            vm_factory: self.vm_factory.as_ref(),
+        })
     }
 
     /// Purge expired documents from a collection.
@@ -69,11 +79,34 @@ impl<S: Store> Database<S> {
     }
 }
 
+impl<S: Store> Database<S> {
+    /// Attach a VM factory for per-collection script execution.
+    ///
+    /// The factory is called lazily to create one VM per collection.
+    /// Without a factory, function source is still stored in the engine
+    /// but no scripts will be executed.
+    pub fn with_vm_factory(
+        mut self,
+        factory: impl Fn() -> Result<Box<dyn slate_vm::Vm + Send>, slate_vm::VmError>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.vm_factory = Some(Arc::new(factory));
+        self
+    }
+}
+
 impl<S: Store + Send + Sync + 'static> Database<S> {
     pub fn open(store: S, config: DatabaseConfig) -> Self {
         let engine = Arc::new(KvEngine::new(store));
         let ttl_handle = sweep::spawn(Arc::clone(&engine), config.ttl_sweep_interval_secs);
-        Self { engine, ttl_handle }
+        Self {
+            engine,
+            vm_registry: Mutex::new(HashMap::new()),
+            vm_factory: None,
+            ttl_handle,
+        }
     }
 }
 
@@ -81,6 +114,8 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
 
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
+    vm_registry: &'db Mutex<HashMap<String, executor::VmEntry>>,
+    vm_factory: Option<&'db VmFactory>,
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
@@ -313,7 +348,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: options.take,
         };
         let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn);
+        let ctx = executor::Context::new(&self.txn)
+            .with_vm(self.vm_registry, self.vm_factory);
+        let exec = executor::Executor::new(ctx);
         let mut iter = exec.execute(plan)?;
         match iter.next() {
             Some(result) => {
@@ -380,9 +417,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Collection management ───────────────────────────────────
 
-    /// Create a collection with the given config and ensure its indexes exist.
+    /// Create a collection with the given config.
     pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
-        // Create the collection in the engine catalog
         let options = slate_engine::CreateCollectionOptions {
             cf: None,
             pk_path: Some(config.pk_path.clone()),
@@ -390,24 +426,83 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         };
         self.txn.create_collection(&config.name, &options)?;
 
-        // Ensure required indexes exist
-        self.ensure_indexes(config)?;
+        // Auto-create TTL index; ignore IndexExists for idempotent re-creation.
+        if let Err(e) = self.txn.create_index(&config.name, &config.ttl_path) {
+            if !matches!(e, slate_engine::EngineError::IndexExists(_)) {
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
-    /// Ensure all indexes declared in the config exist, creating any that are missing.
-    pub fn ensure_indexes(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
-        let handle = self.txn.collection(&config.name)?;
-        let existing = handle.indexes().to_vec();
-        let mut fields: Vec<&str> = config.indexes.iter().map(|s| s.as_str()).collect();
-        if !fields.contains(&config.ttl_path.as_str()) {
-            fields.push(&config.ttl_path);
-        }
-        for field in &fields {
-            if !existing.iter().any(|e| e == field) {
-                self.create_index(&config.name, field)?;
-            }
-        }
+    // ── Function operations ──────────────────────────────────────
+
+    /// Register a trigger function on a collection.
+    pub fn register_trigger(
+        &mut self,
+        collection: &str,
+        name: &str,
+        source: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .create_function(collection, FunctionKind::Trigger, name, source.as_bytes())?;
+        Ok(())
+    }
+
+    /// Register a validator function on a collection.
+    pub fn register_validator(
+        &mut self,
+        collection: &str,
+        name: &str,
+        source: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .create_function(collection, FunctionKind::Validator, name, source.as_bytes())?;
+        Ok(())
+    }
+
+    /// Register a user-defined function on a collection.
+    pub fn register_udf(
+        &mut self,
+        collection: &str,
+        name: &str,
+        source: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .create_function(collection, FunctionKind::Udf, name, source.as_bytes())?;
+        Ok(())
+    }
+
+    /// Drop a trigger function from a collection.
+    pub fn drop_trigger(
+        &mut self,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .drop_function(collection, FunctionKind::Trigger, name)?;
+        Ok(())
+    }
+
+    /// Drop a validator function from a collection.
+    pub fn drop_validator(
+        &mut self,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .drop_function(collection, FunctionKind::Validator, name)?;
+        Ok(())
+    }
+
+    /// Drop a user-defined function from a collection.
+    pub fn drop_udf(
+        &mut self,
+        collection: &str,
+        name: &str,
+    ) -> Result<(), DbError> {
+        self.txn
+            .drop_function(collection, FunctionKind::Udf, name)?;
         Ok(())
     }
 
@@ -429,7 +524,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Prepare a cursor for a query statement.
     fn prepare_cursor(&self, statement: Statement<'_>) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = self.plan(statement)?;
-        Ok(Cursor::new(&self.txn, plan))
+        Ok(Cursor::new(
+            &self.txn,
+            plan,
+            self.vm_registry,
+            self.vm_factory,
+        ))
     }
 
     /// Parse a required filter document into an Expression.

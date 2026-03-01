@@ -50,10 +50,11 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
-        indexes: vec!["status".into(), "contacts_count".into()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("test", "status").unwrap();
+    txn.create_index("test", "contacts_count").unwrap();
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
             bson::doc! {
@@ -114,10 +115,11 @@ pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
-        indexes: vec!["status".into(), "contacts_count".into()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("bench", "status").unwrap();
+    txn.create_index("bench", "contacts_count").unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
         txn.insert_many("bench", chunk.to_vec())

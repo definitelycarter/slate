@@ -1,5 +1,7 @@
 use bson::raw::RawBsonRef;
-use slate_engine::{Catalog, CollectionHandle, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{
+    Catalog, CollectionHandle, Engine, EngineTransaction, FunctionKind, IndexRange, KvEngine,
+};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -622,5 +624,192 @@ fn scan_mixed_id_types() {
     assert!(txn.get(&handle, &RawBsonRef::String("str")).unwrap().is_some());
     assert!(txn.get(&handle, &RawBsonRef::ObjectId(oid)).unwrap().is_some());
     assert!(txn.get(&handle, &RawBsonRef::Int32(42)).unwrap().is_some());
+    txn.rollback().unwrap();
+}
+
+// ── Function catalog ────────────────────────────────────────
+
+#[test]
+fn create_and_load_trigger() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"print('audit')")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let entries = txn.load_functions("users", FunctionKind::Trigger).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "audit");
+    assert_eq!(entries[0].source, b"print('audit')");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn create_and_load_validator() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Validator, "require_name", b"assert(doc.name)")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let entries = txn.load_functions("users", FunctionKind::Validator).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "require_name");
+    assert_eq!(entries[0].source, b"assert(doc.name)");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn create_and_load_udf() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Udf, "full_name", b"return first .. last")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let entries = txn.load_functions("users", FunctionKind::Udf).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "full_name");
+    assert_eq!(entries[0].source, b"return first .. last");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn multiple_functions_per_collection() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"src1")
+        .unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "notify", b"src2")
+        .unwrap();
+    txn.create_function("users", FunctionKind::Validator, "check", b"src3")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let triggers = txn.load_functions("users", FunctionKind::Trigger).unwrap();
+    assert_eq!(triggers.len(), 2);
+    let names: Vec<&str> = triggers.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"audit"));
+    assert!(names.contains(&"notify"));
+
+    // Validators are separate from triggers.
+    let validators = txn.load_functions("users", FunctionKind::Validator).unwrap();
+    assert_eq!(validators.len(), 1);
+    assert_eq!(validators[0].name, "check");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn drop_function() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"src")
+        .unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "notify", b"src2")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = engine.begin(false).unwrap();
+    txn.drop_function("users", FunctionKind::Trigger, "audit")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let entries = txn.load_functions("users", FunctionKind::Trigger).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "notify");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn drop_collection_cleans_functions() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"t")
+        .unwrap();
+    txn.create_function("users", FunctionKind::Validator, "check", b"v")
+        .unwrap();
+    txn.create_function("users", FunctionKind::Udf, "full_name", b"d")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = engine.begin(false).unwrap();
+    txn.drop_collection("users").unwrap();
+    txn.commit().unwrap();
+
+    // Recreate and verify no functions leak.
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    for kind in [FunctionKind::Trigger, FunctionKind::Validator, FunctionKind::Udf] {
+        let entries = txn.load_functions("users", kind).unwrap();
+        assert_eq!(entries.len(), 0, "expected no {:?} entries after drop", kind);
+    }
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn function_requires_existing_collection() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    let err = txn.create_function("nope", FunctionKind::Trigger, "audit", b"src");
+    assert!(err.is_err());
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn functions_isolated_across_collections() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_collection("posts", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"users_src")
+        .unwrap();
+    txn.create_function("posts", FunctionKind::Trigger, "audit", b"posts_src")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let user_triggers = txn.load_functions("users", FunctionKind::Trigger).unwrap();
+    assert_eq!(user_triggers.len(), 1);
+    assert_eq!(user_triggers[0].source, b"users_src");
+
+    let post_triggers = txn.load_functions("posts", FunctionKind::Trigger).unwrap();
+    assert_eq!(post_triggers.len(), 1);
+    assert_eq!(post_triggers[0].source, b"posts_src");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn create_index_duplicate_errors() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_index("users", "email").unwrap();
+
+    let err = txn.create_index("users", "email");
+    assert!(err.is_err(), "expected IndexExists error on duplicate create_index");
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn create_function_duplicate_errors() {
+    let engine = engine();
+    let mut txn = engine.begin(false).unwrap();
+    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_function("users", FunctionKind::Trigger, "audit", b"src1")
+        .unwrap();
+
+    let err = txn.create_function("users", FunctionKind::Trigger, "audit", b"src2");
+    assert!(err.is_err(), "expected FunctionExists error on duplicate create_function");
     txn.rollback().unwrap();
 }

@@ -6,6 +6,23 @@ use bson::RawBson;
 
 use crate::error::EngineError;
 
+// ── Function types ──────────────────────────────────────────
+
+/// The kind of Lua function stored in the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionKind {
+    Trigger,
+    Validator,
+    Udf,
+}
+
+/// A named function definition loaded from the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionEntry {
+    pub name: String,
+    pub source: Vec<u8>,
+}
+
 // ── CollectionHandle ────────────────────────────────────────
 
 struct CollectionHandleInner<Cf> {
@@ -287,4 +304,28 @@ pub trait Catalog: EngineTransaction {
     fn create_index(&mut self, collection: &str, field: &str) -> Result<(), EngineError>;
 
     fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), EngineError>;
+
+    /// Store a named function (trigger, validator, or computed field) for a collection.
+    fn create_function(
+        &mut self,
+        collection: &str,
+        kind: FunctionKind,
+        name: &str,
+        source: &[u8],
+    ) -> Result<(), EngineError>;
+
+    /// Remove a named function from a collection.
+    fn drop_function(
+        &mut self,
+        collection: &str,
+        kind: FunctionKind,
+        name: &str,
+    ) -> Result<(), EngineError>;
+
+    /// Load all function entries of a given kind for a collection.
+    fn load_functions(
+        &self,
+        collection: &str,
+        kind: FunctionKind,
+    ) -> Result<Vec<FunctionEntry>, EngineError>;
 }

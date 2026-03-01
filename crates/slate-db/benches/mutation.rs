@@ -4,7 +4,7 @@ use common::*;
 use bson::raw::RawDocumentBuf;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_db::bench::{Database, Executor, Node, Plan};
+use slate_db::bench::{Context, Database, Executor, Node, Plan};
 use slate_db::{CollectionConfig, DatabaseConfig};
 use slate_engine::{Catalog, Engine};
 use slate_store::MemoryStore;
@@ -24,10 +24,11 @@ fn bench_insert(c: &mut Criterion) {
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
-                indexes: vec!["status".into(), "contacts_count".into()],
-        ..Default::default()
+                ..Default::default()
             })
             .unwrap();
+            txn.create_index("test", "status").unwrap();
+            txn.create_index("test", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -46,7 +47,7 @@ fn bench_insert(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     iter.count()
                 },
@@ -78,7 +79,7 @@ fn bench_update(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let modified: u64 =
                         iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
@@ -108,7 +109,7 @@ fn bench_delete(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let deleted: u64 = iter.map(|r| r.unwrap()).count() as u64;
                     deleted
@@ -142,7 +143,7 @@ fn bench_replace(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let modified: u64 =
                         iter.map(|r| r.unwrap()).filter(|opt| opt.is_some()).count() as u64;
@@ -183,7 +184,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let mut count = 0u64;
                     for r in iter {
@@ -225,7 +226,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let mut count = 0u64;
                     for r in iter {
@@ -251,10 +252,11 @@ fn bench_upsert_insert(c: &mut Criterion) {
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
-                indexes: vec!["status".into(), "contacts_count".into()],
-        ..Default::default()
+                ..Default::default()
             })
             .unwrap();
+            txn.create_index("test", "status").unwrap();
+            txn.create_index("test", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -282,7 +284,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
                     (txn, plan)
                 },
                 |(txn, plan)| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     let iter = exec.execute(plan).unwrap();
                     let mut count = 0u64;
                     for r in iter {

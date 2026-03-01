@@ -4,7 +4,9 @@ use slate_store::{Store, Transaction};
 
 use crate::encoding::{IndexRecord, Key, KeyPrefix, Record};
 use crate::error::EngineError;
-use crate::traits::{Catalog, CollectionHandle, CreateCollectionOptions};
+use crate::traits::{
+    Catalog, CollectionHandle, CreateCollectionOptions, FunctionEntry, FunctionKind,
+};
 
 use super::transaction::KvTransaction;
 use super::{CollectionMeta, DEFAULT_CF, SYS_CF};
@@ -163,6 +165,16 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let idx_config_prefix = KeyPrefix::IndexConfig(Cow::Borrowed(name)).encode();
         self.delete_prefix(&sys, &idx_config_prefix)?;
 
+        // Delete all function config keys from _sys_.
+        for kind in [
+            FunctionKind::Trigger,
+            FunctionKind::Validator,
+            FunctionKind::Udf,
+        ] {
+            let fn_prefix = KeyPrefix::FunctionConfig(kind, Cow::Borrowed(name)).encode();
+            self.delete_prefix(&sys, &fn_prefix)?;
+        }
+
         // Delete the collection metadata key.
         let meta_key = Key::Collection(Cow::Borrowed(name)).encode();
         self.txn.delete(&sys, &meta_key)?;
@@ -174,10 +186,13 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let meta = self.load_collection_meta(collection)?;
         let cf = self.txn.cf(&meta.cf)?;
 
-        // Write the index config key.
+        // Check for duplicate index.
         let sys = self.sys_cf()?;
         let config_key =
             Key::IndexConfig(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+        if self.txn.get(&sys, &config_key)?.is_some() {
+            return Err(EngineError::IndexExists(format!("{collection}.{field}")));
+        }
         self.txn.put(&sys, &config_key, &[])?;
 
         // Backfill: scan all existing records and create index entries.
@@ -224,5 +239,69 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         self.txn.delete(&sys, &key)?;
 
         Ok(())
+    }
+
+    fn create_function(
+        &mut self,
+        collection: &str,
+        kind: FunctionKind,
+        name: &str,
+        source: &[u8],
+    ) -> Result<(), EngineError> {
+        // Verify collection exists.
+        self.load_collection_meta(collection)?;
+
+        let sys = self.sys_cf()?;
+        let key = Key::FunctionConfig(
+            kind,
+            Cow::Borrowed(collection),
+            Cow::Borrowed(name),
+        )
+        .encode();
+        if self.txn.get(&sys, &key)?.is_some() {
+            return Err(EngineError::FunctionExists(format!(
+                "{collection}.{kind:?}.{name}"
+            )));
+        }
+        self.txn.put(&sys, &key, source)?;
+        Ok(())
+    }
+
+    fn drop_function(
+        &mut self,
+        collection: &str,
+        kind: FunctionKind,
+        name: &str,
+    ) -> Result<(), EngineError> {
+        let sys = self.sys_cf()?;
+        let key = Key::FunctionConfig(
+            kind,
+            Cow::Borrowed(collection),
+            Cow::Borrowed(name),
+        )
+        .encode();
+        self.txn.delete(&sys, &key)?;
+        Ok(())
+    }
+
+    fn load_functions(
+        &self,
+        collection: &str,
+        kind: FunctionKind,
+    ) -> Result<Vec<FunctionEntry>, EngineError> {
+        let sys = self.sys_cf()?;
+        let prefix = KeyPrefix::FunctionConfig(kind, Cow::Borrowed(collection)).encode();
+        let iter = self.txn.scan_prefix(&sys, &prefix)?;
+        let mut entries = Vec::new();
+        for result in iter {
+            let (key_bytes, value) = result?;
+            if let Some(Key::FunctionConfig(_, _, name)) = Key::decode(&key_bytes) {
+                entries.push(FunctionEntry {
+                    name: name.into_owned(),
+                    source: value,
+                });
+            }
+        }
+        Ok(entries)
     }
 }

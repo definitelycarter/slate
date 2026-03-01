@@ -46,6 +46,8 @@ pub enum EngineError {
     CollectionNotFound(String),
     DuplicateKey(String),
     InvalidDocument(String),
+    IndexExists(String),
+    FunctionExists(String),
 }
 
 impl fmt::Display for EngineError {
@@ -57,6 +59,8 @@ impl fmt::Display for EngineError {
             Self::CollectionNotFound(name) => write!(f, "collection not found: {name}"),
             Self::DuplicateKey(id) => write!(f, "duplicate key: {id}"),
             Self::InvalidDocument(msg) => write!(f, "invalid document: {msg}"),
+            Self::IndexExists(desc) => write!(f, "index already exists: {desc}"),
+            Self::FunctionExists(desc) => write!(f, "function already exists: {desc}"),
         }
     }
 }

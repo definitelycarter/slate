@@ -38,7 +38,6 @@ pub fn create_collection(db: &Database<MemoryStore>, name: &str) {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: name.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();

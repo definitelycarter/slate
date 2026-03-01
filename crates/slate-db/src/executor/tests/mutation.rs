@@ -11,7 +11,7 @@ fn delete_removes_records() {
         collection: mock_collection(vec![]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut deleted = 0u64;
     for result in iter {
@@ -34,7 +34,7 @@ fn update_writes_merged_doc() {
         mutation: crate::mutation::parse_mutation(&rawdoc! { "score": 100 }).unwrap(),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -64,7 +64,7 @@ fn update_unchanged_skips_write() {
         mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "active" }).unwrap(),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -90,7 +90,7 @@ fn replace_writes_replacement() {
         replacement: rawdoc! { "replaced": true },
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;
@@ -121,7 +121,7 @@ fn insert_writes_records() {
         collection: mock_collection(vec!["status".into()]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut count = 0u64;
     for result in iter {
@@ -144,7 +144,7 @@ fn full_update_pipeline() {
         mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "archived" }).unwrap(),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let mut matched = 0u64;
     let mut modified = 0u64;

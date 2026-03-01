@@ -12,6 +12,9 @@ pub enum DbError {
     InvalidKey(String),
     InvalidDocument(String),
     Serialization(String),
+    IndexExists(String),
+    FunctionExists(String),
+    Vm(slate_vm::VmError),
 }
 
 impl fmt::Display for DbError {
@@ -25,6 +28,9 @@ impl fmt::Display for DbError {
             DbError::InvalidKey(msg) => write!(f, "invalid key: {msg}"),
             DbError::InvalidDocument(msg) => write!(f, "invalid document: {msg}"),
             DbError::Serialization(msg) => write!(f, "serialization error: {msg}"),
+            DbError::IndexExists(desc) => write!(f, "index already exists: {desc}"),
+            DbError::FunctionExists(desc) => write!(f, "function already exists: {desc}"),
+            DbError::Vm(e) => write!(f, "vm error: {e}"),
         }
     }
 }
@@ -56,6 +62,12 @@ impl From<crate::parser::FilterParseError> for DbError {
     }
 }
 
+impl From<slate_vm::VmError> for DbError {
+    fn from(e: slate_vm::VmError) -> Self {
+        DbError::Vm(e)
+    }
+}
+
 impl From<slate_engine::EngineError> for DbError {
     fn from(e: slate_engine::EngineError) -> Self {
         match e {
@@ -65,6 +77,8 @@ impl From<slate_engine::EngineError> for DbError {
             }
             slate_engine::EngineError::DuplicateKey(id) => DbError::DuplicateKey(id),
             slate_engine::EngineError::InvalidDocument(msg) => DbError::InvalidDocument(msg),
+            slate_engine::EngineError::IndexExists(desc) => DbError::IndexExists(desc),
+            slate_engine::EngineError::FunctionExists(desc) => DbError::FunctionExists(desc),
             other => DbError::InvalidQuery(other.to_string()),
         }
     }

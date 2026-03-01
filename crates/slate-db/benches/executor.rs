@@ -3,9 +3,10 @@ use common::*;
 
 use bson::raw::RawDocumentBuf;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_db::bench::{Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
+use slate_db::bench::{Context, Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
 use slate_engine::{
-    Catalog, CollectionHandle, Engine, EngineError, EngineTransaction, IndexEntry, IndexRange,
+    Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineError, EngineTransaction,
+    FunctionEntry, FunctionKind, IndexEntry, IndexRange,
 };
 
 // ── NoopTransaction ─────────────────────────────────────────
@@ -88,6 +89,36 @@ impl EngineTransaction for NoopTransaction {
     }
 }
 
+impl Catalog for NoopTransaction {
+    fn collection(&self, _: &str) -> Result<CollectionHandle<()>, EngineError> {
+        panic!("NoopTransaction::collection called");
+    }
+    fn list_collections(&self) -> Result<Vec<CollectionHandle<()>>, EngineError> {
+        panic!("NoopTransaction::list_collections called");
+    }
+    fn create_collection(&mut self, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
+        panic!("NoopTransaction::create_collection called");
+    }
+    fn drop_collection(&mut self, _: &str) -> Result<(), EngineError> {
+        panic!("NoopTransaction::drop_collection called");
+    }
+    fn create_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+        panic!("NoopTransaction::create_index called");
+    }
+    fn drop_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+        panic!("NoopTransaction::drop_index called");
+    }
+    fn create_function(&mut self, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+        panic!("NoopTransaction::create_function called");
+    }
+    fn drop_function(&mut self, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
+        panic!("NoopTransaction::drop_function called");
+    }
+    fn load_functions(&self, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
+        Ok(vec![])
+    }
+}
+
 // ── Store-free benchmarks ───────────────────────────────────
 
 fn bench_values(c: &mut Criterion) {
@@ -97,7 +128,7 @@ fn bench_values(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || Plan::Find(Node::Values(docs.clone())),
                 |plan| consume_rows(exec.execute(plan).unwrap()),
@@ -115,7 +146,7 @@ fn bench_projection(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("select", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
@@ -130,7 +161,7 @@ fn bench_projection(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("passthrough", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
@@ -152,7 +183,7 @@ fn bench_limit(c: &mut Criterion) {
 
     group.bench_with_input(BenchmarkId::new("skip+take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let exec = Executor::new(&txn);
+        let exec = Executor::new(Context::new(&txn));
         b.iter_batched(
             || {
                 Plan::Find(Node::Limit {
@@ -168,7 +199,7 @@ fn bench_limit(c: &mut Criterion) {
 
     group.bench_with_input(BenchmarkId::new("take", 10_000), &10_000, |b, _| {
         let txn = NoopTransaction;
-        let exec = Executor::new(&txn);
+        let exec = Executor::new(Context::new(&txn));
         b.iter_batched(
             || {
                 Plan::Find(Node::Limit {
@@ -192,7 +223,7 @@ fn bench_sort(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("single", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -210,7 +241,7 @@ fn bench_sort(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("multi", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -242,7 +273,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("low_card", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Distinct {
@@ -260,7 +291,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sorted", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -284,7 +315,7 @@ fn bench_distinct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sorted_hc", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Sort {
@@ -316,7 +347,7 @@ fn bench_filter(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("eq", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Filter {
@@ -334,7 +365,7 @@ fn bench_filter(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("and", n), &n, |b, _| {
             let txn = NoopTransaction;
-            let exec = Executor::new(&txn);
+            let exec = Executor::new(Context::new(&txn));
             b.iter_batched(
                 || {
                     Plan::Find(Node::Filter {
@@ -370,7 +401,7 @@ fn bench_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -401,7 +432,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -424,7 +455,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -447,7 +478,7 @@ fn bench_index_scan(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -476,7 +507,7 @@ fn bench_read_record(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -502,7 +533,7 @@ fn bench_read_record(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -544,7 +575,7 @@ fn bench_index_merge(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,
@@ -578,7 +609,7 @@ fn bench_index_merge(c: &mut Criterion) {
                     })
                 },
                 |plan| {
-                    let exec = Executor::new(&txn);
+                    let exec = Executor::new(Context::new(&txn));
                     consume_rows(exec.execute(plan).unwrap())
                 },
                 BatchSize::SmallInput,

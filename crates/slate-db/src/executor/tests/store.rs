@@ -10,10 +10,11 @@ fn seeded_db() -> Database<MemoryStore> {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
-        indexes: vec!["status".into(), "score".into()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("test", "status").unwrap();
+    txn.create_index("test", "score").unwrap();
     txn.insert_many(
         "test",
         vec![
@@ -73,7 +74,7 @@ fn scan_yields_all_records() {
     let collection = txn.collection("test").unwrap();
 
     let plan = Plan::Find(Node::Scan { collection });
-    let rows = collect_docs(Executor::new(&txn).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "2");
@@ -95,7 +96,7 @@ fn index_scan_eq_filter() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&"1".to_string())); // Alice
     assert!(ids.contains(&"3".to_string())); // Charlie
@@ -116,7 +117,7 @@ fn index_scan_full_column() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     // score order: 70 (id=1), 80 (id=3), 90 (id=2)
     assert_eq!(ids, vec!["1", "3", "2"]);
 }
@@ -135,7 +136,7 @@ fn index_scan_desc() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     // Descending score: 90 (id=2), 80 (id=3), 70 (id=1)
     assert_eq!(ids, vec!["2", "3", "1"]);
 }
@@ -154,7 +155,7 @@ fn index_scan_with_limit() {
         limit: Some(2),
         covered: false,
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
@@ -185,7 +186,7 @@ fn index_merge_or() {
             covered: false,
         }),
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(ids.len(), 3);
     assert!(ids.contains(&"1".to_string()));
     assert!(ids.contains(&"2".to_string()));
@@ -219,7 +220,7 @@ fn index_merge_and() {
             covered: false,
         }),
     });
-    let ids = collect_ids(Executor::new(&txn).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(ids, vec!["3"]); // Charlie: active AND score=80
 }
 
@@ -242,7 +243,7 @@ fn read_record_fetches_docs_from_index_scan() {
             covered: false,
         }),
     });
-    let rows = collect_docs(Executor::new(&txn).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     let names: Vec<&str> = rows
         .iter()
@@ -286,7 +287,7 @@ fn read_record_skips_dangling_index() {
             covered: false,
         }),
     });
-    let rows = collect_docs(Executor::new(&txn).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     // Bob was deleted (engine cleaned up indexes too) → 0 results
     assert_eq!(rows.len(), 0);
 }
@@ -305,7 +306,7 @@ fn read_record_over_scan() {
             collection: collection1,
         }),
     });
-    let rows = collect_docs(Executor::new(&txn).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("name").unwrap(), "Alice");
 }

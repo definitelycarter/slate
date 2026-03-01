@@ -23,7 +23,6 @@ fn distinct_scalar_field() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -57,7 +56,6 @@ fn distinct_nested_path() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -96,7 +94,6 @@ fn distinct_array_field() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -127,7 +124,6 @@ fn distinct_with_filter() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -166,7 +162,6 @@ fn distinct_with_sort_asc() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -213,7 +208,6 @@ fn distinct_with_sort_desc() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -260,7 +254,6 @@ fn distinct_missing_field() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -293,7 +286,6 @@ fn distinct_mixed_presence() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -327,7 +319,6 @@ fn distinct_array_of_sub_documents() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -376,7 +367,6 @@ fn distinct_sub_document() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -424,7 +414,6 @@ fn distinct_with_take() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -472,7 +461,6 @@ fn distinct_with_skip_take() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();
@@ -520,7 +508,6 @@ fn distinct_with_sort_and_limit() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
-        indexes: vec![],
         ..Default::default()
     })
     .unwrap();

@@ -38,6 +38,11 @@ impl From<DbError> for SlateError {
             },
             DbError::InvalidDocument(msg) => SlateError::Serialization { message: msg },
             DbError::Serialization(msg) => SlateError::Serialization { message: msg },
+            DbError::IndexExists(msg) => SlateError::DuplicateKey { message: msg },
+            DbError::FunctionExists(msg) => SlateError::DuplicateKey { message: msg },
+            DbError::Vm(e) => SlateError::Store {
+                message: e.to_string(),
+            },
         }
     }
 }

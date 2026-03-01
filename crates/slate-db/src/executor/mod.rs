@@ -1,3 +1,4 @@
+mod context;
 pub(crate) mod exec;
 pub(crate) mod field_tree;
 mod nodes;
@@ -5,8 +6,11 @@ pub(crate) mod raw_bson;
 #[cfg(test)]
 mod tests;
 
+pub use context::Context;
+pub(crate) use context::VmEntry;
+
 use bson::RawBson;
-use slate_engine::EngineTransaction;
+use slate_engine::{Catalog, EngineTransaction};
 
 use crate::error::DbError;
 use crate::planner::plan::{Node, Plan};
@@ -20,78 +24,24 @@ pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>>
 /// executor can be used as a temporary:
 ///
 /// ```ignore
-/// let iter = Executor::new(&txn).execute(plan)?;
+/// let ctx = Context::new(&txn);
+/// let iter = Executor::new(ctx).execute(plan)?;
 /// for row in iter { /* ... */ }
 /// ```
 pub struct Executor<'a, T: EngineTransaction> {
-    txn: &'a T,
+    ctx: Context<'a, T>,
 }
 
 impl<'a, T: EngineTransaction> Executor<'a, T> {
-    pub fn new(txn: &'a T) -> Self {
-        Self { txn }
-    }
-
-    /// Execute a plan, returning a streaming iterator of rows.
-    pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'a>, DbError> {
-        match plan {
-            Plan::Find(node) => self.execute_node(node),
-
-            Plan::Insert { collection, source } => {
-                let source = self.execute_node(source)?;
-                nodes::insert_record::execute(self.txn, collection, source)
-            }
-
-            Plan::Update {
-                collection,
-                mutation,
-                source,
-            } => {
-                let source = self.execute_node(source)?;
-                nodes::mutate::execute(self.txn, collection, mutation, source)
-            }
-
-            Plan::Replace {
-                collection,
-                replacement,
-                source,
-            } => {
-                let source = self.execute_node(source)?;
-                nodes::replace::execute(self.txn, collection, replacement, source)
-            }
-
-            Plan::Delete { collection, source } => {
-                let source = self.execute_node(source)?;
-                nodes::delete::execute(self.txn, collection, source)
-            }
-
-            Plan::Merge { collection, source } => {
-                let source = self.execute_node(source)?;
-                nodes::upsert::execute(
-                    self.txn,
-                    collection,
-                    nodes::upsert::UpsertMode::Merge,
-                    source,
-                )
-            }
-
-            Plan::Upsert { collection, source } => {
-                let source = self.execute_node(source)?;
-                nodes::upsert::execute(
-                    self.txn,
-                    collection,
-                    nodes::upsert::UpsertMode::Replace,
-                    source,
-                )
-            }
-        }
+    pub fn new(ctx: Context<'a, T>) -> Self {
+        Self { ctx }
     }
 
     fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
 
-            Node::Scan { collection } => nodes::scan::execute(self.txn, collection),
+            Node::Scan { collection } => nodes::scan::execute(self.ctx.txn, collection),
 
             Node::IndexScan {
                 collection,
@@ -101,7 +51,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                 limit,
                 covered,
             } => nodes::index_scan::execute(
-                self.txn,
+                self.ctx.txn,
                 collection,
                 field,
                 &range,
@@ -118,7 +68,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
 
             Node::KeyLookup { collection, source } => {
                 let source = self.execute_node(*source)?;
-                nodes::read_record::execute(self.txn, collection, source)
+                nodes::read_record::execute(self.ctx.txn, collection, source)
             }
 
             Node::Filter { predicate, source } => {
@@ -144,6 +94,63 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
             Node::Distinct { field, source } => {
                 let source = self.execute_node(*source)?;
                 nodes::distinct::execute(field, source)
+            }
+        }
+    }
+}
+
+impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
+    /// Execute a plan, returning a streaming iterator of rows.
+    pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'a>, DbError> {
+        match plan {
+            Plan::Find(node) => self.execute_node(node),
+
+            Plan::Insert { collection, source } => {
+                let source = self.execute_node(source)?;
+                nodes::insert_record::execute(self.ctx.txn, collection, source)
+            }
+
+            Plan::Update {
+                collection,
+                mutation,
+                source,
+            } => {
+                let source = self.execute_node(source)?;
+                nodes::mutate::execute(self.ctx.txn, collection, mutation, source)
+            }
+
+            Plan::Replace {
+                collection,
+                replacement,
+                source,
+            } => {
+                let source = self.execute_node(source)?;
+                nodes::replace::execute(self.ctx.txn, collection, replacement, source)
+            }
+
+            Plan::Delete { collection, source } => {
+                let source = self.execute_node(source)?;
+                nodes::delete::execute(self.ctx, collection, source)
+            }
+
+            Plan::Merge { collection, source } => {
+                let source = self.execute_node(source)?;
+                nodes::upsert::execute(
+                    self.ctx.txn,
+                    collection,
+                    nodes::upsert::UpsertMode::Merge,
+                    source,
+                )
+            }
+
+            Plan::Upsert { collection, source } => {
+                let source = self.execute_node(source)?;
+                nodes::upsert::execute(
+                    self.ctx.txn,
+                    collection,
+                    nodes::upsert::UpsertMode::Replace,
+                    source,
+                )
             }
         }
     }

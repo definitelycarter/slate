@@ -18,10 +18,11 @@ fn bench_bulk_insert(c: &mut Criterion) {
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),
-                indexes: vec!["status".into(), "contacts_count".into()],
-        ..Default::default()
+                ..Default::default()
             })
             .unwrap();
+            txn.create_index("bench", "status").unwrap();
+            txn.create_index("bench", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };

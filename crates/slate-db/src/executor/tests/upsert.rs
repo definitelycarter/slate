@@ -9,10 +9,11 @@ fn seeded_db() -> Database<MemoryStore> {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
-        indexes: vec!["status".into(), "score".into()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("test", "status").unwrap();
+    txn.create_index("test", "score").unwrap();
     txn.insert_many(
         "test",
         vec![
@@ -37,7 +38,7 @@ fn upsert_replace_insert_new() {
         collection: mock_collection(vec!["status".into()]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let rows = collect_docs(iter);
     assert_eq!(rows.len(), 1);
@@ -57,7 +58,7 @@ fn upsert_merge_insert_new() {
         collection: mock_collection(vec![]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(&txn);
+    let exec = Executor::new(Context::new(&txn));
     let iter = exec.execute(plan).unwrap();
     let rows = collect_docs(iter);
     assert_eq!(rows.len(), 1);

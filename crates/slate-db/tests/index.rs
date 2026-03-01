@@ -5,6 +5,20 @@ use bson::{Bson, doc, rawdoc};
 use slate_db::CollectionConfig;
 use slate_query::FindOptions;
 
+#[allow(dead_code)]
+fn create_collection_with_indexes(db: &slate_db::Database<slate_store::MemoryStore>, name: &str, indexes: &[&str]) {
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: name.to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    for field in indexes {
+        txn.create_index(name, field).unwrap();
+    }
+    txn.commit().unwrap();
+}
+
 // ── Index tests ─────────────────────────────────────────────────
 
 #[test]
@@ -218,10 +232,10 @@ fn index_on_nested_path() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "nested_idx".to_string(),
-        indexes: vec!["address.city".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("nested_idx", "address.city").unwrap();
     txn.insert_many(
         "nested_idx",
         vec![
@@ -263,10 +277,10 @@ fn index_on_array_of_scalars() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_idx".to_string(),
-        indexes: vec!["tags.[]".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("tags_idx", "tags.[]").unwrap();
     txn.insert_many(
         "tags_idx",
         vec![
@@ -328,10 +342,10 @@ fn index_on_array_of_objects() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "items_idx".to_string(),
-        indexes: vec!["items.[].sku".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("items_idx", "items.[].sku").unwrap();
     txn.insert_many(
         "items_idx",
         vec![
@@ -391,10 +405,10 @@ fn multikey_index_maintained_on_update() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_upd".to_string(),
-        indexes: vec!["tags.[]".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("tags_upd", "tags.[]").unwrap();
     txn.insert_one("tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
@@ -447,10 +461,10 @@ fn multikey_index_maintained_on_delete() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_del".to_string(),
-        indexes: vec!["tags.[]".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("tags_del", "tags.[]").unwrap();
     txn.insert_one("tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
@@ -535,10 +549,10 @@ fn multikey_index_replace_one() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_rep".to_string(),
-        indexes: vec!["tags.[]".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("tags_rep", "tags.[]").unwrap();
     txn.insert_one("tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
@@ -588,15 +602,16 @@ fn multikey_index_replace_one() {
 }
 
 #[test]
-fn create_collection_with_indexes() {
+fn create_index_shows_in_list() {
     let (db, _dir) = temp_db();
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "configured".to_string(),
-        indexes: vec!["status".to_string(), "tags.[]".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("configured", "status").unwrap();
+    txn.create_index("configured", "tags.[]").unwrap();
     txn.commit().unwrap();
 
     // Verify indexes were created
@@ -614,10 +629,10 @@ fn create_collection_idempotent() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("idem", "status").unwrap();
     txn.commit().unwrap();
 
     // Insert data
@@ -632,7 +647,6 @@ fn create_collection_idempotent() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();

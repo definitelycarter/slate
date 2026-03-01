@@ -174,10 +174,10 @@ fn ttl_purge_cleans_user_indexes() {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "purge_idx".to_string(),
-        indexes: vec!["status".to_string()],
         ..Default::default()
     })
     .unwrap();
+    txn.create_index("purge_idx", "status").unwrap();
     txn.insert_many(
         "purge_idx",
         vec![
