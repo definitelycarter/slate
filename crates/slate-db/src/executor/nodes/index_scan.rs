@@ -94,8 +94,14 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                 Ok(entry) => {
                     // Numeric Eq post-filter: compare as i64 to handle Int32/Int64 cross-matching
                     if let Some(query_val) = numeric_eq_value {
-                        let entry_val = raw_bson_as_i64(&entry.value);
-                        if entry_val != Some(query_val) {
+                        let value = match entry.value() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                done = true;
+                                return Some(Err(DbError::from(e)));
+                            }
+                        };
+                        if raw_bson_as_i64(&value) != Some(query_val) {
                             continue;
                         }
                     }
@@ -111,16 +117,35 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                     count += 1;
 
                     if let Some(ref rv) = raw_value {
-                        // Build a minimal document with _id + the indexed field.
-                        // Coerce the query value to the type stored in the index.
-                        let coerced = coerce_to_stored_type(rv, &entry.value);
+                        let doc_id = match entry.doc_id() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                done = true;
+                                return Some(Err(DbError::from(e)));
+                            }
+                        };
+                        let value = match entry.value() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                done = true;
+                                return Some(Err(DbError::from(e)));
+                            }
+                        };
+                        let coerced = coerce_to_stored_type(rv, &value);
                         let mut doc = RawDocumentBuf::new();
-                        doc.append(bson::cstr!("_id"), entry.doc_id);
+                        doc.append(bson::cstr!("_id"), doc_id);
                         doc.append(&field_cstr, coerced);
                         return Some(Ok(Some(RawBson::Document(doc))));
                     } else {
                         // Standard path: yield bare ID for ReadRecord
-                        return Some(Ok(Some(entry.doc_id)));
+                        let doc_id = match entry.doc_id() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                done = true;
+                                return Some(Err(DbError::from(e)));
+                            }
+                        };
+                        return Some(Ok(Some(doc_id)));
                     }
                 }
                 Err(e) => {

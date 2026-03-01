@@ -26,7 +26,7 @@ fn parse_index_rest(rest: &[u8]) -> Option<(&str, &str, &[u8], BsonValue<'_>)> {
 /// Find the trailing length-prefixed doc_id at the end of a byte slice.
 ///
 /// Returns `(value_bytes, BsonValue)`.
-fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_>)> {
+pub(crate) fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_>)> {
     // Length-prefixed header: 1 type byte + 2 length bytes.
     const LP_HEADER: usize = 3;
     if bytes.len() < LP_HEADER {

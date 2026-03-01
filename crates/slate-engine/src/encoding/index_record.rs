@@ -20,6 +20,7 @@ use super::key::Key;
 ///
 /// Construct via [`IndexRecord::from_pair`] (read side) or
 /// [`IndexRecord::encode`] (write side).
+#[allow(dead_code)]
 pub struct IndexRecord {
     index_key: Vec<u8>,
     metadata: Vec<u8>,
@@ -33,6 +34,7 @@ pub struct IndexRecord {
     doc_id_start: usize,
 }
 
+#[allow(dead_code)]
 impl IndexRecord {
     /// Parse an index entry from raw store key-value bytes (read side).
     ///

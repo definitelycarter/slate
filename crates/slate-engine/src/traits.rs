@@ -186,11 +186,73 @@ pub enum IndexRange<'a> {
     },
 }
 
-/// A decoded index scan entry.
+/// A raw index scan entry with lazy decoding.
+///
+/// Holds the raw key and metadata bytes from the store. Values are
+/// decoded on demand via accessor methods, avoiding conversion overhead
+/// for entries that are filtered out or where only `doc_id` is needed.
 pub struct IndexEntry {
-    pub doc_id: RawBson,
-    pub value: RawBson,
-    pub metadata: Vec<u8>,
+    key: Vec<u8>,
+    metadata: Vec<u8>,
+    value_start: usize,
+    doc_id_start: usize,
+}
+
+impl IndexEntry {
+    /// Construct from raw store key-value bytes.
+    ///
+    /// `field_prefix_len` is the length of the known prefix
+    /// `i\0{collection}\0{field}\0` — this gives us `value_start` for free,
+    /// avoiding re-parse of collection and field.
+    pub(crate) fn from_raw(
+        key: Vec<u8>,
+        metadata: Vec<u8>,
+        field_prefix_len: usize,
+    ) -> Option<Self> {
+        if metadata.is_empty() || key.len() < field_prefix_len {
+            return None;
+        }
+        let tail = &key[field_prefix_len..];
+        let (value_portion, _) = crate::encoding::key::split_trailing_doc_id(tail)?;
+        let doc_id_start = field_prefix_len + value_portion.len();
+        Some(IndexEntry {
+            key,
+            metadata,
+            value_start: field_prefix_len,
+            doc_id_start,
+        })
+    }
+
+    /// Raw sortable-encoded value bytes (no type tag).
+    #[inline]
+    pub(crate) fn value_bytes(&self) -> &[u8] {
+        &self.key[self.value_start..self.doc_id_start]
+    }
+
+    /// O(1) TTL expiry check on the metadata bytes.
+    #[inline]
+    pub(crate) fn is_expired(&self, now_millis: i64) -> bool {
+        crate::encoding::index_record::is_index_expired(&self.metadata, now_millis)
+    }
+
+    /// Lazily decode the doc_id to `RawBson`.
+    pub fn doc_id(&self) -> Result<RawBson, EngineError> {
+        let (bv, _) = crate::encoding::bson_value::BsonValue::parse_length_prefixed(
+            &self.key[self.doc_id_start..],
+        )
+        .ok_or_else(|| EngineError::InvalidKey("malformed doc_id in index key".into()))?;
+        bv.to_raw_bson()
+            .ok_or_else(|| EngineError::InvalidKey("unsupported doc_id type in index key".into()))
+    }
+
+    /// Lazily decode the indexed value to `RawBson`.
+    pub fn value(&self) -> Result<RawBson, EngineError> {
+        let tag = bson::spec::ElementType::from(self.metadata[0])
+            .ok_or_else(|| EngineError::InvalidKey("unknown type byte in index metadata".into()))?;
+        crate::encoding::bson_value::BsonValue::from_parts(tag, self.value_bytes())
+            .to_raw_bson()
+            .ok_or_else(|| EngineError::InvalidKey("malformed value in index key".into()))
+    }
 }
 
 /// Options for creating a new collection. All fields are optional

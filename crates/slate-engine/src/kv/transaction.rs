@@ -100,6 +100,14 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .encode(doc);
         let old_data = self.txn.get(handle.cf(), &encoded_key)?;
 
+        // Fast path: identical record bytes means nothing changed — skip
+        // the index diff entirely. Unlikely in practice (overwriting a
+        // document with the same data) but avoids decoding both records
+        // and diffing index entries for zero result.
+        if old_data.as_deref() == Some(record.as_bytes()) {
+            return Ok(());
+        }
+
         let changes = IndexDiff::new(&record, &doc_id)
             .with_old_record(old_data.as_deref())
             .with_property_paths(handle.indexes())
@@ -248,6 +256,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 self.txn.scan_prefix(handle.cf(), &prefix)?
             };
 
+        let field_prefix_len = field_prefix.len();
         let mut done = false;
 
         Ok(Box::new(std::iter::from_fn(move || {
@@ -262,8 +271,12 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         return Some(Err(EngineError::Store(e)));
                     }
                     Ok((key_bytes, metadata_bytes)) => {
-                        let record = match IndexRecord::from_pair(key_bytes, metadata_bytes) {
-                            Some(r) => r,
+                        let entry = match IndexEntry::from_raw(
+                            key_bytes,
+                            metadata_bytes,
+                            field_prefix_len,
+                        ) {
+                            Some(e) => e,
                             None => {
                                 done = true;
                                 return Some(Err(EngineError::InvalidKey(
@@ -273,7 +286,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         };
 
                         if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {
-                            let value_bytes = record.value_bytes();
+                            let value_bytes = entry.value_bytes();
                             if let Some(lb) = lower {
                                 let cmp = value_bytes.cmp(lb.as_slice());
                                 if cmp == Ordering::Less
@@ -300,25 +313,11 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                             }
                         }
 
-                        if record.is_expired(ttl) {
+                        if entry.is_expired(ttl) {
                             continue;
                         }
 
-                        let doc_id = match record.doc_id_bson() {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let value = match record.value_bson() {
-                            Some(v) => v,
-                            None => continue,
-                        };
-                        let (_, metadata) = record.into_parts();
-
-                        return Some(Ok(IndexEntry {
-                            doc_id,
-                            value,
-                            metadata,
-                        }));
+                        return Some(Ok(entry));
                     }
                 }
             }
