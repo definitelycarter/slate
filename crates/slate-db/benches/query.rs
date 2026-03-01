@@ -4,7 +4,7 @@ use common::*;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::Database;
-use slate_db::{CollectionConfig, DatabaseConfig};
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseConfig};
 use slate_query::*;
 use slate_store::MemoryStore;
 
@@ -21,8 +21,8 @@ fn bench_bulk_insert(c: &mut Criterion) {
                 ..Default::default()
             })
             .unwrap();
-            txn.create_index("bench", "status").unwrap();
-            txn.create_index("bench", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -35,7 +35,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     (txn, docs.clone())
                 },
                 |(mut txn, docs)| {
-                    txn.insert_many("bench", docs).unwrap().drain().unwrap();
+                    txn.insert_many(DEFAULT_CF, "bench", docs).unwrap().drain().unwrap();
                     // Don't commit — let txn drop so engine stays empty for next iteration
                 },
                 BatchSize::PerIteration,
@@ -54,7 +54,7 @@ fn bench_query_scan(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", rawdoc! {}, FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", rawdoc! {}, FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -73,7 +73,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -96,7 +96,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), options.clone())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -119,7 +119,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -138,7 +138,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -164,7 +164,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), options.clone())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -190,7 +190,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", rawdoc! {}, options.clone())
+                txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -222,7 +222,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", rawdoc! {}, options.clone())
+                txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -250,7 +250,7 @@ fn bench_query_pagination(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), options.clone())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -277,7 +277,7 @@ fn bench_query_point_lookup(c: &mut Criterion) {
                 let mut found = 0usize;
                 for id in ids {
                     if txn
-                        .find_one("bench", rawdoc! { "_id": id.as_str() })
+                        .find_one(DEFAULT_CF, "bench", rawdoc! { "_id": id.as_str() })
                         .unwrap()
                         .is_some()
                     {
@@ -302,7 +302,7 @@ fn bench_query_projection(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", rawdoc! {}, options.clone())
+                txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -321,7 +321,7 @@ fn bench_query_array_match(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -341,7 +341,7 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct("bench", "status", rawdoc! {}, DistinctOptions::default())
+                txn.distinct(DEFAULT_CF, "bench", "status", rawdoc! {}, DistinctOptions::default())
                     .unwrap()
             })
         });
@@ -357,6 +357,7 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 txn.distinct(
+                    DEFAULT_CF,
                     "bench",
                     "contacts_count",
                     rawdoc! {},
@@ -377,6 +378,7 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 txn.distinct(
+                    DEFAULT_CF,
                     "bench",
                     "product_recommendation1",
                     rawdoc! {},
@@ -398,6 +400,7 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
                 txn.distinct(
+                    DEFAULT_CF,
                     "bench",
                     "product_recommendation1",
                     filter.clone(),
@@ -420,7 +423,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -439,7 +442,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()
@@ -458,7 +461,7 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.find("bench", filter.clone(), FindOptions::default())
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
                     .iter()
                     .unwrap()

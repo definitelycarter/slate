@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 
 // ── TTL tests ───────────────────────────────────────────────────
@@ -26,6 +26,7 @@ fn ttl_expired_docs_hidden_before_purge() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
@@ -41,7 +42,7 @@ fn ttl_expired_docs_hidden_before_purge() {
     // Expired docs are immediately invisible (TTL read filtering)
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -49,10 +50,10 @@ fn ttl_expired_docs_hidden_before_purge() {
         .unwrap();
     assert_eq!(results.len(), 2);
 
-    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "a" }).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" }).unwrap();
     assert!(result.is_none());
 
-    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
+    let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }
 
@@ -63,6 +64,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
@@ -76,12 +78,12 @@ fn ttl_purge_makes_expired_docs_invisible() {
     txn.commit().unwrap();
 
     // Purge removes expired docs
-    let deleted = db.purge_expired(COLLECTION).unwrap();
+    let deleted = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(deleted, 1);
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -95,10 +97,10 @@ fn ttl_purge_makes_expired_docs_invisible() {
     names.sort();
     assert_eq!(names, vec!["Fresh", "Permanent"]);
 
-    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "a" }).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" }).unwrap();
     assert!(result.is_none());
 
-    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
+    let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }
 
@@ -111,6 +113,7 @@ fn ttl_purge_deletes_expired_docs() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "name": "Expired", "ttl": past_ttl() },
@@ -123,14 +126,14 @@ fn ttl_purge_deletes_expired_docs() {
     .unwrap();
     txn.commit().unwrap();
 
-    let purged = db.purge_expired(COLLECTION).unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(purged, 1);
 
     // Expired doc is physically gone
     let txn = db.begin(true).unwrap();
     // Use a direct scan (count bypasses TTL filter, but purge actually deletes)
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -152,6 +155,7 @@ fn ttl_purge_skips_unexpired_docs() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "name": "Fresh", "ttl": future_ttl() },
@@ -163,7 +167,7 @@ fn ttl_purge_skips_unexpired_docs() {
     .unwrap();
     txn.commit().unwrap();
 
-    let purged = db.purge_expired(COLLECTION).unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(purged, 0);
 }
 
@@ -177,8 +181,9 @@ fn ttl_purge_cleans_user_indexes() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("purge_idx", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "purge_idx", "status").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "purge_idx",
         vec![
             doc! { "_id": "a", "status": "active", "ttl": past_ttl() },
@@ -190,13 +195,14 @@ fn ttl_purge_cleans_user_indexes() {
     .unwrap();
     txn.commit().unwrap();
 
-    let purged = db.purge_expired("purge_idx").unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, "purge_idx").unwrap();
     assert_eq!(purged, 1);
 
     // Index should only have one entry for "active" (doc "b")
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "purge_idx",
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -218,6 +224,7 @@ fn ttl_index_maintained_on_update() {
     let old_ttl = future_ttl();
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "a", "name": "Doc", "ttl": old_ttl },
     )
@@ -229,19 +236,19 @@ fn ttl_index_maintained_on_update() {
     // Update ttl to the past
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "ttl": past_ttl() })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "ttl": past_ttl() })
         .unwrap()
         .drain()
         .unwrap();
     txn.commit().unwrap();
 
     // Purge should now delete the doc
-    let purged = db.purge_expired(COLLECTION).unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(purged, 1);
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -257,6 +264,7 @@ fn ttl_purge_multiple_expired() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "ttl": bson::DateTime::from_millis(bson::DateTime::now().timestamp_millis() - 120_000) },
@@ -268,12 +276,12 @@ fn ttl_purge_multiple_expired() {
     .unwrap().drain().unwrap();
     txn.commit().unwrap();
 
-    let purged = db.purge_expired(COLLECTION).unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(purged, 3);
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -290,6 +298,7 @@ fn ttl_find_by_id_hides_expired() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "x", "name": "Expired", "ttl": past_ttl() },
     )
@@ -297,6 +306,7 @@ fn ttl_find_by_id_hides_expired() {
     .drain()
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "y", "name": "Fresh", "ttl": future_ttl() },
     )
@@ -307,12 +317,12 @@ fn ttl_find_by_id_hides_expired() {
 
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.find_one(COLLECTION, rawdoc! { "_id": "x" })
+        txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "x" })
             .unwrap()
             .is_none()
     );
     assert!(
-        txn.find_one(COLLECTION, rawdoc! { "_id": "y" })
+        txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "y" })
             .unwrap()
             .is_some()
     );
@@ -325,6 +335,7 @@ fn ttl_update_skips_expired() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "a", "status": "old", "ttl": past_ttl() },
     )
@@ -337,7 +348,7 @@ fn ttl_update_skips_expired() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "new" })
+        .update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "new" })
         .unwrap()
         .drain()
         .unwrap();
@@ -351,6 +362,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "a", "old_field": true, "ttl": past_ttl() },
     )
@@ -363,6 +375,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
     let txn = db.begin(false).unwrap();
     let result = txn
         .merge_many(
+            DEFAULT_CF,
             COLLECTION,
             vec![doc! { "_id": "a", "new_field": true, "ttl": future_ttl() }],
         )
@@ -375,7 +388,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
     // The new doc should be visible and should NOT contain old_field
     let txn = db.begin(true).unwrap();
     let doc = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "a" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" })
         .unwrap()
         .unwrap();
     assert!(doc.get_check("new_field"));
@@ -389,6 +402,7 @@ fn ttl_no_ttl_field_always_visible() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "a", "name": "Permanent1" },
@@ -403,7 +417,7 @@ fn ttl_no_ttl_field_always_visible() {
     // Docs without ttl are always visible
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -412,10 +426,10 @@ fn ttl_no_ttl_field_always_visible() {
     assert_eq!(results.len(), 2);
 
     // purge_expired should not touch them
-    let purged = db.purge_expired(COLLECTION).unwrap();
+    let purged = db.purge_expired(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(purged, 0);
 
     let txn = db.begin(true).unwrap();
-    let count = txn.count(COLLECTION, rawdoc! {}).unwrap();
+    let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();
     assert_eq!(count, 2);
 }

@@ -1,7 +1,7 @@
 use super::*;
 
 use self::store::seeded_kv_engine;
-use slate_engine::Engine;
+use slate_engine::{Engine, DEFAULT_CF};
 
 // seeded_db: Alice(id=1,score=70), Bob(id=2,score=90), Charlie(id=3,score=80)
 // score index order ascending: 70(1), 80(3), 90(2)
@@ -10,7 +10,7 @@ use slate_engine::Engine;
 fn index_scan_gt() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score > 70 → Bob(90), Charlie(80)
     let plan = Plan::Find(Node::IndexScan {
@@ -32,7 +32,7 @@ fn index_scan_gt() {
 fn index_scan_gte() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score >= 80 → Charlie(80), Bob(90)
     let plan = Plan::Find(Node::IndexScan {
@@ -54,7 +54,7 @@ fn index_scan_gte() {
 fn index_scan_lt() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score < 90 → Alice(70), Charlie(80)
     let plan = Plan::Find(Node::IndexScan {
@@ -76,7 +76,7 @@ fn index_scan_lt() {
 fn index_scan_lte() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score <= 80 → Alice(70), Charlie(80)
     let plan = Plan::Find(Node::IndexScan {
@@ -98,7 +98,7 @@ fn index_scan_lte() {
 fn index_scan_range() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score > 70 AND score < 90 → Charlie(80) only
     let plan = Plan::Find(Node::IndexScan {
@@ -120,7 +120,7 @@ fn index_scan_range() {
 fn index_scan_range_desc() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score >= 70 AND score <= 90, descending
     let plan = Plan::Find(Node::IndexScan {
@@ -142,7 +142,7 @@ fn index_scan_range_desc() {
 fn index_scan_range_with_limit() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score >= 70, limit 2
     let plan = Plan::Find(Node::IndexScan {
@@ -164,7 +164,7 @@ fn index_scan_range_with_limit() {
 fn index_scan_range_empty_result() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score > 100 → nothing
     let plan = Plan::Find(Node::IndexScan {
@@ -186,7 +186,7 @@ fn index_scan_range_empty_result() {
 fn index_scan_gt_desc() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // score > 70, descending → Bob(90), Charlie(80)
     let plan = Plan::Find(Node::IndexScan {

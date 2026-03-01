@@ -51,9 +51,9 @@ impl<S: Store> Database<S> {
     }
 
     /// Purge expired documents from a collection.
-    pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
+    pub fn purge_expired(&self, cf: &str, collection: &str) -> Result<u64, DbError> {
         let txn = self.begin(false)?;
-        let deleted = txn.purge_expired(collection)?;
+        let deleted = txn.purge_expired(cf, collection)?;
         txn.commit()?;
         Ok(deleted)
     }
@@ -125,16 +125,18 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// If the document has no `_id`, an ObjectId is generated.
     pub fn insert_one(
         &mut self,
+        cf: &str,
         collection: &str,
         doc: impl IntoRawDocumentBuf,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw = doc.into_raw_document_buf()?;
-        self.insert_many(collection, vec![raw])
+        self.insert_many(cf, collection, vec![raw])
     }
 
     /// Insert multiple documents. Fails per-doc on duplicate `_id`.
     pub fn insert_many(
         &mut self,
+        cf: &str,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
@@ -144,6 +146,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Insert {
+            cf,
             collection,
             docs: raw_docs,
         };
@@ -158,6 +161,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// or drained via [`.drain()`](Cursor::drain) for a count.
     pub fn find(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         options: FindOptions,
@@ -165,6 +169,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Find {
+            cf,
             collection,
             predicate,
             sort: options.sort,
@@ -178,6 +183,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Find the first document matching a filter.
     pub fn find_one(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
     ) -> Result<Option<RawDocumentBuf>, DbError> {
@@ -185,7 +191,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: Some(1),
             ..Default::default()
         };
-        let cursor = self.find(collection, filter, options)?;
+        let cursor = self.find(cf, collection, filter, options)?;
         cursor.iter()?.next().transpose()
     }
 
@@ -194,6 +200,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Update the first document matching the filter.
     pub fn update_one(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
@@ -203,6 +210,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let mutation = crate::mutation::parse_mutation(&raw)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
+            cf,
             collection,
             predicate,
             mutation,
@@ -214,6 +222,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Update all documents matching the filter.
     pub fn update_many(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         update: impl IntoRawDocumentBuf,
@@ -223,6 +232,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let mutation = crate::mutation::parse_mutation(&raw)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
+            cf,
             collection,
             predicate,
             mutation,
@@ -234,6 +244,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Replace the first document matching the filter entirely (no merge).
     pub fn replace_one(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
         replacement: impl IntoRawDocumentBuf,
@@ -242,6 +253,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let raw = replacement.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Replace {
+            cf,
             collection,
             predicate,
             replacement: raw,
@@ -254,12 +266,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Delete the first document matching the filter.
     pub fn delete_one(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
+            cf,
             collection,
             predicate,
             limit: Some(1),
@@ -270,12 +284,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Delete all documents matching the filter.
     pub fn delete_many(
         &self,
+        cf: &str,
         collection: &str,
         filter: impl IntoRawDocumentBuf,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
+            cf,
             collection,
             predicate,
             limit: None,
@@ -288,6 +304,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Upsert (insert-or-replace) a batch of documents by `_id`.
     pub fn upsert_many(
         &self,
+        cf: &str,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
@@ -297,6 +314,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Upsert {
+            cf,
             collection,
             docs: raw_docs,
         };
@@ -306,6 +324,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Merge (insert-or-patch) a batch of partial documents by `_id`.
     pub fn merge_many(
         &self,
+        cf: &str,
         collection: &str,
         docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
@@ -315,6 +334,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Merge {
+            cf,
             collection,
             docs: raw_docs,
         };
@@ -324,14 +344,20 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Count ───────────────────────────────────────────────────
 
     /// Count documents matching a filter.
-    pub fn count(&self, collection: &str, filter: impl IntoRawDocumentBuf) -> Result<u64, DbError> {
-        self.find(collection, filter, FindOptions::default())?
+    pub fn count(
+        &self,
+        cf: &str,
+        collection: &str,
+        filter: impl IntoRawDocumentBuf,
+    ) -> Result<u64, DbError> {
+        self.find(cf, collection, filter, FindOptions::default())?
             .drain()
     }
 
     /// Return distinct values for a field, with optional filter and sort.
     pub fn distinct(
         &self,
+        cf: &str,
         collection: &str,
         field: &str,
         filter: impl IntoRawDocumentBuf,
@@ -340,6 +366,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = filter.into_raw_document_buf()?;
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Distinct {
+            cf,
             collection,
             field: field.to_string(),
             predicate,
@@ -364,28 +391,28 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── TTL operations ──────────────────────────────────────────
 
     /// Purge expired documents from a collection.
-    pub fn purge_expired(&self, collection: &str) -> Result<u64, DbError> {
-        let handle = self.txn.collection(collection)?;
+    pub fn purge_expired(&self, cf: &str, collection: &str) -> Result<u64, DbError> {
+        let handle = self.txn.collection(cf, collection)?;
         Ok(self.txn.purge(&handle)?)
     }
 
     // ── Index operations ────────────────────────────────────────
 
     /// Create an index on a field and backfill existing records.
-    pub fn create_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
-        self.txn.create_index(collection, field)?;
+    pub fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
+        self.txn.create_index(cf, collection, field)?;
         Ok(())
     }
 
     /// Drop an index and remove all its entries.
-    pub fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), DbError> {
-        self.txn.drop_index(collection, field)?;
+    pub fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
+        self.txn.drop_index(cf, collection, field)?;
         Ok(())
     }
 
     /// List indexed fields for a collection.
-    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>, DbError> {
-        let handle = self.txn.collection(collection)?;
+    pub fn list_indexes(&self, cf: &str, collection: &str) -> Result<Vec<String>, DbError> {
+        let handle = self.txn.collection(cf, collection)?;
         Ok(handle.indexes().to_vec())
     }
 
@@ -393,13 +420,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// List all known collection names.
     pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
-        let configs = self.txn.list_collections()?;
+        let configs = self.txn.list_collections(None)?;
         Ok(configs.into_iter().map(|c| c.name().to_string()).collect())
     }
 
     /// Drop a collection and all its data, indexes, and metadata.
-    pub fn drop_collection(&mut self, collection: &str) -> Result<(), DbError> {
-        self.txn.drop_collection(collection)?;
+    pub fn drop_collection(&mut self, cf: &str, collection: &str) -> Result<(), DbError> {
+        self.txn.drop_collection(cf, collection)?;
         Ok(())
     }
 
@@ -420,14 +447,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Create a collection with the given config.
     pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
         let options = slate_engine::CreateCollectionOptions {
-            cf: None,
             pk_path: Some(config.pk_path.clone()),
             ttl_path: Some(config.ttl_path.clone()),
         };
-        self.txn.create_collection(&config.name, &options)?;
+        self.txn
+            .create_collection(&config.cf, &config.name, &options)?;
 
         // Auto-create TTL index; ignore IndexExists for idempotent re-creation.
-        if let Err(e) = self.txn.create_index(&config.name, &config.ttl_path) {
+        if let Err(e) = self.txn.create_index(&config.cf, &config.name, &config.ttl_path) {
             if !matches!(e, slate_engine::EngineError::IndexExists(_)) {
                 return Err(e.into());
             }
@@ -440,69 +467,75 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Register a trigger function on a collection.
     pub fn register_trigger(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .create_function(collection, FunctionKind::Trigger, name, source.as_bytes())?;
+            .create_function(cf, collection, FunctionKind::Trigger, name, source.as_bytes())?;
         Ok(())
     }
 
     /// Register a validator function on a collection.
     pub fn register_validator(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .create_function(collection, FunctionKind::Validator, name, source.as_bytes())?;
+            .create_function(cf, collection, FunctionKind::Validator, name, source.as_bytes())?;
         Ok(())
     }
 
     /// Register a user-defined function on a collection.
     pub fn register_udf(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .create_function(collection, FunctionKind::Udf, name, source.as_bytes())?;
+            .create_function(cf, collection, FunctionKind::Udf, name, source.as_bytes())?;
         Ok(())
     }
 
     /// Drop a trigger function from a collection.
     pub fn drop_trigger(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .drop_function(collection, FunctionKind::Trigger, name)?;
+            .drop_function(cf, collection, FunctionKind::Trigger, name)?;
         Ok(())
     }
 
     /// Drop a validator function from a collection.
     pub fn drop_validator(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .drop_function(collection, FunctionKind::Validator, name)?;
+            .drop_function(cf, collection, FunctionKind::Validator, name)?;
         Ok(())
     }
 
     /// Drop a user-defined function from a collection.
     pub fn drop_udf(
         &mut self,
+        cf: &str,
         collection: &str,
         name: &str,
     ) -> Result<(), DbError> {
         self.txn
-            .drop_function(collection, FunctionKind::Udf, name)?;
+            .drop_function(cf, collection, FunctionKind::Udf, name)?;
         Ok(())
     }
 
@@ -516,8 +549,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         crate::planner::plan::Plan<<<KvEngine<S> as Engine>::Txn<'db> as EngineTransaction>::Cf>,
         DbError,
     > {
-        let planner =
-            Planner::new(|name: &str| self.txn.collection(name).map_err(DbError::from));
+        let planner = Planner::new(&self.txn);
         planner.plan(stmt)
     }
 

@@ -97,31 +97,31 @@ impl EngineTransaction for NoopTransaction {
 }
 
 impl Catalog for NoopTransaction {
-    fn collection(&self, _: &str) -> Result<CollectionHandle<()>, EngineError> {
+    fn collection(&self, _: &str, _: &str) -> Result<CollectionHandle<()>, EngineError> {
         panic!("NoopTransaction::collection called");
     }
-    fn list_collections(&self) -> Result<Vec<CollectionHandle<()>>, EngineError> {
+    fn list_collections(&self, _: Option<&str>) -> Result<Vec<CollectionHandle<()>>, EngineError> {
         panic!("NoopTransaction::list_collections called");
     }
-    fn create_collection(&mut self, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
+    fn create_collection(&mut self, _: &str, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_collection called");
     }
-    fn drop_collection(&mut self, _: &str) -> Result<(), EngineError> {
+    fn drop_collection(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_collection called");
     }
-    fn create_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn create_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_index called");
     }
-    fn drop_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_function called");
     }
-    fn drop_function(&mut self, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
+    fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_function called");
     }
-    fn load_functions(&self, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
+    fn load_functions(&self, _: &str, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
         Ok(vec![])
     }
 }
@@ -233,31 +233,31 @@ impl EngineTransaction for MockTransaction {
 }
 
 impl Catalog for MockTransaction {
-    fn collection(&self, _: &str) -> Result<CollectionHandle<()>, EngineError> {
+    fn collection(&self, _: &str, _: &str) -> Result<CollectionHandle<()>, EngineError> {
         panic!("MockTransaction::collection called");
     }
-    fn list_collections(&self) -> Result<Vec<CollectionHandle<()>>, EngineError> {
+    fn list_collections(&self, _: Option<&str>) -> Result<Vec<CollectionHandle<()>>, EngineError> {
         panic!("MockTransaction::list_collections called");
     }
-    fn create_collection(&mut self, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
+    fn create_collection(&mut self, _: &str, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
         panic!("MockTransaction::create_collection called");
     }
-    fn drop_collection(&mut self, _: &str) -> Result<(), EngineError> {
+    fn drop_collection(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_collection called");
     }
-    fn create_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn create_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::create_index called");
     }
-    fn drop_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
         panic!("MockTransaction::create_function called");
     }
-    fn drop_function(&mut self, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
+    fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_function called");
     }
-    fn load_functions(&self, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
+    fn load_functions(&self, _: &str, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
         Ok(vec![])
     }
 }
@@ -292,6 +292,7 @@ fn collect_docs(iter: RawIter) -> Vec<Option<bson::Document>> {
 fn mock_collection(indexes: Vec<String>) -> CollectionHandle<()> {
     CollectionHandle::new(
         "test".to_string(),
+        "default_cf".to_string(),
         (),
         indexes,
         "_id".to_string(),

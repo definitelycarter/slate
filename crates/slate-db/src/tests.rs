@@ -1,5 +1,5 @@
 use bson::Bson;
-use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine, DEFAULT_CF};
 use slate_query::{Sort, SortDirection};
 use slate_store::MemoryStore;
 
@@ -19,21 +19,22 @@ fn engine() -> KvEngine<MemoryStore> {
 fn setup() -> KvEngine<MemoryStore> {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("users", &Default::default()).unwrap();
-    txn.create_index("users", "status").unwrap();
-    txn.create_index("users", "age").unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "users", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "users", "age").unwrap();
     txn.commit().unwrap();
     engine
 }
 
 fn find_stmt(predicate: Expression) -> Statement<'static> {
     Statement::Find {
+        cf: DEFAULT_CF,
         collection: "users",
         predicate,
         sort: vec![],
         skip: None,
         take: None,
-        columns: None,
+        projection: None,
     }
 }
 
@@ -69,7 +70,7 @@ fn unwrap_projection<Cf: Clone>(node: Node<Cf>) -> Node<Cf> {
 fn find_no_index_falls_back_to_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // "name" is not indexed
     let plan = planner
@@ -88,7 +89,7 @@ fn find_no_index_falls_back_to_scan() {
 fn find_indexed_eq_uses_index_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(find_stmt(Expression::Eq("status".into(), Bson::String("active".into()))))
@@ -114,7 +115,7 @@ fn find_indexed_eq_uses_index_scan() {
 fn find_indexed_range_uses_index_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(find_stmt(Expression::Gt("age".into(), Bson::Int32(25))))
@@ -142,7 +143,7 @@ fn find_indexed_range_uses_index_scan() {
 fn and_prefers_eq_over_range() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // AND(age > 25, status = "active") — should pick status Eq, leave age as residual
     let plan = planner
@@ -172,7 +173,7 @@ fn and_prefers_eq_over_range() {
 fn and_dual_range_on_indexed_field() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // AND(age >= 18, age < 65)
     let plan = planner
@@ -209,7 +210,7 @@ fn and_dual_range_on_indexed_field() {
 fn and_no_indexed_field_falls_to_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // AND(name = "alice", email = "alice@test.com") — neither indexed
     let plan = planner
@@ -232,7 +233,7 @@ fn and_no_indexed_field_falls_to_scan() {
 fn or_fully_indexed_builds_index_merge() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // OR(status = "active", status = "pending") — both on indexed field
     let plan = planner
@@ -265,7 +266,7 @@ fn or_fully_indexed_builds_index_merge() {
 fn or_not_fully_indexed_falls_to_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // OR(status = "active", name = "alice") — name not indexed
     let plan = planner
@@ -286,7 +287,7 @@ fn or_not_fully_indexed_falls_to_scan() {
 fn and_containing_indexed_or_subgroup() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     // AND(OR(status = "active", status = "pending"), name = "alice")
     // The OR sub-group is fully indexed → Priority 2 in plan_and
@@ -322,10 +323,11 @@ fn and_containing_indexed_or_subgroup() {
 fn sort_on_indexed_field_with_take_uses_index_order() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Exists("_id".into(), true), // not indexable → Scan
             sort: vec![Sort {
@@ -334,7 +336,7 @@ fn sort_on_indexed_field_with_take_uses_index_order() {
             }],
             skip: None,
             take: Some(10),
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
@@ -367,10 +369,11 @@ fn sort_on_indexed_field_with_take_uses_index_order() {
 fn sort_without_take_does_not_use_index_order() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Exists("_id".into(), true),
             sort: vec![Sort {
@@ -379,7 +382,7 @@ fn sort_without_take_does_not_use_index_order() {
             }],
             skip: None,
             take: None, // no take → can't use indexed sort
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_projection(unwrap_find(plan));
@@ -400,16 +403,17 @@ fn sort_without_take_does_not_use_index_order() {
 fn covered_index_scan_when_projection_matches() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             sort: vec![],
             skip: None,
             take: None,
-            columns: Some(vec!["_id".into(), "status".into()]),
+            projection: Some(vec!["_id".into(), "status".into()]),
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -428,16 +432,17 @@ fn covered_index_scan_when_projection_matches() {
 fn not_covered_when_projection_needs_extra_fields() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             sort: vec![],
             skip: None,
             take: None,
-            columns: Some(vec!["name".into(), "status".into()]), // "name" not in index
+            projection: Some(vec!["name".into(), "status".into()]), // "name" not in index
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -461,16 +466,17 @@ fn not_covered_when_projection_needs_extra_fields() {
 fn find_with_skip_and_take() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             sort: vec![],
             skip: Some(10),
             take: Some(20),
-            columns: None,
+            projection: None,
         })
         .unwrap();
     let node = unwrap_find(plan);
@@ -498,10 +504,11 @@ fn find_with_skip_and_take() {
 fn distinct_builds_correct_pipeline() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Distinct {
+            cf: DEFAULT_CF,
             collection: "users",
             field: "status".into(),
             predicate: Expression::Eq("age".into(), Bson::Int32(30)),
@@ -548,10 +555,11 @@ fn distinct_builds_correct_pipeline() {
 fn insert_plan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Insert {
+            cf: DEFAULT_CF,
             collection: "users",
             docs: vec![bson::rawdoc! { "_id": "1", "name": "alice" }],
         })
@@ -569,13 +577,14 @@ fn insert_plan() {
 fn update_plan_with_limit() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let mutation =
         crate::mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }).unwrap();
 
     let plan = planner
         .plan(Statement::Update {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             mutation,
@@ -607,10 +616,11 @@ fn update_plan_with_limit() {
 fn delete_plan_no_limit() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Delete {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             limit: None,
@@ -635,10 +645,11 @@ fn delete_plan_no_limit() {
 fn replace_plan_has_limit_1() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Replace {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("status".into(), Bson::String("active".into())),
             replacement: bson::rawdoc! { "name": "replaced" },
@@ -661,10 +672,11 @@ fn replace_plan_has_limit_1() {
 fn merge_plan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Merge {
+            cf: DEFAULT_CF,
             collection: "users",
             docs: vec![bson::rawdoc! { "_id": "1", "email": "a@b.c" }],
         })
@@ -677,10 +689,11 @@ fn merge_plan() {
 fn upsert_plan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Upsert {
+            cf: DEFAULT_CF,
             collection: "users",
             docs: vec![bson::rawdoc! { "_id": "1", "name": "alice" }],
         })
@@ -695,22 +708,23 @@ fn upsert_plan() {
 fn collection_not_found() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let err = planner.plan(find_stmt(Expression::Exists("_id".into(), true)));
     // "users" exists but "nonexistent" does not
     let err = planner
         .plan(Statement::Find {
+            cf: DEFAULT_CF,
             collection: "nonexistent",
             predicate: Expression::Exists("_id".into(), true),
             sort: vec![],
             skip: None,
             take: None,
-            columns: None,
+            projection: None,
         });
     assert!(err.is_err());
 }
@@ -721,10 +735,11 @@ fn collection_not_found() {
 fn delete_non_indexed_uses_scan() {
     let engine = setup();
     let txn = engine.begin(true).unwrap();
-    let planner = Planner::new(|name| Ok(txn.collection(name)?));
+    let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let plan = planner
         .plan(Statement::Delete {
+            cf: DEFAULT_CF,
             collection: "users",
             predicate: Expression::Eq("name".into(), Bson::String("alice".into())),
             limit: None,

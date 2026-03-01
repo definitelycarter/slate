@@ -6,7 +6,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use slate_db::bench::{Context, Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
 use slate_engine::{
     Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineError, EngineTransaction,
-    FunctionEntry, FunctionKind, IndexEntry, IndexRange,
+    FunctionEntry, FunctionKind, IndexEntry, IndexRange, DEFAULT_CF,
 };
 
 // ── NoopTransaction ─────────────────────────────────────────
@@ -90,31 +90,31 @@ impl EngineTransaction for NoopTransaction {
 }
 
 impl Catalog for NoopTransaction {
-    fn collection(&self, _: &str) -> Result<CollectionHandle<()>, EngineError> {
+    fn collection(&self, _: &str, _: &str) -> Result<CollectionHandle<()>, EngineError> {
         panic!("NoopTransaction::collection called");
     }
-    fn list_collections(&self) -> Result<Vec<CollectionHandle<()>>, EngineError> {
+    fn list_collections(&self, _: Option<&str>) -> Result<Vec<CollectionHandle<()>>, EngineError> {
         panic!("NoopTransaction::list_collections called");
     }
-    fn create_collection(&mut self, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
+    fn create_collection(&mut self, _: &str, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_collection called");
     }
-    fn drop_collection(&mut self, _: &str) -> Result<(), EngineError> {
+    fn drop_collection(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_collection called");
     }
-    fn create_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn create_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_index called");
     }
-    fn drop_index(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_function called");
     }
-    fn drop_function(&mut self, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
+    fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_function called");
     }
-    fn load_functions(&self, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
+    fn load_functions(&self, _: &str, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
         Ok(vec![])
     }
 }
@@ -393,7 +393,7 @@ fn bench_scan(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::Scan {
@@ -419,7 +419,7 @@ fn bench_index_scan(c: &mut Criterion) {
         // Eq scan: status = "active" (~50% match)
         group.bench_with_input(BenchmarkId::new("eq", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexScan {
@@ -442,7 +442,7 @@ fn bench_index_scan(c: &mut Criterion) {
         // Full column scan (no value filter)
         group.bench_with_input(BenchmarkId::new("full", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexScan {
@@ -465,7 +465,7 @@ fn bench_index_scan(c: &mut Criterion) {
         // Desc with limit
         group.bench_with_input(BenchmarkId::new("desc_limit", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexScan {
@@ -496,7 +496,7 @@ fn bench_read_record(c: &mut Criterion) {
         // KeyLookup over Scan (passthrough — Scan already yields full docs)
         group.bench_with_input(BenchmarkId::new("scan", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::KeyLookup {
@@ -517,7 +517,7 @@ fn bench_read_record(c: &mut Criterion) {
         // KeyLookup over IndexScan (fetches full doc by id)
         group.bench_with_input(BenchmarkId::new("index", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::KeyLookup {
@@ -551,7 +551,7 @@ fn bench_index_merge(c: &mut Criterion) {
         // OR merge: status="active" OR contacts_count=50
         group.bench_with_input(BenchmarkId::new("or", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexMerge {
@@ -585,7 +585,7 @@ fn bench_index_merge(c: &mut Criterion) {
         // AND merge: status="active" AND contacts_count=50
         group.bench_with_input(BenchmarkId::new("and", n), &n, |b, _| {
             let txn = engine.kv_engine().begin(true).unwrap();
-            let collection = txn.collection("test").unwrap();
+            let collection = txn.collection(DEFAULT_CF, "test").unwrap();
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexMerge {

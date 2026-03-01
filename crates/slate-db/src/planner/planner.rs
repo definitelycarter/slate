@@ -1,4 +1,4 @@
-use slate_engine::CollectionHandle;
+use slate_engine::{Catalog, CollectionHandle};
 use slate_query::{Sort, SortDirection};
 
 use crate::error::DbError;
@@ -7,52 +7,60 @@ use crate::statement::Statement;
 
 use super::plan::{IndexScanRange, Node, Plan, ScanDirection};
 
-pub struct Planner<F> {
-    resolve: F,
+pub struct Planner<'a, T: Catalog> {
+    catalog: &'a T,
 }
 
-impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F> {
-    pub fn new(resolve: F) -> Self {
-        Self { resolve }
+impl<'a, T: Catalog> Planner<'a, T>
+where
+    T::Cf: Clone,
+{
+    pub fn new(catalog: &'a T) -> Self {
+        Self { catalog }
     }
 
-    pub fn plan(&self, stmt: Statement<'_>) -> Result<Plan<Cf>, DbError> {
+    pub fn plan(&self, stmt: Statement<'_>) -> Result<Plan<T::Cf>, DbError> {
         match stmt {
             Statement::Find {
+                cf,
                 collection,
                 predicate,
                 sort,
                 skip,
                 take,
                 projection: columns,
-            } => self.plan_find(collection, &predicate, sort, skip, take, columns),
+            } => self.plan_find(cf, collection, &predicate, sort, skip, take, columns),
             Statement::Distinct {
+                cf,
                 collection,
                 field,
                 predicate,
                 sort,
                 skip,
                 take,
-            } => self.plan_distinct(collection, field, &predicate, sort, skip, take),
-            Statement::Insert { collection, docs } => self.plan_insert(collection, docs),
+            } => self.plan_distinct(cf, collection, field, &predicate, sort, skip, take),
+            Statement::Insert { cf, collection, docs } => self.plan_insert(cf, collection, docs),
             Statement::Update {
+                cf,
                 collection,
                 predicate,
                 mutation,
                 limit,
-            } => self.plan_update(collection, &predicate, mutation, limit),
+            } => self.plan_update(cf, collection, &predicate, mutation, limit),
             Statement::Replace {
+                cf,
                 collection,
                 predicate,
                 replacement,
-            } => self.plan_replace(collection, &predicate, replacement),
+            } => self.plan_replace(cf, collection, &predicate, replacement),
             Statement::Delete {
+                cf,
                 collection,
                 predicate,
                 limit,
-            } => self.plan_delete(collection, &predicate, limit),
-            Statement::Merge { collection, docs } => self.plan_merge(collection, docs),
-            Statement::Upsert { collection, docs } => self.plan_upsert(collection, docs),
+            } => self.plan_delete(cf, collection, &predicate, limit),
+            Statement::Merge { cf, collection, docs } => self.plan_merge(cf, collection, docs),
+            Statement::Upsert { cf, collection, docs } => self.plan_upsert(cf, collection, docs),
         }
     }
 
@@ -60,14 +68,15 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_find(
         &self,
+        cf: &str,
         collection: &str,
         predicate: &Expression,
         sort: Vec<Sort>,
         skip: Option<usize>,
         take: Option<usize>,
         columns: Option<Vec<String>>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
         let (source, residual) = self.plan_source(&handle, predicate);
 
         let source_is_scan = matches!(source, Node::Scan { .. });
@@ -205,14 +214,15 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_distinct(
         &self,
+        cf: &str,
         collection: &str,
         field: String,
         predicate: &Expression,
         sort: Option<SortDirection>,
         skip: Option<usize>,
         take: Option<usize>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
         let (source, residual) = self.plan_source(&handle, predicate);
 
         // KeyLookup for index paths (skip if already a KeyLookup).
@@ -275,10 +285,11 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_insert(
         &self,
+        cf: &str,
         collection: &str,
         docs: Vec<bson::RawDocumentBuf>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
 
         Ok(Plan::Insert {
             collection: handle,
@@ -290,12 +301,13 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_update(
         &self,
+        cf: &str,
         collection: &str,
         predicate: &Expression,
         mutation: crate::mutation::Mutation,
         limit: Option<usize>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, limit);
 
         Ok(Plan::Update {
@@ -309,11 +321,12 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_replace(
         &self,
+        cf: &str,
         collection: &str,
         predicate: &Expression,
         replacement: bson::RawDocumentBuf,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, Some(1));
 
         Ok(Plan::Replace {
@@ -327,11 +340,12 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_delete(
         &self,
+        cf: &str,
         collection: &str,
         predicate: &Expression,
         limit: Option<usize>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, limit);
 
         Ok(Plan::Delete {
@@ -344,10 +358,11 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_merge(
         &self,
+        cf: &str,
         collection: &str,
         docs: Vec<bson::RawDocumentBuf>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
 
         Ok(Plan::Merge {
             collection: handle,
@@ -359,10 +374,11 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
 
     fn plan_upsert(
         &self,
+        cf: &str,
         collection: &str,
         docs: Vec<bson::RawDocumentBuf>,
-    ) -> Result<Plan<Cf>, DbError> {
-        let handle = (self.resolve)(collection)?;
+    ) -> Result<Plan<T::Cf>, DbError> {
+        let handle = self.catalog.collection(cf, collection)?;
 
         Ok(Plan::Upsert {
             collection: handle,
@@ -376,10 +392,10 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// plan_source → KeyLookup (if index) → Filter (if residual) → Limit.
     fn plan_read_source(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         predicate: &Expression,
         limit: Option<usize>,
-    ) -> Node<Cf> {
+    ) -> Node<T::Cf> {
         let (source, residual) = self.plan_source(handle, predicate);
 
         let source = if matches!(source, Node::Scan { .. } | Node::KeyLookup { .. }) {
@@ -414,9 +430,9 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// Decide whether to use an index or fall back to a full scan.
     fn plan_source(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         predicate: &Expression,
-    ) -> (Node<Cf>, Option<Expression>) {
+    ) -> (Node<T::Cf>, Option<Expression>) {
         // Fast path: _id equality → direct key lookup, no scan needed.
         if let Expression::Eq(field, value) = predicate
             && field == "_id"
@@ -434,9 +450,9 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// Try to push a single condition into an IndexScan.
     fn plan_single(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         predicate: &Expression,
-    ) -> (Node<Cf>, Option<Expression>) {
+    ) -> (Node<T::Cf>, Option<Expression>) {
         if let Some(node) = self.try_index_scan(handle, predicate) {
             (node, None)
         } else {
@@ -452,10 +468,10 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// Plan an AND: find the best indexed child, leave the rest as residual.
     fn plan_and(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         children: &[Expression],
         original: &Expression,
-    ) -> (Node<Cf>, Option<Expression>) {
+    ) -> (Node<T::Cf>, Option<Expression>) {
         // Priority 0: _id equality — direct key lookup, always wins.
         for (i, child) in children.iter().enumerate() {
             if let Expression::Eq(field, value) = child
@@ -545,10 +561,10 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// candidates but the full predicate must be rechecked after KeyLookup.
     fn plan_or(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         children: &[Expression],
         original: &Expression,
-    ) -> (Node<Cf>, Option<Expression>) {
+    ) -> (Node<T::Cf>, Option<Expression>) {
         match self.try_or_index_merge(handle, children) {
             Some(node) => (node, Some(original.clone())),
             None => (
@@ -564,10 +580,10 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     /// Returns None if any child cannot be pushed into an index.
     fn try_or_index_merge(
         &self,
-        handle: &CollectionHandle<Cf>,
+        handle: &CollectionHandle<T::Cf>,
         children: &[Expression],
-    ) -> Option<Node<Cf>> {
-        let mut nodes: Vec<Node<Cf>> = Vec::new();
+    ) -> Option<Node<T::Cf>> {
+        let mut nodes: Vec<Node<T::Cf>> = Vec::new();
 
         for child in children {
             match child {
@@ -611,7 +627,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     }
 
     /// Build a KeyLookup over a Values node for a direct _id point read.
-    fn id_lookup(handle: &CollectionHandle<Cf>, value: &bson::Bson) -> Node<Cf> {
+    fn id_lookup(handle: &CollectionHandle<T::Cf>, value: &bson::Bson) -> Node<T::Cf> {
         let doc = bson::RawDocumentBuf::try_from(&bson::doc! { "_id": value.clone() })
             .expect("_id document is always valid");
         Node::KeyLookup {
@@ -621,7 +637,7 @@ impl<Cf: Clone, F: Fn(&str) -> Result<CollectionHandle<Cf>, DbError>> Planner<F>
     }
 
     /// Try to convert a single expression into an IndexScan.
-    fn try_index_scan(&self, handle: &CollectionHandle<Cf>, expr: &Expression) -> Option<Node<Cf>> {
+    fn try_index_scan(&self, handle: &CollectionHandle<T::Cf>, expr: &Expression) -> Option<Node<T::Cf>> {
         let (field, range) = match expr {
             Expression::Eq(f, v) => (f, IndexScanRange::Eq(v.clone())),
             Expression::Gt(f, v) => (

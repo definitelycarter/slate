@@ -1,7 +1,7 @@
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -24,10 +24,10 @@ fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
 fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("bench", &Default::default()).unwrap();
-    txn.create_index("bench", "status").unwrap();
-    txn.create_index("bench", "age").unwrap();
-    let handle = txn.collection("bench").unwrap();
+    txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
     for doc in generate_docs(n) {
         txn.put(&handle, &doc).unwrap();
     }
@@ -48,7 +48,7 @@ fn bench_get(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &id_strings, |b, ids| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let handle = txn.collection("bench").unwrap();
+                let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                 let mut found = 0usize;
                 for id in ids {
                     if txn.get(&handle, &RawBsonRef::String(id)).unwrap().is_some() {
@@ -73,7 +73,7 @@ fn bench_scan(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let handle = txn.collection("bench").unwrap();
+                let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                 let count = txn.scan(&handle).unwrap().count();
                 txn.rollback().unwrap();
                 count
@@ -94,7 +94,7 @@ fn bench_index_scan_eq(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let handle = txn.collection("bench").unwrap();
+                let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                 let count = txn
                     .scan_index(&handle, "status", IndexRange::Eq(&active), false)
                     .unwrap()
@@ -115,7 +115,7 @@ fn bench_index_scan_full(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let handle = txn.collection("bench").unwrap();
+                let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                 let count = txn
                     .scan_index(&handle, "age", IndexRange::Full, false)
                     .unwrap()
@@ -138,7 +138,7 @@ fn bench_index_scan_range(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let handle = txn.collection("bench").unwrap();
+                let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                 let count = txn
                     .scan_index(
                         &handle,
@@ -168,9 +168,9 @@ fn bench_put(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection("bench", &Default::default()).unwrap();
-            txn.create_index("bench", "status").unwrap();
-            txn.create_index("bench", "age").unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -181,7 +181,7 @@ fn bench_put(c: &mut Criterion) {
                 || docs.clone(),
                 |docs| {
                     let txn = engine.begin(false).unwrap();
-                    let handle = txn.collection("bench").unwrap();
+                    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                     for doc in &docs {
                         txn.put(&handle, doc).unwrap();
                     }
@@ -202,9 +202,9 @@ fn bench_put_nx(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection("bench", &Default::default()).unwrap();
-            txn.create_index("bench", "status").unwrap();
-            txn.create_index("bench", "age").unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -215,7 +215,7 @@ fn bench_put_nx(c: &mut Criterion) {
                 || docs.clone(),
                 |docs| {
                     let txn = engine.begin(false).unwrap();
-                    let handle = txn.collection("bench").unwrap();
+                    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                     for doc in &docs {
                         txn.put_nx(&handle, doc).unwrap();
                     }
@@ -249,7 +249,7 @@ fn bench_put_overwrite(c: &mut Criterion) {
                 || updated_docs.clone(),
                 |docs| {
                     let txn = engine.begin(false).unwrap();
-                    let handle = txn.collection("bench").unwrap();
+                    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                     for doc in &docs {
                         txn.put(&handle, doc).unwrap();
                     }
@@ -274,7 +274,7 @@ fn bench_put_overwrite_no_change(c: &mut Criterion) {
                 || same_docs.clone(),
                 |docs| {
                     let txn = engine.begin(false).unwrap();
-                    let handle = txn.collection("bench").unwrap();
+                    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                     for doc in &docs {
                         txn.put(&handle, doc).unwrap();
                     }
@@ -299,7 +299,7 @@ fn bench_delete(c: &mut Criterion) {
                 || id_strings.clone(),
                 |ids| {
                     let txn = engine.begin(false).unwrap();
-                    let handle = txn.collection("bench").unwrap();
+                    let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
                     for id in &ids {
                         txn.delete(&handle, &RawBsonRef::String(id)).unwrap();
                     }
@@ -321,8 +321,8 @@ fn bench_create_index_backfill(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection("bench", &Default::default()).unwrap();
-            let handle = txn.collection("bench").unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
             for doc in generate_docs(n) {
                 txn.put(&handle, &doc).unwrap();
             }
@@ -335,7 +335,7 @@ fn bench_create_index_backfill(c: &mut Criterion) {
                 || {},
                 |_| {
                     let mut txn = engine.begin(false).unwrap();
-                    txn.create_index("bench", "name").unwrap();
+                    txn.create_index(DEFAULT_CF, "bench", "name").unwrap();
                     // Don't commit — index doesn't persist.
                 },
                 BatchSize::PerIteration,

@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, RawBson, doc, rawdoc};
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, DEFAULT_CF};
 use slate_query::{DistinctOptions, SortDirection};
 
 fn to_bson_vec(raw: RawBson) -> Vec<Bson> {
@@ -26,15 +26,15 @@ fn distinct_scalar_field() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "active" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "inactive" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "inactive" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "active" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
@@ -42,7 +42,7 @@ fn distinct_scalar_field() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(COLLECTION, "status", rawdoc! {}, DistinctOptions::default())
+        txn.distinct(DEFAULT_CF, COLLECTION,"status", rawdoc! {}, DistinctOptions::default())
             .unwrap(),
     );
     assert_eq!(values.len(), 2);
@@ -59,15 +59,15 @@ fn distinct_nested_path() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Austin" } })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "address": { "city": "Denver" } })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Denver" } })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "address": { "city": "Austin" } })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Austin" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -76,6 +76,7 @@ fn distinct_nested_path() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "address.city",
             rawdoc! {},
@@ -97,11 +98,11 @@ fn distinct_array_field() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "tags": ["rust", "db"] })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "tags": ["rust", "db"] })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "tags": ["db", "perf"] })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "tags": ["db", "perf"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -109,7 +110,7 @@ fn distinct_array_field() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(COLLECTION, "tags", rawdoc! {}, DistinctOptions::default())
+        txn.distinct(DEFAULT_CF, COLLECTION,"tags", rawdoc! {}, DistinctOptions::default())
             .unwrap(),
     );
     assert_eq!(values.len(), 3);
@@ -127,15 +128,15 @@ fn distinct_with_filter() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "gold" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active", "tier": "gold" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "inactive", "tier": "silver" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "inactive", "tier": "silver" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "active", "tier": "silver" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active", "tier": "silver" })
         .unwrap()
         .drain()
         .unwrap();
@@ -144,6 +145,7 @@ fn distinct_with_filter() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "tier",
             eq_filter("status", Bson::String("active".into())),
@@ -165,15 +167,15 @@ fn distinct_with_sort_asc() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "cherry" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "apple" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "banana" })
         .unwrap()
         .drain()
         .unwrap();
@@ -182,6 +184,7 @@ fn distinct_with_sort_asc() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "status",
             rawdoc! {},
@@ -211,15 +214,15 @@ fn distinct_with_sort_desc() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "cherry" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "apple" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "banana" })
         .unwrap()
         .drain()
         .unwrap();
@@ -228,6 +231,7 @@ fn distinct_with_sort_desc() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "status",
             rawdoc! {},
@@ -257,11 +261,11 @@ fn distinct_missing_field() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "alice" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "bob" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "bob" })
         .unwrap()
         .drain()
         .unwrap();
@@ -270,6 +274,7 @@ fn distinct_missing_field() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "nonexistent",
             rawdoc! {},
@@ -289,15 +294,15 @@ fn distinct_mixed_presence() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "active" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "bob" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "bob" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "inactive" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "inactive" })
         .unwrap()
         .drain()
         .unwrap();
@@ -305,7 +310,7 @@ fn distinct_mixed_presence() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(COLLECTION, "status", rawdoc! {}, DistinctOptions::default())
+        txn.distinct(DEFAULT_CF, COLLECTION,"status", rawdoc! {}, DistinctOptions::default())
             .unwrap(),
     );
     assert_eq!(values.len(), 2);
@@ -323,6 +328,7 @@ fn distinct_array_of_sub_documents() {
     })
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "triggers": [{ "type": "email" }, { "type": "sms" }] },
     )
@@ -330,6 +336,7 @@ fn distinct_array_of_sub_documents() {
     .drain()
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "triggers": [{ "type": "sms" }, { "type": "push" }] },
     )
@@ -341,6 +348,7 @@ fn distinct_array_of_sub_documents() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "triggers.type",
             rawdoc! {},
@@ -371,6 +379,7 @@ fn distinct_sub_document() {
     })
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "address": { "city": "Austin", "state": "TX" } },
     )
@@ -378,6 +387,7 @@ fn distinct_sub_document() {
     .drain()
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "address": { "city": "Denver", "state": "CO" } },
     )
@@ -385,6 +395,7 @@ fn distinct_sub_document() {
     .drain()
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "address": { "city": "Austin", "state": "TX" } },
     )
@@ -396,6 +407,7 @@ fn distinct_sub_document() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "address",
             rawdoc! {},
@@ -417,19 +429,19 @@ fn distinct_with_take() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "cherry" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "apple" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "banana" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "date" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "date" })
         .unwrap()
         .drain()
         .unwrap();
@@ -438,6 +450,7 @@ fn distinct_with_take() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "status",
             rawdoc! {},
@@ -464,19 +477,19 @@ fn distinct_with_skip_take() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "cherry" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "apple" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "banana" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "date" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "date" })
         .unwrap()
         .drain()
         .unwrap();
@@ -485,6 +498,7 @@ fn distinct_with_skip_take() {
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "status",
             rawdoc! {},
@@ -511,23 +525,23 @@ fn distinct_with_sort_and_limit() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "cherry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "cherry" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "apple" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "apple" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "banana" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "banana" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "date" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "date" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "status": "elderberry" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "elderberry" })
         .unwrap()
         .drain()
         .unwrap();
@@ -537,6 +551,7 @@ fn distinct_with_sort_and_limit() {
     // Sort desc, skip 1, take 2 -> ["date", "cherry"]
     let values = to_bson_vec(
         txn.distinct(
+            DEFAULT_CF,
             COLLECTION,
             "status",
             rawdoc! {},

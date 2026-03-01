@@ -1,4 +1,4 @@
-use slate_db::{CollectionConfig, Database, DatabaseConfig};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseConfig};
 use slate_store::MemoryStore;
 use slate_vm::LuaVm;
 
@@ -12,7 +12,7 @@ fn database_with_vm_factory() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_trigger("test", "audit", "return function(ctx, event) return event end")
+    txn.register_trigger(DEFAULT_CF, "test", "audit", "return function(ctx, event) return event end")
         .unwrap();
     txn.commit().unwrap();
 }
@@ -27,7 +27,7 @@ fn database_without_vm_factory() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_trigger("test", "audit", "return function(ctx, event) return event end")
+    txn.register_trigger(DEFAULT_CF, "test", "audit", "return function(ctx, event) return event end")
         .unwrap();
     txn.commit().unwrap();
 }

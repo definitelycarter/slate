@@ -6,7 +6,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::bench::{Database, RawIter};
-use slate_db::{CollectionConfig, DatabaseConfig};
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseConfig};
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -53,8 +53,8 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("test", "status").unwrap();
-    txn.create_index("test", "contacts_count").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
             bson::doc! {
@@ -66,7 +66,7 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
             }
         })
         .collect();
-    txn.insert_many("test", docs).unwrap().drain().unwrap();
+    txn.insert_many(DEFAULT_CF, "test", docs).unwrap().drain().unwrap();
     txn.commit().unwrap();
     engine
 }
@@ -118,11 +118,11 @@ pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("bench", "status").unwrap();
-    txn.create_index("bench", "contacts_count").unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "contacts_count").unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
-        txn.insert_many("bench", chunk.to_vec())
+        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
             .unwrap()
             .drain()
             .unwrap();

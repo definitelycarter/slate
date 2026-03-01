@@ -53,7 +53,7 @@ Comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Pattern matching: `Regex`.
 
 ## Index Configuration
 
-Indexes are defined per datasource in the field definitions. The order of indexed fields in the `CollectionConfig` determines **priority** — when multiple indexed fields appear in an AND group, the first one in the list wins.
+Indexes are created per collection via `create_index(cf, collection, field)`. The order of indexed fields in the collection's handle determines **priority** — when multiple indexed fields appear in an AND group, the first one in the list wins.
 
 ```rust
 // indexes: ["user_id", "status"]

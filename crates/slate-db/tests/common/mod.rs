@@ -1,6 +1,6 @@
 use bson::raw::RawDocument;
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig};
+use slate_db::{CollectionConfig, Database, DatabaseConfig, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 pub trait HasKey {
@@ -49,6 +49,7 @@ pub fn seed_records(db: &Database<MemoryStore>) {
     create_collection(db, COLLECTION);
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "acct-1", "name": "Acme Corp", "revenue": 50000.0, "status": "active", "active": true },

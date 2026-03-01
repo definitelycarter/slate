@@ -13,7 +13,7 @@ mod sweep;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
-pub use slate_engine::FunctionKind;
+pub use slate_engine::{FunctionKind, DEFAULT_CF};
 pub use slate_vm::{Vm, VmError};
 pub use convert::IntoRawDocumentBuf;
 pub use cursor::{Cursor, CursorIter};

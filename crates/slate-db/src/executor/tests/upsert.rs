@@ -2,6 +2,7 @@ use super::*;
 
 use crate::collection::CollectionConfig;
 use crate::database::{Database, DatabaseConfig};
+use crate::DEFAULT_CF;
 use slate_store::MemoryStore;
 
 fn seeded_db() -> Database<MemoryStore> {
@@ -12,9 +13,10 @@ fn seeded_db() -> Database<MemoryStore> {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("test", "status").unwrap();
-    txn.create_index("test", "score").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "score").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "test",
         vec![
             bson::doc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
@@ -74,6 +76,7 @@ fn upsert_replace_existing() {
 
     let affected = txn
         .upsert_many(
+            DEFAULT_CF,
             "test",
             vec![bson::doc! { "_id": "1", "name": "Alicia", "status": "archived", "score": 99 }],
         )
@@ -83,7 +86,7 @@ fn upsert_replace_existing() {
     assert_eq!(affected, 1);
 
     let doc = txn
-        .find_one("test", rawdoc! { "_id": "1" })
+        .find_one(DEFAULT_CF, "test", rawdoc! { "_id": "1" })
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alicia");
@@ -97,14 +100,14 @@ fn upsert_merge_existing() {
     let txn = db.begin(false).unwrap();
 
     let affected = txn
-        .merge_many("test", vec![bson::doc! { "_id": "1", "score": 99 }])
+        .merge_many(DEFAULT_CF, "test", vec![bson::doc! { "_id": "1", "score": 99 }])
         .unwrap()
         .drain()
         .unwrap();
     assert_eq!(affected, 1);
 
     let doc = txn
-        .find_one("test", rawdoc! { "_id": "1" })
+        .find_one(DEFAULT_CF, "test", rawdoc! { "_id": "1" })
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
@@ -119,6 +122,7 @@ fn upsert_mixed_insert_and_update() {
 
     let affected = txn
         .upsert_many(
+            DEFAULT_CF,
             "test",
             vec![
                 bson::doc! { "_id": "1", "name": "Alicia", "status": "archived", "score": 99 },
@@ -131,13 +135,13 @@ fn upsert_mixed_insert_and_update() {
     assert_eq!(affected, 2);
 
     let doc1 = txn
-        .find_one("test", rawdoc! { "_id": "1" })
+        .find_one(DEFAULT_CF, "test", rawdoc! { "_id": "1" })
         .unwrap()
         .unwrap();
     assert_eq!(doc1.get_str("name").unwrap(), "Alicia");
 
     let doc99 = txn
-        .find_one("test", rawdoc! { "_id": "99" })
+        .find_one(DEFAULT_CF, "test", rawdoc! { "_id": "99" })
         .unwrap()
         .unwrap();
     assert_eq!(doc99.get_str("name").unwrap(), "New");
@@ -150,6 +154,7 @@ fn upsert_replace_cleans_old_indexes() {
 
     // Alice has status="active". Replace with status="archived".
     txn.upsert_many(
+        DEFAULT_CF,
         "test",
         vec![bson::doc! { "_id": "1", "name": "Alice", "status": "archived", "score": 70 }],
     )
@@ -160,6 +165,7 @@ fn upsert_replace_cleans_old_indexes() {
     // Query by old index value should not find Alice
     let results: Vec<_> = txn
         .find(
+            DEFAULT_CF,
             "test",
             rawdoc! { "status": "active" },
             slate_query::FindOptions::default(),
@@ -182,6 +188,7 @@ fn upsert_replace_cleans_old_indexes() {
     // Query by new index value should find Alice
     let results2: Vec<_> = txn
         .find(
+            DEFAULT_CF,
             "test",
             rawdoc! { "status": "archived" },
             slate_query::FindOptions::default(),

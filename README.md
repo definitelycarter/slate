@@ -1,6 +1,6 @@
 # Slate
 
-A document database built in Rust. Schema-flexible BSON documents with pluggable storage, query execution, indexing, and multiple deployment modes — from embedded in a Swift app to running in Kubernetes.
+A document database built in Rust. Schema-flexible BSON documents with pluggable storage, query execution, indexing, and column-family-scoped collections — from embedded in a Swift app to standalone server.
 
 ## Features
 
@@ -43,7 +43,7 @@ cargo run --release -p slate-store-bench
 
 ```rust
 use bson::{doc, rawdoc};
-use slate_db::{Database, DatabaseConfig};
+use slate_db::{Database, DatabaseConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 use slate_store::RocksStore; // or RedbStore for pure-Rust (no C deps)
 
@@ -52,7 +52,7 @@ let db = Database::open(store, DatabaseConfig::default());
 
 // Insert
 let mut txn = db.begin(false)?;
-txn.insert_one("accounts", doc! {
+txn.insert_one(DEFAULT_CF, "accounts", doc! {
     "_id": "acct-1",
     "name": "Acme Corp",
     "status": "active",
@@ -62,16 +62,16 @@ txn.commit()?;
 
 // Query
 let txn = db.begin(true)?;
-let cursor = txn.find("accounts", rawdoc! {}, FindOptions::default())?;
+let cursor = txn.find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())?;
 for doc in cursor.iter()? {
     let doc = doc?; // RawDocumentBuf
 }
-let doc = txn.find_one("accounts", rawdoc! { "_id": "acct-1" })?;
-let count = txn.count("accounts", rawdoc! {})?;
+let doc = txn.find_one(DEFAULT_CF, "accounts", rawdoc! { "_id": "acct-1" })?;
+let count = txn.count(DEFAULT_CF, "accounts", rawdoc! {})?;
 
 // Update — atomic mutations, no read-modify-write
 let mut txn = db.begin(false)?;
-txn.update_one("accounts",
+txn.update_one(DEFAULT_CF, "accounts",
     rawdoc! { "status": "active" },
     rawdoc! { "$set": { "status": "archived" }, "$inc": { "revenue": 5000.0 } },
 )?.drain()?;
@@ -79,7 +79,7 @@ txn.commit()?;
 
 // Indexes
 let mut txn = db.begin(false)?;
-txn.create_index("accounts", "status")?;
+txn.create_index(DEFAULT_CF, "accounts", "status")?;
 txn.commit()?;
 ```
 

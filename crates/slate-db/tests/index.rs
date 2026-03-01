@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 
 #[allow(dead_code)]
@@ -14,7 +14,7 @@ fn create_collection_with_indexes(db: &slate_db::Database<slate_store::MemorySto
     })
     .unwrap();
     for field in indexes {
-        txn.create_index(name, field).unwrap();
+        txn.create_index(DEFAULT_CF, name, field).unwrap();
     }
     txn.commit().unwrap();
 }
@@ -28,6 +28,7 @@ fn create_and_use_index() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "r1", "name": "Alice", "status": "active" },
@@ -39,12 +40,13 @@ fn create_and_use_index() {
     .drain()
     .unwrap();
     // Create index after data exists (tests backfill)
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -69,20 +71,20 @@ fn drop_index() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let mut indexes = txn.list_indexes(COLLECTION).unwrap();
+    let mut indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "ttl"]);
 
     let mut txn = db.begin(false).unwrap();
-    txn.drop_index(COLLECTION, "status").unwrap();
+    txn.drop_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let indexes = txn.list_indexes(COLLECTION).unwrap();
+    let indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
     assert_eq!(indexes, vec!["ttl"]);
 }
 
@@ -95,8 +97,9 @@ fn index_maintained_on_insert() {
 
     // Create index first, then insert
     let mut txn = db.begin(false).unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -104,6 +107,7 @@ fn index_maintained_on_insert() {
     .drain()
     .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r2", "name": "Bob", "status": "rejected" },
     )
@@ -116,6 +120,7 @@ fn index_maintained_on_insert() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -135,8 +140,9 @@ fn index_maintained_on_update() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -148,7 +154,7 @@ fn index_maintained_on_update() {
     // Update the indexed field
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "status": "rejected" })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "rejected" })
         .unwrap()
         .drain()
         .unwrap();
@@ -158,6 +164,7 @@ fn index_maintained_on_update() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -172,6 +179,7 @@ fn index_maintained_on_update() {
     // New index value should match
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("rejected".into())),
             FindOptions::default(),
@@ -190,8 +198,9 @@ fn index_maintained_on_delete() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -202,7 +211,7 @@ fn index_maintained_on_delete() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one(COLLECTION, &filter)
+    txn.delete_one(DEFAULT_CF, COLLECTION, &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -212,6 +221,7 @@ fn index_maintained_on_delete() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -235,8 +245,9 @@ fn index_on_nested_path() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("nested_idx", "address.city").unwrap();
+    txn.create_index(DEFAULT_CF, "nested_idx", "address.city").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "nested_idx",
         vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
@@ -253,6 +264,7 @@ fn index_on_nested_path() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested_idx",
             eq_filter("address.city", Bson::String("Austin".into())),
             FindOptions::default(),
@@ -280,8 +292,9 @@ fn index_on_array_of_scalars() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("tags_idx", "tags.[]").unwrap();
+    txn.create_index(DEFAULT_CF, "tags_idx", "tags.[]").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "tags_idx",
         vec![
             doc! { "_id": "r1", "name": "Post A", "tags": ["rust", "db"] },
@@ -298,6 +311,7 @@ fn index_on_array_of_scalars() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_idx",
             eq_filter("tags.[]", Bson::String("rust".into())),
             FindOptions::default(),
@@ -318,6 +332,7 @@ fn index_on_array_of_scalars() {
     // Query for tag "api" via index
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_idx",
             eq_filter("tags.[]", Bson::String("api".into())),
             FindOptions::default(),
@@ -345,8 +360,9 @@ fn index_on_array_of_objects() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("items_idx", "items.[].sku").unwrap();
+    txn.create_index(DEFAULT_CF, "items_idx", "items.[].sku").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "items_idx",
         vec![
             doc! { "_id": "order-1", "items": [{ "sku": "A1", "qty": 2 }, { "sku": "B2", "qty": 1 }] },
@@ -361,6 +377,7 @@ fn index_on_array_of_objects() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "items_idx",
             eq_filter("items.[].sku", Bson::String("A1".into())),
             FindOptions::default(),
@@ -381,6 +398,7 @@ fn index_on_array_of_objects() {
     // Query for sku "C3"
     let results = txn
         .find(
+            DEFAULT_CF,
             "items_idx",
             eq_filter("items.[].sku", Bson::String("C3".into())),
             FindOptions::default(),
@@ -408,8 +426,8 @@ fn multikey_index_maintained_on_update() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("tags_upd", "tags.[]").unwrap();
-    txn.insert_one("tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
+    txn.create_index(DEFAULT_CF, "tags_upd", "tags.[]").unwrap();
+    txn.insert_one(DEFAULT_CF, "tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -418,7 +436,7 @@ fn multikey_index_maintained_on_update() {
     // Update tags
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one("tags_upd", &filter, doc! { "tags": ["go", "api"] })
+    txn.update_one(DEFAULT_CF, "tags_upd", &filter, doc! { "tags": ["go", "api"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -428,6 +446,7 @@ fn multikey_index_maintained_on_update() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_upd",
             eq_filter("tags.[]", Bson::String("rust".into())),
             FindOptions::default(),
@@ -442,6 +461,7 @@ fn multikey_index_maintained_on_update() {
     // New tags should match
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_upd",
             eq_filter("tags.[]", Bson::String("go".into())),
             FindOptions::default(),
@@ -464,8 +484,8 @@ fn multikey_index_maintained_on_delete() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("tags_del", "tags.[]").unwrap();
-    txn.insert_one("tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
+    txn.create_index(DEFAULT_CF, "tags_del", "tags.[]").unwrap();
+    txn.insert_one(DEFAULT_CF, "tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -474,7 +494,7 @@ fn multikey_index_maintained_on_delete() {
     // Delete
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one("tags_del", &filter)
+    txn.delete_one(DEFAULT_CF, "tags_del", &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -484,6 +504,7 @@ fn multikey_index_maintained_on_delete() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_del",
             eq_filter("tags.[]", Bson::String("rust".into())),
             FindOptions::default(),
@@ -504,6 +525,7 @@ fn multikey_index_backfill() {
     // Insert data first, then create the index
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "backfill",
         vec![
             doc! { "_id": "r1", "tags": ["rust", "db"] },
@@ -518,13 +540,14 @@ fn multikey_index_backfill() {
 
     // Now create the index — should backfill
     let mut txn = db.begin(false).unwrap();
-    txn.create_index("backfill", "tags.[]").unwrap();
+    txn.create_index(DEFAULT_CF, "backfill", "tags.[]").unwrap();
     txn.commit().unwrap();
 
     // Verify backfill worked
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "backfill",
             eq_filter("tags.[]", Bson::String("rust".into())),
             FindOptions::default(),
@@ -552,8 +575,8 @@ fn multikey_index_replace_one() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("tags_rep", "tags.[]").unwrap();
-    txn.insert_one("tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
+    txn.create_index(DEFAULT_CF, "tags_rep", "tags.[]").unwrap();
+    txn.insert_one(DEFAULT_CF, "tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -562,7 +585,7 @@ fn multikey_index_replace_one() {
     // Replace entirely
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.replace_one("tags_rep", &filter, doc! { "tags": ["python", "ml"] })
+    txn.replace_one(DEFAULT_CF, "tags_rep", &filter, doc! { "tags": ["python", "ml"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -572,6 +595,7 @@ fn multikey_index_replace_one() {
     let txn = db.begin(true).unwrap();
     assert_eq!(
         txn.find(
+            DEFAULT_CF,
             "tags_rep",
             eq_filter("tags.[]", Bson::String("rust".into())),
             FindOptions::default(),
@@ -588,6 +612,7 @@ fn multikey_index_replace_one() {
     // New tags present
     let results = txn
         .find(
+            DEFAULT_CF,
             "tags_rep",
             eq_filter("tags.[]", Bson::String("python".into())),
             FindOptions::default(),
@@ -610,13 +635,13 @@ fn create_index_shows_in_list() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("configured", "status").unwrap();
-    txn.create_index("configured", "tags.[]").unwrap();
+    txn.create_index(DEFAULT_CF, "configured", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "configured", "tags.[]").unwrap();
     txn.commit().unwrap();
 
     // Verify indexes were created
     let txn = db.begin(true).unwrap();
-    let mut indexes = txn.list_indexes("configured").unwrap();
+    let mut indexes = txn.list_indexes(DEFAULT_CF, "configured").unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "tags.[]", "ttl"]);
 }
@@ -632,12 +657,12 @@ fn create_collection_idempotent() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("idem", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "idem", "status").unwrap();
     txn.commit().unwrap();
 
     // Insert data
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one("idem", doc! { "_id": "r1", "status": "active" })
+    txn.insert_one(DEFAULT_CF, "idem", doc! { "_id": "r1", "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
@@ -654,7 +679,7 @@ fn create_collection_idempotent() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("idem", rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, "idem", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

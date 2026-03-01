@@ -6,7 +6,7 @@ use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Context, Database, Executor, Node, Plan};
 use slate_db::{CollectionConfig, DatabaseConfig};
-use slate_engine::{Catalog, Engine};
+use slate_engine::{Catalog, Engine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 // ── Mutation benchmarks ─────────────────────────────────────
@@ -27,8 +27,8 @@ fn bench_insert(c: &mut Criterion) {
                 ..Default::default()
             })
             .unwrap();
-            txn.create_index("test", "status").unwrap();
-            txn.create_index("test", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -39,7 +39,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Insert {
                         collection,
                         source: Node::Values(docs.clone()),
@@ -67,7 +67,7 @@ fn bench_update(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Update {
                         collection: collection.clone(),
                         mutation: slate_db::bench::parse_mutation(
@@ -101,7 +101,7 @@ fn bench_delete(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Delete {
                         collection: collection.clone(),
                         source: Node::Scan { collection },
@@ -130,7 +130,7 @@ fn bench_replace(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Replace {
                         collection: collection.clone(),
                         replacement: bson::rawdoc! {
@@ -176,7 +176,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Upsert {
                         collection,
                         source: Node::Values(raw_docs.clone()),
@@ -218,7 +218,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Merge {
                         collection,
                         source: Node::Values(raw_docs.clone()),
@@ -255,8 +255,8 @@ fn bench_upsert_insert(c: &mut Criterion) {
                 ..Default::default()
             })
             .unwrap();
-            txn.create_index("test", "status").unwrap();
-            txn.create_index("test", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -276,7 +276,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     let txn = engine.kv_engine().begin(false).unwrap();
-                    let collection = txn.collection("test").unwrap();
+                    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Upsert {
                         collection,
                         source: Node::Values(raw_docs.clone()),

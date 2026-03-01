@@ -1,7 +1,7 @@
 use bson::Bson;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Expression, Planner, Statement};
-use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine, DEFAULT_CF};
 use slate_db::bench::Mutation;
 use slate_query::{Sort, SortDirection};
 use slate_store::MemoryStore;
@@ -12,9 +12,9 @@ use slate_store::MemoryStore;
 fn setup() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("users", &Default::default()).unwrap();
-    txn.create_index("users", "status").unwrap();
-    txn.create_index("users", "age").unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "users", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "users", "age").unwrap();
     txn.commit().unwrap();
     engine
 }
@@ -23,6 +23,7 @@ fn setup() -> KvEngine<MemoryStore> {
 
 fn find(predicate: Expression) -> Statement<'static> {
     Statement::Find {
+        cf: DEFAULT_CF,
         collection: "users",
         predicate,
         sort: vec![],
@@ -38,6 +39,7 @@ fn find_with_sort(
     take: Option<usize>,
 ) -> Statement<'static> {
     Statement::Find {
+        cf: DEFAULT_CF,
         collection: "users",
         predicate,
         sort,
@@ -49,6 +51,7 @@ fn find_with_sort(
 
 fn find_with_projection(predicate: Expression, projection: Vec<String>) -> Statement<'static> {
     Statement::Find {
+        cf: DEFAULT_CF,
         collection: "users",
         predicate,
         sort: vec![],
@@ -70,7 +73,7 @@ fn bench_plan_scan(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -91,7 +94,7 @@ fn bench_plan_index_eq(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -109,7 +112,7 @@ fn bench_plan_index_range(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -130,7 +133,7 @@ fn bench_plan_and_eq_plus_range(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -151,7 +154,7 @@ fn bench_plan_and_dual_range(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -172,7 +175,7 @@ fn bench_plan_or_index_merge(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -193,7 +196,7 @@ fn bench_plan_or_mixed_fields(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -218,7 +221,7 @@ fn bench_plan_sort_indexed(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -239,7 +242,7 @@ fn bench_plan_covered_index(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -254,6 +257,7 @@ fn bench_plan_distinct(c: &mut Criterion) {
             || {
                 let txn = engine.begin(true).unwrap();
                 let stmt = Statement::Distinct {
+                    cf: DEFAULT_CF,
                     collection: "users",
                     field: "status".into(),
                     predicate: Expression::Eq("age".into(), Bson::Int32(25)),
@@ -264,7 +268,7 @@ fn bench_plan_distinct(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -280,13 +284,14 @@ fn bench_plan_insert(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 let doc = bson::rawdoc! { "_id": 1, "name": "Alice" };
                 let stmt = Statement::Insert {
+                    cf: DEFAULT_CF,
                     collection: "users",
                     docs: vec![doc],
                 };
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -301,6 +306,7 @@ fn bench_plan_update(c: &mut Criterion) {
             || {
                 let txn = engine.begin(true).unwrap();
                 let stmt = Statement::Update {
+                    cf: DEFAULT_CF,
                     collection: "users",
                     predicate: Expression::Eq("status".into(), Bson::String("active".into())),
                     mutation: Mutation { ops: vec![] },
@@ -309,7 +315,7 @@ fn bench_plan_update(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -324,6 +330,7 @@ fn bench_plan_delete(c: &mut Criterion) {
             || {
                 let txn = engine.begin(true).unwrap();
                 let stmt = Statement::Delete {
+                    cf: DEFAULT_CF,
                     collection: "users",
                     predicate: Expression::Eq("status".into(), Bson::String("inactive".into())),
                     limit: None,
@@ -331,7 +338,7 @@ fn bench_plan_delete(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,
@@ -356,7 +363,7 @@ fn bench_plan_complex_and_or(c: &mut Criterion) {
                 (txn, stmt)
             },
             |(txn, stmt)| {
-                let planner = Planner::new(|name| Ok(txn.collection(name)?));
+                let planner = Planner::new(&txn);
                 planner.plan(stmt).unwrap();
             },
             BatchSize::SmallInput,

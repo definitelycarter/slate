@@ -2,6 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
+use slate_db::DEFAULT_CF;
 use slate_query::FindOptions;
 
 // ── Replace tests ───────────────────────────────────────────────
@@ -13,6 +14,7 @@ fn replace_one_full_replacement() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active", "revenue": 50000.0 },
     )
@@ -24,7 +26,7 @@ fn replace_one_full_replacement() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
-        .replace_one(COLLECTION, &filter, doc! { "name": "New Corp" })
+        .replace_one(DEFAULT_CF, COLLECTION, &filter, doc! { "name": "New Corp" })
         .unwrap()
         .drain()
         .unwrap();
@@ -33,7 +35,7 @@ fn replace_one_full_replacement() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

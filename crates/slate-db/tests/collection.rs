@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::CollectionConfig;
+use slate_db::{CollectionConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 
 // ── Collection tests ────────────────────────────────────────────
@@ -14,11 +14,11 @@ fn list_collections() {
     create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, "contacts", doc! { "_id": "c-1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one("accounts", doc! { "_id": "a-1", "name": "Acme" })
+    txn.insert_one(DEFAULT_CF, "accounts", doc! { "_id": "a-1", "name": "Acme" })
         .unwrap()
         .drain()
         .unwrap();
@@ -36,19 +36,19 @@ fn drop_collection() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "a-1", "name": "Acme" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "a-1", "name": "Acme" })
         .unwrap()
         .drain()
         .unwrap();
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
-    txn.drop_collection(COLLECTION).unwrap();
+    txn.drop_collection(DEFAULT_CF, COLLECTION).unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let result = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
@@ -67,11 +67,11 @@ fn collection_isolation() {
     create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one("contacts", doc! { "_id": "c-1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, "contacts", doc! { "_id": "c-1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one("accounts", doc! { "_id": "a-1", "name": "Acme" })
+    txn.insert_one(DEFAULT_CF, "accounts", doc! { "_id": "a-1", "name": "Acme" })
         .unwrap()
         .drain()
         .unwrap();
@@ -79,7 +79,7 @@ fn collection_isolation() {
 
     let txn = db.begin(true).unwrap();
     let contacts = txn
-        .find("contacts", rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, "contacts", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -89,7 +89,7 @@ fn collection_isolation() {
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
     let accounts = txn
-        .find("accounts", rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -110,15 +110,15 @@ fn register_triggers() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_trigger("users", "audit", "print('audit')")
+    txn.register_trigger(DEFAULT_CF, "users", "audit", "print('audit')")
         .unwrap();
-    txn.register_trigger("users", "notify", "print('notify')")
+    txn.register_trigger(DEFAULT_CF, "users", "notify", "print('notify')")
         .unwrap();
     txn.commit().unwrap();
 
     // Verify the collection is usable.
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one("users", doc! { "_id": "u1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "u1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -134,7 +134,7 @@ fn register_validators() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_validator("users", "require_name", "assert(doc.name)")
+    txn.register_validator(DEFAULT_CF, "users", "require_name", "assert(doc.name)")
         .unwrap();
     txn.commit().unwrap();
 
@@ -152,7 +152,7 @@ fn register_udfs() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_udf("users", "full_name", "return first .. ' ' .. last")
+    txn.register_udf(DEFAULT_CF, "users", "full_name", "return first .. ' ' .. last")
         .unwrap();
     txn.commit().unwrap();
 
@@ -170,18 +170,19 @@ fn register_all_function_types_with_indexes() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("users", "email").unwrap();
-    txn.register_trigger("users", "audit", "print('audit')")
+    txn.create_index(DEFAULT_CF, "users", "email").unwrap();
+    txn.register_trigger(DEFAULT_CF, "users", "audit", "print('audit')")
         .unwrap();
-    txn.register_validator("users", "check", "assert(doc.name)")
+    txn.register_validator(DEFAULT_CF, "users", "check", "assert(doc.name)")
         .unwrap();
-    txn.register_udf("users", "full_name", "return first .. last")
+    txn.register_udf(DEFAULT_CF, "users", "full_name", "return first .. last")
         .unwrap();
     txn.commit().unwrap();
 
     // Verify collection works with all config together.
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "users",
         doc! { "_id": "u1", "name": "Alice", "email": "alice@test.com" },
     )
@@ -192,7 +193,7 @@ fn register_all_function_types_with_indexes() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("users", rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

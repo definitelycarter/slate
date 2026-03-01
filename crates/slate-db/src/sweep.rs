@@ -52,28 +52,31 @@ pub(crate) fn spawn<S: Store + Send + Sync + 'static>(
             if sweep_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let collections = {
+            let collections: Vec<(String, String)> = {
                 let txn = match engine.begin(true) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-                let configs = match txn.list_collections() {
+                let configs = match txn.list_collections(None) {
                     Ok(c) => c,
                     Err(_) => {
                         let _ = txn.rollback();
                         continue;
                     }
                 };
-                let names: Vec<String> = configs.into_iter().map(|c| c.name().to_string()).collect();
+                let pairs: Vec<(String, String)> = configs
+                    .into_iter()
+                    .map(|c| (c.cf_name().to_string(), c.name().to_string()))
+                    .collect();
                 let _ = txn.rollback();
-                names
+                pairs
             };
-            for col in &collections {
+            for (cf, col) in &collections {
                 let txn = match engine.begin(false) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
-                let handle = match txn.collection(col) {
+                let handle = match txn.collection(cf, col) {
                     Ok(h) => h,
                     Err(_) => {
                         let _ = txn.rollback();

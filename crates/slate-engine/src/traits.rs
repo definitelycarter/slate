@@ -27,6 +27,7 @@ pub struct FunctionEntry {
 
 struct CollectionHandleInner<Cf> {
     name: String,
+    cf_name: String,
     cf: Cf,
     indexes: Vec<String>,
     pk_path: String,
@@ -52,6 +53,7 @@ impl<Cf: fmt::Debug> fmt::Debug for CollectionHandle<Cf> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CollectionHandle")
             .field("name", &self.inner.name)
+            .field("cf_name", &self.inner.cf_name)
             .field("cf", &self.inner.cf)
             .field("indexes", &self.inner.indexes)
             .field("pk_path", &self.inner.pk_path)
@@ -63,6 +65,7 @@ impl<Cf: fmt::Debug> fmt::Debug for CollectionHandle<Cf> {
 impl<Cf: Clone> CollectionHandle<Cf> {
     pub fn new(
         name: String,
+        cf_name: String,
         cf: Cf,
         indexes: Vec<String>,
         pk_path: String,
@@ -71,6 +74,7 @@ impl<Cf: Clone> CollectionHandle<Cf> {
         Self {
             inner: Arc::new(CollectionHandleInner {
                 name,
+                cf_name,
                 cf,
                 indexes,
                 pk_path,
@@ -81,6 +85,10 @@ impl<Cf: Clone> CollectionHandle<Cf> {
 
     pub fn name(&self) -> &str {
         &self.inner.name
+    }
+
+    pub fn cf_name(&self) -> &str {
+        &self.inner.cf_name
     }
 
     pub fn cf(&self) -> &Cf {
@@ -276,8 +284,6 @@ impl IndexEntry {
 /// and fall back to engine defaults when `None`.
 #[derive(Debug, Clone, Default)]
 pub struct CreateCollectionOptions {
-    /// Column family name. Defaults to `"default_cf"`.
-    pub cf: Option<String>,
     /// Primary key field path. Defaults to `"_id"`.
     pub pk_path: Option<String>,
     /// TTL field path. Defaults to `"ttl"`.
@@ -287,27 +293,36 @@ pub struct CreateCollectionOptions {
 /// Catalog operations for collection and index metadata.
 ///
 /// Operates on a global `_sys_` column family internally.
+/// Collections are scoped per column family: the pair `(cf, name)` is the
+/// unique identity of a collection.
 pub trait Catalog: EngineTransaction {
-    /// Resolve a collection by name into a live handle.
-    fn collection(&self, name: &str) -> Result<CollectionHandle<Self::Cf>, EngineError>;
+    /// Resolve a collection by CF and name into a live handle.
+    fn collection(&self, cf: &str, name: &str) -> Result<CollectionHandle<Self::Cf>, EngineError>;
 
-    fn list_collections(&self) -> Result<Vec<CollectionHandle<Self::Cf>>, EngineError>;
+    /// List collections, optionally filtered to a single CF.
+    fn list_collections(
+        &self,
+        cf: Option<&str>,
+    ) -> Result<Vec<CollectionHandle<Self::Cf>>, EngineError>;
 
     fn create_collection(
         &mut self,
+        cf: &str,
         name: &str,
         options: &CreateCollectionOptions,
     ) -> Result<(), EngineError>;
 
-    fn drop_collection(&mut self, name: &str) -> Result<(), EngineError>;
+    fn drop_collection(&mut self, cf: &str, name: &str) -> Result<(), EngineError>;
 
-    fn create_index(&mut self, collection: &str, field: &str) -> Result<(), EngineError>;
+    fn create_index(&mut self, cf: &str, collection: &str, field: &str)
+        -> Result<(), EngineError>;
 
-    fn drop_index(&mut self, collection: &str, field: &str) -> Result<(), EngineError>;
+    fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 
     /// Store a named function (trigger, validator, or computed field) for a collection.
     fn create_function(
         &mut self,
+        cf: &str,
         collection: &str,
         kind: FunctionKind,
         name: &str,
@@ -317,6 +332,7 @@ pub trait Catalog: EngineTransaction {
     /// Remove a named function from a collection.
     fn drop_function(
         &mut self,
+        cf: &str,
         collection: &str,
         kind: FunctionKind,
         name: &str,
@@ -325,6 +341,7 @@ pub trait Catalog: EngineTransaction {
     /// Load all function entries of a given kind for a collection.
     fn load_functions(
         &self,
+        cf: &str,
         collection: &str,
         kind: FunctionKind,
     ) -> Result<Vec<FunctionEntry>, EngineError>;

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use bson::raw::RawBsonRef;
-use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
@@ -26,16 +26,16 @@ fn count_index<Txn: EngineTransaction>(
 fn put_nx_creates_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
     txn.put_nx(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
     txn.rollback().unwrap();
 }
@@ -44,16 +44,16 @@ fn put_nx_creates_index_entries() {
 fn put_nx_no_indexed_field_creates_no_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "age": 30 };
     txn.put_nx(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 0);
     txn.rollback().unwrap();
 }
@@ -64,9 +64,9 @@ fn put_nx_no_indexed_field_creates_no_entries() {
 fn put_overwrite_same_value_exactly_one_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
     txn.put(&handle, &doc).unwrap();
@@ -75,7 +75,7 @@ fn put_overwrite_same_value_exactly_one_entry() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
     txn.rollback().unwrap();
 }
@@ -86,9 +86,9 @@ fn put_overwrite_same_value_exactly_one_entry() {
 fn put_overwrite_changed_value_replaces_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice" };
     let doc2 = bson::rawdoc! { "_id": "a", "name": "Bob" };
@@ -97,7 +97,7 @@ fn put_overwrite_changed_value_replaces_entry() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
 
     // Verify it's "Bob", not "Alice".
@@ -117,9 +117,9 @@ fn put_overwrite_changed_value_replaces_entry() {
 fn put_overwrite_removing_field_deletes_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice" };
     txn.put(&handle, &doc1).unwrap();
@@ -129,7 +129,7 @@ fn put_overwrite_removing_field_deletes_entry() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 0);
     txn.rollback().unwrap();
 }
@@ -140,9 +140,9 @@ fn put_overwrite_removing_field_deletes_entry() {
 fn put_overwrite_adding_field_creates_entry() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "age": 30 };
     txn.put(&handle, &doc1).unwrap();
@@ -153,7 +153,7 @@ fn put_overwrite_adding_field_creates_entry() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
     txn.rollback().unwrap();
 }
@@ -164,17 +164,17 @@ fn put_overwrite_adding_field_creates_entry() {
 fn multiple_indexes_maintained() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    txn.create_index("c", "age").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    txn.create_index(DEFAULT_CF, "c", "age").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
     assert_eq!(count_index(&txn, &handle, "age"), 1);
     txn.rollback().unwrap();
@@ -184,10 +184,10 @@ fn multiple_indexes_maintained() {
 fn multiple_indexes_overwrite_partial_change() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    txn.create_index("c", "age").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    txn.create_index(DEFAULT_CF, "c", "age").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
     txn.put(&handle, &doc1).unwrap();
@@ -198,7 +198,7 @@ fn multiple_indexes_overwrite_partial_change() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 1);
     assert_eq!(count_index(&txn, &handle, "age"), 1);
     txn.rollback().unwrap();
@@ -208,10 +208,10 @@ fn multiple_indexes_overwrite_partial_change() {
 fn delete_cleans_all_indexes() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    txn.create_index("c", "age").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    txn.create_index(DEFAULT_CF, "c", "age").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "age": 30 };
     txn.put(&handle, &doc).unwrap();
@@ -219,7 +219,7 @@ fn delete_cleans_all_indexes() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "name"), 0);
     assert_eq!(count_index(&txn, &handle, "age"), 0);
     txn.rollback().unwrap();
@@ -231,16 +231,16 @@ fn delete_cleans_all_indexes() {
 fn index_on_nested_path() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "address.city").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "address": { "city": "Austin", "state": "TX" } };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "address.city"), 1);
     txn.rollback().unwrap();
 }
@@ -249,16 +249,16 @@ fn index_on_nested_path() {
 fn index_on_nested_path_missing_parent() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "address.city").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "address.city"), 0);
     txn.rollback().unwrap();
 }
@@ -267,9 +267,9 @@ fn index_on_nested_path_missing_parent() {
 fn index_on_nested_path_overwrite() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "address.city").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "address": { "city": "Austin" } };
     txn.put(&handle, &doc1).unwrap();
@@ -279,7 +279,7 @@ fn index_on_nested_path_overwrite() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "address.city"), 1);
     txn.rollback().unwrap();
 }
@@ -290,16 +290,16 @@ fn index_on_nested_path_overwrite() {
 fn array_multikey_creates_entry_per_element() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "tags.[]").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "tags": ["rust", "db", "engine"] };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 3);
     txn.rollback().unwrap();
 }
@@ -308,9 +308,9 @@ fn array_multikey_creates_entry_per_element() {
 fn array_multikey_overwrite_partial_change() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "tags.[]").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
     txn.put(&handle, &doc1).unwrap();
@@ -320,7 +320,7 @@ fn array_multikey_overwrite_partial_change() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     // "rust" kept, "db" removed, "engine" added → 2 total
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 2);
     txn.rollback().unwrap();
@@ -330,9 +330,9 @@ fn array_multikey_overwrite_partial_change() {
 fn array_multikey_overwrite_to_empty_array() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "tags.[]").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
     txn.put(&handle, &doc1).unwrap();
@@ -342,7 +342,7 @@ fn array_multikey_overwrite_to_empty_array() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 0);
     txn.rollback().unwrap();
 }
@@ -351,9 +351,9 @@ fn array_multikey_overwrite_to_empty_array() {
 fn array_multikey_delete_cleans_all() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "tags.[]").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "tags": ["rust", "db", "engine"] };
     txn.put(&handle, &doc).unwrap();
@@ -361,7 +361,7 @@ fn array_multikey_delete_cleans_all() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 0);
     txn.rollback().unwrap();
 }
@@ -370,9 +370,9 @@ fn array_multikey_delete_cleans_all() {
 fn array_multikey_multiple_docs() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "tags.[]").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc1 = bson::rawdoc! { "_id": "a", "tags": ["rust", "db"] };
     let doc2 = bson::rawdoc! { "_id": "b", "tags": ["rust", "engine"] };
@@ -381,7 +381,7 @@ fn array_multikey_multiple_docs() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     // doc a: 2, doc b: 2 → 4 total
     assert_eq!(count_index(&txn, &handle, "tags.[]"), 4);
 
@@ -402,9 +402,9 @@ fn array_multikey_multiple_docs() {
 fn nested_array_objects_multikey() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "items.[].sku").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "items.[].sku").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! {
         "_id": "order1",
@@ -418,7 +418,7 @@ fn nested_array_objects_multikey() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "items.[].sku"), 3);
     txn.rollback().unwrap();
 }
@@ -437,9 +437,9 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     });
 
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let expired_dt = bson::DateTime::from_millis(1_000_000); // before the clock
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "ttl": expired_dt };
@@ -447,7 +447,7 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     // Index entries carry TTL in metadata — expired entries are filtered
     // during scan_index using the engine's internal clock.
@@ -475,9 +475,9 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
     });
 
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let future_dt = bson::DateTime::from_millis(i64::MAX / 2); // far future
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice", "ttl": future_dt };
@@ -485,7 +485,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let entries: Vec<_> = txn
         .scan_index(&handle, "name", IndexRange::Full, false)
@@ -500,16 +500,16 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
 fn ttl_no_ttl_field_always_visible() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "name").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let entries: Vec<_> = txn
         .scan_index(&handle, "name", IndexRange::Full, false)
@@ -526,9 +526,9 @@ fn ttl_no_ttl_field_always_visible() {
 fn many_docs_exact_index_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "v").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "v").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     for i in 0..100 {
         let name = format!("doc-{i}");
@@ -538,7 +538,7 @@ fn many_docs_exact_index_count() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "v"), 100);
     txn.rollback().unwrap();
 }
@@ -547,9 +547,9 @@ fn many_docs_exact_index_count() {
 fn many_docs_delete_half_exact_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "v").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "v").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     for i in 0..100 {
         let name = format!("doc-{i}");
@@ -565,7 +565,7 @@ fn many_docs_delete_half_exact_count() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     assert_eq!(count_index(&txn, &handle, "v"), 50);
     txn.rollback().unwrap();
 }
@@ -574,9 +574,9 @@ fn many_docs_delete_half_exact_count() {
 fn many_docs_overwrite_all_exact_count() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection("c", &Default::default()).unwrap();
-    txn.create_index("c", "v").unwrap();
-    let handle = txn.collection("c").unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_index(DEFAULT_CF, "c", "v").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     for i in 0..50 {
         let name = format!("doc-{i}");
@@ -593,7 +593,7 @@ fn many_docs_overwrite_all_exact_count() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let handle = txn.collection("c").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
     // Still exactly 50 — no duplicates from overwrites.
     assert_eq!(count_index(&txn, &handle, "v"), 50);
     txn.rollback().unwrap();

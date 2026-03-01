@@ -12,12 +12,13 @@ use slate_store::Store;
 use crate::error::EngineError;
 
 pub const SYS_CF: &str = "_sys_";
-pub(crate) const DEFAULT_CF: &str = "default_cf";
+pub const DEFAULT_CF: &str = "default_cf";
 
 /// Serializable collection metadata stored in the `_sys_` CF.
+///
+/// The column family is encoded in the key, not in this struct.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CollectionMeta {
-    pub cf: String,
     pub pk: String,
     pub ttl: String,
 }

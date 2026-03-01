@@ -2,6 +2,7 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
+use slate_db::DEFAULT_CF;
 use slate_query::FindOptions;
 
 // ── _id type roundtrips ─────────────────────────────────────────
@@ -12,7 +13,7 @@ fn insert_and_find_string_id() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "my-string", "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "my-string", "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
@@ -20,7 +21,7 @@ fn insert_and_find_string_id() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "my-string" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "my-string" })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_str("_id").unwrap(), "my-string");
@@ -33,7 +34,7 @@ fn insert_and_find_objectid_id() {
 
     let oid = bson::oid::ObjectId::new();
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
@@ -41,7 +42,7 @@ fn insert_and_find_objectid_id() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_object_id("_id").unwrap(), oid);
@@ -53,7 +54,7 @@ fn insert_and_find_i32_id() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": 42_i32, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 42_i32, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
@@ -61,7 +62,7 @@ fn insert_and_find_i32_id() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": 42_i32 })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": 42_i32 })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_i32("_id").unwrap(), 42);
@@ -73,7 +74,7 @@ fn insert_and_find_i64_id() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": 999_i64, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 999_i64, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
@@ -81,7 +82,7 @@ fn insert_and_find_i64_id() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": 999_i64 })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": 999_i64 })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_i64("_id").unwrap(), 999);
@@ -94,12 +95,12 @@ fn insert_objectid_duplicate_fails() {
 
     let oid = bson::oid::ObjectId::new();
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
     let err = txn
-        .insert_one(COLLECTION, doc! { "_id": oid, "v": 2 })
+        .insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 2 })
         .unwrap()
         .drain()
         .unwrap_err();
@@ -112,12 +113,12 @@ fn insert_i32_duplicate_fails() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": 7_i32, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 7_i32, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
     let err = txn
-        .insert_one(COLLECTION, doc! { "_id": 7_i32, "v": 2 })
+        .insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 7_i32, "v": 2 })
         .unwrap()
         .drain()
         .unwrap_err();
@@ -131,21 +132,21 @@ fn delete_by_objectid() {
 
     let oid = bson::oid::ObjectId::new();
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": oid, "v": 1 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
         .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
-    txn.delete_one(COLLECTION, rawdoc! { "_id": oid })
+    txn.delete_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid })
         .unwrap()
         .drain()
         .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let found = txn.find_one(COLLECTION, rawdoc! { "_id": oid }).unwrap();
+    let found = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid }).unwrap();
     assert!(found.is_none());
 }
 
@@ -156,7 +157,7 @@ fn upsert_with_objectid() {
 
     let oid = bson::oid::ObjectId::new();
     let txn = db.begin(false).unwrap();
-    txn.upsert_many(COLLECTION, vec![doc! { "_id": oid, "v": 1 }])
+    txn.upsert_many(DEFAULT_CF, COLLECTION, vec![doc! { "_id": oid, "v": 1 }])
         .unwrap()
         .drain()
         .unwrap();
@@ -164,7 +165,7 @@ fn upsert_with_objectid() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_i32("v").unwrap(), 1);
@@ -177,6 +178,7 @@ fn replace_with_i32_id() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": 10_i32, "name": "Alice", "age": 30 },
     )
@@ -187,6 +189,7 @@ fn replace_with_i32_id() {
 
     let txn = db.begin(false).unwrap();
     txn.replace_one(
+        DEFAULT_CF,
         COLLECTION,
         rawdoc! { "_id": 10_i32 },
         doc! { "_id": 10_i32, "name": "Bob", "age": 25 },
@@ -198,7 +201,7 @@ fn replace_with_i32_id() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": 10_i32 })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": 10_i32 })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_str("name").unwrap(), "Bob");
@@ -211,7 +214,7 @@ fn update_with_objectid() {
 
     let oid = bson::oid::ObjectId::new();
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": oid, "score": 10 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "score": 10 })
         .unwrap()
         .drain()
         .unwrap();
@@ -219,6 +222,7 @@ fn update_with_objectid() {
 
     let txn = db.begin(false).unwrap();
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         rawdoc! { "_id": oid },
         doc! { "$set": { "score": 99 } },
@@ -230,7 +234,7 @@ fn update_with_objectid() {
 
     let txn = db.begin(true).unwrap();
     let found = txn
-        .find_one(COLLECTION, rawdoc! { "_id": oid })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid })
         .unwrap()
         .unwrap();
     assert_eq!(found.get_i32("score").unwrap(), 99);
@@ -244,6 +248,7 @@ fn mixed_id_types_in_collection() {
     let oid = bson::oid::ObjectId::new();
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![
             doc! { "_id": "str-1", "t": "string" },
@@ -259,7 +264,7 @@ fn mixed_id_types_in_collection() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

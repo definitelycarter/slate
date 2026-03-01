@@ -2,6 +2,7 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
+use slate_db::DEFAULT_CF;
 use slate_query::FindOptions;
 
 // ── Insert tests ────────────────────────────────────────────────
@@ -13,6 +14,7 @@ fn insert_one_and_find_one() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "revenue": 50000.0 },
     )
@@ -23,7 +25,7 @@ fn insert_one_and_find_one() {
 
     let txn = db.begin(true).unwrap();
     let record = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-1" })
         .unwrap()
         .unwrap();
     assert_eq!(record.get_str("_id").unwrap(), "acct-1");
@@ -37,12 +39,12 @@ fn insert_one_duplicate_id_fails() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "acct-1", "name": "Acme" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-1", "name": "Acme" })
         .unwrap()
         .drain()
         .unwrap();
     let err = txn
-        .insert_one(COLLECTION, doc! { "_id": "acct-1", "name": "Duplicate" })
+        .insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-1", "name": "Duplicate" })
         .unwrap()
         .drain()
         .unwrap_err();
@@ -55,7 +57,7 @@ fn insert_one_auto_generated_id() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "name": "No ID" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "No ID" })
         .unwrap()
         .drain()
         .unwrap();
@@ -64,7 +66,7 @@ fn insert_one_auto_generated_id() {
     // Verify the auto-generated _id is an ObjectId
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -83,6 +85,7 @@ fn insert_many_batch() {
     let mut txn = db.begin(false).unwrap();
     let count = txn
         .insert_many(
+            DEFAULT_CF,
             COLLECTION,
             vec![
                 doc! { "_id": "acct-1", "name": "Acme" },
@@ -97,7 +100,7 @@ fn insert_many_batch() {
 
     let txn = db.begin(true).unwrap();
     let all = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

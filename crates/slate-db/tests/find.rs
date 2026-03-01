@@ -3,7 +3,7 @@ use common::*;
 
 use bson::raw::RawDocument;
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, Database};
+use slate_db::{CollectionConfig, Database, DEFAULT_CF};
 use slate_query::{FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
@@ -16,7 +16,7 @@ fn find_no_filters() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -33,6 +33,7 @@ fn find_eq_filter() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -53,6 +54,7 @@ fn find_gt_filter() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! { "revenue": { "$gt": 80000.0 } },
             FindOptions::default(),
@@ -71,11 +73,12 @@ fn find_isnull_filter() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "acct-x", "name": "NoStatus" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-x", "name": "NoStatus" })
         .unwrap()
         .drain()
         .unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
@@ -87,6 +90,7 @@ fn find_isnull_filter() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! { "status": null },
             FindOptions::default(),
@@ -108,6 +112,7 @@ fn find_or_filter() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] },
             FindOptions::default(),
@@ -130,6 +135,7 @@ fn find_sort_asc() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -158,6 +164,7 @@ fn find_sort_desc() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -187,6 +194,7 @@ fn find_skip_and_take() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -217,6 +225,7 @@ fn find_filter_sort_paginate() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions {
@@ -248,6 +257,7 @@ fn find_with_projection() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -277,6 +287,7 @@ fn find_projection_includes_filter_columns() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions {
@@ -304,6 +315,7 @@ fn find_projection_includes_sort_columns() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -339,6 +351,7 @@ fn nested_doc_write_and_read() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "nested",
         doc! {
             "_id": "r1",
@@ -357,7 +370,7 @@ fn nested_doc_write_and_read() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find("nested", rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, "nested", rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -379,6 +392,7 @@ fn dot_notation_filter_eq() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "nested",
         vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
@@ -394,6 +408,7 @@ fn dot_notation_filter_eq() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested",
             eq_filter("address.city", Bson::String("Austin".into())),
             FindOptions::default(),
@@ -419,6 +434,7 @@ fn dot_notation_sort() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "nested",
         vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Zurich" } },
@@ -434,6 +450,7 @@ fn dot_notation_sort() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested",
             rawdoc! {},
             FindOptions {
@@ -462,6 +479,7 @@ fn dot_notation_projection() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "nested",
         doc! {
             "_id": "r1",
@@ -481,6 +499,7 @@ fn dot_notation_projection() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested",
             rawdoc! {},
             FindOptions {
@@ -509,6 +528,7 @@ fn dot_notation_projection_multiple_subfields() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "nested",
         doc! {
             "_id": "r1",
@@ -528,6 +548,7 @@ fn dot_notation_projection_multiple_subfields() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested",
             rawdoc! {},
             FindOptions {
@@ -559,13 +580,14 @@ fn dot_notation_isnull_missing_parent() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "nested",
         doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin" } },
     )
     .unwrap()
     .drain()
     .unwrap();
-    txn.insert_one("nested", doc! { "_id": "r2", "name": "Bob" })
+    txn.insert_one(DEFAULT_CF, "nested", doc! { "_id": "r2", "name": "Bob" })
         .unwrap()
         .drain()
         .unwrap();
@@ -574,6 +596,7 @@ fn dot_notation_isnull_missing_parent() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "nested",
             rawdoc! { "address.city": null },
             FindOptions::default(),
@@ -594,6 +617,7 @@ fn dot_notation_deep_nesting() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "deep",
         doc! { "_id": "r1", "data": { "level1": { "level2": { "value": "found" } } } },
     )
@@ -605,6 +629,7 @@ fn dot_notation_deep_nesting() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "deep",
             eq_filter("data.level1.level2.value", Bson::String("found".into())),
             FindOptions::default(),
@@ -626,6 +651,7 @@ fn projection_only_uses_selective_read() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! {},
             FindOptions {
@@ -657,7 +683,7 @@ fn find_by_id_returns_document() {
 
     let txn = db.begin(true).unwrap();
     let doc = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-1" })
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
@@ -672,7 +698,7 @@ fn find_by_id_not_found() {
 
     let txn = db.begin(true).unwrap();
     let result = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "nonexistent" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "nonexistent" })
         .unwrap();
     assert!(result.is_none());
 }
@@ -682,7 +708,7 @@ fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
     let txn = db.begin(true).unwrap();
-    let result = txn.find_one("no_such_collection", rawdoc! { "_id": "id-1" });
+    let result = txn.find_one(DEFAULT_CF, "no_such_collection", rawdoc! { "_id": "id-1" });
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
@@ -697,6 +723,7 @@ fn find_by_id_with_projection() {
     let txn = db.begin(true).unwrap();
     let doc = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             rawdoc! { "_id": "acct-1" },
             FindOptions {
@@ -728,9 +755,10 @@ fn seed_or_test_data(db: &Database<MemoryStore>) {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("orders", "user_id").unwrap();
-    txn.create_index("orders", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "orders", "user_id").unwrap();
+    txn.create_index(DEFAULT_CF, "orders", "status").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "orders",
         vec![
             doc! { "_id": "o1", "user_id": "abc", "status": "active", "score": 80, "name": "Order 1" },
@@ -763,6 +791,7 @@ fn find_with_or_indexed() {
     // user_id = "abc" OR status = "active"
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] },
             FindOptions::default(),
@@ -785,6 +814,7 @@ fn find_with_or_same_field() {
     // status = "active" OR status = "archived"
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] },
             FindOptions::default(),
@@ -807,6 +837,7 @@ fn find_with_or_fallback_scan() {
     // user_id = "abc" OR score > 50 (score not indexed -> full scan)
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] },
             FindOptions::default(),
@@ -830,6 +861,7 @@ fn find_with_and_priority() {
     // user_id has higher priority -- planner should use it for IndexScan
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "status": "active", "user_id": "abc" },
             FindOptions::default(),
@@ -852,6 +884,7 @@ fn find_with_nested_and_or() {
     // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [
                 { "user_id": "abc", "status": "active" },
@@ -877,6 +910,7 @@ fn find_with_or_three_values() {
     // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] },
             FindOptions::default(),
@@ -903,6 +937,7 @@ fn find_with_or_partial_index_per_branch() {
     // Each OR branch has one indexed Eq -- IndexMerge(Or), full recheck
     let results = txn
         .find(
+            DEFAULT_CF,
             "orders",
             rawdoc! { "$or": [
                 { "user_id": "abc", "score": { "$gt": 50_i64 } },
@@ -930,9 +965,9 @@ fn index_covered_preserves_int32_type() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index(COLLECTION, "score").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "score").unwrap();
     // Insert with Int32
-    txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
         .unwrap()
         .drain()
         .unwrap();
@@ -942,6 +977,7 @@ fn index_covered_preserves_int32_type() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("score", Bson::Int64(100)),
             FindOptions {
@@ -973,8 +1009,8 @@ fn index_covered_preserves_string_type() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "rec-1", "status": "active" })
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "rec-1", "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
@@ -983,6 +1019,7 @@ fn index_covered_preserves_string_type() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions {
@@ -1015,8 +1052,9 @@ fn find_gt_on_indexed_field() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("scores", "score").unwrap();
+    txn.create_index(DEFAULT_CF, "scores", "score").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "scores",
         vec![
             doc! { "_id": "1", "name": "Alice", "score": 70 },
@@ -1032,6 +1070,7 @@ fn find_gt_on_indexed_field() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "scores",
             rawdoc! { "score": { "$gt": 75 } },
             FindOptions::default(),
@@ -1062,8 +1101,9 @@ fn find_gte_lte_on_indexed_field() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("scores", "score").unwrap();
+    txn.create_index(DEFAULT_CF, "scores", "score").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "scores",
         vec![
             doc! { "_id": "1", "name": "Alice", "score": 70 },
@@ -1081,6 +1121,7 @@ fn find_gte_lte_on_indexed_field() {
     // score >= 70 AND score <= 80
     let results = txn
         .find(
+            DEFAULT_CF,
             "scores",
             rawdoc! { "score": { "$gte": 70, "$lte": 80 } },
             FindOptions::default(),

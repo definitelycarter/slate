@@ -56,6 +56,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
     fn ensure_vm<'g>(
         &self,
         guard: &'g mut HashMap<String, VmEntry>,
+        cf: &str,
         collection: &str,
     ) -> Result<Option<&'g VmEntry>, DbError> {
         let Some(factory) = self.vm_factory else {
@@ -65,7 +66,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         if !guard.contains_key(collection) {
             let mut vm = factory()?;
 
-            let triggers = self.txn.load_functions(collection, FunctionKind::Trigger)?;
+            let triggers = self.txn.load_functions(cf, collection, FunctionKind::Trigger)?;
             let trigger_names: Vec<String> = triggers.iter().map(|f| f.name.clone()).collect();
             for f in &triggers {
                 vm.register(&f.name, &f.source)?;
@@ -85,6 +86,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
 
     pub(crate) fn fire_triggers(
         &self,
+        cf: &str,
         collection: &str,
         action: &str,
         doc: &RawDocument,
@@ -94,7 +96,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         };
 
         let mut guard = registry.lock().unwrap();
-        let Some(entry) = self.ensure_vm(&mut guard, collection)? else {
+        let Some(entry) = self.ensure_vm(&mut guard, cf, collection)? else {
             return Ok(());
         };
 
@@ -103,6 +105,9 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         }
 
         let txn = self.txn;
+        // Trigger callbacks are scoped to the triggering collection's CF.
+        // A trigger on cf1:accounts can only read/write collections in cf1.
+        let trigger_cf = cf.to_string();
 
         let get_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
             let coll_name = args
@@ -118,7 +123,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
             })?;
 
             let handle = txn
-                .collection(coll_name)
+                .collection(&trigger_cf, coll_name)
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
 
             let wrapper = bson::raw::RawDocumentBuf::try_from(bson::doc! { "v": doc_id.clone() })
@@ -165,7 +170,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
             };
 
             let handle = txn
-                .collection(coll_name)
+                .collection(&trigger_cf, coll_name)
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
 
             let raw = bson::raw::RawDocumentBuf::try_from(doc)
@@ -193,7 +198,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
             })?;
 
             let handle = txn
-                .collection(coll_name)
+                .collection(&trigger_cf, coll_name)
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
 
             let wrapper = bson::raw::RawDocumentBuf::try_from(bson::doc! { "v": doc_id.clone() })

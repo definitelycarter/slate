@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig};
+use slate_db::{CollectionConfig, Database, DatabaseConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
 use slate_vm::LuaVm;
@@ -31,6 +31,7 @@ fn mutation_set_explicit() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -42,6 +43,7 @@ fn mutation_set_explicit() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$set": { "status": "archived", "score": 100 } },
@@ -53,7 +55,7 @@ fn mutation_set_explicit() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -68,6 +70,7 @@ fn mutation_unset() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active", "score": 50 },
     )
@@ -78,7 +81,7 @@ fn mutation_unset() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$unset": { "score": "" } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$unset": { "score": "" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -86,7 +89,7 @@ fn mutation_unset() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -100,7 +103,7 @@ fn mutation_inc_i32() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "score": 10_i32 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "score": 10_i32 })
         .unwrap()
         .drain()
         .unwrap();
@@ -108,7 +111,7 @@ fn mutation_inc_i32() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": 5_i32 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$inc": { "score": 5_i32 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -116,7 +119,7 @@ fn mutation_inc_i32() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 15);
@@ -128,7 +131,7 @@ fn mutation_inc_missing_field() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -136,7 +139,7 @@ fn mutation_inc_missing_field() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": 7_i32 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$inc": { "score": 7_i32 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -144,7 +147,7 @@ fn mutation_inc_missing_field() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 7);
@@ -156,7 +159,7 @@ fn mutation_inc_negative_decrement() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "score": 100_i32 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "score": 100_i32 })
         .unwrap()
         .drain()
         .unwrap();
@@ -164,7 +167,7 @@ fn mutation_inc_negative_decrement() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$inc": { "score": -30_i32 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$inc": { "score": -30_i32 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -172,7 +175,7 @@ fn mutation_inc_negative_decrement() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_i32("score").unwrap(), 70);
@@ -184,7 +187,7 @@ fn mutation_inc_f64() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "balance": 100.50_f64 })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "balance": 100.50_f64 })
         .unwrap()
         .drain()
         .unwrap();
@@ -193,6 +196,7 @@ fn mutation_inc_f64() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$inc": { "balance": 25.25_f64 } },
@@ -204,7 +208,7 @@ fn mutation_inc_f64() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert!((d.get_f64("balance").unwrap() - 125.75).abs() < f64::EPSILON);
@@ -217,6 +221,7 @@ fn mutation_rename() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "old_name": "Alice", "status": "active" },
     )
@@ -228,6 +233,7 @@ fn mutation_rename() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$rename": { "old_name": "name" } },
@@ -239,7 +245,7 @@ fn mutation_rename() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -253,7 +259,7 @@ fn mutation_push() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "tags": ["rust", "db"] })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "tags": ["rust", "db"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -261,7 +267,7 @@ fn mutation_push() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$push": { "tags": "perf" } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$push": { "tags": "perf" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -269,7 +275,7 @@ fn mutation_push() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["rust", "db", "perf"]);
@@ -281,7 +287,7 @@ fn mutation_push_creates_array() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -289,7 +295,7 @@ fn mutation_push_creates_array() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$push": { "tags": "new" } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$push": { "tags": "new" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -297,7 +303,7 @@ fn mutation_push_creates_array() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "tags"), vec!["new"]);
@@ -310,6 +316,7 @@ fn mutation_lpush() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "queue": ["second", "third"] },
     )
@@ -320,7 +327,7 @@ fn mutation_lpush() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$lpush": { "queue": "first" } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$lpush": { "queue": "first" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -328,7 +335,7 @@ fn mutation_lpush() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "queue"), vec!["first", "second", "third"]);
@@ -340,7 +347,7 @@ fn mutation_pop() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "stack": ["a", "b", "c"] })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "stack": ["a", "b", "c"] })
         .unwrap()
         .drain()
         .unwrap();
@@ -348,7 +355,7 @@ fn mutation_pop() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "stack": 1 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$pop": { "stack": 1 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -356,7 +363,7 @@ fn mutation_pop() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "stack"), vec!["a", "b"]);
@@ -369,6 +376,7 @@ fn mutation_multiple_operators() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "score": 10_i32, "tags": ["a"] },
     )
@@ -380,6 +388,7 @@ fn mutation_multiple_operators() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! {
@@ -395,7 +404,7 @@ fn mutation_multiple_operators() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice Updated");
@@ -410,6 +419,7 @@ fn mutation_bare_fields_implicit_set() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -421,6 +431,7 @@ fn mutation_bare_fields_implicit_set() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "status": "archived", "score": 99 },
@@ -432,7 +443,7 @@ fn mutation_bare_fields_implicit_set() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -447,6 +458,7 @@ fn mutation_dot_path_set() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "address": { "city": "Austin", "state": "TX" } },
     )
@@ -458,6 +470,7 @@ fn mutation_dot_path_set() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$set": { "address.city": "Denver" } },
@@ -469,7 +482,7 @@ fn mutation_dot_path_set() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     let addr = d.get_document("address").unwrap();
@@ -484,6 +497,7 @@ fn mutation_dot_path_inc() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "stats": { "views": 100_i32, "likes": 10_i32 } },
     )
@@ -495,6 +509,7 @@ fn mutation_dot_path_inc() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$inc": { "stats.views": 1_i32 } },
@@ -506,7 +521,7 @@ fn mutation_dot_path_inc() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     let stats = d.get_document("stats").unwrap();
@@ -520,7 +535,7 @@ fn mutation_dot_path_creates_intermediates() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -529,6 +544,7 @@ fn mutation_dot_path_creates_intermediates() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$set": { "address.city": "Austin" } },
@@ -540,7 +556,7 @@ fn mutation_dot_path_creates_intermediates() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -555,6 +571,7 @@ fn mutation_dot_path_unset() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "r1", "address": { "city": "Austin", "state": "TX", "zip": "78701" } },
     )
@@ -566,6 +583,7 @@ fn mutation_dot_path_unset() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         COLLECTION,
         &filter,
         doc! { "$unset": { "address.zip": "" } },
@@ -577,7 +595,7 @@ fn mutation_dot_path_unset() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     let addr = d.get_document("address").unwrap();
@@ -592,7 +610,7 @@ fn mutation_dot_path_push() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "data": { "items": ["a"] } })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "data": { "items": ["a"] } })
         .unwrap()
         .drain()
         .unwrap();
@@ -600,7 +618,7 @@ fn mutation_dot_path_push() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$push": { "data.items": "b" } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$push": { "data.items": "b" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -608,7 +626,7 @@ fn mutation_dot_path_push() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "data.items"), vec!["a", "b"]);
@@ -623,6 +641,7 @@ fn mutation_update_many_with_inc() {
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
         .update_many(
+            DEFAULT_CF,
             COLLECTION,
             &filter,
             doc! { "$inc": { "revenue": 1000.0_f64 } },
@@ -635,25 +654,25 @@ fn mutation_update_many_with_inc() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-1" })
         .unwrap()
         .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 51000.0).abs() < f64::EPSILON);
 
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-4" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-4" })
         .unwrap()
         .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 96000.0).abs() < f64::EPSILON);
 
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-5" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-5" })
         .unwrap()
         .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 201000.0).abs() < f64::EPSILON);
 
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "acct-2" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-2" })
         .unwrap()
         .unwrap();
     assert!((d.get_f64("revenue").unwrap() - 80000.0).abs() < f64::EPSILON);
@@ -668,8 +687,9 @@ fn mutation_index_maintained_on_set() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("idx_mut", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "idx_mut", "status").unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "idx_mut",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -681,6 +701,7 @@ fn mutation_index_maintained_on_set() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     txn.update_one(
+        DEFAULT_CF,
         "idx_mut",
         &filter,
         doc! { "$set": { "status": "archived" } },
@@ -693,6 +714,7 @@ fn mutation_index_maintained_on_set() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "idx_mut",
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -706,6 +728,7 @@ fn mutation_index_maintained_on_set() {
 
     let results = txn
         .find(
+            DEFAULT_CF,
             "idx_mut",
             eq_filter("status", Bson::String("archived".into())),
             FindOptions::default(),
@@ -728,8 +751,9 @@ fn mutation_index_maintained_on_unset() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("idx_unset", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "idx_unset", "status").unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         "idx_unset",
         doc! { "_id": "r1", "name": "Alice", "status": "active" },
     )
@@ -740,7 +764,7 @@ fn mutation_index_maintained_on_unset() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one("idx_unset", &filter, doc! { "$unset": { "status": "" } })
+    txn.update_one(DEFAULT_CF, "idx_unset", &filter, doc! { "$unset": { "status": "" } })
         .unwrap()
         .drain()
         .unwrap();
@@ -749,6 +773,7 @@ fn mutation_index_maintained_on_unset() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             "idx_unset",
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -761,7 +786,7 @@ fn mutation_index_maintained_on_unset() {
     assert_eq!(results.len(), 0);
 
     let d = txn
-        .find_one("idx_unset", rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, "idx_unset", rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(d.get_str("name").unwrap(), "Alice");
@@ -774,7 +799,7 @@ fn mutation_push_pop_as_stack() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "stack" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "stack" })
         .unwrap()
         .drain()
         .unwrap();
@@ -783,7 +808,7 @@ fn mutation_push_pop_as_stack() {
     for val in ["a", "b", "c"] {
         let txn = db.begin(false).unwrap();
         let filter = eq_filter("_id", Bson::String("r1".into()));
-        txn.update_one(COLLECTION, &filter, doc! { "$push": { "items": val } })
+        txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$push": { "items": val } })
             .unwrap()
             .drain()
             .unwrap();
@@ -792,14 +817,14 @@ fn mutation_push_pop_as_stack() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b", "c"]);
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -807,7 +832,7 @@ fn mutation_push_pop_as_stack() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["a", "b"]);
@@ -819,7 +844,7 @@ fn mutation_lpush_pop_as_queue() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "queue" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "queue" })
         .unwrap()
         .drain()
         .unwrap();
@@ -828,7 +853,7 @@ fn mutation_lpush_pop_as_queue() {
     for val in ["first", "second", "third"] {
         let txn = db.begin(false).unwrap();
         let filter = eq_filter("_id", Bson::String("r1".into()));
-        txn.update_one(COLLECTION, &filter, doc! { "$lpush": { "items": val } })
+        txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$lpush": { "items": val } })
             .unwrap()
             .drain()
             .unwrap();
@@ -837,14 +862,14 @@ fn mutation_lpush_pop_as_queue() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second", "first"]);
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$pop": { "items": 1 } })
         .unwrap()
         .drain()
         .unwrap();
@@ -852,7 +877,7 @@ fn mutation_lpush_pop_as_queue() {
 
     let txn = db.begin(true).unwrap();
     let d = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "r1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" })
         .unwrap()
         .unwrap();
     assert_eq!(get_str_array(&d, "items"), vec!["third", "second"]);
@@ -864,7 +889,7 @@ fn mutation_unknown_operator_rejected() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -872,7 +897,7 @@ fn mutation_unknown_operator_rejected() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.update_one(COLLECTION, &filter, doc! { "$badop": { "name": "Bob" } });
+    let result = txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$badop": { "name": "Bob" } });
     let err = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("expected error for $badop"),
@@ -889,7 +914,7 @@ fn mutation_id_rejected() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -897,7 +922,7 @@ fn mutation_id_rejected() {
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.update_one(COLLECTION, &filter, doc! { "$set": { "_id": "r2" } });
+    let result = txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$set": { "_id": "r2" } });
     assert!(result.is_err());
 }
 
@@ -915,16 +940,17 @@ fn delete_fires_trigger_successfully() {
     })
     .unwrap();
     txn.register_trigger(
+        DEFAULT_CF,
         COLLECTION,
         "audit",
         "return function(ctx, event) return event end",
     )
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r2", "name": "Bob" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r2", "name": "Bob" })
         .unwrap()
         .drain()
         .unwrap();
@@ -934,7 +960,7 @@ fn delete_fires_trigger_successfully() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
     let count = txn
-        .delete_one(COLLECTION, &filter)
+        .delete_one(DEFAULT_CF, COLLECTION, &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -943,9 +969,9 @@ fn delete_fires_trigger_successfully() {
 
     // Verify the record is actually gone
     let txn = db.begin(true).unwrap();
-    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "r1" }).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap();
     assert!(result.is_none());
-    let result = txn.find_one(COLLECTION, rawdoc! { "_id": "r2" }).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r2" }).unwrap();
     assert!(result.is_some());
 }
 
@@ -961,6 +987,7 @@ fn delete_many_fires_trigger_successfully() {
     })
     .unwrap();
     txn.register_trigger(
+        DEFAULT_CF,
         COLLECTION,
         "log_delete",
         "return function(ctx, event) return event end",
@@ -968,6 +995,7 @@ fn delete_many_fires_trigger_successfully() {
     .unwrap();
     for i in 1..=5 {
         txn.insert_one(
+            DEFAULT_CF,
             COLLECTION,
             doc! { "_id": format!("r{i}"), "status": if i <= 3 { "active" } else { "inactive" } },
         )
@@ -980,7 +1008,7 @@ fn delete_many_fires_trigger_successfully() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let count = txn
-        .delete_many(COLLECTION, &filter)
+        .delete_many(DEFAULT_CF, COLLECTION, &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -989,7 +1017,7 @@ fn delete_many_fires_trigger_successfully() {
 
     let txn = db.begin(true).unwrap();
     let remaining = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -1010,12 +1038,13 @@ fn delete_trigger_error_propagates() {
     })
     .unwrap();
     txn.register_trigger(
+        DEFAULT_CF,
         COLLECTION,
         "bad_trigger",
         "return function(ctx, event) error('trigger failed!') end",
     )
     .unwrap();
-    txn.insert_one(COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
@@ -1024,6 +1053,6 @@ fn delete_trigger_error_propagates() {
     // Delete should fail because the trigger errors
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.delete_one(COLLECTION, &filter).unwrap().drain();
+    let result = txn.delete_one(DEFAULT_CF, COLLECTION, &filter).unwrap().drain();
     assert!(result.is_err());
 }

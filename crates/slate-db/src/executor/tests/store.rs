@@ -2,7 +2,7 @@ use super::*;
 
 use crate::collection::CollectionConfig;
 use crate::database::{Database, DatabaseConfig};
-use slate_engine::{Engine, KvEngine};
+use slate_engine::{Engine, KvEngine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 fn seeded_db() -> Database<MemoryStore> {
@@ -13,9 +13,10 @@ fn seeded_db() -> Database<MemoryStore> {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index("test", "status").unwrap();
-    txn.create_index("test", "score").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "score").unwrap();
     txn.insert_many(
+        DEFAULT_CF,
         "test",
         vec![
             bson::doc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
@@ -46,15 +47,15 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     {
         let mut txn = engine.begin(false).unwrap();
-        txn.create_collection("test", &Default::default()).unwrap();
-        txn.create_index("test", "status").unwrap();
-        txn.create_index("test", "score").unwrap();
-        txn.create_index("test", "ttl").unwrap();
+        txn.create_collection(DEFAULT_CF, "test", &Default::default()).unwrap();
+        txn.create_index(DEFAULT_CF, "test", "status").unwrap();
+        txn.create_index(DEFAULT_CF, "test", "score").unwrap();
+        txn.create_index(DEFAULT_CF, "test", "ttl").unwrap();
         txn.commit().unwrap();
     }
     {
         let txn = engine.begin(false).unwrap();
-        let handle = txn.collection("test").unwrap();
+        let handle = txn.collection(DEFAULT_CF, "test").unwrap();
         for doc in [
             rawdoc! { "_id": "1", "name": "Alice", "status": "active", "score": 70 },
             rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 90 },
@@ -71,7 +72,7 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
 fn scan_yields_all_records() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     let plan = Plan::Find(Node::Scan { collection });
     let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
@@ -86,7 +87,7 @@ fn scan_yields_all_records() {
 fn index_scan_eq_filter() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     let plan = Plan::Find(Node::IndexScan {
         collection,
@@ -106,7 +107,7 @@ fn index_scan_eq_filter() {
 fn index_scan_full_column() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // Scan entire "score" index in ascending order
     let plan = Plan::Find(Node::IndexScan {
@@ -126,7 +127,7 @@ fn index_scan_full_column() {
 fn index_scan_desc() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     let plan = Plan::Find(Node::IndexScan {
         collection,
@@ -145,7 +146,7 @@ fn index_scan_desc() {
 fn index_scan_with_limit() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection = txn.collection("test").unwrap();
+    let collection = txn.collection(DEFAULT_CF, "test").unwrap();
 
     let plan = Plan::Find(Node::IndexScan {
         collection,
@@ -163,8 +164,8 @@ fn index_scan_with_limit() {
 fn index_merge_or() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection1 = txn.collection("test").unwrap();
-    let collection2 = txn.collection("test").unwrap();
+    let collection1 = txn.collection(DEFAULT_CF, "test").unwrap();
+    let collection2 = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // OR: status="active" | status="inactive" → all 3 records
     let plan = Plan::Find(Node::IndexMerge {
@@ -197,8 +198,8 @@ fn index_merge_or() {
 fn index_merge_and() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection1 = txn.collection("test").unwrap();
-    let collection2 = txn.collection("test").unwrap();
+    let collection1 = txn.collection(DEFAULT_CF, "test").unwrap();
+    let collection2 = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // AND: status="active" & score=80 → only Charlie (id=3)
     let plan = Plan::Find(Node::IndexMerge {
@@ -228,8 +229,8 @@ fn index_merge_and() {
 fn read_record_fetches_docs_from_index_scan() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection1 = txn.collection("test").unwrap();
-    let collection2 = txn.collection("test").unwrap();
+    let collection1 = txn.collection(DEFAULT_CF, "test").unwrap();
+    let collection2 = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // KeyLookup wrapping an IndexScan — should fetch actual documents
     let plan = Plan::Find(Node::KeyLookup {
@@ -260,7 +261,7 @@ fn read_record_skips_dangling_index() {
     // Delete record "2" directly via engine to leave dangling index entries
     {
         let txn = engine.begin(false).unwrap();
-        let handle = txn.collection("test").unwrap();
+        let handle = txn.collection(DEFAULT_CF, "test").unwrap();
         // Use engine delete which cleans up indexes too — so let's use raw store delete instead
         // Actually, we want a dangling index. Let's delete only the record, not the indexes.
         // But EngineTransaction::delete removes indexes too. We need to go lower.
@@ -273,8 +274,8 @@ fn read_record_skips_dangling_index() {
     // After proper delete, the index should be clean too. So this test verifies
     // that KeyLookup handles None results gracefully (even if not truly dangling).
     let txn = engine.begin(true).unwrap();
-    let collection1 = txn.collection("test").unwrap();
-    let collection2 = txn.collection("test").unwrap();
+    let collection1 = txn.collection(DEFAULT_CF, "test").unwrap();
+    let collection2 = txn.collection(DEFAULT_CF, "test").unwrap();
 
     let plan = Plan::Find(Node::KeyLookup {
         collection: collection2,
@@ -296,8 +297,8 @@ fn read_record_skips_dangling_index() {
 fn read_record_over_scan() {
     let engine = seeded_kv_engine();
     let txn = engine.begin(true).unwrap();
-    let collection1 = txn.collection("test").unwrap();
-    let collection2 = txn.collection("test").unwrap();
+    let collection1 = txn.collection(DEFAULT_CF, "test").unwrap();
+    let collection2 = txn.collection(DEFAULT_CF, "test").unwrap();
 
     // KeyLookup wrapping Scan — passthrough path (Scan already yields docs)
     let plan = Plan::Find(Node::KeyLookup {

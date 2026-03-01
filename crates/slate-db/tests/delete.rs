@@ -2,6 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
+use slate_db::DEFAULT_CF;
 use slate_query::FindOptions;
 
 // ── Delete tests ────────────────────────────────────────────────
@@ -13,6 +14,7 @@ fn delete_one_removes_record() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
@@ -24,7 +26,7 @@ fn delete_one_removes_record() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
-        .delete_one(COLLECTION, &filter)
+        .delete_one(DEFAULT_CF, COLLECTION, &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -33,7 +35,7 @@ fn delete_one_removes_record() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -50,7 +52,7 @@ fn delete_many_removes_matching() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
-        .delete_many(COLLECTION, &filter)
+        .delete_many(DEFAULT_CF, COLLECTION, &filter)
         .unwrap()
         .drain()
         .unwrap();
@@ -59,7 +61,7 @@ fn delete_many_removes_matching() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()

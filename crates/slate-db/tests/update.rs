@@ -2,6 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
+use slate_db::DEFAULT_CF;
 use slate_query::FindOptions;
 
 // ── Update tests ────────────────────────────────────────────────
@@ -13,6 +14,7 @@ fn update_one_merge() {
 
     let mut txn = db.begin(false).unwrap();
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
     )
@@ -24,7 +26,7 @@ fn update_one_merge() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "rejected" })
+        .update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "rejected" })
         .unwrap()
         .drain()
         .unwrap();
@@ -33,7 +35,7 @@ fn update_one_merge() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -52,7 +54,7 @@ fn update_one_no_match() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("nonexistent".into()));
     let result = txn
-        .update_one(COLLECTION, &filter, doc! { "status": "active" })
+        .update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "active" })
         .unwrap()
         .drain()
         .unwrap();
@@ -67,6 +69,7 @@ fn upsert_via_upsert_many() {
     let txn = db.begin(false).unwrap();
     let result = txn
         .upsert_many(
+            DEFAULT_CF,
             COLLECTION,
             vec![doc! { "_id": "new-doc", "name": "Upserted" }],
         )
@@ -78,7 +81,7 @@ fn upsert_via_upsert_many() {
 
     let txn = db.begin(true).unwrap();
     let results = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -96,7 +99,7 @@ fn update_many_multiple() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
-        .update_many(COLLECTION, &filter, doc! { "status": "archived" })
+        .update_many(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "archived" })
         .unwrap()
         .drain()
         .unwrap();
@@ -106,6 +109,7 @@ fn update_many_multiple() {
     let txn = db.begin(true).unwrap();
     let results = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("archived".into())),
             FindOptions::default(),
@@ -130,11 +134,11 @@ fn upsert_many_inserts_new() {
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
         doc! { "_id": "u2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 2);
 
     let found = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -151,6 +155,7 @@ fn upsert_many_replaces_existing() {
 
     // Insert original
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active", "score": 100 },
     )
@@ -160,11 +165,11 @@ fn upsert_many_replaces_existing() {
 
     // Upsert replaces entirely
     let docs = vec![doc! { "_id": "u1", "name": "Alice Updated", "status": "inactive" }];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 1);
 
     let doc = txn
-        .find_one(COLLECTION, rawdoc! { "_id": "u1" })
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "u1" })
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "u1");
@@ -181,6 +186,7 @@ fn upsert_many_mixed() {
     let mut txn = db.begin(false).unwrap();
 
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
     )
@@ -192,11 +198,11 @@ fn upsert_many_mixed() {
         doc! { "_id": "u1", "name": "Alice v2", "status": "inactive" },
         doc! { "_id": "u2", "name": "Bob", "status": "active" },
     ];
-    let result = txn.upsert_many(COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
     assert_eq!(result, 2);
 
     let found = txn
-        .find(COLLECTION, rawdoc! {}, FindOptions::default())
+        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
         .iter()
         .unwrap()
@@ -210,9 +216,10 @@ fn upsert_many_updates_indexes() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
     let mut txn = db.begin(false).unwrap();
-    txn.create_index(COLLECTION, "status").unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
 
     txn.insert_one(
+        DEFAULT_CF,
         COLLECTION,
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
     )
@@ -223,6 +230,7 @@ fn upsert_many_updates_indexes() {
     // Verify index works before upsert
     let active = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -236,6 +244,7 @@ fn upsert_many_updates_indexes() {
 
     // Upsert changes status
     txn.upsert_many(
+        DEFAULT_CF,
         COLLECTION,
         vec![doc! { "_id": "u1", "name": "Alice", "status": "inactive" }],
     )
@@ -246,6 +255,7 @@ fn upsert_many_updates_indexes() {
     // Old index entry gone
     let active = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("active".into())),
             FindOptions::default(),
@@ -260,6 +270,7 @@ fn upsert_many_updates_indexes() {
     // New index entry present
     let inactive = txn
         .find(
+            DEFAULT_CF,
             COLLECTION,
             eq_filter("status", Bson::String("inactive".into())),
             FindOptions::default(),

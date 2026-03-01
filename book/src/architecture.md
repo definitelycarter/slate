@@ -171,10 +171,10 @@ The engine layer sits between `slate-store` and `slate-db`. It owns the on-disk 
 ### CollectionHandle
 
 A cheap-to-clone (`Arc`-backed) handle returned by the catalog when resolving a
-collection. Carries the collection's column family reference, index field names,
-primary key path (`pk_path`), and TTL field path (`ttl_path`). Passed to all
-engine operations so the caller never needs to know about key encoding or storage
-layout.
+collection. Carries the collection's column family name (`cf_name`), column family
+reference, index field names, primary key path (`pk_path`), and TTL field path
+(`ttl_path`). Passed to all engine operations so the caller never needs to know
+about key encoding or storage layout.
 
 ### Key Encoding
 
@@ -182,10 +182,11 @@ All keys use a tag-prefixed binary format with `\x00` separators and sort-preser
 BSON value encoding. Doc IDs are length-prefixed (`[type:1][len:2 BE][bytes]`) so
 they can be embedded in index keys without ambiguity.
 
-- **Collection metadata** — `c\x00{name}` stores collection config in the `_sys_` CF.
-- **Index config** — `x\x00{collection}\x00{field}` stores index metadata.
-- **Record** — `r\x00{collection}\x00{doc_id}` → encoded `Record` (BSON bytes + optional TTL).
-- **Index** — `i\x00{collection}\x00{field}\x00{value_bytes}{doc_id}` → metadata (type byte + optional TTL).
+- **Collection metadata** — `c\x00{cf}\x00{name}` stores collection config in the `_sys_` CF. Collections are scoped per column family: the pair `(cf, name)` is the unique identity.
+- **Index config** — `x\x00{cf}\x00{collection}\x00{field}` stores index metadata.
+- **Function config** — `{tag}\x00{cf}\x00{collection}\x00{name}` stores trigger/validator/UDF metadata.
+- **Record** — `r\x00{collection}\x00{doc_id}` → encoded `Record` (BSON bytes + optional TTL). Lives in the actual CF, not `_sys_`.
+- **Index** — `i\x00{collection}\x00{field}\x00{value_bytes}{doc_id}` → metadata (type byte + optional TTL). Lives in the actual CF.
 
 ### Record Format
 
@@ -221,8 +222,10 @@ path (non-covered queries), only `doc_id()` is called, avoiding unnecessary work
 ### Catalog
 
 The `Catalog` trait provides collection and index lifecycle: `create_collection`,
-`drop_collection`, `create_index` (with backfill), `drop_index`, and `collection`
-handle resolution.
+`drop_collection`, `create_index` (with backfill), `drop_index`, `collection`
+handle resolution, and function management (`create_function`, `drop_function`,
+`load_functions`). All methods take a `cf` parameter — collections are scoped per
+column family, so the pair `(cf, name)` is the unique identity.
 
 ## Tier 3: Database Layer (`slate-db`)
 
@@ -252,62 +255,62 @@ let doc = doc! {
 The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
+use slate_db::{DEFAULT_CF, CollectionConfig};
 use slate_query::FindOptions;
 
 let db = Database::open(store, DatabaseConfig::default());
 
-// Create a collection with indexes
+// Create a collection (uses DEFAULT_CF by default)
 let mut txn = db.begin(false)?;
 txn.create_collection(&CollectionConfig {
     name: "users".into(),
-    indexes: vec!["status".into()],
     ..Default::default()
 })?;
 
-// Insert
-let result = txn.insert_one("users", doc! {
+// Insert — all operations take (cf, collection, ...) as first params
+txn.insert_one(DEFAULT_CF, "users", doc! {
     "name": "Alice",
     "status": "active",
-})?;  // result.id = auto-generated UUID (or use _id in doc)
+})?;
 
-txn.insert_many("users", vec![
+txn.insert_many(DEFAULT_CF, "users", vec![
     doc! { "_id": "bob", "name": "Bob" },
     doc! { "_id": "carol", "name": "Carol" },
 ])?;
 
 // Query — find() returns a Cursor for lazy iteration
-let cursor = txn.find("users", rawdoc! {}, FindOptions::default())?;
+let cursor = txn.find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?;
 for doc in cursor.iter()? {              // CursorIter yields RawDocumentBuf
     let doc = doc?;
 }
 
-let one = txn.find_one("users", rawdoc! { "_id": "bob" })?; // -> Option<RawDocumentBuf>
+let one = txn.find_one(DEFAULT_CF, "users", rawdoc! { "_id": "bob" })?;
 
 // Update (merge — preserves unspecified fields)
-txn.update_one("users", filter,
+txn.update_one(DEFAULT_CF, "users", filter,
     rawdoc! { "$set": { "status": "archived" } })?.drain()?;
-txn.update_many("users", filter,
+txn.update_many(DEFAULT_CF, "users", filter,
     rawdoc! { "$set": { "status": "archived" } })?.drain()?;
 
 // Replace (full document swap)
-txn.replace_one("users", filter,
+txn.replace_one(DEFAULT_CF, "users", filter,
     rawdoc! { "name": "Alice", "status": "inactive" })?.drain()?;
 
 // Delete
-txn.delete_one("users", filter)?.drain()?;
-txn.delete_many("users", filter)?.drain()?;
+txn.delete_one(DEFAULT_CF, "users", filter)?.drain()?;
+txn.delete_many(DEFAULT_CF, "users", filter)?.drain()?;
 
 // Count
-let n = txn.count("users", rawdoc! {})?;  // -> u64
+let n = txn.count(DEFAULT_CF, "users", rawdoc! {})?;  // -> u64
 
 // Index management
-txn.create_index("users", "email")?;  // backfills existing records
-txn.drop_index("users", "email")?;
-txn.list_indexes("users")?;           // -> Vec<String>
+txn.create_index(DEFAULT_CF, "users", "email")?;  // backfills existing records
+txn.drop_index(DEFAULT_CF, "users", "email")?;
+txn.list_indexes(DEFAULT_CF, "users")?;            // -> Vec<String>
 
 // Collection management
-txn.list_collections()?;              // -> Vec<String>
-txn.drop_collection("users")?;        // removes data, indexes, metadata
+txn.list_collections()?;                           // -> Vec<String>
+txn.drop_collection(DEFAULT_CF, "users")?;         // removes data, indexes, metadata
 
 txn.commit()?;
 ```
@@ -332,6 +335,6 @@ For index-covered queries, the index value is carried directly as `RawBson` — 
 **Key properties:**
 
 - **No deserialization** — the entire pipeline stays in raw bytes. Records that fail a filter are never cloned or materialized.
-- **Priority-based index selection** — `CollectionConfig.indexes` order determines which index is preferred for AND groups.
+- **Priority-based index selection** — the index order in a collection's `CollectionHandle` determines which index is preferred for AND groups.
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.

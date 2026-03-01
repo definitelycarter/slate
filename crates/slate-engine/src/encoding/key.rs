@@ -67,8 +67,9 @@ pub(crate) fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_
 
 /// Structured key for engine storage operations.
 ///
-/// - `Collection(name)` — collection metadata in `_sys_`
-/// - `IndexConfig(collection, field)` — index metadata in `_sys_`
+/// - `Collection(cf, name)` — collection metadata in `_sys_`
+/// - `IndexConfig(cf, collection, field)` — index metadata in `_sys_`
+/// - `FunctionConfig(kind, cf, collection, name)` — function metadata in `_sys_`
 /// - `Index(collection, field, doc_id)` — value-first index entry (`i` tag)
 /// - `Record(collection, doc_id)` — document record addressing
 ///
@@ -76,9 +77,9 @@ pub(crate) fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_
 /// and stored as the full encoded block (type + length + bytes) in the enum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Key<'a> {
-    Collection(Cow<'a, str>),
-    IndexConfig(Cow<'a, str>, Cow<'a, str>),
-    FunctionConfig(FunctionKind, Cow<'a, str>, Cow<'a, str>),
+    Collection(Cow<'a, str>, Cow<'a, str>),
+    IndexConfig(Cow<'a, str>, Cow<'a, str>, Cow<'a, str>),
+    FunctionConfig(FunctionKind, Cow<'a, str>, Cow<'a, str>, Cow<'a, str>),
     Index(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
     Record(Cow<'a, str>, BsonValue<'a>),
 }
@@ -86,33 +87,40 @@ pub enum Key<'a> {
 impl<'a> Key<'a> {
     /// Encode a key to bytes.
     ///
-    /// - `Collection`: `c\x00{name}`
-    /// - `IndexConfig`: `x\x00{collection}\x00{field}`
+    /// - `Collection`: `c\x00{cf}\x00{name}`
+    /// - `IndexConfig`: `x\x00{cf}\x00{collection}\x00{field}`
+    /// - `FunctionConfig`: `{tag}\x00{cf}\x00{collection}\x00{name}`
     /// - `Record`: `r\x00{collection}\x00[doc_id_encoded]`
     /// - `Index` (no value): `i\x00{collection}\x00{field}\x00\x00[doc_id_encoded]`
     ///
     /// For `Index` keys with value bytes, use [`encode_index`](Key::encode_index).
     pub fn encode(&self) -> Vec<u8> {
         match self {
-            Key::Collection(name) => {
-                let mut buf = Vec::with_capacity(2 + name.len());
+            Key::Collection(cf, name) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + name.len());
                 buf.push(COLLECTION_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(name.as_bytes());
                 buf
             }
-            Key::IndexConfig(collection, field) => {
-                let mut buf = Vec::with_capacity(2 + collection.len() + 1 + field.len());
+            Key::IndexConfig(cf, collection, field) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + field.len());
                 buf.push(INDEX_CONFIG_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(field.as_bytes());
                 buf
             }
-            Key::FunctionConfig(kind, collection, name) => {
-                let mut buf = Vec::with_capacity(2 + collection.len() + 1 + name.len());
+            Key::FunctionConfig(kind, cf, collection, name) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + name.len());
                 buf.push(function_tag(*kind));
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
@@ -198,8 +206,11 @@ impl<'a> Key<'a> {
         let rest = &bytes[2..];
         match tag {
             COLLECTION_TAG => {
-                let name = std::str::from_utf8(rest).ok()?;
-                Some(Key::Collection(Cow::Borrowed(name)))
+                // c\x00{cf}\x00{name}
+                let sep = rest.iter().position(|&b| b == SEP)?;
+                let cf = std::str::from_utf8(&rest[..sep]).ok()?;
+                let name = std::str::from_utf8(&rest[sep + 1..]).ok()?;
+                Some(Key::Collection(Cow::Borrowed(cf), Cow::Borrowed(name)))
             }
             RECORD_TAG => {
                 // r\x00{collection}\x00[type][len][id_bytes]
@@ -209,10 +220,15 @@ impl<'a> Key<'a> {
                 Some(Key::Record(Cow::Borrowed(collection), bv))
             }
             INDEX_CONFIG_TAG => {
-                let sep = rest.iter().position(|&b| b == SEP)?;
-                let collection = std::str::from_utf8(&rest[..sep]).ok()?;
-                let field = std::str::from_utf8(&rest[sep + 1..]).ok()?;
+                // x\x00{cf}\x00{collection}\x00{field}
+                let first_sep = rest.iter().position(|&b| b == SEP)?;
+                let cf = std::str::from_utf8(&rest[..first_sep]).ok()?;
+                let after_cf = &rest[first_sep + 1..];
+                let second_sep = after_cf.iter().position(|&b| b == SEP)?;
+                let collection = std::str::from_utf8(&after_cf[..second_sep]).ok()?;
+                let field = std::str::from_utf8(&after_cf[second_sep + 1..]).ok()?;
                 Some(Key::IndexConfig(
+                    Cow::Borrowed(cf),
                     Cow::Borrowed(collection),
                     Cow::Borrowed(field),
                 ))
@@ -226,12 +242,17 @@ impl<'a> Key<'a> {
                 ))
             }
             other => {
+                // {tag}\x00{cf}\x00{collection}\x00{name}
                 let kind = tag_to_function_kind(other)?;
-                let sep = rest.iter().position(|&b| b == SEP)?;
-                let collection = std::str::from_utf8(&rest[..sep]).ok()?;
-                let name = std::str::from_utf8(&rest[sep + 1..]).ok()?;
+                let first_sep = rest.iter().position(|&b| b == SEP)?;
+                let cf = std::str::from_utf8(&rest[..first_sep]).ok()?;
+                let after_cf = &rest[first_sep + 1..];
+                let second_sep = after_cf.iter().position(|&b| b == SEP)?;
+                let collection = std::str::from_utf8(&after_cf[..second_sep]).ok()?;
+                let name = std::str::from_utf8(&after_cf[second_sep + 1..]).ok()?;
                 Some(Key::FunctionConfig(
                     kind,
+                    Cow::Borrowed(cf),
                     Cow::Borrowed(collection),
                     Cow::Borrowed(name),
                 ))
@@ -267,15 +288,18 @@ impl<'a> Key<'a> {
 /// Each variant represents a partial key used as a scan prefix.
 ///
 /// - `Collection` — all collection metadata keys (`c\x00`)
-/// - `IndexConfig(collection)` — index configs for a collection (`x\x00{collection}\x00`)
+/// - `CollectionByCf(cf)` — collection metadata for a specific CF (`c\x00{cf}\x00`)
+/// - `IndexConfig(cf, collection)` — index configs for a collection (`x\x00{cf}\x00{collection}\x00`)
+/// - `FunctionConfig(kind, cf, collection)` — function configs (`{tag}\x00{cf}\x00{collection}\x00`)
 /// - `Record(collection)` — all document records in a collection (`r\x00{collection}\x00`)
 /// - `IndexField(collection, field)` — index entries for a field (`i\x00{collection}\x00{field}\x00`)
 /// - `IndexValue(collection, field, value)` — index entries for a specific value
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyPrefix<'a> {
     Collection,
-    IndexConfig(Cow<'a, str>),
-    FunctionConfig(FunctionKind, Cow<'a, str>),
+    CollectionByCf(Cow<'a, str>),
+    IndexConfig(Cow<'a, str>, Cow<'a, str>),
+    FunctionConfig(FunctionKind, Cow<'a, str>, Cow<'a, str>),
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
@@ -285,17 +309,29 @@ impl<'a> KeyPrefix<'a> {
     pub fn encode(&self) -> Vec<u8> {
         match self {
             KeyPrefix::Collection => vec![COLLECTION_TAG, SEP],
-            KeyPrefix::IndexConfig(collection) => {
-                let mut buf = Vec::with_capacity(2 + collection.len() + 1);
+            KeyPrefix::CollectionByCf(cf) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1);
+                buf.push(COLLECTION_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
+                buf.push(SEP);
+                buf
+            }
+            KeyPrefix::IndexConfig(cf, collection) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1);
                 buf.push(INDEX_CONFIG_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
                 buf
             }
-            KeyPrefix::FunctionConfig(kind, collection) => {
-                let mut buf = Vec::with_capacity(2 + collection.len() + 1);
+            KeyPrefix::FunctionConfig(kind, cf, collection) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1);
                 buf.push(function_tag(*kind));
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
@@ -358,11 +394,20 @@ mod tests {
 
     #[test]
     fn collection_key_roundtrip() {
-        let key = Key::Collection(Cow::Borrowed("users"));
+        let key = Key::Collection(Cow::Borrowed("default_cf"), Cow::Borrowed("users"));
         let bytes = key.encode();
-        assert_eq!(bytes, b"c\x00users");
+        assert_eq!(bytes, b"c\x00default_cf\x00users");
         let decoded = Key::decode(&bytes).unwrap();
         assert_eq!(decoded, key);
+    }
+
+    #[test]
+    fn collection_key_different_cfs() {
+        let k1 = Key::Collection(Cow::Borrowed("cf1"), Cow::Borrowed("accounts"));
+        let k2 = Key::Collection(Cow::Borrowed("cf2"), Cow::Borrowed("accounts"));
+        assert_ne!(k1.encode(), k2.encode());
+        assert_eq!(Key::decode(&k1.encode()).unwrap(), k1);
+        assert_eq!(Key::decode(&k2.encode()).unwrap(), k2);
     }
 
     #[test]
@@ -448,6 +493,7 @@ mod tests {
         ] {
             let key = Key::FunctionConfig(
                 kind,
+                Cow::Borrowed("default_cf"),
                 Cow::Borrowed("users"),
                 Cow::Borrowed("audit_log"),
             );
@@ -461,6 +507,7 @@ mod tests {
     fn function_config_tag_bytes() {
         let trigger = Key::FunctionConfig(
             FunctionKind::Trigger,
+            Cow::Borrowed("cf"),
             Cow::Borrowed("users"),
             Cow::Borrowed("f"),
         );
@@ -468,6 +515,7 @@ mod tests {
 
         let validator = Key::FunctionConfig(
             FunctionKind::Validator,
+            Cow::Borrowed("cf"),
             Cow::Borrowed("users"),
             Cow::Borrowed("f"),
         );
@@ -475,6 +523,7 @@ mod tests {
 
         let computed = Key::FunctionConfig(
             FunctionKind::Udf,
+            Cow::Borrowed("cf"),
             Cow::Borrowed("users"),
             Cow::Borrowed("f"),
         );
