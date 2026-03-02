@@ -456,6 +456,23 @@ mod tests {
         assert_eq!(dt.timestamp_millis(), 1_700_000_000_000);
     }
 
+    #[test]
+    fn datetime_now() {
+        let mut vm = vm();
+        vm.register(
+            "make_now",
+            b"return function(doc) return { ts = bson.now() } end",
+        )
+        .unwrap();
+
+        let before = bson::DateTime::now().timestamp_millis();
+        let result = vm.call("make_now", &rawdoc! {}).unwrap();
+        let after = bson::DateTime::now().timestamp_millis();
+
+        let ts = result.get_datetime("ts").unwrap().timestamp_millis();
+        assert!(ts >= before && ts <= after);
+    }
+
     // --- ObjectId userdata ---
 
     #[test]

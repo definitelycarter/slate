@@ -123,6 +123,11 @@ pub(crate) fn create_bson_module(lua: &mlua::Lua) -> Result<mlua::Table, VmError
     )?;
 
     module.set(
+        "now",
+        lua.create_function(|_, ()| Ok(LuaDateTime(bson::DateTime::now())))?,
+    )?;
+
+    module.set(
         "objectid",
         lua.create_function(|_, hex: String| {
             let oid = bson::oid::ObjectId::parse_str(&hex)
