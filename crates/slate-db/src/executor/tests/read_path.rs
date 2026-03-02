@@ -9,7 +9,7 @@ fn values_yields_all_docs() {
         rawdoc! { "_id": "3", "name": "Charlie", "status": "active" },
     ];
     let plan = Plan::Find(Node::Values(docs));
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "2");
@@ -34,7 +34,7 @@ fn filter_on_values() {
         predicate: Expression::Eq("status".into(), bson::Bson::String("active".into())),
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
@@ -51,7 +51,7 @@ fn filter_empty_result() {
         predicate: Expression::Eq("status".into(), bson::Bson::String("nope".into())),
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 0);
 }
 
@@ -70,7 +70,7 @@ fn sort_on_values() {
         }],
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2"); // Bob: 90
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3"); // Charlie: 80
@@ -91,7 +91,7 @@ fn limit_skip_take() {
         take: Some(2),
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "2");
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "3");
@@ -109,7 +109,7 @@ fn limit_take_only() {
         take: Some(1),
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "1");
 }
@@ -125,7 +125,7 @@ fn projection_on_values() {
         columns: Some(vec!["name".into()]),
         source: Box::new(Node::Values(docs)),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     let doc0 = rows[0].as_ref().unwrap();
     assert_eq!(doc0.get_str("_id").unwrap(), "1");
@@ -150,7 +150,7 @@ fn distinct_on_values() {
             source: Box::new(Node::Values(docs)),
         }),
     });
-    let mut iter = Executor::new(Context::new(&txn)).execute(plan).unwrap();
+    let mut iter = Executor::new(&txn, None).execute(plan).unwrap();
     let val = iter.next().unwrap().unwrap().unwrap();
     let arr = match val {
         bson::RawBson::Array(a) => a,
@@ -191,7 +191,7 @@ fn composed_filter_sort_limit() {
             }),
         }),
     });
-    let rows = collect_docs(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let rows = collect_docs(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].as_ref().unwrap().get_str("_id").unwrap(), "3"); // Charlie: 90
     assert_eq!(rows[1].as_ref().unwrap().get_str("_id").unwrap(), "4"); // Diana: 80

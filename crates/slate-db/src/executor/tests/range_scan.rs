@@ -24,7 +24,7 @@ fn index_scan_gt() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["3", "2"]); // score 80, 90
 }
 
@@ -46,7 +46,7 @@ fn index_scan_gte() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["3", "2"]); // score 80, 90
 }
 
@@ -68,7 +68,7 @@ fn index_scan_lt() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
@@ -90,7 +90,7 @@ fn index_scan_lte() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
@@ -112,7 +112,7 @@ fn index_scan_range() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["3"]); // score 80 only
 }
 
@@ -134,7 +134,7 @@ fn index_scan_range_desc() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["2", "3", "1"]); // descending: 90, 80, 70
 }
 
@@ -156,7 +156,7 @@ fn index_scan_range_with_limit() {
         limit: Some(2),
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["1", "3"]); // score 70, 80
 }
 
@@ -178,7 +178,7 @@ fn index_scan_range_empty_result() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert!(ids.is_empty());
 }
 
@@ -200,6 +200,6 @@ fn index_scan_gt_desc() {
         limit: None,
         covered: false,
     });
-    let ids = collect_ids(Executor::new(Context::new(&txn)).execute(plan).unwrap());
+    let ids = collect_ids(Executor::new(&txn, None).execute(plan).unwrap());
     assert_eq!(ids, vec!["2", "3"]); // descending: 90, 80
 }

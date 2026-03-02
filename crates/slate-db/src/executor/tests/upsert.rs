@@ -40,7 +40,7 @@ fn upsert_replace_insert_new() {
         collection: mock_collection(vec!["status".into()]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(Context::new(&txn));
+    let exec = Executor::new(&txn, None);
     let iter = exec.execute(plan).unwrap();
     let rows = collect_docs(iter);
     assert_eq!(rows.len(), 1);
@@ -60,7 +60,7 @@ fn upsert_merge_insert_new() {
         collection: mock_collection(vec![]),
         source: Node::Values(docs),
     };
-    let exec = Executor::new(Context::new(&txn));
+    let exec = Executor::new(&txn, None);
     let iter = exec.execute(plan).unwrap();
     let rows = collect_docs(iter);
     assert_eq!(rows.len(), 1);

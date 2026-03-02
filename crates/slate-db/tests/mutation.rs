@@ -1031,6 +1031,78 @@ fn delete_trigger_error_propagates() {
     let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
         .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
 
+    // Seed data first (no triggers yet)
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Register bad trigger in a separate transaction
+    let mut txn = db.begin(false).unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "bad_trigger",
+        "return function(ctx, event) error('trigger failed!') end",
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Delete should fail because the trigger errors
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("r1".into()));
+    let result = txn.delete_one(DEFAULT_CF, COLLECTION, &filter).unwrap().drain();
+    assert!(result.is_err());
+}
+
+// ── Insert trigger tests ─────────────────────────────────────────
+
+#[test]
+fn insert_fires_trigger_successfully() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Insert with trigger registered — should succeed
+    let mut txn = db.begin(false).unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().get_str("name").unwrap(), "Alice");
+}
+
+#[test]
+fn insert_trigger_error_propagates() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
@@ -1044,15 +1116,202 @@ fn delete_trigger_error_propagates() {
         "return function(ctx, event) error('trigger failed!') end",
     )
     .unwrap();
+    txn.commit().unwrap();
+
+    let mut txn = db.begin(false).unwrap();
+    let result = txn
+        .insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain();
+    assert!(result.is_err());
+}
+
+// ── Update trigger tests ─────────────────────────────────────────
+
+#[test]
+fn update_fires_trigger_successfully() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice", "score": 10 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("r1".into()));
+    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$set": { "score": 99 } })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let doc = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap().unwrap();
+    assert_eq!(doc.get_i32("score").unwrap(), 99);
+}
+
+#[test]
+fn update_trigger_error_propagates() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    // Seed data first (no triggers yet)
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
         .unwrap()
         .drain()
         .unwrap();
     txn.commit().unwrap();
 
-    // Delete should fail because the trigger errors
+    // Register bad trigger in a separate transaction
+    let mut txn = db.begin(false).unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "bad_trigger",
+        "return function(ctx, event) error('trigger failed!') end",
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    let result = txn.delete_one(DEFAULT_CF, COLLECTION, &filter).unwrap().drain();
+    let result = txn
+        .update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "$set": { "name": "Bob" } })
+        .unwrap()
+        .drain();
     assert!(result.is_err());
+}
+
+// ── Replace trigger tests ────────────────────────────────────────
+
+#[test]
+fn replace_fires_trigger_successfully() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice", "score": 10 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(false).unwrap();
+    let filter = eq_filter("_id", Bson::String("r1".into()));
+    txn.replace_one(DEFAULT_CF, COLLECTION, &filter, doc! { "name": "Bob", "score": 50 })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let doc = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap().unwrap();
+    assert_eq!(doc.get_str("name").unwrap(), "Bob");
+    assert_eq!(doc.get_i32("score").unwrap(), 50);
+}
+
+// ── Upsert trigger tests ────────────────────────────────────────
+
+#[test]
+fn upsert_fires_trigger_on_insert() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Upsert a new doc (insert path)
+    let txn = db.begin(false).unwrap();
+    txn.upsert_many(DEFAULT_CF, COLLECTION, vec![doc! { "_id": "r1", "name": "Alice" }])
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().get_str("name").unwrap(), "Alice");
+}
+
+#[test]
+fn upsert_fires_trigger_on_update() {
+    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
+        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+
+    let mut txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: COLLECTION.into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        COLLECTION,
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
+    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "r1", "name": "Alice" })
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Upsert existing doc (update path)
+    let txn = db.begin(false).unwrap();
+    txn.upsert_many(DEFAULT_CF, COLLECTION, vec![doc! { "_id": "r1", "name": "Bob" }])
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let doc = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "r1" }).unwrap().unwrap();
+    assert_eq!(doc.get_str("name").unwrap(), "Bob");
 }

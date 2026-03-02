@@ -7,11 +7,11 @@ pub(crate) mod raw_bson;
 mod tests;
 
 pub use context::Context;
-pub(crate) use context::VmEntry;
 
 use bson::RawBson;
-use slate_engine::{Catalog, EngineTransaction};
+use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 
+use crate::database::VmFactory;
 use crate::error::DbError;
 use crate::planner::plan::{Node, Plan};
 
@@ -19,29 +19,24 @@ pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>>
 
 /// Executes query plans against an [`EngineTransaction`].
 ///
-/// The returned `RawIter` borrows from the transaction, not from the executor.
-/// Collection handles are passed by value into iterator closures, so the
-/// executor can be used as a temporary:
-///
-/// ```ignore
-/// let ctx = Context::new(&txn);
-/// let iter = Executor::new(ctx).execute(plan)?;
-/// for row in iter { /* ... */ }
-/// ```
+/// For mutation plans, the executor creates a [`Context`] with a pre-built VM
+/// containing all functions for the target collection. Read-only plans use a
+/// bare context with no VM.
 pub struct Executor<'a, T: EngineTransaction> {
-    ctx: Context<'a, T>,
+    txn: &'a T,
+    vm_factory: Option<&'a VmFactory>,
 }
 
 impl<'a, T: EngineTransaction> Executor<'a, T> {
-    pub fn new(ctx: Context<'a, T>) -> Self {
-        Self { ctx }
+    pub fn new(txn: &'a T, vm_factory: Option<&'a VmFactory>) -> Self {
+        Self { txn, vm_factory }
     }
 
     fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
 
-            Node::Scan { collection } => nodes::scan::execute(self.ctx.txn, collection),
+            Node::Scan { collection } => nodes::scan::execute(self.txn, collection),
 
             Node::IndexScan {
                 collection,
@@ -51,7 +46,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                 limit,
                 covered,
             } => nodes::index_scan::execute(
-                self.ctx.txn,
+                self.txn,
                 collection,
                 field,
                 &range,
@@ -68,7 +63,7 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
 
             Node::KeyLookup { collection, source } => {
                 let source = self.execute_node(*source)?;
-                nodes::read_record::execute(self.ctx.txn, collection, source)
+                nodes::read_record::execute(self.txn, collection, source)
             }
 
             Node::Filter { predicate, source } => {
@@ -100,6 +95,14 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
+    /// Create a context with a VM loaded for the given collection.
+    fn create_context(
+        &self,
+        handle: &CollectionHandle<T::Cf>,
+    ) -> Result<Context<'a, T>, DbError> {
+        Context::with_vm(self.txn, self.vm_factory, handle.cf_name(), handle.name())
+    }
+
     /// Execute a plan, returning a streaming iterator of rows.
     pub fn execute(&self, plan: Plan<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match plan {
@@ -107,7 +110,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Plan::Insert { collection, source } => {
                 let source = self.execute_node(source)?;
-                nodes::insert_record::execute(self.ctx.txn, collection, source)
+                let ctx = self.create_context(&collection)?;
+                nodes::insert_record::execute(ctx, collection, source)
             }
 
             Plan::Update {
@@ -116,7 +120,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                nodes::mutate::execute(self.ctx.txn, collection, mutation, source)
+                let ctx = self.create_context(&collection)?;
+                nodes::mutate::execute(ctx, collection, mutation, source)
             }
 
             Plan::Replace {
@@ -125,18 +130,21 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                nodes::replace::execute(self.ctx.txn, collection, replacement, source)
+                let ctx = self.create_context(&collection)?;
+                nodes::replace::execute(ctx, collection, replacement, source)
             }
 
             Plan::Delete { collection, source } => {
                 let source = self.execute_node(source)?;
-                nodes::delete::execute(self.ctx, collection, source)
+                let ctx = self.create_context(&collection)?;
+                nodes::delete::execute(ctx, collection, source)
             }
 
             Plan::Merge { collection, source } => {
                 let source = self.execute_node(source)?;
+                let ctx = self.create_context(&collection)?;
                 nodes::upsert::execute(
-                    self.ctx.txn,
+                    ctx,
                     collection,
                     nodes::upsert::UpsertMode::Merge,
                     source,
@@ -145,8 +153,9 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Plan::Upsert { collection, source } => {
                 let source = self.execute_node(source)?;
+                let ctx = self.create_context(&collection)?;
                 nodes::upsert::execute(
-                    self.ctx.txn,
+                    ctx,
                     collection,
                     nodes::upsert::UpsertMode::Replace,
                     source,

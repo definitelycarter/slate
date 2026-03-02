@@ -9,10 +9,11 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
+    let cf = handle.cf_name().to_string();
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         if let Some(RawBson::Document(ref d)) = opt_val {
-            ctx.fire_triggers(handle.cf_name(), handle.name(), "deleting", d)?;
+            ctx.fire_triggers(&cf, "deleting", d)?;
 
             let raw_id = d
                 .get("_id")
@@ -20,7 +21,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 .ok_or_else(|| DbError::InvalidQuery("missing _id".into()))?;
             ctx.txn.delete(&handle, &raw_id)?;
 
-            ctx.fire_triggers(handle.cf_name(), handle.name(), "deleted", d)?;
+            ctx.fire_triggers(&cf, "deleted", d)?;
         }
         Ok(None)
     })))

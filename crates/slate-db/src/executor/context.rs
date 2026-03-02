@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use bson::raw::RawDocument;
 use bson::rawdoc;
 use slate_engine::{Catalog, EngineTransaction, FunctionKind};
@@ -8,116 +5,83 @@ use slate_engine::{Catalog, EngineTransaction, FunctionKind};
 use crate::database::VmFactory;
 use crate::error::DbError;
 
-/// A cached VM instance for a collection, with pre-loaded function names.
-pub(crate) struct VmEntry {
-    vm: Box<dyn slate_vm::Vm + Send>,
+/// Bundles the resources an [`Executor`] needs: an engine transaction and
+/// an optional pre-built VM with all functions for the target collection.
+pub struct Context<'a, T: EngineTransaction> {
+    pub(crate) txn: &'a T,
+    pub(crate) vm: Option<Box<dyn slate_vm::Vm + Send>>,
+    /// Trigger function names registered in the VM.
     triggers: Vec<String>,
 }
 
-/// Bundles the resources an [`Executor`] needs: an engine transaction and
-/// optional VM infrastructure for trigger/validator execution.
-pub struct Context<'a, T: EngineTransaction> {
-    pub(crate) txn: &'a T,
-    pub(crate) vm_registry: Option<&'a Mutex<HashMap<String, VmEntry>>>,
-    pub(crate) vm_factory: Option<&'a VmFactory>,
-}
-
 impl<'a, T: EngineTransaction> Context<'a, T> {
+    /// Create a bare context with no VM.
     pub fn new(txn: &'a T) -> Self {
         Self {
             txn,
-            vm_registry: None,
-            vm_factory: None,
+            vm: None,
+            triggers: Vec::new(),
         }
     }
-
-    pub(crate) fn with_vm(
-        mut self,
-        registry: &'a Mutex<HashMap<String, VmEntry>>,
-        factory: Option<&'a VmFactory>,
-    ) -> Self {
-        self.vm_registry = Some(registry);
-        self.vm_factory = factory;
-        self
-    }
 }
-
-impl<T: EngineTransaction> Clone for Context<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: EngineTransaction> Copy for Context<'_, T> {}
 
 impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
-    /// Ensure a VM exists for `collection`, lazily creating it and
-    /// loading+registering all function kinds on first access.
-    fn ensure_vm<'g>(
-        &self,
-        guard: &'g mut HashMap<String, VmEntry>,
+    /// Create a context with a VM loaded with all functions for the given collection.
+    /// Returns a bare context (no VM) if there is no factory or no functions exist.
+    pub(crate) fn with_vm(
+        txn: &'a T,
+        factory: Option<&VmFactory>,
         cf: &str,
         collection: &str,
-    ) -> Result<Option<&'g VmEntry>, DbError> {
-        let Some(factory) = self.vm_factory else {
-            return Ok(None);
+    ) -> Result<Self, DbError> {
+        let Some(factory) = factory else {
+            return Ok(Self::new(txn));
         };
 
-        if !guard.contains_key(collection) {
-            let mut vm = factory()?;
+        let triggers = txn.load_functions(cf, collection, FunctionKind::Trigger)?;
 
-            let triggers = self.txn.load_functions(cf, collection, FunctionKind::Trigger)?;
-            let trigger_names: Vec<String> = triggers.iter().map(|f| f.name.clone()).collect();
-            for f in &triggers {
-                vm.register(&f.name, &f.source)?;
-            }
-
-            guard.insert(
-                collection.to_string(),
-                VmEntry {
-                    vm,
-                    triggers: trigger_names,
-                },
-            );
+        if triggers.is_empty() {
+            return Ok(Self::new(txn));
         }
 
-        Ok(guard.get(collection))
+        let mut vm = factory()?;
+        let trigger_names: Vec<String> = triggers.iter().map(|f| f.name.clone()).collect();
+        for f in &triggers {
+            vm.register(&f.name, &f.source)?;
+        }
+
+        Ok(Self {
+            txn,
+            vm: Some(vm),
+            triggers: trigger_names,
+        })
     }
 
+    /// Fire all trigger functions for the given action and document.
+    /// No-op if no VM or no triggers are loaded.
     pub(crate) fn fire_triggers(
         &self,
         cf: &str,
-        collection: &str,
         action: &str,
         doc: &RawDocument,
     ) -> Result<(), DbError> {
-        let Some(registry) = self.vm_registry else {
+        let Some(ref vm) = self.vm else {
             return Ok(());
         };
 
-        let mut guard = registry.lock().unwrap();
-        let Some(entry) = self.ensure_vm(&mut guard, cf, collection)? else {
-            return Ok(());
-        };
-
-        if entry.triggers.is_empty() {
+        if self.triggers.is_empty() {
             return Ok(());
         }
 
         let txn = self.txn;
-        // Trigger callbacks are scoped to the triggering collection's CF.
-        // A trigger on cf1:accounts can only read/write collections in cf1.
         let trigger_cf = cf.to_string();
 
         let get_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-            let coll_name = args
-                .first()
-                .and_then(|b| b.as_str())
-                .ok_or_else(|| {
-                    slate_vm::VmError::InvalidReturn(
-                        "ctx.get: first argument must be a collection name".into(),
-                    )
-                })?;
+            let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
+                slate_vm::VmError::InvalidReturn(
+                    "ctx.get: first argument must be a collection name".into(),
+                )
+            })?;
             let doc_id = args.get(1).ok_or_else(|| {
                 slate_vm::VmError::InvalidReturn("ctx.get: second argument (id) required".into())
             })?;
@@ -137,9 +101,8 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
 
             match txn.get(&handle, &raw_ref) {
                 Ok(Some(doc)) => {
-                    let document: bson::Document =
-                        bson::deserialize_from_slice(doc.as_bytes())
-                            .map_err(|e| slate_vm::VmError::Bson(e))?;
+                    let document: bson::Document = bson::deserialize_from_slice(doc.as_bytes())
+                        .map_err(|e| slate_vm::VmError::Bson(e))?;
                     Ok(bson::Bson::Document(document))
                 }
                 Ok(None) => Ok(bson::Bson::Null),
@@ -148,14 +111,11 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         };
 
         let put_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-            let coll_name = args
-                .first()
-                .and_then(|b| b.as_str())
-                .ok_or_else(|| {
-                    slate_vm::VmError::InvalidReturn(
-                        "ctx.put: first argument must be a collection name".into(),
-                    )
-                })?;
+            let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
+                slate_vm::VmError::InvalidReturn(
+                    "ctx.put: first argument must be a collection name".into(),
+                )
+            })?;
             let doc_bson = args.get(1).ok_or_else(|| {
                 slate_vm::VmError::InvalidReturn("ctx.put: second argument (doc) required".into())
             })?;
@@ -165,7 +125,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
                 _ => {
                     return Err(slate_vm::VmError::InvalidReturn(
                         "ctx.put: second argument must be a document".into(),
-                    ))
+                    ));
                 }
             };
 
@@ -173,8 +133,8 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
                 .collection(&trigger_cf, coll_name)
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
 
-            let raw = bson::raw::RawDocumentBuf::try_from(doc)
-                .map_err(|e| slate_vm::VmError::Bson(e))?;
+            let raw =
+                bson::raw::RawDocumentBuf::try_from(doc).map_err(|e| slate_vm::VmError::Bson(e))?;
 
             txn.put(&handle, &raw)
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
@@ -183,18 +143,13 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         };
 
         let delete_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-            let coll_name = args
-                .first()
-                .and_then(|b| b.as_str())
-                .ok_or_else(|| {
-                    slate_vm::VmError::InvalidReturn(
-                        "ctx.delete: first argument must be a collection name".into(),
-                    )
-                })?;
-            let doc_id = args.get(1).ok_or_else(|| {
+            let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
                 slate_vm::VmError::InvalidReturn(
-                    "ctx.delete: second argument (id) required".into(),
+                    "ctx.delete: first argument must be a collection name".into(),
                 )
+            })?;
+            let doc_id = args.get(1).ok_or_else(|| {
+                slate_vm::VmError::InvalidReturn("ctx.delete: second argument (id) required".into())
             })?;
 
             let handle = txn
@@ -207,9 +162,7 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
                 .get("v")
                 .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?
                 .ok_or_else(|| {
-                    slate_vm::VmError::InvalidReturn(
-                        "ctx.delete: failed to encode doc_id".into(),
-                    )
+                    slate_vm::VmError::InvalidReturn("ctx.delete: failed to encode doc_id".into())
                 })?;
 
             txn.delete(&handle, &raw_ref)
@@ -234,8 +187,8 @@ impl<'a, T: EngineTransaction + Catalog> Context<'a, T> {
         ];
 
         let input = rawdoc! { "action": action, "doc": doc.to_owned() };
-        for name in &entry.triggers {
-            entry.vm.call_with_scope(name, &input, &methods)?;
+        for name in &self.triggers {
+            vm.call_with_scope(name, &input, &methods)?;
         }
         Ok(())
     }

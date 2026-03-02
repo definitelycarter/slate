@@ -1,9 +1,9 @@
 use bson::raw::RawDocumentBuf;
 use bson::{RawBson, RawDocument};
-use slate_engine::{CollectionHandle, EngineTransaction};
+use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
-use crate::executor::RawIter;
+use crate::executor::{Context, RawIter};
 use crate::mutation::raw as raw_mutation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,12 +12,13 @@ pub(crate) enum UpsertMode {
     Merge,
 }
 
-pub(crate) fn execute<'a, T: EngineTransaction>(
-    txn: &'a T,
+pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
+    ctx: Context<'a, T>,
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
+    let cf = handle.cf_name().to_string();
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let mut new_doc = match opt_val {
@@ -41,9 +42,11 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .expect("_id was just ensured");
 
-        let old_doc = txn.get(&handle, &raw_id)?;
+        let old_doc = ctx.txn.get(&handle, &raw_id)?;
 
         if let Some(ref old_raw_doc) = old_doc {
+            ctx.fire_triggers(&cf, "updating", old_raw_doc)?;
+
             let written = build_doc(&mode, &new_doc, old_raw_doc)?;
             let written = match written {
                 Some(doc) => doc,
@@ -53,10 +56,13 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                 }
             };
 
-            txn.put(&handle, &written)?;
+            ctx.txn.put(&handle, &written)?;
+            ctx.fire_triggers(&cf, "updated", &written)?;
             Ok(Some(RawBson::Document(written)))
         } else {
-            txn.put_nx(&handle, &new_doc)?;
+            ctx.fire_triggers(&cf, "inserting", &new_doc)?;
+            ctx.txn.put_nx(&handle, &new_doc)?;
+            ctx.fire_triggers(&cf, "inserted", &new_doc)?;
             Ok(Some(RawBson::Document(new_doc)))
         }
     })))

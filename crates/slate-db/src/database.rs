@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
@@ -35,7 +34,6 @@ pub(crate) type VmFactory =
 
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
-    vm_registry: Mutex<HashMap<String, executor::VmEntry>>,
     vm_factory: Option<VmFactory>,
     ttl_handle: Option<TtlHandle>,
 }
@@ -45,7 +43,6 @@ impl<S: Store> Database<S> {
         let txn = self.engine.begin(read_only)?;
         Ok(Transaction {
             txn,
-            vm_registry: &self.vm_registry,
             vm_factory: self.vm_factory.as_ref(),
         })
     }
@@ -103,7 +100,6 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
         let ttl_handle = sweep::spawn(Arc::clone(&engine), config.ttl_sweep_interval_secs);
         Self {
             engine,
-            vm_registry: Mutex::new(HashMap::new()),
             vm_factory: None,
             ttl_handle,
         }
@@ -114,7 +110,6 @@ impl<S: Store + Send + Sync + 'static> Database<S> {
 
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
-    vm_registry: &'db Mutex<HashMap<String, executor::VmEntry>>,
     vm_factory: Option<&'db VmFactory>,
 }
 
@@ -375,9 +370,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: options.take,
         };
         let plan = self.plan(stmt)?;
-        let ctx = executor::Context::new(&self.txn)
-            .with_vm(self.vm_registry, self.vm_factory);
-        let exec = executor::Executor::new(ctx);
+        let exec = executor::Executor::new(&self.txn, self.vm_factory);
         let mut iter = exec.execute(plan)?;
         match iter.next() {
             Some(result) => {
@@ -556,12 +549,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Prepare a cursor for a query statement.
     fn prepare_cursor(&self, statement: Statement<'_>) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = self.plan(statement)?;
-        Ok(Cursor::new(
-            &self.txn,
-            plan,
-            self.vm_registry,
-            self.vm_factory,
-        ))
+        Ok(Cursor::new(&self.txn, plan, self.vm_factory))
     }
 
     /// Parse a required filter document into an Expression.

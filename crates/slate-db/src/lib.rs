@@ -23,7 +23,7 @@ pub use error::DbError;
 #[cfg(feature = "bench-internals")]
 pub mod bench {
     pub use crate::database::Database;
-    pub use crate::executor::{Context, Executor, RawIter};
+    pub use crate::executor::{Executor, RawIter};
     pub use crate::expression::{Expression, LogicalOp};
     pub use crate::mutation::{Mutation, parse_mutation};
     pub use crate::planner::plan::{IndexScanRange, Node, Plan, ScanDirection};
