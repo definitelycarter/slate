@@ -3,7 +3,7 @@ use bson::spec::ElementType;
 use bson::{Bson, Document};
 use mlua::{IntoLua, MetaMethod, UserData, UserDataMethods, Value};
 
-use crate::VmError;
+use crate::error::VmError;
 
 // ---------------------------------------------------------------------------
 // Userdata wrappers

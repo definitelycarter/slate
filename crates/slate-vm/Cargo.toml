@@ -3,9 +3,12 @@ name = "slate-vm"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+lua = ["dep:mlua"]
+
 [dependencies]
 bson = { workspace = true }
-mlua = { version = "0.11", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.11", features = ["lua54", "vendored", "send"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -13,3 +16,4 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "vm"
 harness = false
+required-features = ["lua"]

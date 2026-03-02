@@ -10,7 +10,7 @@ bench-internals = []
 slate-engine = { path = "../slate-engine" }
 slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
-slate-vm = { path = "../slate-vm" }
+slate-vm = { path = "../slate-vm", features = ["lua"] }
 serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
 regex = "1"

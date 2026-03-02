@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use bson::raw::RawDocumentBuf;
 use mlua::Lua;
 
-use crate::convert;
+use super::convert;
+use super::error::LuaError;
+use super::sandbox;
 use crate::error::VmError;
-use crate::sandbox;
 use crate::{ScopedMethod, Vm, VmCallback};
 
 const DEFAULT_INSTRUCTION_LIMIT: u32 = 100_000;
@@ -43,7 +44,7 @@ impl Vm for LuaVm {
         }
 
         let source_str = std::str::from_utf8(source)
-            .map_err(|e| VmError::Lua(mlua::Error::RuntimeError(e.to_string())))?;
+            .map_err(|e| LuaError::from(mlua::Error::RuntimeError(e.to_string())))?;
 
         // Evaluate the chunk — it should return a function
         let chunk = self.lua.load(source_str).set_name(name);
@@ -146,7 +147,7 @@ impl Vm for LuaVm {
             if is_instruction_limit_error(&e) {
                 VmError::InstructionLimit
             } else {
-                VmError::Lua(e)
+                VmError::from(e)
             }
         })?;
 
@@ -223,7 +224,7 @@ impl Vm for LuaVm {
                 if is_instruction_limit_error(&e) {
                     VmError::InstructionLimit
                 } else {
-                    VmError::Lua(e)
+                    VmError::from(e)
                 }
             })
     }

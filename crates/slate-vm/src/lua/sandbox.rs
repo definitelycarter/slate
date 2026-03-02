@@ -1,4 +1,4 @@
-use crate::VmError;
+use crate::error::VmError;
 
 const BLOCKED_GLOBALS: &[&str] = &[
     "os",

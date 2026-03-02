@@ -1,10 +1,10 @@
-mod convert;
 mod error;
-mod lua_vm;
-mod sandbox;
+#[cfg(feature = "lua")]
+pub mod lua;
 
 pub use error::VmError;
-pub use lua_vm::LuaVm;
+#[cfg(feature = "lua")]
+pub use lua::{LuaError, LuaVm};
 
 use std::sync::Arc;
 
