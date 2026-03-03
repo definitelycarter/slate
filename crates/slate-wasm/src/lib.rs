@@ -9,6 +9,9 @@ type Txn<'a> = slate_db::DatabaseTransaction<'a, MemoryStore>;
 
 // ── Conversion helpers ──────────────────────────────────────
 
+const SERIALIZER: serde_wasm_bindgen::Serializer =
+    serde_wasm_bindgen::Serializer::json_compatible();
+
 fn to_js_err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
 }
@@ -24,7 +27,7 @@ fn js_to_raw(val: JsValue) -> Result<RawDocumentBuf, JsError> {
 
 fn raw_to_js(raw: RawDocumentBuf) -> Result<JsValue, JsError> {
     let doc: Document = bson::deserialize_from_slice(raw.as_bytes()).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&doc).map_err(to_js_err)
+    serde::Serialize::serialize(&doc, &SERIALIZER).map_err(to_js_err)
 }
 
 fn js_array_to_raws(arr: &js_sys::Array) -> Result<Vec<RawDocumentBuf>, JsError> {
@@ -77,7 +80,7 @@ impl SlateDb {
         for doc in cursor.iter()? {
             let raw = doc?;
             let d: Document = bson::deserialize_from_slice(raw.as_bytes())?;
-            let js = serde_wasm_bindgen::to_value(&d)
+            let js = serde::Serialize::serialize(&d, &SERIALIZER)
                 .map_err(|e| DbError::Serialization(e.to_string()))?;
             arr.push(&js);
         }
