@@ -1,6 +1,6 @@
 #![cfg(feature = "memory")]
 
-use slate_store::{MemoryStore, Store, Transaction};
+use slate_store::{BackupStore, MemoryStore, Store, Transaction};
 
 fn mem_store() -> MemoryStore {
     let store = MemoryStore::new();
@@ -473,4 +473,14 @@ fn multi_get_returns_matching_values() {
     assert_eq!(&**results[1].as_ref().unwrap(), b"v2");
     assert!(results[2].is_none());
     assert_eq!(&**results[3].as_ref().unwrap(), b"v3");
+}
+
+// ── Backup ──────────────────────────────────────────────────
+
+#[test]
+fn backup_returns_error() {
+    let store = mem_store();
+    let dir = tempfile::tempdir().unwrap();
+    let result = store.backup(dir.path());
+    assert!(result.is_err());
 }

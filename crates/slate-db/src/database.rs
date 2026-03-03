@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
 use slate_query::{DistinctOptions, FindOptions};
-use slate_store::Store;
+use slate_store::{BackupStore, Store};
 use slate_vm::pool::VmPool;
 
 use crate::collection::CollectionConfig;
@@ -104,6 +104,17 @@ pub struct Database<S: Store> {
     registry: Option<HookRegistry>,
     #[cfg(feature = "runtime")]
     ttl_handle: Option<crate::runtime::sweep::TtlHandle>,
+}
+
+impl<S: Store + BackupStore> Database<S> {
+    /// Create a physical backup of the database at the given path.
+    ///
+    /// The backup can be opened with the same store backend as a new database.
+    /// Safe to call while the database is live (online backup).
+    pub fn backup(&self, dest: impl AsRef<std::path::Path>) -> Result<(), DbError> {
+        self.engine.backup(dest.as_ref())?;
+        Ok(())
+    }
 }
 
 impl<S: Store> Database<S> {

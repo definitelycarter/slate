@@ -1,4 +1,5 @@
 use std::ops::RangeBounds;
+use std::path::Path;
 
 use crate::error::StoreError;
 
@@ -74,4 +75,13 @@ pub trait Transaction {
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;
     fn rollback(self) -> Result<(), StoreError>;
+}
+
+/// Optional trait for stores that support physical backup.
+///
+/// Physical backup copies the store's native files to a destination path.
+/// The backup can be opened with the same backend as a new database.
+/// Safe to call while the database is live (online backup).
+pub trait BackupStore: Store {
+    fn backup(&self, dest: &Path) -> Result<(), StoreError>;
 }

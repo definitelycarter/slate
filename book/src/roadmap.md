@@ -50,40 +50,38 @@ plan node.
 
 ---
 
-## Dynamic Primary Key Path
+## Dynamic Primary Key Path — Done
 
-### Problem
+All executor nodes (`insert_record`, `upsert`, `replace`, `delete`, `read_record`,
+`index_scan`, `index_merge`, `projection`) and the mutation parser now use
+`CollectionHandle::pk_path()` instead of hardcoded `"_id"`.
 
-The engine layer supports configurable primary keys via `CollectionHandle::pk_path()`,
-but the executor nodes in `slate-db` hard-code `"_id"` in ~18 places across
-`insert_record`, `upsert`, `replace`, `delete`, `read_record`, `index_scan`,
-`index_merge`, and `projection`.
+**Constraint:** `pk_path` must be a top-level scalar field. Dot-paths are rejected at
+collection creation time. This matches MongoDB (where `_id` is always top-level) and
+avoids significant complexity in the append/copy/skip patterns used by insert, upsert,
+replace, and projection nodes.
 
-### Work
-
-- Thread `CollectionHandle` (or just `pk_path: &str`) into each executor node so they
-  use the configured path instead of `"_id"`.
-- `pk_path` should support dot-notated paths (e.g. `"user.id"`) for nested primary keys.
-  `RawDocument::get()` only does top-level lookups, so a dot-path traversal helper is
-  needed.
-- Auto-generation of missing PKs (`insert_record`, `upsert`) needs to work with nested
-  paths — creating intermediate subdocuments if necessary.
-- `projection` always includes `_id` unconditionally — should include whatever `pk_path`
-  resolves to instead.
+**TTL path** supports dot-paths (e.g. `"meta.expires_at"`) since it is read-only —
+the engine resolves nested DateTime values during record encoding via a byte-level
+path scanner.
 
 ---
 
-## Backup
+## Backup — Done (Hot Backup)
 
 ### Hot backup
 
-Snapshot the storage while the DB is running. Delegates to the store backend
-(RocksDB `CreateCheckpoint`, redb `savepoint`) behind a unified DB-layer API so the
-caller doesn't need to know which backend is in use.
+Online snapshots via `Database::backup(path)`. Delegates to the store backend behind
+the `BackupStore` trait — the caller doesn't need to know which backend is in use.
 
-This is the primary backup path — run on a schedule or before a risky migration.
+- **RocksDB** — `rocksdb::Checkpoint` (hardlinks SST files, near-instant)
+- **redb** — `std::fs::copy` (CoW B-tree keeps the file crash-consistent)
+- **MemoryStore** — returns an error (nothing to back up)
 
-### Export / Import
+`backup()` is only available when `S: BackupStore`. Restore is offline — open the
+backup directory/file as a fresh store.
+
+### Export / Import (Not yet implemented)
 
 Logical backup. Dump collections as BSON or JSON, reload into the same or a different
 instance. The DB layer owns this because it understands collection metadata, index

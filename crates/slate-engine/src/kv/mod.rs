@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use slate_store::Store;
+use std::path::Path;
+
+use slate_store::{BackupStore, Store};
 
 use crate::error::EngineError;
 
@@ -52,6 +54,13 @@ impl<S: Store> KvEngine<S> {
             store,
             clock: Arc::new(clock),
         }
+    }
+}
+
+impl<S: Store + BackupStore> KvEngine<S> {
+    pub fn backup(&self, dest: &Path) -> Result<(), EngineError> {
+        self.store.backup(dest)?;
+        Ok(())
     }
 }
 

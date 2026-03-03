@@ -1,6 +1,6 @@
 #![cfg(feature = "redb")]
 
-use slate_store::{RedbStore, Store, Transaction};
+use slate_store::{BackupStore, RedbStore, Store, Transaction};
 
 fn temp_store() -> (RedbStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -511,4 +511,30 @@ fn multi_get_returns_matching_values() {
     assert_eq!(&**results[1].as_ref().unwrap(), b"v2");
     assert!(results[2].is_none());
     assert_eq!(&**results[3].as_ref().unwrap(), b"v3");
+}
+
+// ── Backup ──────────────────────────────────────────────────
+
+#[test]
+fn backup_and_restore() {
+    let (store, _dir) = temp_store();
+
+    // Write some data
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"name", b"Alice").unwrap();
+    txn.put(&cf, b"score", b"100").unwrap();
+    txn.commit().unwrap();
+
+    // Backup to a new file
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_path = backup_dir.path().join("backup.redb");
+    store.backup(&backup_path).unwrap();
+
+    // Open the backup as a new store and verify data
+    let restored = RedbStore::open(&backup_path).unwrap();
+    let txn = restored.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(&*txn.get(&cf, b"name").unwrap().unwrap(), b"Alice");
+    assert_eq!(&*txn.get(&cf, b"score").unwrap().unwrap(), b"100");
 }

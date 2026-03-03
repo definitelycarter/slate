@@ -1,21 +1,25 @@
 use std::ops::{Bound, RangeBounds};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
-use crate::store::Store;
+use crate::store::{BackupStore, Store};
 
 use super::transaction::RedbTransaction;
 
 pub struct RedbStore {
     db: Database,
+    path: PathBuf,
 }
 
 impl RedbStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let db = Database::create(path).map_err(|e| StoreError::Storage(e.to_string()))?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -98,6 +102,14 @@ impl Store for RedbStore {
         }
         txn.commit()
             .map_err(|e| StoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+}
+
+impl BackupStore for RedbStore {
+    fn backup(&self, dest: &Path) -> Result<(), StoreError> {
+        std::fs::copy(&self.path, dest)
+            .map_err(|e| StoreError::Storage(format!("backup failed: {e}")))?;
         Ok(())
     }
 }

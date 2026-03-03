@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::ops::{Bound, RangeBounds};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use arc_swap::ArcSwap;
 use imbl::OrdMap;
 
 use crate::error::StoreError;
-use crate::store::Store;
+use crate::store::{BackupStore, Store};
 
 use super::transaction::MemoryTransaction;
 
@@ -101,6 +102,14 @@ impl Store for MemoryStore {
 
         arc.store(Arc::new(data));
         Ok(())
+    }
+}
+
+impl BackupStore for MemoryStore {
+    fn backup(&self, _dest: &Path) -> Result<(), StoreError> {
+        Err(StoreError::Storage(
+            "backup is not supported for in-memory stores".into(),
+        ))
     }
 }
 

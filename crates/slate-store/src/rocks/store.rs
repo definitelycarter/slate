@@ -1,10 +1,10 @@
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 
-use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options};
+use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options, checkpoint::Checkpoint};
 
 use crate::error::StoreError;
-use crate::store::Store;
+use crate::store::{BackupStore, Store};
 
 use super::transaction::RocksTransaction;
 
@@ -88,6 +88,15 @@ impl Store for RocksStore {
 
         self.db
             .delete_range_cf(&cf_handle, &from, &to)
+            .map_err(|e| StoreError::Storage(e.to_string()))
+    }
+}
+
+impl BackupStore for RocksStore {
+    fn backup(&self, dest: &Path) -> Result<(), StoreError> {
+        let cp = Checkpoint::new(&self.db)
+            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        cp.create_checkpoint(dest)
             .map_err(|e| StoreError::Storage(e.to_string()))
     }
 }

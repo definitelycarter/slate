@@ -1,6 +1,6 @@
 #![cfg(feature = "rocksdb")]
 
-use slate_store::{RocksStore, Store, Transaction};
+use slate_store::{BackupStore, RocksStore, Store, Transaction};
 
 fn temp_store() -> (RocksStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -472,4 +472,38 @@ fn multi_get_returns_matching_values() {
     assert_eq!(&**results[1].as_ref().unwrap(), b"v2");
     assert!(results[2].is_none());
     assert_eq!(&**results[3].as_ref().unwrap(), b"v3");
+}
+
+// ── Backup ──────────────────────────────────────────────────
+
+#[test]
+fn backup_and_restore() {
+    let (store, _dir) = temp_store();
+
+    // Write some data
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"name", b"Alice").unwrap();
+    txn.put(&cf, b"score", b"100").unwrap();
+    txn.commit().unwrap();
+
+    // Backup to a new directory
+    let backup_dir = tempfile::tempdir().unwrap();
+    let backup_path = backup_dir.path().join("backup");
+    store.backup(&backup_path).unwrap();
+
+    // Open the backup as a new store and verify data
+    let restored = RocksStore::open(&backup_path).unwrap();
+    let txn = restored.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(&*txn.get(&cf, b"name").unwrap().unwrap(), b"Alice");
+    assert_eq!(&*txn.get(&cf, b"score").unwrap().unwrap(), b"100");
+}
+
+#[test]
+fn backup_to_existing_path_fails() {
+    let (store, _dir) = temp_store();
+    let backup_dir = tempfile::tempdir().unwrap();
+    // RocksDB checkpoint fails if the destination already exists
+    assert!(store.backup(backup_dir.path()).is_err());
 }

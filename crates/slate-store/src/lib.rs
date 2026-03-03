@@ -2,7 +2,7 @@ mod error;
 mod store;
 
 pub use error::StoreError;
-pub use store::{Store, Transaction};
+pub use store::{BackupStore, Store, Transaction};
 
 #[cfg(feature = "rocksdb")]
 mod rocks;

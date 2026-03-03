@@ -71,6 +71,29 @@ pub trait Transaction {
 }
 ```
 
+### BackupStore Trait
+
+The `BackupStore` trait extends `Store` with a single `backup()` method for online
+snapshots. It is a separate trait so that backends without meaningful backup support
+(e.g. `MemoryStore`) can still implement `Store` without providing a no-op.
+
+```rust
+pub trait BackupStore: Store {
+    fn backup(&self, dest: &Path) -> Result<(), StoreError>;
+}
+```
+
+`Database::backup(path)` and `KvEngine::backup(path)` are conditionally available
+when `S: BackupStore`.
+
+- **RocksDB** — `rocksdb::Checkpoint::create_checkpoint()`. Hardlinks SST files for
+  a near-instant, consistent snapshot while the DB is live.
+- **redb** — `std::fs::copy`. redb's CoW B-tree design keeps the file in a
+  consistent state at all times.
+- **MemoryStore** — returns `StoreError::Storage` (nothing on disk to back up).
+
+Restore is offline: open the backup directory (RocksDB) or file (redb) as a new store.
+
 ### Error Type
 
 Custom `StoreError` enum with variants: `TransactionConsumed`, `ReadOnly`, `Storage`.
@@ -272,6 +295,16 @@ collection. Carries the collection's column family name (`cf_name`), column fami
 reference, index field names, primary key path (`pk_path`), and TTL field path
 (`ttl_path`). Passed to all engine operations so the caller never needs to know
 about key encoding or storage layout.
+
+**`pk_path`** — configurable primary key field name. Must be a top-level scalar field
+(dot-paths are rejected at collection creation time). Defaults to `"_id"`. Can be any
+top-level property (e.g. `"email"`, `"sku"`, `"user_id"`). If absent on insert, an
+`ObjectId` is auto-generated at the configured field name.
+
+**`ttl_path`** — the field used for TTL expiry. Supports dot-paths for nested DateTime
+fields (e.g. `"meta.expires_at"`). Defaults to `"ttl"`. The engine extracts the
+DateTime value during record encoding and stores it in the record header for O(1)
+expiry checks.
 
 ### Key Encoding
 

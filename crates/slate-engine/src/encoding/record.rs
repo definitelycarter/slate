@@ -1,5 +1,6 @@
-use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
+use bson::raw::{RawDocument, RawDocumentBuf};
 
+use super::skip_bson_value;
 use crate::error::{EncodingError, EngineError};
 
 // ── Wire format ───────────────────────────────────────────────
@@ -174,11 +175,65 @@ impl TryFrom<Record> for RawDocumentBuf {
 }
 
 /// Extract a DateTime field's millis from a raw BSON document.
-fn extract_datetime_millis(doc: &RawDocument, field: &str) -> Option<i64> {
-    match doc.get(field) {
-        Ok(Some(RawBsonRef::DateTime(dt))) => Some(dt.timestamp_millis()),
-        _ => None,
+///
+/// Supports dot-paths (e.g. `"meta.expires_at"`) by scanning into nested
+/// documents. Only depends on [`skip_bson_value`] which lives in this crate.
+fn extract_datetime_millis(doc: &RawDocument, path: &str) -> Option<i64> {
+    resolve_datetime(doc.as_bytes(), 0, path)
+}
+
+/// Walk a dot-path through raw BSON bytes, returning millis if the leaf is DateTime.
+fn resolve_datetime(bytes: &[u8], base: usize, path: &str) -> Option<i64> {
+    let (field, rest) = match path.split_once('.') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (path, None),
+    };
+    let target = field.as_bytes();
+
+    if base + 4 > bytes.len() {
+        return None;
     }
+    let doc_len = i32::from_le_bytes(bytes[base..base + 4].try_into().ok()?) as usize;
+    let doc_end = base + doc_len;
+    let mut pos = base + 4;
+
+    while pos < doc_end {
+        let type_byte = bytes[pos];
+        if type_byte == 0x00 {
+            break;
+        }
+        pos += 1;
+
+        let name_start = pos;
+        while pos < doc_end && bytes[pos] != 0x00 {
+            pos += 1;
+        }
+        if pos >= doc_end {
+            return None;
+        }
+        let name = &bytes[name_start..pos];
+        pos += 1; // null terminator
+
+        let value_start = pos;
+        let element_end = skip_bson_value(type_byte, bytes, pos)?;
+
+        if name == target {
+            return match rest {
+                // Nested path — descend into embedded document (type 0x03)
+                Some(rest) if type_byte == 0x03 => resolve_datetime(bytes, value_start, rest),
+                // Leaf — extract DateTime millis (type 0x09)
+                None if type_byte == 0x09 => {
+                    let ms = i64::from_le_bytes(
+                        bytes[value_start..value_start + 8].try_into().ok()?,
+                    );
+                    Some(ms)
+                }
+                _ => None,
+            };
+        }
+        pos = element_end;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -270,5 +325,37 @@ mod tests {
         let record = Record::encoder().encode(&doc);
         let doc_buf: RawDocumentBuf = record.try_into().unwrap();
         assert_eq!(doc_buf, doc);
+    }
+
+    #[test]
+    fn with_ttl_at_nested_path() {
+        let dt = bson::DateTime::from_millis(99_000);
+        let doc = bson::rawdoc! { "_id": "a", "meta": { "expires_at": dt } };
+        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        assert_eq!(record.ttl_millis(), Some(99_000));
+        assert!(Record::is_expired(record.as_bytes(), 100_000));
+        assert!(!Record::is_expired(record.as_bytes(), 50_000));
+    }
+
+    #[test]
+    fn with_ttl_at_deeply_nested_path() {
+        let dt = bson::DateTime::from_millis(7_000);
+        let doc = bson::rawdoc! { "_id": "a", "a": { "b": { "ttl": dt } } };
+        let record = Record::encoder().with_ttl_at_path("a.b.ttl").encode(&doc);
+        assert_eq!(record.ttl_millis(), Some(7_000));
+    }
+
+    #[test]
+    fn with_ttl_at_nested_path_missing() {
+        let doc = bson::rawdoc! { "_id": "a", "meta": { "name": "test" } };
+        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        assert_eq!(record.as_bytes()[0], TAG_NO_TTL);
+    }
+
+    #[test]
+    fn with_ttl_at_nested_path_non_document_intermediate() {
+        let doc = bson::rawdoc! { "_id": "a", "meta": "not a doc" };
+        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        assert_eq!(record.as_bytes()[0], TAG_NO_TTL);
     }
 }

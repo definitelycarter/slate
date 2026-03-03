@@ -130,11 +130,17 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         name: &str,
         options: &CreateCollectionOptions,
     ) -> Result<(), EngineError> {
+        let pk = options
+            .pk_path
+            .clone()
+            .unwrap_or_else(|| "_id".to_string());
+        if pk.contains('.') {
+            return Err(EngineError::InvalidDocument(
+                "pk_path must be a top-level field (dot-paths are not supported)".into(),
+            ));
+        }
         let meta = CollectionMeta {
-            pk: options
-                .pk_path
-                .clone()
-                .unwrap_or_else(|| "_id".to_string()),
+            pk,
             ttl: options
                 .ttl_path
                 .clone()
