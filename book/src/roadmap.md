@@ -132,18 +132,25 @@ overhead.
 
 ## User-Defined Logic
 
-### Concept
+### Implemented
 
-Register sandboxed functions that the DB calls at defined hook points in the write and
-read paths. Functions take BSON bytes in and return BSON bytes out.
+**Triggers** and **validators** are implemented. Scripts are registered per-collection,
+resolved at plan time via `HookSnapshot`, and executed as typed plan nodes
+(`Node::Validate`, `Node::Trigger`, `Plan::Trigger`). See the
+[mutation pipeline](./querying.md) documentation for details.
 
-### Hook points
+**Lua runtime** (`mlua`) is the default scripting backend. Sandboxed execution with
+instruction limits, BSON type preservation, and scoped transaction callbacks
+(`ctx.get`, `ctx.put`, `ctx.delete`).
+
+**JS runtime** (`wasm-bindgen`) provides the same `ScriptRuntime`/`ScriptHandle`
+traits on wasm32 targets, delegating script execution to the JS host.
+
+### Remaining hook points
 
 - **Computed fields** — derive a field value from the rest of the document on
   insert/update. The result is stored in the document, making it indexable and
   queryable like any real field.
-- **Validation** — run a predicate before a write is accepted. Return an error to
-  reject the document. Replaces ad-hoc application-side validation.
 - **Custom index key extractors** — produce a synthetic index key from document fields
   (e.g. a normalized/lowercased string, a composite key). The engine indexes the
   output; the function defines *what* to index.
@@ -153,45 +160,62 @@ read paths. Functions take BSON bytes in and return BSON bytes out.
 - **Transform pipelines** — chain multiple functions on a document before storage.
   Schema migration, field normalization, enrichment.
 
-### Runtime options
-
-#### Wasm (wasmtime / wasmi)
+### Future runtime: Wasm (wasmtime / wasmi)
 
 Polyglot — users write functions in any language that compiles to wasm32 (Rust, Swift,
 Go, JS via QuickJS, AssemblyScript). Sandboxed by default with no filesystem, network,
 or memory access beyond what's explicitly granted. Fuel metering provides hard
-computation bounds.
-
-wasmtime uses JIT/AOT compilation (fast, but JIT is blocked on iOS). wasmi is a pure
-interpreter (works everywhere, slower for heavy computation). AOT pre-compilation is a
-middle ground — compile at build time, load the native artifact at runtime.
-
-#### Lua (mlua)
-
-Single language, but a much smaller footprint (~200KB runtime). Pure interpreter with
-no platform restrictions. Battle-tested embedding pattern (Redis, Nginx, Neovim).
-Lower barrier for simple validation rules and field transforms. Sandboxing is manual —
-strip `os`, `io`, `require` from the environment.
-
-#### Recommendation
-
-Lua is the more practical default for slate's primary use case (short functions that
-compute a field or validate a document). Wasm is the better choice when polyglot
-support or heavy computation is needed. Both can coexist behind a common trait —
-the hook points don't care which runtime evaluates the function.
+computation bounds. The `RuntimeKind::Wasm` variant and `wasm` feature flag are
+reserved for this.
 
 ---
 
-## Platform Adapters
+## WebAssembly Support
 
-### Problem
+### What works today
+
+The full database stack (`slate-store`, `slate-engine`, `slate-query`, `slate-vm`,
+`slate-db`) compiles to `wasm32-unknown-unknown`. The MemoryStore backend works
+out of the box — no C dependencies, no filesystem, no threads.
+
+```bash
+cargo build -p slate-db --target wasm32-unknown-unknown --no-default-features --features js
+```
+
+This produces a `slate_db.wasm` binary with the complete query engine, planner,
+executor, index support, and JS scripting bridge.
+
+**Scripting on wasm32:** The native Lua runtime (`mlua`) vendors C code and cannot
+compile to wasm. The `js` feature in `slate-vm` provides an alternative:
+`JsScriptRuntime` and `JsScriptHandle` implement the `ScriptRuntime`/`ScriptHandle`
+traits via `wasm-bindgen`, delegating script execution to the JS host. The JS side
+plugs in any Lua engine (e.g. wasmoon for Lua 5.4 compiled to wasm, or Fengari for
+a pure-JS Lua VM).
+
+The bridge exposes three wasm-bindgen contract points:
+
+- **`slate_vm_load(name, source) → handle_id`** — JS compiles script source, returns
+  an integer handle
+- **`slate_vm_call(handle_id, input_bson, caps) → output_bson`** — JS executes the
+  compiled script with BSON input
+- **`slate_vm_invoke_method(name, args_bson) → result_bson`** — exported from Rust,
+  called by JS when a script invokes `ctx.get()`, `ctx.put()`, or `ctx.delete()`,
+  routing back into the Rust transaction layer
+
+Feature flags:
+
+| Feature | Runtime | Target | Use case |
+|---------|---------|--------|----------|
+| `lua`   | mlua (C Lua 5.4) | Native | Default for Rust/Swift apps |
+| `js`    | wasm-bindgen → JS host | wasm32 | Browser, Node.js |
+| `wasm`  | (reserved) | Any | Future: wasmtime/wasmi for embedded wasm modules |
+
+### Remaining work
+
+#### Platform adapters
 
 `slate-db` currently owns two platform-specific concerns: a `SystemTime::now()` clock
-and a background sweep thread (`std::thread::spawn`). This couples the core to
-platforms that support threading and system time, blocking targets like
-`wasm32-unknown-unknown`.
-
-### Design
+and a background sweep thread (`std::thread::spawn`). These need to be gated for wasm.
 
 Gate platform-specific code behind a `runtime` feature in `slate-db` (default on).
 With `runtime` enabled, `Database::open` uses `SystemTime::now()` as the clock and
@@ -210,29 +234,36 @@ slate-wasm    → depends on slate-db with default-features = false
                 wasm-bindgen, injects Date.now(), no sweep (or JS setInterval)
 ```
 
-### Work
+Runtime blockers (compile succeeds, but these panic at runtime on wasm32):
 
-- Add `runtime` feature to `slate-db`. Gate `sweep.rs` and the default
-  `SystemTime::now()` clock behind `#[cfg(feature = "runtime")]`.
-- `Database::open` with `runtime`: current behavior (clock + sweep thread).
-- `Database::open` without `runtime`: takes a clock function, no sweep.
-- Create `slate-wasm` crate: `wasm-bindgen` wrapper over `Database`, `Transaction`,
-  `Cursor`. Depends on `slate-db` with `default-features = false`. Injects
-  `Date.now()` as the clock. Exposes `purge_expired()` for manual or
-  `setInterval`-driven cleanup.
-
-### Compilation status
-
-The full stack (`slate-store`, `slate-engine`, `slate-query`, `slate-db`) already
-compiles for `wasm32-unknown-unknown` with `--features memory`. The remaining
-blockers are runtime, not compile-time:
-
-- **`SystemTime::now()`** — panics on wasm32, but `KvEngine::with_clock()` escape
-  hatch already exists
-- **`std::thread::spawn`** — panics on wasm32, but sweep is already a no-op when
+- **`SystemTime::now()`** — `KvEngine::with_clock()` escape hatch already exists
+- **`std::thread::spawn`** — sweep is already a no-op when
   `ttl_sweep_interval_secs = u64::MAX`
 - **`getrandom`** — needs `features = ["js"]` for `crypto.getRandomValues()` entropy
   (used by bson for ObjectId generation)
+
+#### Browser storage
+
+MemoryStore works on wasm32 but is ephemeral — data is lost on page reload. Two
+browser-native storage options could provide persistence:
+
+**OPFS (Origin Private File System)** — `createSyncAccessHandle()` in Web Workers
+provides synchronous file I/O. This maps directly to the existing `Store` trait
+without any API changes. Could potentially run redb on top of it since redb is
+file-backed. Limited to Web Workers (not the main thread).
+
+**IndexedDB** — transactional key-value store built into all browsers. No size limits,
+supports binary data. The catch: IndexedDB is async, and the `Store`/`Transaction`
+traits are synchronous. Supporting IndexedDB would require making the Store trait
+async, which is a significant but worthwhile change — it would also benefit
+server-mode deployments where async I/O matters.
+
+#### slate-wasm crate
+
+A thin binding crate (similar to `slate-uniffi`) that wraps `Database`, `Transaction`,
+and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
+`default-features = false`. Injects `Date.now()` as the clock. Exposes
+`purge_expired()` for manual or `setInterval`-driven cleanup.
 
 ---
 
@@ -248,7 +279,21 @@ An interactive playground sells an embedded DB better than docs or benchmarks. U
 can feel it working: insert a document, watch a Lua validator reject bad data, edit a
 computed field function, re-query, see results update instantly.
 
-Depends on the platform adapter work above and the `slate-wasm` crate.
+### Architecture
+
+```
+Browser
+  ├── slate_db.wasm          ← database engine (MemoryStore)
+  ├── wasmoon / fengari      ← Lua VM in JS
+  └── UI (editor + results)  ← query input, document viewer, plan visualizer
+
+JS glue wires wasmoon into the wasm-bindgen bridge:
+  slate_vm_load  → wasmoon.loadString(source)
+  slate_vm_call  → wasmoon.callFunction(handle, input)
+  ctx.get/put/delete → slate_vm_invoke_method → Rust transaction layer
+```
+
+Depends on the platform adapter work and the `slate-wasm` crate above.
 
 ---
 

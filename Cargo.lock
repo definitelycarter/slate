@@ -1334,7 +1334,9 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "criterion",
+ "js-sys",
  "mlua",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -8,8 +8,17 @@ use slate_vm::RuntimeKind;
 
 /// Map a stored runtime tag byte to a [`RuntimeKind`].
 pub fn runtime_kind(tag: u8) -> RuntimeKind {
-    let _ = tag; // currently only Lua is supported
-    RuntimeKind::Lua
+    #[cfg(feature = "lua")]
+    if tag == 0x01 {
+        return RuntimeKind::Lua;
+    }
+
+    #[cfg(feature = "js")]
+    if tag == 0x03 {
+        return RuntimeKind::Js;
+    }
+
+    panic!("unsupported runtime tag: {tag:#x}")
 }
 
 // ── ResolvedHook ────────────────────────────────────────────
@@ -84,6 +93,14 @@ impl HookSnapshot {
             triggers,
             validators,
         })
+    }
+
+    /// An empty snapshot with no hooks.
+    pub fn empty() -> Self {
+        Self {
+            triggers: HashMap::new(),
+            validators: HashMap::new(),
+        }
     }
 
     /// Get triggers for a (cf, collection) pair.

@@ -1,9 +1,13 @@
 mod error;
+#[cfg(feature = "js")]
+pub mod js;
 #[cfg(feature = "lua")]
 pub mod lua;
 pub mod pool;
 
 pub use error::VmError;
+#[cfg(feature = "js")]
+pub use js::{JsScriptHandle, JsScriptRuntime};
 #[cfg(feature = "lua")]
 pub use lua::{LuaError, LuaScriptHandle, LuaScriptRuntime};
 
@@ -17,6 +21,8 @@ use bson::raw::RawDocumentBuf;
 /// Identifies which scripting runtime a script targets.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum RuntimeKind {
+    #[cfg(feature = "js")]
+    Js,
     #[cfg(feature = "lua")]
     Lua,
     #[cfg(feature = "wasm")]

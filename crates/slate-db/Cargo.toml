@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["lua"]
 bench-internals = []
+lua = ["slate-vm/lua"]
+js = ["slate-vm/js"]
 
 [dependencies]
 slate-engine = { path = "../slate-engine" }
 slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
-slate-vm = { path = "../slate-vm", features = ["lua"] }
+slate-vm = { path = "../slate-vm" }
 serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
 regex = "1"
