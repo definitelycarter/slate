@@ -11,6 +11,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Three storage backends** — RocksDB (fast, default), redb (pure Rust, no C dependencies), in-memory (ephemeral)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
+- **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required)
 - **Sub-millisecond indexed queries** at 100k records across all backends
 
 ## Crate Structure
@@ -22,7 +23,8 @@ slate/
   ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
-  └── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
+  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
+  └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
 
 ## Quick Start

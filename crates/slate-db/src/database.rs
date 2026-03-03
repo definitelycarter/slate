@@ -21,6 +21,7 @@ use crate::statement::Statement;
 
 pub struct DatabaseBuilder {
     pool: Option<VmPool>,
+    clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     #[cfg(feature = "runtime")]
     sweep_interval: Option<std::time::Duration>,
 }
@@ -29,6 +30,7 @@ impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
             pool: None,
+            clock: None,
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
@@ -40,6 +42,14 @@ impl DatabaseBuilder {
     /// but no scripts will be executed.
     pub fn with_scripting(mut self, pool: VmPool) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Inject a custom clock function (returns epoch millis).
+    ///
+    /// Required on platforms where `SystemTime::now()` is unavailable (e.g. wasm32).
+    pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Some(Arc::new(clock));
         self
     }
 
@@ -55,7 +65,10 @@ impl DatabaseBuilder {
     /// When a script pool is configured, loads an initial hook snapshot
     /// from the engine so triggers and validators are available immediately.
     pub fn open<S: Store + Send + Sync + 'static>(self, store: S) -> Result<Database<S>, DbError> {
-        let engine = Arc::new(KvEngine::new(store));
+        let engine = match self.clock {
+            Some(clock) => Arc::new(KvEngine::with_clock(store, move || clock())),
+            None => Arc::new(KvEngine::new(store)),
+        };
 
         // Load initial hook snapshot if scripting is enabled.
         let registry = if self.pool.is_some() {

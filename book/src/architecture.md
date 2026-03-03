@@ -13,7 +13,8 @@ slate/
   ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
-  └── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
+  ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
+  └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
 
 ## Tier 1: Storage Layer (`slate-store`)
@@ -451,3 +452,30 @@ For index-covered queries, the index value is carried directly as `RawBson` — 
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 - **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).
+
+## Platform Bindings
+
+### `slate-uniffi` — Swift/Kotlin
+
+UniFFI bindings for Apple and Android platforms. Wraps `Database<StoreImpl>` in a `SlateDatabase` object with auto-commit `read()`/`write()` helpers. Documents cross the FFI boundary as raw BSON bytes (`Vec<u8>`). Feature-gated store selection: `memory`, `redb`, `rocksdb`.
+
+### `slate-wasm` — JavaScript/WebAssembly
+
+wasm-bindgen bindings for browser and Node.js. Wraps `Database<MemoryStore>` in a `SlateDb` struct exported to JavaScript. Accepts and returns plain JS objects — BSON conversion happens internally via `serde-wasm-bindgen`, so no BSON library is needed on the JS side.
+
+```js
+const db = new SlateDb();
+db.create_collection("users");
+db.insert_one("users", { _id: "u1", name: "Alice", age: 30 });
+
+const docs = db.find("users", { name: "Alice" });
+// [{ _id: "u1", name: "Alice", age: 30 }]
+```
+
+**Key properties:**
+
+- **Auto-commit** — each method creates a transaction, executes, and commits/rolls back. Same pattern as `slate-uniffi`.
+- **JS-native interface** — `JsValue` in/out via `serde-wasm-bindgen`. No `Uint8Array` encoding required.
+- **Mutations return documents** — insert, update, delete all return the affected documents as an `Array` of JS objects. Use `.length` for count.
+- **MemoryStore only** — no filesystem access on wasm32. Persistent storage (OPFS, IndexedDB) is future work.
+- **Clock injection** — uses `Date.now()` via `js_sys` since `SystemTime::now()` panics on wasm32. Injected through `DatabaseBuilder::with_clock()`.
