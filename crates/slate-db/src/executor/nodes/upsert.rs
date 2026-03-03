@@ -1,4 +1,4 @@
-use bson::raw::RawDocumentBuf;
+use bson::raw::{CString, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 
@@ -23,6 +23,8 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let cf = handle.cf_name().to_string();
+    let pk_key = CString::try_from(handle.pk_path())
+        .map_err(|e| DbError::Serialization(e.to_string()))?;
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let mut new_doc = match opt_val {
@@ -31,27 +33,28 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             None => return Err(DbError::InvalidQuery("Upsert requires document".into())),
         };
 
-        // Ensure _id exists, generating one if missing.
+        // Ensure pk exists, generating one if missing.
+        let pk = handle.pk_path();
         let has_id = new_doc
-            .get("_id")
+            .get(pk)
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .is_some();
         if !has_id {
             let oid = bson::oid::ObjectId::new();
-            new_doc.append(bson::cstr!("_id"), oid);
+            new_doc.append(&pk_key, oid);
         }
 
         let raw_id = new_doc
-            .get("_id")
+            .get(pk)
             .map_err(|e| DbError::Serialization(e.to_string()))?
-            .expect("_id was just ensured");
+            .expect("pk was just ensured");
 
         let old_doc = txn.get(&handle, &raw_id)?;
 
         if let Some(ref old_raw_doc) = old_doc {
             super::trigger::fire_hooks(txn, pool, &cf, &hooks, "updating", old_raw_doc)?;
 
-            let written = build_doc(&mode, &new_doc, old_raw_doc)?;
+            let written = build_doc(pk, &pk_key, &mode, &new_doc, old_raw_doc)?;
             let written = match written {
                 Some(doc) => doc,
                 None => {
@@ -75,26 +78,28 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 /// Build the document to write based on upsert mode.
 /// Returns `None` for a merge no-op (all fields unchanged).
 fn build_doc(
+    pk_path: &str,
+    pk_key: &CString,
     mode: &UpsertMode,
     new_raw: &RawDocument,
     old_raw: &RawDocument,
 ) -> Result<Option<RawDocumentBuf>, DbError> {
     match mode {
         UpsertMode::Replace => {
-            // Copy _id from old doc (preserves original type), then new fields
+            // Copy pk from old doc (preserves original type), then new fields
             let mut buf = RawDocumentBuf::new();
-            if let Ok(Some(id_ref)) = old_raw.get("_id") {
-                buf.append(bson::cstr!("_id"), id_ref);
+            if let Ok(Some(id_ref)) = old_raw.get(pk_path) {
+                buf.append(pk_key, id_ref);
             }
             for entry in new_raw.iter() {
                 let (k, v) = entry?;
-                if k != "_id" {
+                if k != pk_path {
                     buf.append(k, v);
                 }
             }
             Ok(Some(buf))
         }
-        UpsertMode::Merge => Ok(raw_mutation::raw_merge(old_raw, new_raw)?),
+        UpsertMode::Merge => Ok(raw_mutation::raw_merge(old_raw, new_raw, pk_path)?),
     }
 }
 
@@ -109,8 +114,9 @@ mod tests {
     fn build_doc_replace() {
         let old = rawdoc! { "_id": "1", "name": "Alice", "score": 70 };
         let new = rawdoc! { "_id": "1", "name": "Bob", "status": "active" };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Replace, &new, &old)
+        let result = build_doc("_id", &pk_key, &UpsertMode::Replace, &new, &old)
             .unwrap()
             .unwrap();
         assert_eq!(result.get_str("_id").unwrap(), "1");
@@ -124,8 +130,9 @@ mod tests {
     fn build_doc_replace_strips_duplicate_id() {
         let old = rawdoc! { "_id": "1", "name": "Alice" };
         let new = rawdoc! { "_id": "1", "name": "Bob" };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Replace, &new, &old)
+        let result = build_doc("_id", &pk_key, &UpsertMode::Replace, &new, &old)
             .unwrap()
             .unwrap();
         let keys: Vec<&str> = result.iter().map(|e| e.unwrap().0.as_str()).collect();
@@ -137,8 +144,9 @@ mod tests {
         let oid = bson::oid::ObjectId::new();
         let old = rawdoc! { "_id": oid, "name": "Alice" };
         let new = rawdoc! { "name": "Bob" };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Replace, &new, &old)
+        let result = build_doc("_id", &pk_key, &UpsertMode::Replace, &new, &old)
             .unwrap()
             .unwrap();
         assert_eq!(result.get_object_id("_id").unwrap(), oid);
@@ -149,8 +157,9 @@ mod tests {
     fn build_doc_merge_updates_field() {
         let old = rawdoc! { "_id": "1", "name": "Alice", "score": 70 };
         let new = rawdoc! { "_id": "1", "score": 99 };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap().unwrap();
+        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old).unwrap().unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_i32("score").unwrap(), 99);
     }
@@ -159,8 +168,9 @@ mod tests {
     fn build_doc_merge_adds_new_field() {
         let old = rawdoc! { "_id": "1", "name": "Alice" };
         let new = rawdoc! { "_id": "1", "email": "a@test.com" };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap().unwrap();
+        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old).unwrap().unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_str("email").unwrap(), "a@test.com");
     }
@@ -169,8 +179,9 @@ mod tests {
     fn build_doc_merge_noop_returns_none() {
         let old = rawdoc! { "_id": "1", "name": "Alice", "score": 70 };
         let new = rawdoc! { "_id": "1", "name": "Alice", "score": 70 };
+        let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap();
+        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old).unwrap();
         assert!(result.is_none());
     }
 }

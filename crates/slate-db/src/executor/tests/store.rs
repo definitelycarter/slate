@@ -169,6 +169,7 @@ fn index_merge_or() {
 
     // OR: status="active" | status="inactive" → all 3 records
     let plan = Plan::Find(Node::IndexMerge {
+        collection: collection1.clone(),
         logical: LogicalOp::Or,
         lhs: Box::new(Node::IndexScan {
             collection: collection1,
@@ -203,6 +204,7 @@ fn index_merge_and() {
 
     // AND: status="active" & score=80 → only Charlie (id=3)
     let plan = Plan::Find(Node::IndexMerge {
+        collection: collection1.clone(),
         logical: LogicalOp::And,
         lhs: Box::new(Node::IndexScan {
             collection: collection1,

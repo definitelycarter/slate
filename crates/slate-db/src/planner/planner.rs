@@ -92,7 +92,8 @@ where
         let has_residual = residual.is_some();
 
         // Covered index optimization: Eq on indexed field, no residual,
-        // and projection only needs _id + the indexed field.
+        // and projection only needs pk + the indexed field.
+        let pk = handle.pk_path();
         let covered = !has_residual
             && matches!(
                 &source,
@@ -101,7 +102,7 @@ where
                     range: IndexScanRange::Eq(_),
                     ..
                 } if columns.as_ref().is_some_and(|cols|
-                    cols.iter().all(|c| c == "_id" || c == field)
+                    cols.iter().all(|c| c == pk || c == field)
                 )
             );
 
@@ -211,6 +212,7 @@ where
             node
         } else {
             Node::Projection {
+                collection: handle.clone(),
                 columns,
                 source: Box::new(node),
             }
@@ -255,6 +257,7 @@ where
 
         // Project to just the distinct field.
         let node = Node::Projection {
+            collection: handle.clone(),
             columns: Some(vec![field.clone()]),
             source: Box::new(node),
         };
@@ -528,11 +531,11 @@ where
         handle: &CollectionHandle<T::Cf>,
         predicate: &Expression,
     ) -> (Node<T::Cf>, Option<Expression>) {
-        // Fast path: _id equality → direct key lookup, no scan needed.
+        // Fast path: pk equality → direct key lookup, no scan needed.
         if let Expression::Eq(field, value) = predicate
-            && field == "_id"
+            && field == handle.pk_path()
         {
-            return (Self::id_lookup(handle, value), None);
+            return (Self::pk_lookup(handle, value), None);
         }
 
         match predicate {
@@ -567,12 +570,12 @@ where
         children: &[Expression],
         original: &Expression,
     ) -> (Node<T::Cf>, Option<Expression>) {
-        // Priority 0: _id equality — direct key lookup, always wins.
+        // Priority 0: pk equality — direct key lookup, always wins.
         for (i, child) in children.iter().enumerate() {
             if let Expression::Eq(field, value) = child
-                && field == "_id"
+                && field == handle.pk_path()
             {
-                let node = Self::id_lookup(handle, value);
+                let node = Self::pk_lookup(handle, value);
                 let residual = residual_from_and(children, &[i]);
                 return (node, residual);
             }
@@ -712,6 +715,7 @@ where
         let mut result = iter.next().unwrap();
         for node in iter {
             result = Node::IndexMerge {
+                collection: handle.clone(),
                 logical: LogicalOp::Or,
                 lhs: Box::new(result),
                 rhs: Box::new(node),
@@ -721,13 +725,15 @@ where
         Some(result)
     }
 
-    /// Build a KeyLookup over a Values node for a direct _id point read.
-    fn id_lookup(handle: &CollectionHandle<T::Cf>, value: &bson::Bson) -> Node<T::Cf> {
-        let doc = bson::RawDocumentBuf::try_from(&bson::doc! { "_id": value.clone() })
-            .expect("_id document is always valid");
+    /// Build a KeyLookup over a Values node for a direct pk point read.
+    fn pk_lookup(handle: &CollectionHandle<T::Cf>, value: &bson::Bson) -> Node<T::Cf> {
+        let mut doc = bson::Document::new();
+        doc.insert(handle.pk_path().to_string(), value.clone());
+        let raw = bson::RawDocumentBuf::try_from(&doc)
+            .expect("pk document is always valid");
         Node::KeyLookup {
             collection: handle.clone(),
-            source: Box::new(Node::Values(vec![doc])),
+            source: Box::new(Node::Values(vec![raw])),
         }
     }
 

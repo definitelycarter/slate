@@ -72,6 +72,7 @@ fn bench_update(c: &mut Criterion) {
                         collection: collection.clone(),
                         mutation: slate_db::bench::parse_mutation(
                             &bson::rawdoc! { "$set": { "status": "updated" } },
+                            "_id",
                         )
                         .unwrap(),
                         source: Node::Scan { collection },

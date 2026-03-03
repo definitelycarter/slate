@@ -1,4 +1,5 @@
 use bson::RawBson;
+use bson::raw::CString;
 use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
@@ -9,6 +10,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     handle: CollectionHandle<T::Cf>,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
+    let pk_key = CString::try_from(handle.pk_path())
+        .map_err(|e| DbError::Serialization(e.to_string()))?;
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let mut doc = match opt_val {
@@ -23,14 +26,14 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             }
         };
 
-        // Generate _id if missing.
+        // Generate pk if missing.
         let has_id = doc
-            .get("_id")
+            .get(handle.pk_path())
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .is_some();
         if !has_id {
             let oid = bson::oid::ObjectId::new();
-            doc.append(bson::cstr!("_id"), oid);
+            doc.append(&pk_key, oid);
         }
         txn.put_nx(&handle, &doc)?;
 

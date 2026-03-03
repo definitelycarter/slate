@@ -1,5 +1,5 @@
 use bson::RawBson;
-use bson::raw::RawDocumentBuf;
+use bson::raw::{CString, RawDocumentBuf};
 use slate_engine::{CollectionHandle, EngineTransaction, IndexRange};
 
 use crate::error::DbError;
@@ -78,7 +78,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         None
     };
 
-    let field_cstr = bson::raw::CString::try_from(field.as_str())
+    let pk_cstr = CString::try_from(handle.pk_path())
+        .map_err(|e| DbError::Serialization(e.to_string()))?;
+    let field_cstr = CString::try_from(field.as_str())
         .map_err(|e| DbError::InvalidQuery(format!("invalid field name: {e}")))?;
     let mut iter = txn.scan_index(&handle, &field, engine_range, reverse)?;
     let mut count = 0usize;
@@ -133,7 +135,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
                         };
                         let coerced = coerce_to_stored_type(rv, &value);
                         let mut doc = RawDocumentBuf::new();
-                        doc.append(bson::cstr!("_id"), doc_id);
+                        doc.append(&pk_cstr, doc_id);
                         doc.append(&field_cstr, coerced);
                         return Some(Ok(Some(RawBson::Document(doc))));
                     } else {

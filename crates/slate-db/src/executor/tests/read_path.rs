@@ -122,6 +122,7 @@ fn projection_on_values() {
         rawdoc! { "_id": "2", "name": "Bob", "status": "inactive", "score": 90 },
     ];
     let plan = Plan::Find(Node::Projection {
+        collection: mock_collection(vec![]),
         columns: Some(vec!["name".into()]),
         source: Box::new(Node::Values(docs)),
     });
@@ -146,6 +147,7 @@ fn distinct_on_values() {
     let plan = Plan::Find(Node::Distinct {
         field: "status".into(),
         source: Box::new(Node::Projection {
+            collection: mock_collection(vec![]),
             columns: Some(vec!["status".into()]),
             source: Box::new(Node::Values(docs)),
         }),

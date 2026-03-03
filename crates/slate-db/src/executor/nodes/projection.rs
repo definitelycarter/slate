@@ -9,17 +9,20 @@ use crate::executor::field_tree::FieldTree;
 use slate_engine::skip_bson_value;
 
 pub(crate) fn execute<'a>(
+    pk_path: &str,
     columns: Option<Vec<String>>,
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let tree = columns.as_ref().map(|cols| FieldTree::from_paths(cols));
     let flat = tree.as_ref().is_some_and(is_all_leaf);
+    let pk_bytes = pk_path.as_bytes().to_vec();
+    let pk_str = pk_path.to_string();
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let val = opt_val.ok_or_else(|| DbError::InvalidQuery("expected value".into()))?;
 
-        // No columns specified: pass through as-is (_id already in doc)
+        // No columns specified: pass through as-is (pk already in doc)
         let tree = match tree {
             Some(ref t) => t,
             None => return Ok(Some(val)),
@@ -32,7 +35,7 @@ pub(crate) fn execute<'a>(
 
         // Fast path: all flat fields → raw byte projection
         if flat {
-            let projected = raw_project_flat(raw.as_bytes(), tree);
+            let projected = raw_project_flat(raw.as_bytes(), tree, &pk_bytes);
             let buf = RawDocumentBuf::from_bytes(projected)
                 .map_err(|e| DbError::Serialization(e.to_string()))?;
             return Ok(Some(RawBson::Document(buf)));
@@ -40,7 +43,7 @@ pub(crate) fn execute<'a>(
 
         // Slow path: nested projection (dot-paths, arrays of documents)
         let mut buf = RawDocumentBuf::new();
-        project_document(raw, tree, &mut buf)?;
+        project_document(raw, tree, &pk_str, &mut buf)?;
         Ok(Some(RawBson::Document(buf)))
     })))
 }
@@ -52,7 +55,7 @@ fn is_all_leaf(tree: &HashMap<String, FieldTree>) -> bool {
 
 /// Project flat fields by raw byte scanning. Single pass over the document,
 /// copying matching element byte ranges directly into the output buffer.
-fn raw_project_flat(bytes: &[u8], tree: &HashMap<String, FieldTree>) -> Vec<u8> {
+fn raw_project_flat(bytes: &[u8], tree: &HashMap<String, FieldTree>, pk_bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     out.extend_from_slice(&[0, 0, 0, 0]); // length placeholder
 
@@ -81,8 +84,8 @@ fn raw_project_flat(bytes: &[u8], tree: &HashMap<String, FieldTree>) -> Vec<u8> 
             None => break,
         };
 
-        // Always include _id, plus any field in the projection tree
-        if name == b"_id" || std::str::from_utf8(name).is_ok_and(|s| tree.contains_key(s)) {
+        // Always include pk, plus any field in the projection tree
+        if name == pk_bytes || std::str::from_utf8(name).is_ok_and(|s| tree.contains_key(s)) {
             out.extend_from_slice(&bytes[element_start..element_end]);
         }
         pos = element_end;
@@ -97,14 +100,15 @@ fn raw_project_flat(bytes: &[u8], tree: &HashMap<String, FieldTree>) -> Vec<u8> 
 fn project_document(
     src: &RawDocument,
     tree: &HashMap<String, FieldTree>,
+    pk_path: &str,
     dest: &mut RawDocumentBuf,
 ) -> Result<(), DbError> {
     for result in src.iter() {
         let (key, raw_val) = result?;
 
-        // Always include _id
-        if key == "_id" {
-            dest.append(bson::cstr!("_id"), raw_val);
+        // Always include pk
+        if key == pk_path {
+            dest.append(key, raw_val);
             continue;
         }
 
@@ -120,7 +124,7 @@ fn project_document(
             FieldTree::Branch(children) => match raw_val {
                 RawBsonRef::Document(sub_doc) => {
                     let mut trimmed = RawDocumentBuf::new();
-                    project_document(sub_doc, children, &mut trimmed)?;
+                    project_document(sub_doc, children, pk_path, &mut trimmed)?;
                     dest.append(key, RawBson::Document(trimmed));
                 }
                 RawBsonRef::Array(arr) => {
@@ -130,7 +134,7 @@ fn project_document(
                         match elem {
                             RawBsonRef::Document(elem_doc) => {
                                 let mut trimmed = RawDocumentBuf::new();
-                                project_document(elem_doc, children, &mut trimmed)?;
+                                project_document(elem_doc, children, pk_path, &mut trimmed)?;
                                 out.push(RawBson::Document(trimmed));
                             }
                             other => {
@@ -171,7 +175,7 @@ mod tests {
     fn raw_project_flat_basic() {
         let doc = rawdoc! { "_id": "abc", "name": "Alice", "age": 30_i32, "email": "a@b.c" };
         let tree = make_tree(&["name", "age"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         assert_eq!(result.get("_id").unwrap(), Some(RawBsonRef::String("abc")));
         assert_eq!(
@@ -186,7 +190,7 @@ mod tests {
     fn raw_project_flat_keeps_id_always() {
         let doc = rawdoc! { "_id": "x", "a": 1_i32, "b": 2_i32 };
         let tree = make_tree(&["a"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         assert_eq!(result.get("_id").unwrap(), Some(RawBsonRef::String("x")));
         assert_eq!(result.get("a").unwrap(), Some(RawBsonRef::Int32(1)));
@@ -197,7 +201,7 @@ mod tests {
     fn raw_project_flat_no_matching_fields() {
         let doc = rawdoc! { "_id": "x", "a": 1_i32 };
         let tree = make_tree(&["z"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         // Only _id should be in the result
         assert_eq!(result.get("_id").unwrap(), Some(RawBsonRef::String("x")));
@@ -209,7 +213,7 @@ mod tests {
     fn raw_project_flat_all_fields() {
         let doc = rawdoc! { "_id": "x", "a": 1_i32, "b": "hello" };
         let tree = make_tree(&["a", "b"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         assert_eq!(result.get("_id").unwrap(), Some(RawBsonRef::String("x")));
         assert_eq!(result.get("a").unwrap(), Some(RawBsonRef::Int32(1)));
@@ -230,7 +234,7 @@ mod tests {
             "skip": "nope"
         };
         let tree = make_tree(&["i32", "i64", "f64", "str", "bool", "dt"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         assert_eq!(result.get("i32").unwrap(), Some(RawBsonRef::Int32(42)));
         assert_eq!(result.get("i64").unwrap(), Some(RawBsonRef::Int64(99)));
@@ -249,7 +253,7 @@ mod tests {
         // Verify the projected output can be fully iterated as valid BSON
         let doc = rawdoc! { "_id": "t", "a": 1_i32, "b": "two", "c": true, "d": 4.0_f64 };
         let tree = make_tree(&["a", "c"]);
-        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree));
+        let result = parse_projected(raw_project_flat(doc_bytes(&doc), &tree, b"_id"));
 
         let fields: Vec<_> = result.iter().map(|r| r.unwrap().0.to_string()).collect();
         assert_eq!(fields, vec!["_id", "a", "c"]);

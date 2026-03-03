@@ -1,5 +1,5 @@
 use bson::RawBson;
-use bson::raw::RawDocumentBuf;
+use bson::raw::{CString, RawDocumentBuf};
 use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
@@ -12,6 +12,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let replacement_raw = replacement;
+    let pk_key = CString::try_from(handle.pk_path())
+        .map_err(|e| DbError::Serialization(e.to_string()))?;
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
@@ -20,22 +22,23 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             _ => return Ok(None),
         };
 
+        let pk = handle.pk_path();
         let has_id = old_raw
-            .get("_id")
+            .get(pk)
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .is_some();
         if !has_id {
-            return Err(DbError::InvalidQuery("missing _id".into()));
+            return Err(DbError::InvalidQuery("missing pk".into()));
         }
 
-        // Rebuild doc: copy _id from old doc (preserves type), then replacement fields
+        // Rebuild doc: copy pk from old doc (preserves type), then replacement fields
         let mut buf = RawDocumentBuf::new();
-        if let Ok(Some(id_ref)) = old_raw.get("_id") {
-            buf.append(bson::cstr!("_id"), id_ref);
+        if let Ok(Some(id_ref)) = old_raw.get(pk) {
+            buf.append(&pk_key, id_ref);
         }
         for entry in replacement_raw.iter() {
             let (k, v) = entry?;
-            if k != "_id" {
+            if k != pk {
                 buf.append(k, v);
             }
         }

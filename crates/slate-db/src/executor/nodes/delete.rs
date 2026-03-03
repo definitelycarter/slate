@@ -13,9 +13,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         let opt_val = result?;
         if let Some(RawBson::Document(ref d)) = opt_val {
             let raw_id = d
-                .get("_id")
+                .get(handle.pk_path())
                 .map_err(|e| DbError::Serialization(e.to_string()))?
-                .ok_or_else(|| DbError::InvalidQuery("missing _id".into()))?;
+                .ok_or_else(|| DbError::InvalidQuery("missing pk".into()))?;
             txn.delete(&handle, &raw_id)?;
         }
         Ok(opt_val)

@@ -66,6 +66,7 @@ pub enum Node<Cf: Clone> {
 
     /// Combines ID sets from two child nodes using AND or OR.
     IndexMerge {
+        collection: CollectionHandle<Cf>,
         logical: LogicalOp,
         lhs: Box<Node<Cf>>,
         rhs: Box<Node<Cf>>,
@@ -85,6 +86,7 @@ pub enum Node<Cf: Clone> {
 
     /// Select/rename fields.
     Projection {
+        collection: CollectionHandle<Cf>,
         columns: Option<Vec<String>>,
         source: Box<Node<Cf>>,
     },

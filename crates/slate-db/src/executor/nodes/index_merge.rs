@@ -6,9 +6,9 @@ use bson::RawBson;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
-fn id_hash(v: &RawBson) -> Option<u64> {
+fn id_hash(v: &RawBson, pk_path: &str) -> Option<u64> {
     match v {
-        RawBson::Document(doc) => doc.get("_id").ok().flatten().map(exec::hash_raw),
+        RawBson::Document(doc) => doc.get(pk_path).ok().flatten().map(exec::hash_raw),
         other => Some(hash_owned(other)),
     }
 }
@@ -40,10 +40,12 @@ fn hash_owned(v: &RawBson) -> u64 {
 }
 
 pub(crate) fn execute<'a>(
+    pk_path: &str,
     logical: LogicalOp,
     left_source: RawIter<'a>,
     right_source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
+    let pk_path = pk_path.to_string();
     let merged = match logical {
         LogicalOp::Or => {
             let left: Vec<Option<RawBson>> = left_source.collect::<Result<_, _>>()?;
@@ -53,7 +55,7 @@ pub(crate) fn execute<'a>(
             let mut result = Vec::with_capacity(left.len() + right.len());
             for val in left.into_iter().chain(right) {
                 if let Some(ref v) = val
-                    && let Some(id) = id_hash(v)
+                    && let Some(id) = id_hash(v, &pk_path)
                     && !seen.insert(id)
                 {
                     continue;
@@ -67,7 +69,7 @@ pub(crate) fn execute<'a>(
             let mut right_set = HashSet::new();
             for result in right_source {
                 if let Some(val) = result?
-                    && let Some(id) = id_hash(&val)
+                    && let Some(id) = id_hash(&val, &pk_path)
                 {
                     right_set.insert(id);
                 }
@@ -79,7 +81,7 @@ pub(crate) fn execute<'a>(
                 .into_iter()
                 .filter(|val| {
                     val.as_ref()
-                        .and_then(id_hash)
+                        .and_then(|v| id_hash(v, &pk_path))
                         .map(|id| right_set.contains(&id))
                         .unwrap_or(false)
                 })

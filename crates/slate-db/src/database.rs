@@ -248,7 +248,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
-        let mutation = crate::mutation::parse_mutation(&raw)?;
+        let handle = self.txn.collection(cf, collection)?;
+        let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,
@@ -270,7 +271,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = filter.into_raw_document_buf()?;
         let raw = update.into_raw_document_buf()?;
-        let mutation = crate::mutation::parse_mutation(&raw)?;
+        let handle = self.txn.collection(cf, collection)?;
+        let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,

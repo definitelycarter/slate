@@ -51,10 +51,10 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 covered,
             ),
 
-            Node::IndexMerge { logical, lhs, rhs } => {
+            Node::IndexMerge { collection, logical, lhs, rhs } => {
                 let left = self.execute_node(*lhs)?;
                 let right = self.execute_node(*rhs)?;
-                nodes::index_merge::execute(logical, left, right)
+                nodes::index_merge::execute(collection.pk_path(), logical, left, right)
             }
 
             Node::KeyLookup { collection, source } => {
@@ -77,9 +77,9 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::limit::execute(skip, take, source)
             }
 
-            Node::Projection { columns, source } => {
+            Node::Projection { collection, columns, source } => {
                 let source = self.execute_node(*source)?;
-                nodes::projection::execute(columns, source)
+                nodes::projection::execute(collection.pk_path(), columns, source)
             }
 
             Node::Distinct { field, source } => {

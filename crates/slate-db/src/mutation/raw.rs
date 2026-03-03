@@ -476,13 +476,14 @@ pub(crate) fn raw_apply_mutation(
 pub(crate) fn raw_merge(
     old_raw: &RawDocument,
     update: &RawDocument,
+    pk_path: &str,
 ) -> Result<Option<RawDocumentBuf>, DbError> {
     let mut bytes = old_raw.as_bytes().to_vec();
     let mut changed = false;
 
     for result in update.iter() {
         let (key, _) = result?;
-        if key == "_id" {
+        if key == pk_path {
             continue;
         }
 
@@ -887,7 +888,7 @@ mod tests {
     #[test]
     fn orchestrator_inc_produces_valid_bson() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "name": "Alice" });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -909,7 +910,7 @@ mod tests {
     #[test]
     fn orchestrator_unset() {
         let raw = make_raw(&doc! { "_id": "r1", "a": 1, "b": 2 });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -923,7 +924,7 @@ mod tests {
     #[test]
     fn orchestrator_noop_returns_unchanged() {
         let raw = make_raw(&doc! { "a": 10_i32 });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Unchanged
@@ -933,7 +934,7 @@ mod tests {
     #[test]
     fn orchestrator_dot_path_falls_back() {
         let raw = make_raw(&doc! { "a": { "b": 1 } });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -944,7 +945,7 @@ mod tests {
     fn orchestrator_rename_falls_back() {
         let raw = make_raw(&doc! { "old": 1 });
         let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }).unwrap();
+            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -954,7 +955,7 @@ mod tests {
     #[test]
     fn orchestrator_lpush_falls_back() {
         let raw = make_raw(&doc! { "tags": ["a"] });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }).unwrap();
+        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -966,6 +967,7 @@ mod tests {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "status": "active" });
         let mutation = crate::mutation::parse_mutation(
             &rawdoc! { "$inc": { "score": 5 }, "$set": { "status": "done" } },
+            "_id",
         )
         .unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {

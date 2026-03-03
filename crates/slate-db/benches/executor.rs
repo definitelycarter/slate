@@ -119,6 +119,17 @@ impl Catalog for NoopTransaction {
     }
 }
 
+fn mock_collection() -> CollectionHandle<()> {
+    CollectionHandle::new(
+        "test".to_string(),
+        "default_cf".to_string(),
+        (),
+        vec![],
+        "_id".to_string(),
+        "ttl".to_string(),
+    )
+}
+
 // ── Store-free benchmarks ───────────────────────────────────
 
 fn bench_values(c: &mut Criterion) {
@@ -150,6 +161,7 @@ fn bench_projection(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
+                        collection: mock_collection(),
                         columns: Some(vec!["name".into(), "status".into()]),
                         source: Box::new(Node::Values(docs.clone())),
                     })
@@ -165,6 +177,7 @@ fn bench_projection(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     Plan::Find(Node::Projection {
+                        collection: mock_collection(),
                         columns: None,
                         source: Box::new(Node::Values(docs.clone())),
                     })
@@ -279,6 +292,7 @@ fn bench_distinct(c: &mut Criterion) {
                     Plan::Find(Node::Distinct {
                         field: "status".into(),
                         source: Box::new(Node::Projection {
+                            collection: mock_collection(),
                             columns: Some(vec!["status".into()]),
                             source: Box::new(Node::Values(docs.clone())),
                         }),
@@ -302,6 +316,7 @@ fn bench_distinct(c: &mut Criterion) {
                         source: Box::new(Node::Distinct {
                             field: "status".into(),
                             source: Box::new(Node::Projection {
+                                collection: mock_collection(),
                                 columns: Some(vec!["status".into()]),
                                 source: Box::new(Node::Values(docs.clone())),
                             }),
@@ -326,6 +341,7 @@ fn bench_distinct(c: &mut Criterion) {
                         source: Box::new(Node::Distinct {
                             field: "contacts_count".into(),
                             source: Box::new(Node::Projection {
+                                collection: mock_collection(),
                                 columns: Some(vec!["contacts_count".into()]),
                                 source: Box::new(Node::Values(docs.clone())),
                             }),
@@ -555,6 +571,7 @@ fn bench_index_merge(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexMerge {
+                        collection: collection.clone(),
                         logical: LogicalOp::Or,
                         lhs: Box::new(Node::IndexScan {
                             collection: collection.clone(),
@@ -589,6 +606,7 @@ fn bench_index_merge(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     Plan::Find(Node::IndexMerge {
+                        collection: collection.clone(),
                         logical: LogicalOp::And,
                         lhs: Box::new(Node::IndexScan {
                             collection: collection.clone(),

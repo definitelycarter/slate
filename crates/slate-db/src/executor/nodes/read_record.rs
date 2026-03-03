@@ -19,9 +19,9 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
             Some(v) => v,
             None => return None,
         };
-        // Accept bare id (from IndexScan) or Document with _id
+        // Accept bare id (from IndexScan) or Document with pk
         let raw_ref = match &val {
-            RawBson::Document(d) => match d.get("_id") {
+            RawBson::Document(d) => match d.get(handle.pk_path()) {
                 Ok(Some(id)) => id,
                 _ => return None,
             },

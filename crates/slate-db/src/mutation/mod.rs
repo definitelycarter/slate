@@ -141,16 +141,16 @@ impl Mutation {
 ///
 /// # Errors
 ///
-/// Returns an error if the document contains unknown operator keys, targets `_id`,
-/// or has invalid operand types (e.g. non-numeric `$inc` value, non-string `$rename`).
-pub fn parse_mutation(doc: &RawDocument) -> Result<Mutation, ParseError> {
+/// Returns an error if the document contains unknown operator keys, targets the
+/// primary key, or has invalid operand types (e.g. non-numeric `$inc` value, non-string `$rename`).
+pub fn parse_mutation(doc: &RawDocument, pk_path: &str) -> Result<Mutation, ParseError> {
     let mut ops = Vec::new();
 
     for result in doc.iter() {
         let (key, value) = result.map_err(|e| ParseError(format!("malformed BSON: {e}")))?;
 
-        if key == "_id" {
-            continue; // silently skip _id
+        if key == pk_path {
+            continue; // silently skip pk
         }
 
         match key.as_str() {
@@ -179,11 +179,11 @@ pub fn parse_mutation(doc: &RawDocument) -> Result<Mutation, ParseError> {
         return Err(ParseError("empty mutation document".into()));
     }
 
-    // Reject any ops targeting _id
+    // Reject any ops targeting the primary key
     for fm in &ops {
         let target = fm.field.split('.').next().unwrap_or(&fm.field);
-        if target == "_id" {
-            return Err(ParseError("cannot mutate _id field".into()));
+        if target == pk_path {
+            return Err(ParseError(format!("cannot mutate primary key field '{pk_path}'")));
         }
     }
 
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn bare_fields_become_set() {
         let doc = rawdoc! { "status": "active", "score": 10 };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 2);
         assert_eq!(m.ops[0].field, "status");
         assert_eq!(m.ops[0].op, MutationOp::Set(Bson::String("active".into())));
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn explicit_set() {
         let doc = rawdoc! { "$set": { "a": 1, "b": "hello" } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 2);
         assert_eq!(m.ops[0].op, MutationOp::Set(Bson::Int32(1)));
         assert_eq!(m.ops[1].op, MutationOp::Set(Bson::String("hello".into())));
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn unset() {
         let doc = rawdoc! { "$unset": { "a": "", "b": "" } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 2);
         assert_eq!(m.ops[0].op, MutationOp::Unset);
         assert_eq!(m.ops[1].op, MutationOp::Unset);
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn inc() {
         let doc = rawdoc! { "$inc": { "score": 10, "lives": -1 } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 2);
         assert_eq!(m.ops[0].op, MutationOp::Inc(Bson::Int32(10)));
         assert_eq!(m.ops[1].op, MutationOp::Inc(Bson::Int32(-1)));
@@ -361,13 +361,13 @@ mod tests {
     #[test]
     fn inc_rejects_non_numeric() {
         let doc = rawdoc! { "$inc": { "score": "ten" } };
-        assert!(parse_mutation(&doc).is_err());
+        assert!(parse_mutation(&doc, "_id").is_err());
     }
 
     #[test]
     fn rename() {
         let doc = rawdoc! { "$rename": { "old_name": "new_name" } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops[0].field, "old_name");
         assert_eq!(m.ops[0].op, MutationOp::Rename("new_name".into()));
     }
@@ -375,13 +375,13 @@ mod tests {
     #[test]
     fn rename_rejects_non_string() {
         let doc = rawdoc! { "$rename": { "old": 123 } };
-        assert!(parse_mutation(&doc).is_err());
+        assert!(parse_mutation(&doc, "_id").is_err());
     }
 
     #[test]
     fn push_and_lpush() {
         let doc = rawdoc! { "$push": { "tags": "new" }, "$lpush": { "queue": "first" } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops[0].op, MutationOp::Push(Bson::String("new".into())));
         assert_eq!(m.ops[1].op, MutationOp::LPush(Bson::String("first".into())));
     }
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn pop() {
         let doc = rawdoc! { "$pop": { "tags": 1 } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops[0].op, MutationOp::Pop);
     }
 
@@ -400,7 +400,7 @@ mod tests {
             "status": "active",
             "$push": { "tags": "rust" }
         };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 3);
         assert_eq!(m.ops[0].op, MutationOp::Inc(Bson::Int32(5)));
         assert_eq!(m.ops[1].op, MutationOp::Set(Bson::String("active".into())));
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn dot_path_fields() {
         let doc = rawdoc! { "$set": { "address.city": "Austin" }, "$inc": { "stats.score": 1 } };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops[0].field, "address.city");
         assert_eq!(m.ops[1].field, "stats.score");
     }
@@ -418,25 +418,25 @@ mod tests {
     #[test]
     fn rejects_unknown_operator() {
         let doc = rawdoc! { "$unknown": { "a": 1 } };
-        assert!(parse_mutation(&doc).is_err());
+        assert!(parse_mutation(&doc, "_id").is_err());
     }
 
     #[test]
     fn rejects_id_mutation() {
         let doc = rawdoc! { "$set": { "_id": "new_id" } };
-        assert!(parse_mutation(&doc).is_err());
+        assert!(parse_mutation(&doc, "_id").is_err());
     }
 
     #[test]
     fn rejects_empty_document() {
         let doc = rawdoc! {};
-        assert!(parse_mutation(&doc).is_err());
+        assert!(parse_mutation(&doc, "_id").is_err());
     }
 
     #[test]
     fn skips_top_level_id() {
         let doc = rawdoc! { "_id": "ignored", "status": "active" };
-        let m = parse_mutation(&doc).unwrap();
+        let m = parse_mutation(&doc, "_id").unwrap();
         assert_eq!(m.ops.len(), 1);
         assert_eq!(m.ops[0].field, "status");
     }

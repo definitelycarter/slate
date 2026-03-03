@@ -264,7 +264,7 @@ fn or_fully_indexed_builds_index_merge() {
     match node {
         Node::Filter { source, .. } => match *source {
             Node::KeyLookup { source, .. } => match *source {
-                Node::IndexMerge { logical, lhs, rhs } => {
+                Node::IndexMerge { logical, lhs, rhs, .. } => {
                     assert_eq!(logical, LogicalOp::Or);
                     assert!(is_index_scan_on(&lhs, "status"));
                     assert!(is_index_scan_on(&rhs, "status"));
@@ -552,7 +552,7 @@ fn distinct_builds_correct_pipeline() {
                     Node::Distinct { field, source } => {
                         assert_eq!(field, "status");
                         match *source {
-                            Node::Projection { columns, source } => {
+                            Node::Projection { columns, source, .. } => {
                                 assert_eq!(columns, Some(vec!["status".into()]));
                                 match *source {
                                     Node::KeyLookup { source, .. } => {
@@ -604,7 +604,7 @@ fn update_plan_with_limit() {
     let planner = Planner::new(&txn);
 
     let mutation =
-        crate::mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }).unwrap();
+        crate::mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }, "_id").unwrap();
 
     let plan = planner
         .plan(Statement::Update {
