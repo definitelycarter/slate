@@ -11,7 +11,8 @@ slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
   ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
-  ├── slate-db               → Filter parser, expression tree, query planner + executor
+  ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
+  ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
   └── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
 ```
 
@@ -162,6 +163,101 @@ pub struct Sort {
 
 `slate-query` exports the `Mutation` model: `parse_mutation` converts a BSON update document (with `$set`, `$inc`, `$unset`, etc.) into a `Vec<FieldMutation>` — a flat list of field-level operations. This is used by the executor's mutation pipeline.
 
+## Tier 2.5: Scripting Engine (`slate-vm`)
+
+### Overview
+
+A runtime-agnostic scripting engine for extending database behavior with user-defined logic. Scripts are used for triggers (side effects on mutations), validators (document-level constraints), and UDFs. The VM layer is completely decoupled from storage — it knows nothing about collections, indexes, or transactions.
+
+### Architecture
+
+```
+slate-vm/
+  ├── ScriptRuntime trait     → compile source bytes → ScriptHandle
+  ├── ScriptHandle trait      → execute compiled script with capabilities
+  ├── VmPool                  → runtime registry + compile cache (hash-keyed)
+  └── lua/                    → LuaScriptRuntime (feature-gated behind "lua")
+```
+
+### Runtime Traits
+
+Two traits define the contract between the database and any scripting language:
+
+```rust
+/// Compiles source bytes into executable handles.
+pub trait ScriptRuntime: Send + Sync {
+    fn load(&self, name: &str, source: &[u8]) -> Result<Box<dyn ScriptHandle>, VmError>;
+    fn runtime_kind(&self) -> RuntimeKind;
+}
+
+/// A compiled script ready to execute.
+pub trait ScriptHandle: Send + Sync {
+    fn call(
+        &self,
+        input: &RawDocumentBuf,
+        capabilities: &ScriptCapabilities<'_>,
+    ) -> Result<RawDocumentBuf, VmError>;
+}
+```
+
+Scripts receive BSON in, return BSON out. The database controls what a script can do through `ScriptCapabilities`:
+
+- **`Pure`** — no external access. Used for validators — the script only sees the input document.
+- **`ReadOnly`** — scoped read methods (`ctx.get`). For future use (computed fields, projections).
+- **`ReadWrite`** — scoped read-write methods (`ctx.get`, `ctx.put`, `ctx.delete`). Used for triggers that need to read/write other collections.
+
+Capabilities are provided at call time, not compile time. A compiled script is cached once and reused across transactions with different capability sets.
+
+### VmPool
+
+The `VmPool` manages runtime registration and compiled script caching:
+
+- **Runtime registry** — maps `RuntimeKind` → `Arc<dyn ScriptRuntime>`. Currently Lua; Wasm is defined but not yet implemented.
+- **Compile cache** — `DashMap<(RuntimeKind, u64), Arc<dyn ScriptHandle>>` keyed by runtime + source hash. Scripts are compiled once and shared across all transactions. Cache invalidation is automatic — if the source hash changes (e.g., a trigger is updated), the new source is compiled and cached.
+- **`get_or_load()`** — the primary entry point. Checks the cache by source hash; on miss, compiles via the appropriate runtime and caches the result.
+
+### Lua Runtime
+
+The default scripting runtime (feature-gated behind `lua`). Scripts follow a factory pattern — the source returns a function:
+
+```lua
+return function(ctx, event)
+  -- ctx provides scoped methods (get, put, delete) when capabilities allow
+  -- event is the BSON input document
+  return event  -- return value is converted back to BSON
+end
+```
+
+**Key properties:**
+
+- **Sandboxed** — `os`, `io`, `debug`, `loadfile`, and `dofile` are removed. Scripts can't access the filesystem or network.
+- **Instruction-limited** — a configurable instruction count limit prevents infinite loops. Exceeding it returns `VmError::InstructionLimit`.
+- **BSON type preservation** — i32, i64, DateTime, ObjectId, and other BSON types round-trip through Lua via userdata wrappers with metamethods for comparison and string conversion.
+- **`bson` global** — provides constructors (`bson.datetime()`, `bson.objectid()`, `bson.now()`, `bson.i32()`) for creating typed BSON values from Lua.
+
+### Scoped Callbacks
+
+`ScopedMethod` enables trigger scripts to interact with the database without requiring `'static` closures:
+
+```rust
+pub struct ScopedMethod<'a> {
+    pub name: &'a str,
+    pub callback: &'a dyn Fn(Vec<Bson>) -> Result<Bson, VmError>,
+}
+```
+
+The callbacks capture borrowed transaction references. They're injected as methods on a `ctx` table passed to the script function. This avoids the need for `Arc<Mutex<...>>` patterns — the callbacks are scoped to a single script invocation and borrow directly from the transaction.
+
+### Hook Registry and Snapshot Isolation
+
+At the database layer (`slate-db`), hooks are managed by a `HookRegistry` backed by `ArcSwap<HookSnapshot>`:
+
+- **`HookSnapshot`** — a frozen map of `(cf, collection) → Vec<ResolvedHook>` for both triggers and validators. Built by scanning the catalog.
+- **`HookRegistry`** — wraps `ArcSwap` for lock-free snapshot reads. Transactions capture a snapshot at `begin()` time and see a consistent view regardless of concurrent hook modifications.
+- **Invalidation** — when a transaction that modified hooks (register/drop) commits, a fresh snapshot is loaded and swapped in. Subsequent transactions see the updated hooks.
+
+This gives snapshot isolation for hook resolution — a long-running read transaction won't see hooks that were registered after it began.
+
 ## Tier 2.5: Engine Layer (`slate-engine`)
 
 ### Overview
@@ -255,10 +351,10 @@ let doc = doc! {
 The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
-use slate_db::{DEFAULT_CF, CollectionConfig};
+use slate_db::{DatabaseBuilder, DEFAULT_CF, CollectionConfig};
 use slate_query::FindOptions;
 
-let db = Database::open(store, DatabaseConfig::default());
+let db = DatabaseBuilder::new().open(store)?;
 
 // Create a collection (uses DEFAULT_CF by default)
 let mut txn = db.begin(false)?;
@@ -308,6 +404,22 @@ txn.create_index(DEFAULT_CF, "users", "email")?;  // backfills existing records
 txn.drop_index(DEFAULT_CF, "users", "email")?;
 txn.list_indexes(DEFAULT_CF, "users")?;            // -> Vec<String>
 
+// Triggers and validators (requires DatabaseBuilder with scripting)
+txn.register_trigger("app", "users", "audit_trigger", r#"
+    return function(ctx, event)
+      ctx.put("audit", { _id = event.doc._id .. ":" .. event.action, action = event.action })
+      return event
+    end
+"#)?;
+txn.register_validator("app", "users", "require_name", r#"
+    return function(event)
+      if type(event.doc.name) ~= "string" then
+        return { ok = false, reason = "name is required" }
+      end
+      return { ok = true }
+    end
+"#)?;
+
 // Collection management
 txn.list_collections()?;                           // -> Vec<String>
 txn.drop_collection(DEFAULT_CF, "users")?;         // removes data, indexes, metadata
@@ -338,3 +450,4 @@ For index-covered queries, the index value is carried directly as `RawBson` — 
 - **Priority-based index selection** — the index order in a collection's `CollectionHandle` determines which index is preferred for AND groups.
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
+- **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).
