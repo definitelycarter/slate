@@ -9,8 +9,9 @@ pub(crate) mod hooks;
 pub(crate) mod mutation;
 pub(crate) mod parser;
 mod planner;
+#[cfg(feature = "runtime")]
+pub(crate) mod runtime;
 mod statement;
-mod sweep;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;

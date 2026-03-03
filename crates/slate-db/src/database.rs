@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
@@ -17,19 +16,20 @@ use crate::hooks::{HookRegistry, HookSnapshot};
 use crate::parser;
 use crate::planner::planner::Planner;
 use crate::statement::Statement;
-use crate::sweep::{self, TtlHandle};
 
 // ── DatabaseBuilder ────────────────────────────────────────
 
 pub struct DatabaseBuilder {
     pool: Option<VmPool>,
-    sweep_interval: Option<Duration>,
+    #[cfg(feature = "runtime")]
+    sweep_interval: Option<std::time::Duration>,
 }
 
 impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
             pool: None,
+            #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
     }
@@ -44,7 +44,8 @@ impl DatabaseBuilder {
     }
 
     /// Enable background TTL sweep at the given interval.
-    pub fn with_sweep(mut self, interval: Duration) -> Self {
+    #[cfg(feature = "runtime")]
+    pub fn with_sweep(mut self, interval: std::time::Duration) -> Self {
         self.sweep_interval = Some(interval);
         self
     }
@@ -66,8 +67,9 @@ impl DatabaseBuilder {
             None
         };
 
+        #[cfg(feature = "runtime")]
         let ttl_handle = match self.sweep_interval {
-            Some(d) => sweep::spawn(Arc::clone(&engine), d.as_secs()),
+            Some(d) => crate::runtime::sweep::spawn(Arc::clone(&engine), d.as_secs()),
             None => None,
         };
 
@@ -75,6 +77,7 @@ impl DatabaseBuilder {
             engine,
             pool: self.pool,
             registry,
+            #[cfg(feature = "runtime")]
             ttl_handle,
         })
     }
@@ -86,7 +89,8 @@ pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
     pool: Option<VmPool>,
     registry: Option<HookRegistry>,
-    ttl_handle: Option<TtlHandle>,
+    #[cfg(feature = "runtime")]
+    ttl_handle: Option<crate::runtime::sweep::TtlHandle>,
 }
 
 impl<S: Store> Database<S> {
@@ -110,15 +114,16 @@ impl<S: Store> Database<S> {
         Ok(deleted)
     }
 
-    /// List all known collection names.
-    pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
+    /// List all known collections as `(cf, name)` pairs.
+    pub fn list_collections(&self) -> Result<Vec<(String, String)>, DbError> {
         let txn = self.begin(true)?;
-        let names = txn.list_collections()?;
+        let pairs = txn.list_collections()?;
         let _ = txn.rollback();
-        Ok(names)
+        Ok(pairs)
     }
 
     /// Gracefully stop background tasks.
+    #[cfg(feature = "runtime")]
     pub fn shutdown(&mut self) {
         if let Some(mut handle) = self.ttl_handle.take() {
             handle.stop();
@@ -439,10 +444,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── Collection operations ───────────────────────────────────
 
-    /// List all known collection names.
-    pub fn list_collections(&self) -> Result<Vec<String>, DbError> {
+    /// List all known collections as `(cf, name)` pairs.
+    pub fn list_collections(&self) -> Result<Vec<(String, String)>, DbError> {
         let configs = self.txn.list_collections(None)?;
-        Ok(configs.into_iter().map(|c| c.name().to_string()).collect())
+        Ok(configs
+            .into_iter()
+            .map(|c| (c.cf_name().to_string(), c.name().to_string()))
+            .collect())
     }
 
     /// Drop a collection and all its data, indexes, and metadata.

@@ -26,8 +26,9 @@ fn list_collections() {
 
     let txn = db.begin(true).unwrap();
     let mut collections = txn.list_collections().unwrap();
-    collections.sort();
-    assert_eq!(collections, vec!["accounts", "contacts"]);
+    collections.sort_by(|a, b| a.1.cmp(&b.1));
+    let names: Vec<&str> = collections.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(names, vec!["accounts", "contacts"]);
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn drop_collection() {
         Err(slate_db::DbError::CollectionNotFound(_))
     ));
     let collections = txn.list_collections().unwrap();
-    assert!(!collections.contains(&COLLECTION.to_string()));
+    assert!(!collections.iter().any(|(_, n)| n == COLLECTION));
 }
 
 // ── Collection isolation ────────────────────────────────────────
@@ -140,7 +141,7 @@ fn register_validators() {
 
     let txn = db.begin(true).unwrap();
     let collections = txn.list_collections().unwrap();
-    assert!(collections.contains(&"users".to_string()));
+    assert!(collections.iter().any(|(_, n)| n == "users"));
 }
 
 #[test]
@@ -158,7 +159,7 @@ fn register_udfs() {
 
     let txn = db.begin(true).unwrap();
     let collections = txn.list_collections().unwrap();
-    assert!(collections.contains(&"users".to_string()));
+    assert!(collections.iter().any(|(_, n)| n == "users"));
 }
 
 #[test]

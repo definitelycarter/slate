@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["lua"]
+default = ["lua", "runtime"]
+runtime = []
 bench-internals = []
 lua = ["slate-vm/lua"]
 js = ["slate-vm/js"]

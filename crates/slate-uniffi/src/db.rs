@@ -246,7 +246,7 @@ impl SlateDatabase {
     pub fn list_collections(&self) -> Result<Vec<String>, SlateError> {
         self.read(|txn| {
             let collections = txn.list_collections()?;
-            Ok(collections)
+            Ok(collections.into_iter().map(|(_, name)| name).collect())
         })
     }
 
