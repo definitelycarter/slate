@@ -3,8 +3,10 @@ use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
-use crate::executor::{Context, RawIter};
+use crate::executor::RawIter;
+use crate::hooks::ResolvedHook;
 use crate::mutation::raw as raw_mutation;
+use slate_vm::pool::VmPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UpsertMode {
@@ -13,7 +15,9 @@ pub(crate) enum UpsertMode {
 }
 
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
-    ctx: Context<'a, T>,
+    txn: &'a T,
+    pool: Option<&'a VmPool>,
+    hooks: Vec<ResolvedHook>,
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: RawIter<'a>,
@@ -42,10 +46,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             .map_err(|e| DbError::Serialization(e.to_string()))?
             .expect("_id was just ensured");
 
-        let old_doc = ctx.txn.get(&handle, &raw_id)?;
+        let old_doc = txn.get(&handle, &raw_id)?;
 
         if let Some(ref old_raw_doc) = old_doc {
-            ctx.fire_triggers(&cf, "updating", old_raw_doc)?;
+            super::trigger::fire_hooks(txn, pool, &cf, &hooks, "updating", old_raw_doc)?;
 
             let written = build_doc(&mode, &new_doc, old_raw_doc)?;
             let written = match written {
@@ -56,13 +60,13 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 }
             };
 
-            ctx.txn.put(&handle, &written)?;
-            ctx.fire_triggers(&cf, "updated", &written)?;
+            txn.put(&handle, &written)?;
+            super::trigger::fire_hooks(txn, pool, &cf, &hooks, "updated", &written)?;
             Ok(Some(RawBson::Document(written)))
         } else {
-            ctx.fire_triggers(&cf, "inserting", &new_doc)?;
-            ctx.txn.put_nx(&handle, &new_doc)?;
-            ctx.fire_triggers(&cf, "inserted", &new_doc)?;
+            super::trigger::fire_hooks(txn, pool, &cf, &hooks, "inserting", &new_doc)?;
+            txn.put_nx(&handle, &new_doc)?;
+            super::trigger::fire_hooks(txn, pool, &cf, &hooks, "inserted", &new_doc)?;
             Ok(Some(RawBson::Document(new_doc)))
         }
     })))
@@ -169,5 +173,4 @@ mod tests {
         let result = build_doc(&UpsertMode::Merge, &new, &old).unwrap();
         assert!(result.is_none());
     }
-
 }

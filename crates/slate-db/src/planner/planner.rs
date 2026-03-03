@@ -3,12 +3,14 @@ use slate_query::{Sort, SortDirection};
 
 use crate::error::DbError;
 use crate::expression::{Expression, LogicalOp};
+use crate::hooks::HookSnapshot;
 use crate::statement::Statement;
 
 use super::plan::{IndexScanRange, Node, Plan, ScanDirection};
 
 pub struct Planner<'a, T: Catalog> {
     catalog: &'a T,
+    snapshot: Option<&'a HookSnapshot>,
 }
 
 impl<'a, T: Catalog> Planner<'a, T>
@@ -16,7 +18,14 @@ where
     T::Cf: Clone,
 {
     pub fn new(catalog: &'a T) -> Self {
-        Self { catalog }
+        Self {
+            catalog,
+            snapshot: None,
+        }
+    }
+
+    pub fn with_snapshot(catalog: &'a T, snapshot: Option<&'a HookSnapshot>) -> Self {
+        Self { catalog, snapshot }
     }
 
     pub fn plan(&self, stmt: Statement<'_>) -> Result<Plan<T::Cf>, DbError> {
@@ -281,6 +290,76 @@ where
         Ok(Plan::Find(node))
     }
 
+    // ── Hook wrapping helpers ───────────────────────────────────
+
+    /// Wrap source with Node::Validate then Node::Trigger (before-action).
+    fn wrap_before(&self, cf: &str, coll: &str, action: &str, source: Node<T::Cf>) -> Node<T::Cf> {
+        let Some(snap) = self.snapshot else {
+            return source;
+        };
+
+        let validators = snap.validators_for(cf, coll);
+        let source = if !validators.is_empty() {
+            Node::Validate {
+                validators: validators.to_vec(),
+                source: Box::new(source),
+            }
+        } else {
+            source
+        };
+
+        let triggers = snap.triggers_for(cf, coll);
+        if !triggers.is_empty() {
+            Node::Trigger {
+                cf: cf.into(),
+                action: action.into(),
+                hooks: triggers.to_vec(),
+                source: Box::new(source),
+            }
+        } else {
+            source
+        }
+    }
+
+    /// Wrap source with Node::Trigger only (before-action, no validation).
+    /// Used for deletes where nothing is being written.
+    fn wrap_before_triggers(&self, cf: &str, coll: &str, action: &str, source: Node<T::Cf>) -> Node<T::Cf> {
+        let Some(snap) = self.snapshot else {
+            return source;
+        };
+
+        let triggers = snap.triggers_for(cf, coll);
+        if !triggers.is_empty() {
+            Node::Trigger {
+                cf: cf.into(),
+                action: action.into(),
+                hooks: triggers.to_vec(),
+                source: Box::new(source),
+            }
+        } else {
+            source
+        }
+    }
+
+    /// Wrap plan with Plan::Trigger (after-action).
+    fn wrap_after(&self, cf: &str, coll: &str, action: &str, plan: Plan<T::Cf>) -> Plan<T::Cf> {
+        let Some(snap) = self.snapshot else {
+            return plan;
+        };
+
+        let triggers = snap.triggers_for(cf, coll);
+        if !triggers.is_empty() {
+            Plan::Trigger {
+                cf: cf.into(),
+                action: action.into(),
+                hooks: triggers.to_vec(),
+                plan: Box::new(plan),
+            }
+        } else {
+            plan
+        }
+    }
+
     // ── Insert ──────────────────────────────────────────────────
 
     fn plan_insert(
@@ -290,11 +369,12 @@ where
         docs: Vec<bson::RawDocumentBuf>,
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
-
-        Ok(Plan::Insert {
+        let source = self.wrap_before(cf, collection, "inserting", Node::Values(docs));
+        let plan = Plan::Insert {
             collection: handle,
-            source: Node::Values(docs),
-        })
+            source,
+        };
+        Ok(self.wrap_after(cf, collection, "inserted", plan))
     }
 
     // ── Update ──────────────────────────────────────────────────
@@ -309,12 +389,13 @@ where
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, limit);
-
-        Ok(Plan::Update {
+        let source = self.wrap_before(cf, collection, "updating", source);
+        let plan = Plan::Update {
             collection: handle,
             mutation,
             source,
-        })
+        };
+        Ok(self.wrap_after(cf, collection, "updated", plan))
     }
 
     // ── Replace ─────────────────────────────────────────────────
@@ -328,12 +409,13 @@ where
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, Some(1));
-
-        Ok(Plan::Replace {
+        let source = self.wrap_before(cf, collection, "updating", source);
+        let plan = Plan::Replace {
             collection: handle,
             replacement,
             source,
-        })
+        };
+        Ok(self.wrap_after(cf, collection, "updated", plan))
     }
 
     // ── Delete ──────────────────────────────────────────────────
@@ -347,11 +429,12 @@ where
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
         let source = self.plan_read_source(&handle, predicate, limit);
-
-        Ok(Plan::Delete {
+        let source = self.wrap_before_triggers(cf, collection, "deleting", source);
+        let plan = Plan::Delete {
             collection: handle,
             source,
-        })
+        };
+        Ok(self.wrap_after(cf, collection, "deleted", plan))
     }
 
     // ── Merge ───────────────────────────────────────────────────
@@ -364,8 +447,14 @@ where
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
 
+        // Upsert/merge keeps triggers internal (runtime-conditional actions).
+        let hooks = self
+            .snapshot
+            .map(|s| s.triggers_for(cf, collection).to_vec())
+            .unwrap_or_default();
         Ok(Plan::Merge {
             collection: handle,
+            hooks,
             source: Node::Values(docs),
         })
     }
@@ -380,8 +469,14 @@ where
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
 
+        // Upsert/merge keeps triggers internal (runtime-conditional actions).
+        let hooks = self
+            .snapshot
+            .map(|s| s.triggers_for(cf, collection).to_vec())
+            .unwrap_or_default();
         Ok(Plan::Upsert {
             collection: handle,
+            hooks,
             source: Node::Values(docs),
         })
     }

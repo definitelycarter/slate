@@ -11,5 +11,7 @@ pub(crate) mod read_record;
 pub(crate) mod replace;
 pub(crate) mod scan;
 pub(crate) mod sort;
+pub(crate) mod trigger;
 pub(crate) mod upsert;
+pub(crate) mod validate;
 pub(crate) mod values;

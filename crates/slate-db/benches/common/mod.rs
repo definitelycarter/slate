@@ -5,8 +5,9 @@ use bson::rawdoc;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
-use slate_db::bench::{Database, RawIter};
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseConfig};
+use slate_db::bench::Database;
+use slate_db::bench::RawIter;
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -46,7 +47,7 @@ pub fn consume_rows(iter: RawIter) -> usize {
 /// Create a seeded MemoryStore-backed Engine with `n` documents and indexes
 /// on `status` and `contacts_count`.
 pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
-    let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
+    let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
@@ -111,7 +112,7 @@ pub fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
 }
 
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
-    let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
+    let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),

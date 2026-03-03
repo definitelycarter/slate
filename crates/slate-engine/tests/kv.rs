@@ -1,7 +1,7 @@
 use bson::raw::RawBsonRef;
 use slate_engine::{
     Catalog, CollectionHandle, Engine, EngineTransaction, FunctionKind, IndexRange, KvEngine,
-    DEFAULT_CF,
+    DEFAULT_CF, runtime_tag,
 };
 use slate_store::MemoryStore;
 
@@ -636,7 +636,7 @@ fn create_and_load_trigger() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"print('audit')")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"print('audit')")
         .unwrap();
     txn.commit().unwrap();
 
@@ -653,7 +653,7 @@ fn create_and_load_validator() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "require_name", b"assert(doc.name)")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "require_name", runtime_tag::LUA, b"assert(doc.name)")
         .unwrap();
     txn.commit().unwrap();
 
@@ -670,7 +670,7 @@ fn create_and_load_udf() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", b"return first .. last")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", runtime_tag::LUA, b"return first .. last")
         .unwrap();
     txn.commit().unwrap();
 
@@ -687,11 +687,11 @@ fn multiple_functions_per_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"src1")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src1")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", b"src2")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", runtime_tag::LUA, b"src2")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", b"src3")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", runtime_tag::LUA, b"src3")
         .unwrap();
     txn.commit().unwrap();
 
@@ -714,9 +714,9 @@ fn drop_function() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"src")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", b"src2")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", runtime_tag::LUA, b"src2")
         .unwrap();
     txn.commit().unwrap();
 
@@ -737,11 +737,11 @@ fn drop_collection_cleans_functions() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"t")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"t")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", b"v")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", runtime_tag::LUA, b"v")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", b"d")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", runtime_tag::LUA, b"d")
         .unwrap();
     txn.commit().unwrap();
 
@@ -763,7 +763,7 @@ fn drop_collection_cleans_functions() {
 fn function_requires_existing_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    let err = txn.create_function(DEFAULT_CF, "nope", FunctionKind::Trigger, "audit", b"src");
+    let err = txn.create_function(DEFAULT_CF, "nope", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src");
     assert!(err.is_err());
     txn.rollback().unwrap();
 }
@@ -774,9 +774,9 @@ fn functions_isolated_across_collections() {
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
     txn.create_collection(DEFAULT_CF, "posts", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"users_src")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"users_src")
         .unwrap();
-    txn.create_function(DEFAULT_CF, "posts", FunctionKind::Trigger, "audit", b"posts_src")
+    txn.create_function(DEFAULT_CF, "posts", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"posts_src")
         .unwrap();
     txn.commit().unwrap();
 
@@ -808,10 +808,10 @@ fn create_function_duplicate_errors() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"src1")
+    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src1")
         .unwrap();
 
-    let err = txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", b"src2");
+    let err = txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src2");
     assert!(err.is_err(), "expected FunctionExists error on duplicate create_function");
     txn.rollback().unwrap();
 }

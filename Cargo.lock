@@ -1274,6 +1274,7 @@ checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 name = "slate-db"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bson",
  "criterion",
  "rand 0.8.5",

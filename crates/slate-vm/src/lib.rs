@@ -1,82 +1,79 @@
 mod error;
 #[cfg(feature = "lua")]
 pub mod lua;
+pub mod pool;
 
 pub use error::VmError;
 #[cfg(feature = "lua")]
-pub use lua::{LuaError, LuaVm};
+pub use lua::{LuaError, LuaScriptHandle, LuaScriptRuntime};
 
-use std::sync::Arc;
-
-use bson::raw::RawDocumentBuf;
 use bson::Bson;
+use bson::raw::RawDocumentBuf;
 
-/// A callback function that can be injected into the VM.
-///
-/// Receives positional arguments as BSON values and returns a BSON value.
-pub type VmCallback = Arc<dyn Fn(Vec<Bson>) -> Result<Bson, VmError> + Send + Sync>;
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
 
-/// A borrowed callback for use within a single scoped VM call.
+/// Identifies which scripting runtime a script targets.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub enum RuntimeKind {
+    #[cfg(feature = "lua")]
+    Lua,
+    #[cfg(feature = "wasm")]
+    Wasm,
+}
+
+/// A borrowed callback for use within a single scoped script call.
 ///
-/// Unlike [`VmCallback`], this does not require `Send` or `'static`,
-/// enabling capture of borrowed transaction references. Methods are
-/// placed on a context table passed as the first argument to the
-/// registered function.
+/// Does not require `Send` or `'static`, enabling capture of borrowed
+/// transaction references. Methods are placed on a context table passed
+/// as the first argument to the script function.
 pub struct ScopedMethod<'a> {
     pub name: &'a str,
     pub callback: &'a dyn Fn(Vec<Bson>) -> Result<Bson, VmError>,
 }
 
-/// Abstraction over a scripting engine that processes BSON documents.
+/// Describes what external access a script has during execution.
 ///
-/// Functions are compiled once via [`Vm::register`] and called with BSON
-/// input/output via [`Vm::call`]. The VM implementation is responsible for
-/// sandboxing and resource limits.
-pub trait Vm {
-    /// Compile and cache a named function from source bytes.
-    ///
-    /// For Lua, the source should be a UTF-8 chunk that returns a function:
-    /// ```lua
-    /// return function(ctx, event)
-    ///     return { ok = true }
-    /// end
-    /// ```
-    fn register(&mut self, name: &str, source: &[u8]) -> Result<(), VmError>;
-
-    /// Remove a previously registered function.
-    fn unregister(&mut self, name: &str) -> Result<(), VmError>;
-
-    /// Call a registered function, passing a BSON document as input
-    /// and receiving a BSON document as output.
-    fn call(&self, name: &str, input: &RawDocumentBuf) -> Result<RawDocumentBuf, VmError>;
-
-    /// Call a registered function with scoped callbacks available as
-    /// methods on a context table passed as the first argument.
-    ///
-    /// The callbacks exist only for the duration of this call and are
-    /// cleaned up before the method returns, enabling triggers to
-    /// call back into the database transaction without requiring
-    /// `'static` lifetimes.
-    ///
-    /// The registered function is called as `func(ctx, input)`.
-    fn call_with_scope(
-        &self,
-        name: &str,
-        input: &RawDocumentBuf,
-        methods: &[ScopedMethod<'_>],
-    ) -> Result<RawDocumentBuf, VmError>;
-
-    /// Inject a named callback into a namespace, making it callable from scripts.
-    ///
-    /// For example, `inject("db", "put", cb)` makes `db.put(args)` available
-    /// in Lua. The callback receives a single BSON document and returns one.
-    fn inject(
-        &self,
-        namespace: &str,
-        method: &str,
-        callback: VmCallback,
-    ) -> Result<(), VmError>;
-
-    /// Remove a previously injected namespace and all its methods.
-    fn eject(&self, namespace: &str) -> Result<(), VmError>;
+/// Capabilities are provided at call time, not compile time, so that
+/// cached compiled scripts can be reused across transactions.
+pub enum ScriptCapabilities<'a> {
+    /// Pure function — no external access.
+    Pure,
+    /// Read-only access via scoped methods.
+    ReadOnly { methods: &'a [ScopedMethod<'a>] },
+    /// Full read-write access via scoped methods.
+    ReadWrite { methods: &'a [ScopedMethod<'a>] },
 }
+
+// ---------------------------------------------------------------------------
+// Runtime-agnostic traits
+// ---------------------------------------------------------------------------
+
+/// A scripting runtime that can compile source into executable handles.
+///
+/// Each runtime (Lua, Wasm, etc.) implements this trait once. The pool
+/// calls [`ScriptRuntime::load`] to compile source bytes and caches the
+/// returned handle.
+pub trait ScriptRuntime: Send + Sync {
+    /// Compile source bytes into an executable handle.
+    fn load(&self, name: &str, source: &[u8]) -> Result<Box<dyn ScriptHandle>, VmError>;
+
+    /// Which runtime kind this is.
+    fn runtime_kind(&self) -> RuntimeKind;
+}
+
+/// A compiled script ready to execute.
+///
+/// Handles are cached by the [`pool::VmPool`] and shared via `Arc`.
+/// Capabilities are injected at call time so the same compiled handle
+/// can be reused across different transactions.
+pub trait ScriptHandle: Send + Sync {
+    /// Execute the script with the given BSON input and capabilities.
+    fn call(
+        &self,
+        input: &RawDocumentBuf,
+        capabilities: &ScriptCapabilities<'_>,
+    ) -> Result<RawDocumentBuf, VmError>;
+}
+

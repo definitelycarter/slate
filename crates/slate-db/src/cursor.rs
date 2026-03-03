@@ -2,7 +2,7 @@ use bson::RawDocumentBuf;
 use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
-use crate::database::VmFactory;
+use slate_vm::pool::VmPool;
 use crate::error::DbError;
 use crate::executor::{Executor, RawIter};
 use crate::planner::plan::Plan;
@@ -17,31 +17,31 @@ type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
     plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
-    vm_factory: Option<&'txn VmFactory>,
+    pool: Option<&'txn VmPool>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn KvTxn<'db, S>,
         plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
-        vm_factory: Option<&'txn VmFactory>,
+        pool: Option<&'txn VmPool>,
     ) -> Self {
         Self {
             txn,
             plan,
-            vm_factory,
+            pool,
         }
     }
 
     /// Consume the cursor and return a streaming iterator over documents.
     pub fn iter(self) -> Result<CursorIter<'txn>, DbError> {
-        let iter = Executor::new(self.txn, self.vm_factory).execute(self.plan)?;
+        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
         Ok(CursorIter { inner: iter })
     }
 
     /// Consume the cursor, drain all rows, and return the count of affected rows.
     pub fn drain(self) -> Result<u64, DbError> {
-        let iter = Executor::new(self.txn, self.vm_factory).execute(self.plan)?;
+        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
         let mut count = 0u64;
         for result in iter {
             result?;

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use slate_db::{CollectionConfig, Database, DatabaseConfig, DatabaseTransaction, DbError, DEFAULT_CF};
+use slate_db::{CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, DEFAULT_CF};
 use slate_query::FindOptions;
 
 use crate::error::SlateError;
@@ -63,7 +63,7 @@ impl SlateDatabase {
     #[uniffi::constructor]
     pub fn memory() -> Arc<Self> {
         let store = slate_store::MemoryStore::new();
-        let db = Database::open(store, DatabaseConfig::default());
+        let db = DatabaseBuilder::new().open(store).expect("failed to open database");
         Arc::new(Self { db })
     }
 }
@@ -77,7 +77,7 @@ impl SlateDatabase {
             StoreImpl::open(std::path::Path::new(&path)).map_err(|e| SlateError::Store {
                 message: e.to_string(),
             })?;
-        let db = Database::open(store, DatabaseConfig::default());
+        let db = DatabaseBuilder::new().open(store).map_err(SlateError::from)?;
         Ok(Arc::new(Self { db }))
     }
 }

@@ -2,6 +2,7 @@ use bson::RawDocumentBuf;
 use slate_engine::CollectionHandle;
 use slate_query::Sort;
 
+use crate::hooks::ResolvedHook;
 use crate::mutation::Mutation;
 
 use crate::expression::{Expression, LogicalOp};
@@ -30,11 +31,21 @@ pub enum Plan<Cf: Clone> {
     },
     Merge {
         collection: CollectionHandle<Cf>,
+        hooks: Vec<ResolvedHook>,
         source: Node<Cf>,
     },
     Upsert {
         collection: CollectionHandle<Cf>,
+        hooks: Vec<ResolvedHook>,
         source: Node<Cf>,
+    },
+    /// After-mutation trigger wrapper. Fires hooks on each document
+    /// yielded by the inner plan.
+    Trigger {
+        cf: String,
+        action: String,
+        hooks: Vec<ResolvedHook>,
+        plan: Box<Plan<Cf>>,
     },
 }
 
@@ -99,6 +110,22 @@ pub enum Node<Cf: Clone> {
 
     /// Caller-provided documents.
     Values(Vec<RawDocumentBuf>),
+
+    /// Before-mutation trigger tap. Fires hooks per document as a
+    /// side effect, always passes the document through.
+    Trigger {
+        cf: String,
+        action: String,
+        hooks: Vec<ResolvedHook>,
+        source: Box<Node<Cf>>,
+    },
+
+    /// Validation gate. Runs validators per document, errors if any
+    /// fail. Passes the document through on success.
+    Validate {
+        validators: Vec<ResolvedHook>,
+        source: Box<Node<Cf>>,
+    },
 }
 
 /// Scan direction for index scans.

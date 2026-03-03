@@ -8,7 +8,7 @@ use crate::error::EngineError;
 
 // ── Function types ──────────────────────────────────────────
 
-/// The kind of Lua function stored in the catalog.
+/// The kind of function stored in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionKind {
     Trigger,
@@ -16,10 +16,17 @@ pub enum FunctionKind {
     Udf,
 }
 
+/// Runtime tag constants for function storage.
+pub mod runtime_tag {
+    pub const LUA: u8 = 0x01;
+    pub const WASM: u8 = 0x02;
+}
+
 /// A named function definition loaded from the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionEntry {
     pub name: String,
+    pub runtime: u8,
     pub source: Vec<u8>,
 }
 
@@ -326,6 +333,7 @@ pub trait Catalog: EngineTransaction {
         collection: &str,
         kind: FunctionKind,
         name: &str,
+        runtime: u8,
         source: &[u8],
     ) -> Result<(), EngineError>;
 

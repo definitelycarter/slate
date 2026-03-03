@@ -5,7 +5,7 @@ use bson::raw::RawDocumentBuf;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Database, Executor, Node, Plan};
-use slate_db::{CollectionConfig, DatabaseConfig};
+use slate_db::{CollectionConfig, DatabaseBuilder};
 use slate_engine::{Catalog, Engine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
@@ -20,7 +20,7 @@ fn bench_insert(c: &mut Criterion) {
     for n in [100, 1_000] {
         // Empty engine with collection + indexes, docs inserted per iteration
         let engine = {
-            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
+            let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -179,6 +179,7 @@ fn bench_upsert_replace(c: &mut Criterion) {
                     let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Upsert {
                         collection,
+                        hooks: vec![],
                         source: Node::Values(raw_docs.clone()),
                     };
                     (txn, plan)
@@ -221,6 +222,7 @@ fn bench_upsert_merge(c: &mut Criterion) {
                     let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Merge {
                         collection,
+                        hooks: vec![],
                         source: Node::Values(raw_docs.clone()),
                     };
                     (txn, plan)
@@ -248,7 +250,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
     for n in [100, 1_000] {
         // Empty collection — upsert acts as pure insert
         let engine = {
-            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
+            let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "test".into(),
@@ -279,6 +281,7 @@ fn bench_upsert_insert(c: &mut Criterion) {
                     let collection = txn.collection(DEFAULT_CF, "test").unwrap();
                     let plan = Plan::Upsert {
                         collection,
+                        hooks: vec![],
                         source: Node::Values(raw_docs.clone()),
                     };
                     (txn, plan)

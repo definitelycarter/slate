@@ -1,12 +1,17 @@
+use std::sync::Arc;
+
 use bson::{doc, rawdoc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig, DbError};
+use slate_db::{CollectionConfig, DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
 use slate_store::MemoryStore;
+use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
 fn main() -> Result<(), DbError> {
-    // ── Open an in-memory database with Lua VM support ─────────
-    let store = MemoryStore::new();
-    let db = Database::open(store, DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(slate_vm::LuaVm::new()?)));
+    // ── Open an in-memory database with Lua scripting ──────────
+    let mut reg = RuntimeRegistry::new();
+    reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
+    let db = DatabaseBuilder::new()
+        .with_scripting(VmPool::new(reg))
+        .open(MemoryStore::new())?;
 
     // ── Set up collections ────────────────────────────────────
     let mut txn = db.begin(false)?;

@@ -276,6 +276,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         collection: &str,
         kind: FunctionKind,
         name: &str,
+        runtime: u8,
         source: &[u8],
     ) -> Result<(), EngineError> {
         // Verify collection exists.
@@ -294,7 +295,11 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
                 "{collection}.{kind:?}.{name}"
             )));
         }
-        self.txn.put(&sys, &key, source)?;
+        // Value format: [runtime_tag: u8][source_bytes...]
+        let mut value = Vec::with_capacity(1 + source.len());
+        value.push(runtime);
+        value.extend_from_slice(source);
+        self.txn.put(&sys, &key, &value)?;
         Ok(())
     }
 
@@ -331,9 +336,16 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         for result in iter {
             let (key_bytes, value) = result?;
             if let Some(Key::FunctionConfig(_, _, _, name)) = Key::decode(&key_bytes) {
+                // Value format: [runtime_tag: u8][source_bytes...]
+                let (runtime, source) = if value.is_empty() {
+                    (crate::traits::runtime_tag::LUA, Vec::new())
+                } else {
+                    (value[0], value[1..].to_vec())
+                };
                 entries.push(FunctionEntry {
                     name: name.into_owned(),
-                    source: value,
+                    runtime,
+                    source,
                 });
             }
         }

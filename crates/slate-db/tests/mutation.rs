@@ -1,11 +1,19 @@
 mod common;
 use common::*;
 
+use std::sync::Arc;
+
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig, DEFAULT_CF};
+use slate_db::{CollectionConfig, DatabaseBuilder, DEFAULT_CF, RuntimeRegistry, VmPool};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
-use slate_vm::LuaVm;
+use slate_vm::{LuaScriptRuntime, RuntimeKind};
+
+fn scripting_pool() -> VmPool {
+    let mut reg = RuntimeRegistry::new();
+    reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
+    VmPool::new(reg)
+}
 
 // ── Mutation operator tests ─────────────────────────────────────
 
@@ -930,8 +938,9 @@ fn mutation_id_rejected() {
 
 #[test]
 fn delete_fires_trigger_successfully() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -977,8 +986,9 @@ fn delete_fires_trigger_successfully() {
 
 #[test]
 fn delete_many_fires_trigger_successfully() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1028,8 +1038,9 @@ fn delete_many_fires_trigger_successfully() {
 
 #[test]
 fn delete_trigger_error_propagates() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     // Seed data first (no triggers yet)
     let mut txn = db.begin(false).unwrap();
@@ -1066,8 +1077,9 @@ fn delete_trigger_error_propagates() {
 
 #[test]
 fn insert_fires_trigger_successfully() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1100,8 +1112,9 @@ fn insert_fires_trigger_successfully() {
 
 #[test]
 fn insert_trigger_error_propagates() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1130,8 +1143,9 @@ fn insert_trigger_error_propagates() {
 
 #[test]
 fn update_fires_trigger_successfully() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1167,8 +1181,9 @@ fn update_fires_trigger_successfully() {
 
 #[test]
 fn update_trigger_error_propagates() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     // Seed data first (no triggers yet)
     let mut txn = db.begin(false).unwrap();
@@ -1207,8 +1222,9 @@ fn update_trigger_error_propagates() {
 
 #[test]
 fn replace_fires_trigger_successfully() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1247,8 +1263,9 @@ fn replace_fires_trigger_successfully() {
 
 #[test]
 fn upsert_fires_trigger_on_insert() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
@@ -1281,8 +1298,9 @@ fn upsert_fires_trigger_on_insert() {
 
 #[test]
 fn upsert_fires_trigger_on_update() {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default())
-        .with_vm_factory(|| Ok(Box::new(LuaVm::new()?)));
+    let db = DatabaseBuilder::new()
+        .with_scripting(scripting_pool())
+        .open(MemoryStore::new()).unwrap();
 
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {

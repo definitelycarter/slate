@@ -1,6 +1,6 @@
 use bson::raw::RawDocument;
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig, DEFAULT_CF};
+use slate_db::{CollectionConfig, Database, DatabaseBuilder, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 pub trait HasKey {
@@ -24,7 +24,7 @@ pub const COLLECTION: &str = "accounts";
 pub fn temp_db() -> (Database<MemoryStore>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::new();
-    let db = Database::open(store, DatabaseConfig::default());
+    let db = DatabaseBuilder::new().open(store).unwrap();
     (db, dir)
 }
 

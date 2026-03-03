@@ -1,7 +1,7 @@
 mod convert;
 pub mod error;
+mod runtime;
 mod sandbox;
-mod vm;
 
 pub use error::LuaError;
-pub use vm::LuaVm;
+pub use runtime::{LuaScriptHandle, LuaScriptRuntime};

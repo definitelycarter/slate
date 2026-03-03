@@ -115,7 +115,7 @@ impl Catalog for NoopTransaction {
     fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: u8, _: &[u8]) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_function called");
     }
     fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
@@ -251,7 +251,7 @@ impl Catalog for MockTransaction {
     fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: u8, _: &[u8]) -> Result<(), EngineError> {
         panic!("MockTransaction::create_function called");
     }
     fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {

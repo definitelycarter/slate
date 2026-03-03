@@ -7,14 +7,12 @@ pub enum VmError {
     Lua(crate::lua::LuaError),
     /// BSON serialization/deserialization failure during conversion.
     Bson(bson::error::Error),
-    /// The named function was not found in the registry.
-    NotFound(String),
-    /// The named function is already registered.
-    AlreadyRegistered(String),
-    /// The Lua function returned a value that could not be converted to BSON.
+    /// The script returned a value that could not be converted to BSON.
     InvalidReturn(String),
     /// Script exceeded the instruction limit.
     InstructionLimit,
+    /// No runtime registered for the requested kind.
+    UnsupportedRuntime(crate::RuntimeKind),
 }
 
 impl fmt::Display for VmError {
@@ -23,10 +21,9 @@ impl fmt::Display for VmError {
             #[cfg(feature = "lua")]
             Self::Lua(e) => write!(f, "{e}"),
             Self::Bson(e) => write!(f, "bson error: {e}"),
-            Self::NotFound(name) => write!(f, "function not found: {name}"),
-            Self::AlreadyRegistered(name) => write!(f, "function already registered: {name}"),
             Self::InvalidReturn(msg) => write!(f, "invalid return value: {msg}"),
             Self::InstructionLimit => write!(f, "instruction limit exceeded"),
+            Self::UnsupportedRuntime(kind) => write!(f, "unsupported runtime: {kind:?}"),
         }
     }
 }

@@ -1,15 +1,12 @@
-use std::sync::Arc;
-
 use bson::{Bson, rawdoc};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use slate_vm::{LuaVm, Vm, VmCallback};
+use slate_vm::{LuaScriptRuntime, ScriptCapabilities, ScriptHandle, ScriptRuntime, ScopedMethod, VmError};
 
 // ── Helpers ─────────────────────────────────────────────────
 
-fn vm_with(name: &str, source: &[u8]) -> LuaVm {
-    let mut vm = LuaVm::new().unwrap();
-    vm.register(name, source).unwrap();
-    vm
+fn load(name: &str, source: &[u8]) -> Box<dyn ScriptHandle> {
+    let runtime = LuaScriptRuntime::new();
+    runtime.load(name, source).unwrap()
 }
 
 fn small_doc() -> bson::RawDocumentBuf {
@@ -41,16 +38,16 @@ fn medium_doc() -> bson::RawDocumentBuf {
 fn bench_identity(c: &mut Criterion) {
     let mut group = c.benchmark_group("identity");
 
-    let vm = vm_with("f", b"return function(doc) return doc end");
+    let handle = load("f", b"return function(ctx, doc) return doc end");
 
     group.bench_function("small_doc", |b| {
         let input = small_doc();
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.bench_function("medium_doc", |b| {
         let input = medium_doc();
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.finish();
@@ -62,9 +59,9 @@ fn bench_validator(c: &mut Criterion) {
     let mut group = c.benchmark_group("validator");
 
     // Simple: check one field exists
-    let vm_simple = vm_with(
+    let handle_simple = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             if doc.name ~= nil then
                 return { ok = true }
             else
@@ -75,18 +72,18 @@ fn bench_validator(c: &mut Criterion) {
 
     group.bench_function("simple_pass", |b| {
         let input = small_doc();
-        b.iter(|| vm_simple.call("f", &input).unwrap())
+        b.iter(|| handle_simple.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.bench_function("simple_fail", |b| {
         let input = rawdoc! { "status": "active" };
-        b.iter(|| vm_simple.call("f", &input).unwrap())
+        b.iter(|| handle_simple.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Multi-field: check several constraints
-    let vm_multi = vm_with(
+    let handle_multi = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             if doc.name == nil then
                 return { ok = false, reason = "name is required" }
             end
@@ -102,7 +99,7 @@ fn bench_validator(c: &mut Criterion) {
 
     group.bench_function("multi_field", |b| {
         let input = medium_doc();
-        b.iter(|| vm_multi.call("f", &input).unwrap())
+        b.iter(|| handle_multi.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.finish();
@@ -114,35 +111,35 @@ fn bench_computed_field(c: &mut Criterion) {
     let mut group = c.benchmark_group("computed_field");
 
     // String concatenation
-    let vm_concat = vm_with(
+    let handle_concat = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             return { value = doc.first .. " " .. doc.last }
         end"#,
     );
 
     group.bench_function("string_concat", |b| {
         let input = rawdoc! { "first": "Ada", "last": "Lovelace" };
-        b.iter(|| vm_concat.call("f", &input).unwrap())
+        b.iter(|| handle_concat.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Arithmetic
-    let vm_arith = vm_with(
+    let handle_arith = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             return { value = (doc.score * 100 + 0.5) }
         end"#,
     );
 
     group.bench_function("arithmetic", |b| {
         let input = rawdoc! { "score": 0.875 };
-        b.iter(|| vm_arith.call("f", &input).unwrap())
+        b.iter(|| handle_arith.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Build a derived document
-    let vm_derive = vm_with(
+    let handle_derive = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             return {
                 full_name = doc.first .. " " .. doc.last,
                 display = doc.first .. " " .. doc.last .. " <" .. doc.email .. ">",
@@ -152,7 +149,7 @@ fn bench_computed_field(c: &mut Criterion) {
 
     group.bench_function("derived_doc", |b| {
         let input = medium_doc();
-        b.iter(|| vm_derive.call("f", &input).unwrap())
+        b.iter(|| handle_derive.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.finish();
@@ -164,17 +161,17 @@ fn bench_trigger(c: &mut Criterion) {
     let mut group = c.benchmark_group("trigger");
 
     // Minimal: just return empty doc (trigger that inspects nothing)
-    let vm_noop = vm_with("f", b"return function(doc) return {} end");
+    let handle_noop = load("f", b"return function(ctx, doc) return {} end");
 
     group.bench_function("noop", |b| {
         let input = small_doc();
-        b.iter(|| vm_noop.call("f", &input).unwrap())
+        b.iter(|| handle_noop.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Read-heavy: inspect multiple fields, return audit-style output
-    let vm_audit = vm_with(
+    let handle_audit = load(
         "f",
-        br#"return function(doc)
+        br#"return function(ctx, doc)
             return {
                 action = "insert",
                 collection = "users",
@@ -185,7 +182,7 @@ fn bench_trigger(c: &mut Criterion) {
 
     group.bench_function("audit_log", |b| {
         let input = medium_doc();
-        b.iter(|| vm_audit.call("f", &input).unwrap())
+        b.iter(|| handle_audit.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.finish();
@@ -196,64 +193,69 @@ fn bench_trigger(c: &mut Criterion) {
 fn bench_trigger_with_db(c: &mut Criterion) {
     let mut group = c.benchmark_group("trigger_with_db");
 
-    // Single db.put call
-    let vm_single = vm_with(
+    let noop_cb = |_: Vec<Bson>| -> Result<Bson, VmError> { Ok(Bson::Null) };
+
+    // Single ctx.put call
+    let handle_single = load(
         "f",
-        br#"return function(doc)
-            db.put("audit", doc.name)
+        br#"return function(ctx, doc)
+            ctx.put("audit", doc.name)
             return {}
         end"#,
     );
-    let cb_noop: VmCallback = Arc::new(|_| Ok(Bson::Null));
-    vm_single.inject("db", "put", cb_noop).unwrap();
 
     group.bench_function("single_put", |b| {
         let input = small_doc();
-        b.iter(|| vm_single.call("f", &input).unwrap())
+        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let caps = ScriptCapabilities::ReadWrite { methods: &methods };
+        b.iter(|| handle_single.call(&input, &caps).unwrap())
     });
 
-    // Multiple db calls
-    let vm_multi = vm_with(
+    // Multiple ctx calls
+    let handle_multi = load(
         "f",
-        br#"return function(doc)
-            db.put("audit", doc.name)
-            db.put("metrics", "insert_count")
-            db.put("changelog", doc.name)
+        br#"return function(ctx, doc)
+            ctx.put("audit", doc.name)
+            ctx.put("metrics", "insert_count")
+            ctx.put("changelog", doc.name)
             return {}
         end"#,
     );
-    let cb_noop2: VmCallback = Arc::new(|_| Ok(Bson::Null));
-    vm_multi.inject("db", "put", cb_noop2).unwrap();
 
     group.bench_function("three_puts", |b| {
         let input = small_doc();
-        b.iter(|| vm_multi.call("f", &input).unwrap())
+        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let caps = ScriptCapabilities::ReadWrite { methods: &methods };
+        b.iter(|| handle_multi.call(&input, &caps).unwrap())
     });
 
     // put + get round-trip
-    let vm_rw = vm_with(
+    let handle_rw = load(
         "f",
-        br#"return function(doc)
-            db.put("users", doc.name)
-            local result = db.get("users", doc.name)
+        br#"return function(ctx, doc)
+            ctx.put("users", doc.name)
+            local result = ctx.get("users", doc.name)
             return { found = result }
         end"#,
     );
-    let cb_put: VmCallback = Arc::new(|_| Ok(Bson::Null));
-    let cb_get: VmCallback = Arc::new(|_| Ok(Bson::String("stored".into())));
-    vm_rw.inject("db", "put", cb_put).unwrap();
-    vm_rw.inject("db", "get", cb_get).unwrap();
+
+    let get_cb = |_: Vec<Bson>| -> Result<Bson, VmError> { Ok(Bson::String("stored".into())) };
 
     group.bench_function("put_and_get", |b| {
         let input = small_doc();
-        b.iter(|| vm_rw.call("f", &input).unwrap())
+        let methods = [
+            ScopedMethod { name: "put", callback: &noop_cb },
+            ScopedMethod { name: "get", callback: &get_cb },
+        ];
+        let caps = ScriptCapabilities::ReadWrite { methods: &methods };
+        b.iter(|| handle_rw.call(&input, &caps).unwrap())
     });
 
-    // Realistic trigger: read doc fields, call db.put with a table arg
-    let vm_real = vm_with(
+    // Realistic trigger: read doc fields, call ctx.put with a table arg
+    let handle_real = load(
         "f",
-        br#"return function(doc)
-            db.put("audit", {
+        br#"return function(ctx, doc)
+            ctx.put("audit", {
                 action = "insert",
                 target = "users",
                 key = doc.name,
@@ -262,12 +264,12 @@ fn bench_trigger_with_db(c: &mut Criterion) {
             return {}
         end"#,
     );
-    let cb_real: VmCallback = Arc::new(|_| Ok(Bson::Null));
-    vm_real.inject("db", "put", cb_real).unwrap();
 
     group.bench_function("realistic_audit", |b| {
         let input = medium_doc();
-        b.iter(|| vm_real.call("f", &input).unwrap())
+        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let caps = ScriptCapabilities::ReadWrite { methods: &methods };
+        b.iter(|| handle_real.call(&input, &caps).unwrap())
     });
 
     group.finish();
@@ -278,61 +280,56 @@ fn bench_trigger_with_db(c: &mut Criterion) {
 fn bench_type_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("type_roundtrip");
 
-    let vm = vm_with("f", b"return function(doc) return doc end");
+    let handle = load("f", b"return function(ctx, doc) return doc end");
 
     // DateTime
     group.bench_function("datetime", |b| {
         let ts = bson::DateTime::from_millis(1_700_000_000_000);
         let input = rawdoc! { "ts": ts };
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // ObjectId
     group.bench_function("objectid", |b| {
         let oid = bson::oid::ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
         let input = rawdoc! { "_id": oid };
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Int32 (preserved, not widened)
     group.bench_function("i32", |b| {
         let input = rawdoc! { "n": 42_i32 };
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     // Int64
     group.bench_function("i64", |b| {
         let input = rawdoc! { "n": 42_i64 };
-        b.iter(|| vm.call("f", &input).unwrap())
+        b.iter(|| handle.call(&input, &ScriptCapabilities::Pure).unwrap())
     });
 
     group.finish();
 }
 
-// ── VM lifecycle ────────────────────────────────────────────
+// ── Script lifecycle ─────────────────────────────────────────
 
 fn bench_lifecycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("lifecycle");
 
-    group.bench_function("vm_create", |b| {
-        b.iter(|| LuaVm::new().unwrap())
-    });
+    let runtime = LuaScriptRuntime::new();
 
-    group.bench_function("register", |b| {
-        b.iter_batched(
-            || LuaVm::new().unwrap(),
-            |mut vm| {
-                vm.register(
+    group.bench_function("runtime_load", |b| {
+        b.iter(|| {
+            runtime
+                .load(
                     "f",
-                    br#"return function(doc)
+                    br#"return function(ctx, doc)
                         if doc.name ~= nil then return { ok = true }
                         else return { ok = false } end
                     end"#,
                 )
-                .unwrap();
-            },
-            BatchSize::PerIteration,
-        )
+                .unwrap()
+        })
     });
 
     group.finish();

@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 lua = ["dep:mlua"]
+wasm = []
 
 [dependencies]
 bson = { workspace = true }

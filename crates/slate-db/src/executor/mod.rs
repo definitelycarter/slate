@@ -1,4 +1,3 @@
-mod context;
 pub(crate) mod exec;
 pub(crate) mod field_tree;
 mod nodes;
@@ -6,32 +5,29 @@ pub(crate) mod raw_bson;
 #[cfg(test)]
 mod tests;
 
-pub use context::Context;
-
 use bson::RawBson;
-use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
+use slate_engine::{Catalog, EngineTransaction};
 
-use crate::database::VmFactory;
+use slate_vm::pool::VmPool;
+
 use crate::error::DbError;
 use crate::planner::plan::{Node, Plan};
 
 pub type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, DbError>> + 'a>;
 
 /// Executes query plans against an [`EngineTransaction`].
-///
-/// For mutation plans, the executor creates a [`Context`] with a pre-built VM
-/// containing all functions for the target collection. Read-only plans use a
-/// bare context with no VM.
 pub struct Executor<'a, T: EngineTransaction> {
     txn: &'a T,
-    vm_factory: Option<&'a VmFactory>,
+    pool: Option<&'a VmPool>,
 }
 
 impl<'a, T: EngineTransaction> Executor<'a, T> {
-    pub fn new(txn: &'a T, vm_factory: Option<&'a VmFactory>) -> Self {
-        Self { txn, vm_factory }
+    pub fn new(txn: &'a T, pool: Option<&'a VmPool>) -> Self {
+        Self { txn, pool }
     }
+}
 
+impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     fn execute_node(&self, node: Node<T::Cf>) -> Result<RawIter<'a>, DbError> {
         match node {
             Node::Values(docs) => nodes::values::execute(docs),
@@ -90,17 +86,22 @@ impl<'a, T: EngineTransaction> Executor<'a, T> {
                 let source = self.execute_node(*source)?;
                 nodes::distinct::execute(field, source)
             }
-        }
-    }
-}
 
-impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
-    /// Create a context with a VM loaded for the given collection.
-    fn create_context(
-        &self,
-        handle: &CollectionHandle<T::Cf>,
-    ) -> Result<Context<'a, T>, DbError> {
-        Context::with_vm(self.txn, self.vm_factory, handle.cf_name(), handle.name())
+            Node::Validate { validators, source } => {
+                let source = self.execute_node(*source)?;
+                nodes::validate::execute(self.pool, validators, source)
+            }
+
+            Node::Trigger {
+                cf,
+                action,
+                hooks,
+                source,
+            } => {
+                let source = self.execute_node(*source)?;
+                nodes::trigger::execute(self.txn, self.pool, cf, action, hooks, source)
+            }
+        }
     }
 
     /// Execute a plan, returning a streaming iterator of rows.
@@ -110,8 +111,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Plan::Insert { collection, source } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
-                nodes::insert_record::execute(ctx, collection, source)
+                nodes::insert_record::execute(self.txn, collection, source)
             }
 
             Plan::Update {
@@ -120,8 +120,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
-                nodes::mutate::execute(ctx, collection, mutation, source)
+                nodes::mutate::execute(self.txn, collection, mutation, source)
             }
 
             Plan::Replace {
@@ -130,36 +129,54 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
-                nodes::replace::execute(ctx, collection, replacement, source)
+                nodes::replace::execute(self.txn, collection, replacement, source)
             }
 
             Plan::Delete { collection, source } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
-                nodes::delete::execute(ctx, collection, source)
+                nodes::delete::execute(self.txn, collection, source)
             }
 
-            Plan::Merge { collection, source } => {
+            Plan::Merge {
+                collection,
+                hooks,
+                source,
+            } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
                 nodes::upsert::execute(
-                    ctx,
+                    self.txn,
+                    self.pool,
+                    hooks,
                     collection,
                     nodes::upsert::UpsertMode::Merge,
                     source,
                 )
             }
 
-            Plan::Upsert { collection, source } => {
+            Plan::Upsert {
+                collection,
+                hooks,
+                source,
+            } => {
                 let source = self.execute_node(source)?;
-                let ctx = self.create_context(&collection)?;
                 nodes::upsert::execute(
-                    ctx,
+                    self.txn,
+                    self.pool,
+                    hooks,
                     collection,
                     nodes::upsert::UpsertMode::Replace,
                     source,
                 )
+            }
+
+            Plan::Trigger {
+                cf,
+                action,
+                hooks,
+                plan,
+            } => {
+                let iter = self.execute(*plan)?;
+                nodes::trigger::execute(self.txn, self.pool, cf, action, hooks, iter)
             }
         }
     }

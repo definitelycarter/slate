@@ -1,12 +1,12 @@
 use super::*;
 
 use crate::collection::CollectionConfig;
-use crate::database::{Database, DatabaseConfig};
+use crate::database::Database;
 use slate_engine::{Engine, KvEngine, DEFAULT_CF};
 use slate_store::MemoryStore;
 
 fn seeded_db() -> Database<MemoryStore> {
-    let db = Database::open(MemoryStore::new(), DatabaseConfig::default());
+    let db = crate::database::DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),

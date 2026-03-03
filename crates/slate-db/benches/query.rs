@@ -4,7 +4,7 @@ use common::*;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::Database;
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseConfig};
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder};
 use slate_query::*;
 use slate_store::MemoryStore;
 
@@ -14,7 +14,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("bulk_insert");
     for n in [1_000, 10_000] {
         let engine = {
-            let engine = Database::open(MemoryStore::new(), DatabaseConfig::default());
+            let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
             let mut txn = engine.begin(false).unwrap();
             txn.create_collection(&CollectionConfig {
                 name: "bench".into(),

@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
 use slate_query::{DistinctOptions, FindOptions};
 use slate_store::Store;
+use slate_vm::pool::VmPool;
 
 use crate::collection::CollectionConfig;
 use crate::convert::IntoRawDocumentBuf;
@@ -11,39 +13,92 @@ use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::executor;
 use crate::expression::Expression;
+use crate::hooks::{HookRegistry, HookSnapshot};
 use crate::parser;
 use crate::planner::planner::Planner;
 use crate::statement::Statement;
 use crate::sweep::{self, TtlHandle};
 
-pub struct DatabaseConfig {
-    /// Interval in seconds between TTL sweep runs.
-    pub ttl_sweep_interval_secs: u64,
+// ── DatabaseBuilder ────────────────────────────────────────
+
+pub struct DatabaseBuilder {
+    pool: Option<VmPool>,
+    sweep_interval: Option<Duration>,
 }
 
-impl Default for DatabaseConfig {
-    fn default() -> Self {
+impl DatabaseBuilder {
+    pub fn new() -> Self {
         Self {
-            ttl_sweep_interval_secs: u64::MAX,
+            pool: None,
+            sweep_interval: None,
         }
+    }
+
+    /// Attach a script execution pool.
+    ///
+    /// Without a pool, function source is still stored in the engine
+    /// but no scripts will be executed.
+    pub fn with_scripting(mut self, pool: VmPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Enable background TTL sweep at the given interval.
+    pub fn with_sweep(mut self, interval: Duration) -> Self {
+        self.sweep_interval = Some(interval);
+        self
+    }
+
+    /// Open the database with the configured settings.
+    ///
+    /// When a script pool is configured, loads an initial hook snapshot
+    /// from the engine so triggers and validators are available immediately.
+    pub fn open<S: Store + Send + Sync + 'static>(self, store: S) -> Result<Database<S>, DbError> {
+        let engine = Arc::new(KvEngine::new(store));
+
+        // Load initial hook snapshot if scripting is enabled.
+        let registry = if self.pool.is_some() {
+            let txn = engine.begin(true)?;
+            let snapshot = HookSnapshot::load_all(&txn)?;
+            txn.rollback()?;
+            Some(HookRegistry::new(snapshot))
+        } else {
+            None
+        };
+
+        let ttl_handle = match self.sweep_interval {
+            Some(d) => sweep::spawn(Arc::clone(&engine), d.as_secs()),
+            None => None,
+        };
+
+        Ok(Database {
+            engine,
+            pool: self.pool,
+            registry,
+            ttl_handle,
+        })
     }
 }
 
-pub(crate) type VmFactory =
-    Arc<dyn Fn() -> Result<Box<dyn slate_vm::Vm + Send>, slate_vm::VmError> + Send + Sync>;
+// ── Database ───────────────────────────────────────────────
 
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
-    vm_factory: Option<VmFactory>,
+    pool: Option<VmPool>,
+    registry: Option<HookRegistry>,
     ttl_handle: Option<TtlHandle>,
 }
 
 impl<S: Store> Database<S> {
     pub fn begin(&self, read_only: bool) -> Result<Transaction<'_, S>, DbError> {
         let txn = self.engine.begin(read_only)?;
+        let snapshot = self.registry.as_ref().map(|r| r.snapshot());
         Ok(Transaction {
             txn,
-            vm_factory: self.vm_factory.as_ref(),
+            pool: self.pool.as_ref(),
+            snapshot,
+            registry: self.registry.as_ref(),
+            hooks_dirty: false,
         })
     }
 
@@ -76,41 +131,14 @@ impl<S: Store> Database<S> {
     }
 }
 
-impl<S: Store> Database<S> {
-    /// Attach a VM factory for per-collection script execution.
-    ///
-    /// The factory is called lazily to create one VM per collection.
-    /// Without a factory, function source is still stored in the engine
-    /// but no scripts will be executed.
-    pub fn with_vm_factory(
-        mut self,
-        factory: impl Fn() -> Result<Box<dyn slate_vm::Vm + Send>, slate_vm::VmError>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.vm_factory = Some(Arc::new(factory));
-        self
-    }
-}
-
-impl<S: Store + Send + Sync + 'static> Database<S> {
-    pub fn open(store: S, config: DatabaseConfig) -> Self {
-        let engine = Arc::new(KvEngine::new(store));
-        let ttl_handle = sweep::spawn(Arc::clone(&engine), config.ttl_sweep_interval_secs);
-        Self {
-            engine,
-            vm_factory: None,
-            ttl_handle,
-        }
-    }
-}
-
-// ── Transaction ─────────────────────────────────────────────
+// ── Transaction ────────────────────────────────────────────
 
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
-    vm_factory: Option<&'db VmFactory>,
+    pool: Option<&'db VmPool>,
+    snapshot: Option<Arc<HookSnapshot>>,
+    registry: Option<&'db HookRegistry>,
+    hooks_dirty: bool,
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
@@ -370,7 +398,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             take: options.take,
         };
         let plan = self.plan(stmt)?;
-        let exec = executor::Executor::new(&self.txn, self.vm_factory);
+        let exec = executor::Executor::new(&self.txn, self.pool);
         let mut iter = exec.execute(plan)?;
         match iter.next() {
             Some(result) => {
@@ -420,13 +448,28 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Drop a collection and all its data, indexes, and metadata.
     pub fn drop_collection(&mut self, cf: &str, collection: &str) -> Result<(), DbError> {
         self.txn.drop_collection(cf, collection)?;
+        self.hooks_dirty = true;
         Ok(())
     }
 
     // ── Lifecycle ───────────────────────────────────────────────
 
     pub fn commit(self) -> Result<(), DbError> {
+        // If hooks were modified, reload the snapshot before committing
+        // so the new snapshot reflects the changes we're about to persist.
+        let new_snapshot = if self.hooks_dirty {
+            Some(HookSnapshot::load_all(&self.txn)?)
+        } else {
+            None
+        };
+
         self.txn.commit()?;
+
+        // Swap the new snapshot into the registry after a successful commit.
+        if let (Some(snapshot), Some(registry)) = (new_snapshot, self.registry) {
+            registry.swap(snapshot);
+        }
+
         Ok(())
     }
 
@@ -465,8 +508,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn
-            .create_function(cf, collection, FunctionKind::Trigger, name, source.as_bytes())?;
+        self.txn.create_function(
+            cf,
+            collection,
+            FunctionKind::Trigger,
+            name,
+            slate_engine::runtime_tag::LUA,
+            source.as_bytes(),
+        )?;
+        self.hooks_dirty = true;
         Ok(())
     }
 
@@ -478,8 +528,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn
-            .create_function(cf, collection, FunctionKind::Validator, name, source.as_bytes())?;
+        self.txn.create_function(
+            cf,
+            collection,
+            FunctionKind::Validator,
+            name,
+            slate_engine::runtime_tag::LUA,
+            source.as_bytes(),
+        )?;
+        self.hooks_dirty = true;
         Ok(())
     }
 
@@ -491,8 +548,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn
-            .create_function(cf, collection, FunctionKind::Udf, name, source.as_bytes())?;
+        self.txn.create_function(
+            cf,
+            collection,
+            FunctionKind::Udf,
+            name,
+            slate_engine::runtime_tag::LUA,
+            source.as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -505,6 +568,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Trigger, name)?;
+        self.hooks_dirty = true;
         Ok(())
     }
 
@@ -517,6 +581,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Validator, name)?;
+        self.hooks_dirty = true;
         Ok(())
     }
 
@@ -542,14 +607,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         crate::planner::plan::Plan<<<KvEngine<S> as Engine>::Txn<'db> as EngineTransaction>::Cf>,
         DbError,
     > {
-        let planner = Planner::new(&self.txn);
+        let planner = Planner::with_snapshot(&self.txn, self.snapshot.as_deref());
         planner.plan(stmt)
     }
 
     /// Prepare a cursor for a query statement.
     fn prepare_cursor(&self, statement: Statement<'_>) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = self.plan(statement)?;
-        Ok(Cursor::new(&self.txn, plan, self.vm_factory))
+        Ok(Cursor::new(&self.txn, plan, self.pool))
     }
 
     /// Parse a required filter document into an Expression.

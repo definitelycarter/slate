@@ -1,12 +1,11 @@
 use bson::{Bson, RawBson, doc, rawdoc};
-use slate_db::{CollectionConfig, Database, DatabaseConfig, DbError, DEFAULT_CF};
+use slate_db::{CollectionConfig, DatabaseBuilder, DbError, DEFAULT_CF};
 use slate_query::{FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
 fn main() -> Result<(), DbError> {
     // ── Open an in-memory database ──────────────────────────────
-    let store = MemoryStore::new();
-    let db = Database::open(store, DatabaseConfig::default());
+    let db = DatabaseBuilder::new().open(MemoryStore::new())?;
 
     // ── Create a collection ─────────────────────────────────────
     let mut txn = db.begin(false)?;

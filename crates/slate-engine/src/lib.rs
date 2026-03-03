@@ -10,5 +10,5 @@ pub use error::{EncodingError, EngineError};
 pub use kv::{DEFAULT_CF, KvEngine};
 pub use traits::{
     Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineTransaction, FunctionEntry,
-    FunctionKind, IndexEntry, IndexRange,
+    FunctionKind, IndexEntry, IndexRange, runtime_tag,
 };
