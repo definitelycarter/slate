@@ -92,6 +92,49 @@ migration (e.g. redb → RocksDB).
 
 ---
 
+## MemoryStore Persistence (Write-Behind Flush)
+
+### Concept
+
+MemoryStore is fast but ephemeral. A write-behind persistence layer lets MemoryStore
+act as the hot path while flushing durable state to a pluggable backend
+asynchronously. This is the same pattern used by RocksDB (memtable + background
+flush) and Redis (RDB snapshots / AOF) — the sync API never blocks on I/O, and
+persistence is a separate concern.
+
+### Flush targets
+
+- **Disk (native)** — serialize snapshots or append to a WAL on macOS/Linux
+- **IndexedDB (browser)** — async flush from MemoryStore to browser storage,
+  hydrate on startup
+- **S3 / remote** — cloud backup for embedded deployments
+
+### Flush strategies
+
+- **Snapshot** — serialize the full store state periodically or after N writes
+- **WAL (write-ahead log)** — append each mutation, replay on startup. More
+  granular than snapshots, slightly more complex
+- **Dirty tracking** — only flush changed column families or key ranges
+
+### Design
+
+The flush layer wraps a `MemoryStore` and owns the persistence lifecycle. It does
+not change the `Store` trait — consumers interact with MemoryStore as usual. The
+flush runs on a background thread (native) or via `setInterval` / microtask
+(browser). On startup, the store hydrates from the durable backend before accepting
+operations.
+
+This avoids making the `Store` trait async. The async boundary lives entirely inside
+the flush layer, invisible to the engine, database, and public API.
+
+### Relation to BackupStore
+
+`BackupStore::backup()` is on-demand, point-in-time. The flush layer is continuous
+and automatic. They can coexist — `backup()` remains useful for explicit snapshots
+even when flush is running.
+
+---
+
 ## Change Detection (Watch Queries)
 
 ### Concept
@@ -234,9 +277,8 @@ slate-wasm    → depends on slate-db with default-features = false
 
 Runtime blockers (compile succeeds, but these panic at runtime on wasm32):
 
-- **`SystemTime::now()`** — `KvEngine::with_clock()` escape hatch already exists
-- **`std::thread::spawn`** — sweep is already a no-op when
-  `ttl_sweep_interval_secs = u64::MAX`
+- ~~**`SystemTime::now()`** — `KvEngine::with_clock()` escape hatch already exists~~
+- ~~**`std::thread::spawn`** — sweep is gated behind `#[cfg(feature = "runtime")]`~~
 - **`getrandom`** — needs `features = ["js"]` for `crypto.getRandomValues()` entropy
   (used by bson for ObjectId generation)
 
@@ -250,13 +292,22 @@ provides synchronous file I/O. This maps directly to the existing `Store` trait
 without any API changes. Could potentially run redb on top of it since redb is
 file-backed. Limited to Web Workers (not the main thread).
 
-**IndexedDB** — transactional key-value store built into all browsers. No size limits,
-supports binary data. The catch: IndexedDB is async, and the `Store`/`Transaction`
-traits are synchronous. Supporting IndexedDB would require making the Store trait
-async, which is a significant but worthwhile change — it would also benefit
-server-mode deployments where async I/O matters.
+**IndexedDB via flush** — IndexedDB is async, and the `Store`/`Transaction` traits
+are synchronous. Rather than making the entire store layer async (which would bubble
+up through the engine, database, and public API), MemoryStore can persist to
+IndexedDB using a write-behind flush strategy. MemoryStore remains the hot path for
+reads and writes; a background flush (driven by `setInterval` or after N writes)
+serializes dirty state to IndexedDB asynchronously. On startup, the store hydrates
+from IndexedDB before becoming available. This keeps the `Store` trait sync and
+avoids infecting the core API with async — persistence is a separate concern bolted
+on from the outside.
 
-#### slate-wasm crate
+This is the same pattern RocksDB and redb use internally: writes hit memory
+(memtable / B-tree cache), and actual disk I/O happens in the background. The sync
+API isn't blocking on disk for every operation — it's "sync API, async I/O
+internally."
+
+#### ~~slate-wasm crate~~ — Done
 
 A thin binding crate (similar to `slate-uniffi`) that wraps `Database`, `Transaction`,
 and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
