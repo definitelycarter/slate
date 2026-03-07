@@ -13,7 +13,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
 - **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required)
-- **Sub-millisecond indexed queries** at 100k records across all backends
+- **Sub-millisecond indexed queries** at 10k records across all backends
 
 ## Crate Structure
 

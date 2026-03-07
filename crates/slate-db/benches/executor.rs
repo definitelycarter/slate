@@ -404,7 +404,7 @@ fn bench_filter(c: &mut Criterion) {
 
 fn bench_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan");
-    for n in [100, 1_000, 10_000] {
+    for n in [100, 1_000, 20_000] {
         let engine = seeded_engine(n);
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
