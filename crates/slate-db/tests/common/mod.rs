@@ -1,6 +1,6 @@
 use bson::raw::RawDocument;
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, Database, DatabaseBuilder, DEFAULT_CF};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 pub trait HasKey {

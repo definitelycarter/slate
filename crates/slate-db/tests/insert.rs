@@ -39,12 +39,20 @@ fn insert_one_duplicate_id_fails() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-1", "name": "Acme" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "acct-1", "name": "Acme" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     let err = txn
-        .insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-1", "name": "Duplicate" })
+        .insert_one(
+            DEFAULT_CF,
+            COLLECTION,
+            doc! { "_id": "acct-1", "name": "Duplicate" },
+        )
         .unwrap()
         .drain()
         .unwrap_err();

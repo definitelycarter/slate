@@ -2,7 +2,7 @@ use bson::RawBson;
 use bson::rawdoc;
 use slate_engine::{Catalog, EngineTransaction};
 use slate_vm::pool::VmPool;
-use slate_vm::{ScriptCapabilities, ScopedMethod};
+use slate_vm::{ScopedMethod, ScriptCapabilities};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
@@ -102,8 +102,7 @@ pub(crate) fn fire_hooks<T: EngineTransaction + Catalog>(
             .collection(cf, coll_name)
             .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
 
-        let raw =
-            bson::raw::RawDocumentBuf::try_from(doc).map_err(slate_vm::VmError::Bson)?;
+        let raw = bson::raw::RawDocumentBuf::try_from(doc).map_err(slate_vm::VmError::Bson)?;
 
         txn.put(&handle, &raw)
             .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;

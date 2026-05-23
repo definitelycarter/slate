@@ -146,7 +146,9 @@ fn delete_by_objectid() {
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let found = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid }).unwrap();
+    let found = txn
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": oid })
+        .unwrap();
     assert!(found.is_none());
 }
 

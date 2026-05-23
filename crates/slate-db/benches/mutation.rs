@@ -6,7 +6,7 @@ use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Database, Executor, Node, Plan};
 use slate_db::{CollectionConfig, DatabaseBuilder};
-use slate_engine::{Catalog, Engine, DEFAULT_CF};
+use slate_engine::{Catalog, DEFAULT_CF, Engine};
 use slate_store::MemoryStore;
 
 // ── Mutation benchmarks ─────────────────────────────────────
@@ -28,7 +28,8 @@ fn bench_insert(c: &mut Criterion) {
             })
             .unwrap();
             txn.create_index(DEFAULT_CF, "test", "status").unwrap();
-            txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "contacts_count")
+                .unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -259,7 +260,8 @@ fn bench_upsert_insert(c: &mut Criterion) {
             })
             .unwrap();
             txn.create_index(DEFAULT_CF, "test", "status").unwrap();
-            txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "test", "contacts_count")
+                .unwrap();
             txn.commit().unwrap();
             engine
         };

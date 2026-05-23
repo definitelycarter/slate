@@ -61,8 +61,10 @@ fn bench_put_batch(c: &mut Criterion) {
                     (txn, cf, pairs.clone())
                 },
                 |(txn, cf, pairs)| {
-                    let refs: Vec<(&[u8], &[u8])> =
-                        pairs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+                    let refs: Vec<(&[u8], &[u8])> = pairs
+                        .iter()
+                        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                        .collect();
                     txn.put_batch(&cf, &refs).unwrap();
                 },
                 BatchSize::PerIteration,

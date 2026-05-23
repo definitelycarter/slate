@@ -4,7 +4,7 @@ use super::convert;
 use super::error::LuaError;
 use super::sandbox;
 use crate::error::VmError;
-use crate::{RuntimeKind, ScriptCapabilities, ScriptHandle, ScriptRuntime, ScopedMethod};
+use crate::{RuntimeKind, ScopedMethod, ScriptCapabilities, ScriptHandle, ScriptRuntime};
 use bson::raw::RawDocumentBuf;
 
 const DEFAULT_INSTRUCTION_LIMIT: u32 = 100_000;
@@ -139,34 +139,32 @@ impl LuaScriptHandle {
 
                 for sm in methods {
                     let cb = sm.callback;
-                    let lua_fn =
-                        scope.create_function(move |lua, args: mlua::MultiValue| {
-                            let bson_args: Vec<bson::Bson> = args
-                                .into_iter()
-                                .map(|v| {
-                                    convert::lua_value_to_bson(v)
-                                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
-                                })
-                                .collect::<Result<_, _>>()?;
+                    let lua_fn = scope.create_function(move |lua, args: mlua::MultiValue| {
+                        let bson_args: Vec<bson::Bson> = args
+                            .into_iter()
+                            .map(|v| {
+                                convert::lua_value_to_bson(v)
+                                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                            })
+                            .collect::<Result<_, _>>()?;
 
-                            let result = cb(bson_args)
-                                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                        let result =
+                            cb(bson_args).map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
-                            convert::bson_to_lua(lua, result)
-                                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
-                        })?;
+                        convert::bson_to_lua(lua, result)
+                            .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                    })?;
 
                     ctx.set(sm.name, lua_fn)?;
                 }
 
-                let result: mlua::Value =
-                    func.call((ctx, input_table)).map_err(|e| {
-                        if is_instruction_limit_error(&e) {
-                            mlua::Error::RuntimeError("instruction limit exceeded".into())
-                        } else {
-                            e
-                        }
-                    })?;
+                let result: mlua::Value = func.call((ctx, input_table)).map_err(|e| {
+                    if is_instruction_limit_error(&e) {
+                        mlua::Error::RuntimeError("instruction limit exceeded".into())
+                    } else {
+                        e
+                    }
+                })?;
 
                 match result {
                     mlua::Value::Table(t) => convert::table_to_doc(&t)
@@ -267,7 +265,10 @@ mod tests {
         let out = handle
             .call(&rawdoc! { "ts": ts }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(out.get_datetime("ts").unwrap().timestamp_millis(), 1_700_000_000_000);
+        assert_eq!(
+            out.get_datetime("ts").unwrap().timestamp_millis(),
+            1_700_000_000_000
+        );
     }
 
     #[test]
@@ -323,9 +324,7 @@ mod tests {
 
     #[test]
     fn pure_datetime_constructor() {
-        let handle = load(
-            b"return function(doc) return { ts = bson.datetime(1700000000000) } end",
-        );
+        let handle = load(b"return function(doc) return { ts = bson.datetime(1700000000000) } end");
         let result = handle.call(&rawdoc! {}, &ScriptCapabilities::Pure).unwrap();
         let dt = result.get_datetime("ts").unwrap();
         assert_eq!(dt.timestamp_millis(), 1_700_000_000_000);
@@ -333,9 +332,7 @@ mod tests {
 
     #[test]
     fn pure_datetime_now() {
-        let handle = load(
-            b"return function(doc) return { ts = bson.now() } end",
-        );
+        let handle = load(b"return function(doc) return { ts = bson.now() } end");
         let before = bson::DateTime::now().timestamp_millis();
         let result = handle.call(&rawdoc! {}, &ScriptCapabilities::Pure).unwrap();
         let after = bson::DateTime::now().timestamp_millis();
@@ -345,9 +342,7 @@ mod tests {
 
     #[test]
     fn pure_objectid_read() {
-        let handle = load(
-            b"return function(doc) return { hex = doc._id:hex() } end",
-        );
+        let handle = load(b"return function(doc) return { hex = doc._id:hex() } end");
         let oid = bson::oid::ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap();
         let input = rawdoc! { "_id": oid };
         let result = handle.call(&input, &ScriptCapabilities::Pure).unwrap();
@@ -368,12 +363,8 @@ mod tests {
 
     #[test]
     fn pure_sandbox_blocks_globals() {
-        let handle = load(
-            b"return function(doc) return { has_os = (os ~= nil) } end",
-        );
-        let result = handle
-            .call(&rawdoc! {}, &ScriptCapabilities::Pure)
-            .unwrap();
+        let handle = load(b"return function(doc) return { has_os = (os ~= nil) } end");
+        let result = handle.call(&rawdoc! {}, &ScriptCapabilities::Pure).unwrap();
         assert_eq!(result.get_bool("has_os").unwrap(), false);
     }
 
@@ -381,7 +372,10 @@ mod tests {
     fn pure_instruction_limit() {
         let rt = LuaScriptRuntime::new().with_instruction_limit(100);
         let handle = rt
-            .load("f", b"return function(doc) while true do end; return {} end")
+            .load(
+                "f",
+                b"return function(doc) while true do end; return {} end",
+            )
             .unwrap();
         let result = handle.call(&rawdoc! {}, &ScriptCapabilities::Pure);
         assert!(matches!(result, Err(VmError::InstructionLimit)));
@@ -441,9 +435,8 @@ mod tests {
             end"#,
         );
 
-        let get_cb = |_args: Vec<Bson>| -> Result<Bson, VmError> {
-            Ok(Bson::String("hello".into()))
-        };
+        let get_cb =
+            |_args: Vec<Bson>| -> Result<Bson, VmError> { Ok(Bson::String("hello".into())) };
 
         let methods = [ScopedMethod {
             name: "get",

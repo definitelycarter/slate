@@ -1,12 +1,14 @@
 use super::*;
 
+use crate::DEFAULT_CF;
 use crate::collection::CollectionConfig;
 use crate::database::Database;
-use crate::DEFAULT_CF;
 use slate_store::MemoryStore;
 
 fn seeded_db() -> Database<MemoryStore> {
-    let db = crate::database::DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let db = crate::database::DatabaseBuilder::new()
+        .open(MemoryStore::new())
+        .unwrap();
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
@@ -102,7 +104,11 @@ fn upsert_merge_existing() {
     let txn = db.begin(false).unwrap();
 
     let affected = txn
-        .merge_many(DEFAULT_CF, "test", vec![bson::doc! { "_id": "1", "score": 99 }])
+        .merge_many(
+            DEFAULT_CF,
+            "test",
+            vec![bson::doc! { "_id": "1", "score": 99 }],
+        )
         .unwrap()
         .drain()
         .unwrap();

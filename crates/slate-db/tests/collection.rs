@@ -14,14 +14,22 @@ fn list_collections() {
     create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, "contacts", doc! { "_id": "c-1", "name": "Alice" })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, "accounts", doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "contacts",
+        doc! { "_id": "c-1", "name": "Alice" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "accounts",
+        doc! { "_id": "a-1", "name": "Acme" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -37,10 +45,14 @@ fn drop_collection() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "a-1", "name": "Acme" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let mut txn = db.begin(false).unwrap();
@@ -68,14 +80,22 @@ fn collection_isolation() {
     create_collection(&db, "accounts");
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, "contacts", doc! { "_id": "c-1", "name": "Alice" })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, "accounts", doc! { "_id": "a-1", "name": "Acme" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "contacts",
+        doc! { "_id": "c-1", "name": "Alice" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "accounts",
+        doc! { "_id": "a-1", "name": "Acme" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -153,8 +173,13 @@ fn register_udfs() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_udf(DEFAULT_CF, "users", "full_name", "return first .. ' ' .. last")
-        .unwrap();
+    txn.register_udf(
+        DEFAULT_CF,
+        "users",
+        "full_name",
+        "return first .. ' ' .. last",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();

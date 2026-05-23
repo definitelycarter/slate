@@ -91,9 +91,7 @@ fn extract_int(val: Value) -> Result<i64, mlua::Error> {
             let i32_val = ud.borrow::<LuaInt32>()?;
             Ok(i32_val.0 as i64)
         }
-        _ => Err(mlua::Error::RuntimeError(
-            "expected a number".into(),
-        )),
+        _ => Err(mlua::Error::RuntimeError("expected a number".into())),
     }
 }
 
@@ -141,10 +139,7 @@ pub(crate) fn create_bson_module(lua: &mlua::Lua) -> Result<mlua::Table, VmError
         lua.create_function(|_, bytes: mlua::String| Ok(LuaBinary(bytes.as_bytes().to_vec())))?,
     )?;
 
-    module.set(
-        "i32",
-        lua.create_function(|_, n: i32| Ok(LuaInt32(n)))?,
-    )?;
+    module.set("i32", lua.create_function(|_, n: i32| Ok(LuaInt32(n)))?)?;
 
     module.set(
         "is_datetime",

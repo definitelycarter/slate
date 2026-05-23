@@ -87,17 +87,16 @@ impl<'a> RawField<'a> {
                 Some(RawBsonRef::String(s))
             }
             ElementType::EmbeddedDocument => {
-                let doc =
-                    RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end]).ok()?;
+                let doc = RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end])
+                    .ok()?;
                 Some(RawBsonRef::Document(doc))
             }
             ElementType::Array => {
-                let doc =
-                    RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end]).ok()?;
+                let doc = RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end])
+                    .ok()?;
                 // SAFETY: RawArray is repr-transparent over RawDocument.
                 // The bson crate's own RawArray::from_doc does this same pointer cast.
-                let arr: &RawArray =
-                    unsafe { &*(doc as *const RawDocument as *const RawArray) };
+                let arr: &RawArray = unsafe { &*(doc as *const RawDocument as *const RawArray) };
                 Some(RawBsonRef::Array(arr))
             }
             ElementType::ObjectId => {
@@ -108,9 +107,7 @@ impl<'a> RawField<'a> {
                 );
                 Some(RawBsonRef::ObjectId(oid))
             }
-            ElementType::Boolean => {
-                Some(RawBsonRef::Boolean(self.bytes[self.value_start] != 0))
-            }
+            ElementType::Boolean => Some(RawBsonRef::Boolean(self.bytes[self.value_start] != 0)),
             ElementType::DateTime => {
                 let ms = i64::from_le_bytes(
                     self.bytes[self.value_start..self.value_start + 8]

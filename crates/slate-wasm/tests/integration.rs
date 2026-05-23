@@ -221,11 +221,8 @@ fn create_and_list_indexes() {
 fn drop_collection() {
     let db = SlateDb::new().unwrap();
     db.create_collection("temp").unwrap();
-    db.insert_one(
-        "temp",
-        obj(&[("_id", JsValue::from_str("t1"))]),
-    )
-    .unwrap();
+    db.insert_one("temp", obj(&[("_id", JsValue::from_str("t1"))]))
+        .unwrap();
 
     db.drop_collection("temp").unwrap();
     log("dropped collection: temp");

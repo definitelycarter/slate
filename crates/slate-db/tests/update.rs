@@ -26,7 +26,12 @@ fn update_one_merge() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
     let result = txn
-        .update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "rejected" })
+        .update_one(
+            DEFAULT_CF,
+            COLLECTION,
+            &filter,
+            doc! { "status": "rejected" },
+        )
         .unwrap()
         .drain()
         .unwrap();
@@ -99,7 +104,12 @@ fn update_many_multiple() {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
     let result = txn
-        .update_many(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "archived" })
+        .update_many(
+            DEFAULT_CF,
+            COLLECTION,
+            &filter,
+            doc! { "status": "archived" },
+        )
         .unwrap()
         .drain()
         .unwrap();
@@ -134,7 +144,11 @@ fn upsert_many_inserts_new() {
         doc! { "_id": "u1", "name": "Alice", "status": "active" },
         doc! { "_id": "u2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .upsert_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 2);
 
     let found = txn
@@ -165,7 +179,11 @@ fn upsert_many_replaces_existing() {
 
     // Upsert replaces entirely
     let docs = vec![doc! { "_id": "u1", "name": "Alice Updated", "status": "inactive" }];
-    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .upsert_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 1);
 
     let doc = txn
@@ -198,7 +216,11 @@ fn upsert_many_mixed() {
         doc! { "_id": "u1", "name": "Alice v2", "status": "inactive" },
         doc! { "_id": "u2", "name": "Bob", "status": "active" },
     ];
-    let result = txn.upsert_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .upsert_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 2);
 
     let found = txn

@@ -42,8 +42,14 @@ fn distinct_scalar_field() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(DEFAULT_CF, COLLECTION,"status", rawdoc! {}, DistinctOptions::default())
-            .unwrap(),
+        txn.distinct(
+            DEFAULT_CF,
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
     );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));
@@ -59,18 +65,30 @@ fn distinct_nested_path() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Austin" } })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Denver" } })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "address": { "city": "Austin" } })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "address": { "city": "Austin" } },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "address": { "city": "Denver" } },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "address": { "city": "Austin" } },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -110,8 +128,14 @@ fn distinct_array_field() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(DEFAULT_CF, COLLECTION,"tags", rawdoc! {}, DistinctOptions::default())
-            .unwrap(),
+        txn.distinct(
+            DEFAULT_CF,
+            COLLECTION,
+            "tags",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
     );
     assert_eq!(values.len(), 3);
     assert!(values.contains(&Bson::String("rust".into())));
@@ -128,18 +152,30 @@ fn distinct_with_filter() {
         ..Default::default()
     })
     .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active", "tier": "gold" })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "inactive", "tier": "silver" })
-        .unwrap()
-        .drain()
-        .unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "status": "active", "tier": "silver" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "status": "active", "tier": "gold" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "status": "inactive", "tier": "silver" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "status": "active", "tier": "silver" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
@@ -310,8 +346,14 @@ fn distinct_mixed_presence() {
 
     let txn = db.begin(true).unwrap();
     let values = to_bson_vec(
-        txn.distinct(DEFAULT_CF, COLLECTION,"status", rawdoc! {}, DistinctOptions::default())
-            .unwrap(),
+        txn.distinct(
+            DEFAULT_CF,
+            COLLECTION,
+            "status",
+            rawdoc! {},
+            DistinctOptions::default(),
+        )
+        .unwrap(),
     );
     assert_eq!(values.len(), 2);
     assert!(values.contains(&Bson::String("active".into())));

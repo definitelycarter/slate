@@ -48,7 +48,11 @@ where
                 skip,
                 take,
             } => self.plan_distinct(cf, collection, field, &predicate, sort, skip, take),
-            Statement::Insert { cf, collection, docs } => self.plan_insert(cf, collection, docs),
+            Statement::Insert {
+                cf,
+                collection,
+                docs,
+            } => self.plan_insert(cf, collection, docs),
             Statement::Update {
                 cf,
                 collection,
@@ -68,8 +72,16 @@ where
                 predicate,
                 limit,
             } => self.plan_delete(cf, collection, &predicate, limit),
-            Statement::Merge { cf, collection, docs } => self.plan_merge(cf, collection, docs),
-            Statement::Upsert { cf, collection, docs } => self.plan_upsert(cf, collection, docs),
+            Statement::Merge {
+                cf,
+                collection,
+                docs,
+            } => self.plan_merge(cf, collection, docs),
+            Statement::Upsert {
+                cf,
+                collection,
+                docs,
+            } => self.plan_upsert(cf, collection, docs),
         }
     }
 
@@ -326,7 +338,13 @@ where
 
     /// Wrap source with Node::Trigger only (before-action, no validation).
     /// Used for deletes where nothing is being written.
-    fn wrap_before_triggers(&self, cf: &str, coll: &str, action: &str, source: Node<T::Cf>) -> Node<T::Cf> {
+    fn wrap_before_triggers(
+        &self,
+        cf: &str,
+        coll: &str,
+        action: &str,
+        source: Node<T::Cf>,
+    ) -> Node<T::Cf> {
         let Some(snap) = self.snapshot else {
             return source;
         };
@@ -729,8 +747,7 @@ where
     fn pk_lookup(handle: &CollectionHandle<T::Cf>, value: &bson::Bson) -> Node<T::Cf> {
         let mut doc = bson::Document::new();
         doc.insert(handle.pk_path().to_string(), value.clone());
-        let raw = bson::RawDocumentBuf::try_from(&doc)
-            .expect("pk document is always valid");
+        let raw = bson::RawDocumentBuf::try_from(&doc).expect("pk document is always valid");
         Node::KeyLookup {
             collection: handle.clone(),
             source: Box::new(Node::Values(vec![raw])),
@@ -738,7 +755,11 @@ where
     }
 
     /// Try to convert a single expression into an IndexScan.
-    fn try_index_scan(&self, handle: &CollectionHandle<T::Cf>, expr: &Expression) -> Option<Node<T::Cf>> {
+    fn try_index_scan(
+        &self,
+        handle: &CollectionHandle<T::Cf>,
+        expr: &Expression,
+    ) -> Option<Node<T::Cf>> {
         let (field, range) = match expr {
             Expression::Eq(f, v) => (f, IndexScanRange::Eq(v.clone())),
             Expression::Gt(f, v) => (

@@ -15,14 +15,14 @@ mod statement;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
-pub use slate_engine::{FunctionKind, DEFAULT_CF};
-pub use slate_vm::VmError;
-pub use slate_vm::pool::{RuntimeRegistry, VmPool};
 pub use convert::IntoRawDocumentBuf;
 pub use cursor::{Cursor, CursorIter};
 pub use database::{Database, DatabaseBuilder, Transaction as DatabaseTransaction};
 pub use error::DbError;
 pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};
+pub use slate_engine::{DEFAULT_CF, FunctionKind};
+pub use slate_vm::VmError;
+pub use slate_vm::pool::{RuntimeRegistry, VmPool};
 
 #[cfg(feature = "bench-internals")]
 pub mod bench {

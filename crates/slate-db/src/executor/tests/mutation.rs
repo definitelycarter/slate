@@ -141,7 +141,8 @@ fn full_update_pipeline() {
     let docs = vec![rawdoc! { "_id": "1", "status": "active" }];
     let plan = Plan::Update {
         collection: mock_collection(vec!["status".into()]),
-        mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "archived" }, "_id").unwrap(),
+        mutation: crate::mutation::parse_mutation(&rawdoc! { "status": "archived" }, "_id")
+            .unwrap(),
         source: Node::Values(docs),
     };
     let exec = Executor::new(&txn, None);

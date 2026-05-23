@@ -1,8 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::RawBson;
+use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 
 use crate::error::EngineError;
 
@@ -166,10 +166,7 @@ pub trait EngineTransaction {
     fn scan<'a>(
         &'a self,
         handle: &CollectionHandle<Self::Cf>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
-        EngineError,
-    >;
+    ) -> Result<Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>, EngineError>;
 
     // ── Index operations ───────────────────────────────────────
 
@@ -321,8 +318,7 @@ pub trait Catalog: EngineTransaction {
 
     fn drop_collection(&mut self, cf: &str, name: &str) -> Result<(), EngineError>;
 
-    fn create_index(&mut self, cf: &str, collection: &str, field: &str)
-        -> Result<(), EngineError>;
+    fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 
     fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 

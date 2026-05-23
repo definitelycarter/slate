@@ -1,6 +1,8 @@
 use bson::{Bson, rawdoc};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use slate_vm::{LuaScriptRuntime, ScriptCapabilities, ScriptHandle, ScriptRuntime, ScopedMethod, VmError};
+use slate_vm::{
+    LuaScriptRuntime, ScopedMethod, ScriptCapabilities, ScriptHandle, ScriptRuntime, VmError,
+};
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -72,12 +74,20 @@ fn bench_validator(c: &mut Criterion) {
 
     group.bench_function("simple_pass", |b| {
         let input = small_doc();
-        b.iter(|| handle_simple.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_simple
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     group.bench_function("simple_fail", |b| {
         let input = rawdoc! { "status": "active" };
-        b.iter(|| handle_simple.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_simple
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     // Multi-field: check several constraints
@@ -99,7 +109,11 @@ fn bench_validator(c: &mut Criterion) {
 
     group.bench_function("multi_field", |b| {
         let input = medium_doc();
-        b.iter(|| handle_multi.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_multi
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     group.finish();
@@ -120,7 +134,11 @@ fn bench_computed_field(c: &mut Criterion) {
 
     group.bench_function("string_concat", |b| {
         let input = rawdoc! { "first": "Ada", "last": "Lovelace" };
-        b.iter(|| handle_concat.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_concat
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     // Arithmetic
@@ -133,7 +151,11 @@ fn bench_computed_field(c: &mut Criterion) {
 
     group.bench_function("arithmetic", |b| {
         let input = rawdoc! { "score": 0.875 };
-        b.iter(|| handle_arith.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_arith
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     // Build a derived document
@@ -149,7 +171,11 @@ fn bench_computed_field(c: &mut Criterion) {
 
     group.bench_function("derived_doc", |b| {
         let input = medium_doc();
-        b.iter(|| handle_derive.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_derive
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     group.finish();
@@ -182,7 +208,11 @@ fn bench_trigger(c: &mut Criterion) {
 
     group.bench_function("audit_log", |b| {
         let input = medium_doc();
-        b.iter(|| handle_audit.call(&input, &ScriptCapabilities::Pure).unwrap())
+        b.iter(|| {
+            handle_audit
+                .call(&input, &ScriptCapabilities::Pure)
+                .unwrap()
+        })
     });
 
     group.finish();
@@ -206,7 +236,10 @@ fn bench_trigger_with_db(c: &mut Criterion) {
 
     group.bench_function("single_put", |b| {
         let input = small_doc();
-        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let methods = [ScopedMethod {
+            name: "put",
+            callback: &noop_cb,
+        }];
         let caps = ScriptCapabilities::ReadWrite { methods: &methods };
         b.iter(|| handle_single.call(&input, &caps).unwrap())
     });
@@ -224,7 +257,10 @@ fn bench_trigger_with_db(c: &mut Criterion) {
 
     group.bench_function("three_puts", |b| {
         let input = small_doc();
-        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let methods = [ScopedMethod {
+            name: "put",
+            callback: &noop_cb,
+        }];
         let caps = ScriptCapabilities::ReadWrite { methods: &methods };
         b.iter(|| handle_multi.call(&input, &caps).unwrap())
     });
@@ -244,8 +280,14 @@ fn bench_trigger_with_db(c: &mut Criterion) {
     group.bench_function("put_and_get", |b| {
         let input = small_doc();
         let methods = [
-            ScopedMethod { name: "put", callback: &noop_cb },
-            ScopedMethod { name: "get", callback: &get_cb },
+            ScopedMethod {
+                name: "put",
+                callback: &noop_cb,
+            },
+            ScopedMethod {
+                name: "get",
+                callback: &get_cb,
+            },
         ];
         let caps = ScriptCapabilities::ReadWrite { methods: &methods };
         b.iter(|| handle_rw.call(&input, &caps).unwrap())
@@ -267,7 +309,10 @@ fn bench_trigger_with_db(c: &mut Criterion) {
 
     group.bench_function("realistic_audit", |b| {
         let input = medium_doc();
-        let methods = [ScopedMethod { name: "put", callback: &noop_cb }];
+        let methods = [ScopedMethod {
+            name: "put",
+            callback: &noop_cb,
+        }];
         let caps = ScriptCapabilities::ReadWrite { methods: &methods };
         b.iter(|| handle_real.call(&input, &caps).unwrap())
     });

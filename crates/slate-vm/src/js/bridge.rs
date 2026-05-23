@@ -119,16 +119,15 @@ fn invoke_method_inner(name: &str, args_bson: &[u8]) -> Result<Vec<u8>, String> 
 
         // Serialize result as { "v": result }.
         let doc = bson::doc! { "v": result };
-        let raw = bson::raw::RawDocumentBuf::try_from(doc)
-            .map_err(|e| e.to_string())?;
+        let raw = bson::raw::RawDocumentBuf::try_from(doc).map_err(|e| e.to_string())?;
         Ok(raw.into_bytes())
     })
 }
 
 /// Deserialize `{ "0": v0, "1": v1, ... }` into `Vec<Bson>`.
 fn deserialize_args(bson_bytes: &[u8]) -> Result<Vec<Bson>, String> {
-    let raw = bson::raw::RawDocumentBuf::from_bytes(bson_bytes.to_vec())
-        .map_err(|e| e.to_string())?;
+    let raw =
+        bson::raw::RawDocumentBuf::from_bytes(bson_bytes.to_vec()).map_err(|e| e.to_string())?;
     let doc: bson::Document =
         bson::deserialize_from_slice(raw.as_bytes()).map_err(|e| e.to_string())?;
 

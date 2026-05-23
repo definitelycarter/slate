@@ -58,8 +58,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         collection: &str,
     ) -> Result<Vec<String>, EngineError> {
         let sys = self.sys_cf()?;
-        let prefix =
-            KeyPrefix::IndexConfig(Cow::Borrowed(cf), Cow::Borrowed(collection)).encode();
+        let prefix = KeyPrefix::IndexConfig(Cow::Borrowed(cf), Cow::Borrowed(collection)).encode();
         let iter = self.txn.scan_prefix(&sys, &prefix)?;
         let mut fields = Vec::new();
         for result in iter {
@@ -113,12 +112,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let indexes = self.load_indexes(&cf_name, &name)?;
             let cf_handle = self.txn.cf(&cf_name)?;
             handles.push(CollectionHandle::new(
-                name,
-                cf_name,
-                cf_handle,
-                indexes,
-                meta.pk,
-                meta.ttl,
+                name, cf_name, cf_handle, indexes, meta.pk, meta.ttl,
             ));
         }
         Ok(handles)
@@ -130,10 +124,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         name: &str,
         options: &CreateCollectionOptions,
     ) -> Result<(), EngineError> {
-        let pk = options
-            .pk_path
-            .clone()
-            .unwrap_or_else(|| "_id".to_string());
+        let pk = options.pk_path.clone().unwrap_or_else(|| "_id".to_string());
         if pk.contains('.') {
             return Err(EngineError::InvalidDocument(
                 "pk_path must be a top-level field (dot-paths are not supported)".into(),
@@ -150,8 +141,9 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let key = Key::Collection(Cow::Borrowed(cf), Cow::Borrowed(name)).encode();
         if self.txn.get(&sys, &key)?.is_none() {
             self.txn.create_cf(cf)?;
-            let blob = bson::serialize_to_vec(&meta)
-                .map_err(|e| EngineError::InvalidDocument(format!("failed to serialize meta: {e}")))?;
+            let blob = bson::serialize_to_vec(&meta).map_err(|e| {
+                EngineError::InvalidDocument(format!("failed to serialize meta: {e}"))
+            })?;
             self.txn.put(&sys, &key, &blob)?;
         }
         Ok(())
@@ -204,12 +196,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         Ok(())
     }
 
-    fn create_index(
-        &mut self,
-        cf: &str,
-        collection: &str,
-        field: &str,
-    ) -> Result<(), EngineError> {
+    fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
         self.load_collection_meta(cf, collection)?;
         let cf_handle = self.txn.cf(cf)?;
 
@@ -241,8 +228,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let record = Record::from_bytes(value_bytes.clone())?;
             let ttl = record.ttl_millis();
             let doc = record.doc()?;
-            let entries =
-                IndexRecord::from_document(collection, &indexes, doc, &doc_id, ttl);
+            let entries = IndexRecord::from_document(collection, &indexes, doc, &doc_id, ttl);
             if !entries.is_empty() {
                 let refs: Vec<(&[u8], &[u8])> = entries
                     .iter()

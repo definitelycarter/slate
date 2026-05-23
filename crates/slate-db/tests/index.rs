@@ -6,7 +6,11 @@ use slate_db::{CollectionConfig, DEFAULT_CF};
 use slate_query::FindOptions;
 
 #[allow(dead_code)]
-fn create_collection_with_indexes(db: &slate_db::Database<slate_store::MemoryStore>, name: &str, indexes: &[&str]) {
+fn create_collection_with_indexes(
+    db: &slate_db::Database<slate_store::MemoryStore>,
+    name: &str,
+    indexes: &[&str],
+) {
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: name.to_string(),
@@ -154,10 +158,15 @@ fn index_maintained_on_update() {
     // Update the indexed field
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(DEFAULT_CF, COLLECTION, &filter, doc! { "status": "rejected" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.update_one(
+        DEFAULT_CF,
+        COLLECTION,
+        &filter,
+        doc! { "status": "rejected" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Old index value should not match
@@ -245,7 +254,8 @@ fn index_on_nested_path() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index(DEFAULT_CF, "nested_idx", "address.city").unwrap();
+    txn.create_index(DEFAULT_CF, "nested_idx", "address.city")
+        .unwrap();
     txn.insert_many(
         DEFAULT_CF,
         "nested_idx",
@@ -360,7 +370,8 @@ fn index_on_array_of_objects() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index(DEFAULT_CF, "items_idx", "items.[].sku").unwrap();
+    txn.create_index(DEFAULT_CF, "items_idx", "items.[].sku")
+        .unwrap();
     txn.insert_many(
         DEFAULT_CF,
         "items_idx",
@@ -427,19 +438,28 @@ fn multikey_index_maintained_on_update() {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, "tags_upd", "tags.[]").unwrap();
-    txn.insert_one(DEFAULT_CF, "tags_upd", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "tags_upd",
+        doc! { "_id": "r1", "tags": ["rust", "db"] },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Update tags
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(DEFAULT_CF, "tags_upd", &filter, doc! { "tags": ["go", "api"] })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.update_one(
+        DEFAULT_CF,
+        "tags_upd",
+        &filter,
+        doc! { "tags": ["go", "api"] },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Old tags should not match
@@ -485,10 +505,14 @@ fn multikey_index_maintained_on_delete() {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, "tags_del", "tags.[]").unwrap();
-    txn.insert_one(DEFAULT_CF, "tags_del", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "tags_del",
+        doc! { "_id": "r1", "tags": ["rust", "db"] },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Delete
@@ -576,19 +600,28 @@ fn multikey_index_replace_one() {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, "tags_rep", "tags.[]").unwrap();
-    txn.insert_one(DEFAULT_CF, "tags_rep", doc! { "_id": "r1", "tags": ["rust", "db"] })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "tags_rep",
+        doc! { "_id": "r1", "tags": ["rust", "db"] },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Replace entirely
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.replace_one(DEFAULT_CF, "tags_rep", &filter, doc! { "tags": ["python", "ml"] })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.replace_one(
+        DEFAULT_CF,
+        "tags_rep",
+        &filter,
+        doc! { "tags": ["python", "ml"] },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Old tags gone
@@ -635,8 +668,10 @@ fn create_index_shows_in_list() {
         ..Default::default()
     })
     .unwrap();
-    txn.create_index(DEFAULT_CF, "configured", "status").unwrap();
-    txn.create_index(DEFAULT_CF, "configured", "tags.[]").unwrap();
+    txn.create_index(DEFAULT_CF, "configured", "status")
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "configured", "tags.[]")
+        .unwrap();
     txn.commit().unwrap();
 
     // Verify indexes were created

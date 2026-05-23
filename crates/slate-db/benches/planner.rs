@@ -1,8 +1,8 @@
 use bson::Bson;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use slate_db::bench::{Expression, Planner, Statement};
-use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine, DEFAULT_CF};
 use slate_db::bench::Mutation;
+use slate_db::bench::{Expression, Planner, Statement};
+use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
 use slate_query::{Sort, SortDirection};
 use slate_store::MemoryStore;
 
@@ -12,7 +12,8 @@ use slate_store::MemoryStore;
 fn setup() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "status").unwrap();
     txn.create_index(DEFAULT_CF, "users", "age").unwrap();
     txn.commit().unwrap();

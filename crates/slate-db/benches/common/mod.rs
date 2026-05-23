@@ -55,7 +55,8 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, "test", "status").unwrap();
-    txn.create_index(DEFAULT_CF, "test", "contacts_count").unwrap();
+    txn.create_index(DEFAULT_CF, "test", "contacts_count")
+        .unwrap();
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
             bson::doc! {
@@ -67,7 +68,10 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
             }
         })
         .collect();
-    txn.insert_many(DEFAULT_CF, "test", docs).unwrap().drain().unwrap();
+    txn.insert_many(DEFAULT_CF, "test", docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     txn.commit().unwrap();
     engine
 }
@@ -120,7 +124,8 @@ pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
-    txn.create_index(DEFAULT_CF, "bench", "contacts_count").unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "contacts_count")
+        .unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
         txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())

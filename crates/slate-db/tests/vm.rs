@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder, VmPool, RuntimeRegistry};
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder, RuntimeRegistry, VmPool};
 use slate_store::MemoryStore;
 use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
@@ -22,8 +22,13 @@ fn database_with_scripting() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_trigger(DEFAULT_CF, "test", "audit", "return function(ctx, event) return event end")
-        .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        "test",
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
     txn.commit().unwrap();
 }
 
@@ -37,7 +42,12 @@ fn database_without_scripting() {
         ..Default::default()
     })
     .unwrap();
-    txn.register_trigger(DEFAULT_CF, "test", "audit", "return function(ctx, event) return event end")
-        .unwrap();
+    txn.register_trigger(
+        DEFAULT_CF,
+        "test",
+        "audit",
+        "return function(ctx, event) return event end",
+    )
+    .unwrap();
     txn.commit().unwrap();
 }

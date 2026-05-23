@@ -29,9 +29,8 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     ) -> Result<BsonValue<'static>, EngineError> {
         match doc.get(handle.pk_path()) {
             Ok(Some(val)) => {
-                let bv = BsonValue::from_raw_bson_ref(val).ok_or_else(|| {
-                    EngineError::InvalidDocument("unsupported pk type".into())
-                })?;
+                let bv = BsonValue::from_raw_bson_ref(val)
+                    .ok_or_else(|| EngineError::InvalidDocument("unsupported pk type".into()))?;
                 Ok(BsonValue {
                     tag: bv.tag,
                     bytes: Cow::Owned(bv.bytes.into_owned()),
@@ -115,8 +114,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .diff(handle.name())?;
 
         self.apply_index_changes(handle, &changes)?;
-        self.txn
-            .put(handle.cf(), &encoded_key, record.as_bytes())?;
+        self.txn.put(handle.cf(), &encoded_key, record.as_bytes())?;
 
         Ok(())
     }
@@ -150,8 +148,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .diff(handle.name())?;
 
         self.apply_index_changes(handle, &changes)?;
-        self.txn
-            .put(handle.cf(), &encoded_key, record.as_bytes())?;
+        self.txn.put(handle.cf(), &encoded_key, record.as_bytes())?;
 
         Ok(())
     }
@@ -183,10 +180,8 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     fn scan<'b>(
         &'b self,
         handle: &CollectionHandle<Self::Cf>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'b>,
-        EngineError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'b>, EngineError>
+    {
         let now = self.now_millis;
         let prefix = KeyPrefix::Record(Cow::Borrowed(handle.name())).encode();
         let iter = self.txn.scan_prefix(handle.cf(), &prefix)?;
@@ -196,9 +191,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 if Record::is_expired(&value_bytes, now) {
                     return None;
                 }
-                match Record::from_bytes(value_bytes)
-                    .and_then(RawDocumentBuf::try_from)
-                {
+                match Record::from_bytes(value_bytes).and_then(RawDocumentBuf::try_from) {
                     Ok(doc) => Some(Ok(doc)),
                     Err(e) => Some(Err(e)),
                 }
@@ -212,8 +205,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         field: &str,
         range: IndexRange<'_>,
         reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError> {
         let ttl = self.now_millis;
         let collection = handle.name();
 
@@ -224,12 +216,10 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             _ => None,
         };
         let prefix = match &eq_encoded {
-            Some(bytes) => KeyPrefix::IndexValue(
-                Cow::Borrowed(collection),
-                Cow::Borrowed(field),
-                bytes,
-            )
-            .encode(),
+            Some(bytes) => {
+                KeyPrefix::IndexValue(Cow::Borrowed(collection), Cow::Borrowed(field), bytes)
+                    .encode()
+            }
             None => field_prefix.clone(),
         };
 
@@ -249,12 +239,13 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         };
 
         #[allow(clippy::type_complexity)]
-        let mut iter: Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b> =
-            if reverse {
-                self.txn.scan_prefix_rev(handle.cf(), &prefix)?
-            } else {
-                self.txn.scan_prefix(handle.cf(), &prefix)?
-            };
+        let mut iter: Box<
+            dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b,
+        > = if reverse {
+            self.txn.scan_prefix_rev(handle.cf(), &prefix)?
+        } else {
+            self.txn.scan_prefix(handle.cf(), &prefix)?
+        };
 
         let field_prefix_len = field_prefix.len();
         let mut done = false;
@@ -271,27 +262,23 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         return Some(Err(EngineError::Store(e)));
                     }
                     Ok((key_bytes, metadata_bytes)) => {
-                        let entry = match IndexEntry::from_raw(
-                            key_bytes,
-                            metadata_bytes,
-                            field_prefix_len,
-                        ) {
-                            Some(e) => e,
-                            None => {
-                                done = true;
-                                return Some(Err(EngineError::InvalidKey(
-                                    "invalid index key".into(),
-                                )));
-                            }
-                        };
+                        let entry =
+                            match IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len)
+                            {
+                                Some(e) => e,
+                                None => {
+                                    done = true;
+                                    return Some(Err(EngineError::InvalidKey(
+                                        "invalid index key".into(),
+                                    )));
+                                }
+                            };
 
                         if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {
                             let value_bytes = entry.value_bytes();
                             if let Some(lb) = lower {
                                 let cmp = value_bytes.cmp(lb.as_slice());
-                                if cmp == Ordering::Less
-                                    || (cmp == Ordering::Equal && !lower_inc)
-                                {
+                                if cmp == Ordering::Less || (cmp == Ordering::Equal && !lower_inc) {
                                     if reverse {
                                         done = true;
                                         return None;

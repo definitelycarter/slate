@@ -2,10 +2,10 @@ use bson::RawDocumentBuf;
 use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
-use slate_vm::pool::VmPool;
 use crate::error::DbError;
 use crate::executor::{Executor, RawIter};
 use crate::planner::plan::Plan;
+use slate_vm::pool::VmPool;
 
 type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 
@@ -26,11 +26,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
         pool: Option<&'txn VmPool>,
     ) -> Self {
-        Self {
-            txn,
-            plan,
-            pool,
-        }
+        Self { txn, plan, pool }
     }
 
     /// Consume the cursor and return a streaming iterator over documents.

@@ -255,9 +255,9 @@ impl<'a> BsonValue<'a> {
     /// Convert back to a `RawBson`, decoding sortable-encoded values.
     pub fn to_raw_bson(&self) -> Option<bson::RawBson> {
         Some(match self.tag {
-            ElementType::String => bson::RawBson::String(
-                std::str::from_utf8(&self.bytes).ok()?.to_string(),
-            ),
+            ElementType::String => {
+                bson::RawBson::String(std::str::from_utf8(&self.bytes).ok()?.to_string())
+            }
             ElementType::ObjectId if self.bytes.len() == 12 => {
                 let oid = bson::oid::ObjectId::from_bytes(self.bytes[..12].try_into().ok()?);
                 bson::RawBson::ObjectId(oid)

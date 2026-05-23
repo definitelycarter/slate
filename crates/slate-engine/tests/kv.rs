@@ -1,7 +1,7 @@
 use bson::raw::RawBsonRef;
 use slate_engine::{
-    Catalog, CollectionHandle, Engine, EngineTransaction, FunctionKind, IndexRange, KvEngine,
-    DEFAULT_CF, runtime_tag,
+    Catalog, CollectionHandle, DEFAULT_CF, Engine, EngineTransaction, FunctionKind, IndexRange,
+    KvEngine, runtime_tag,
 };
 use slate_store::MemoryStore;
 
@@ -15,7 +15,8 @@ fn engine() -> KvEngine<MemoryStore> {
 fn create_and_list_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let configs = txn.list_collections(None).unwrap();
     assert_eq!(configs.len(), 1);
     assert_eq!(configs[0].name(), "users");
@@ -35,8 +36,10 @@ fn collection_not_found() {
 fn create_collection_idempotent() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let configs = txn.list_collections(None).unwrap();
     assert_eq!(configs.len(), 1);
     txn.commit().unwrap();
@@ -46,7 +49,8 @@ fn create_collection_idempotent() {
 fn drop_collection_removes_metadata() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.drop_collection(DEFAULT_CF, "users").unwrap();
     let configs = txn.list_collections(None).unwrap();
     assert_eq!(configs.len(), 0);
@@ -67,7 +71,8 @@ fn drop_nonexistent_collection_is_noop() {
 fn put_get_roundtrip() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice", "name": "Alice" };
@@ -86,7 +91,8 @@ fn put_get_roundtrip() {
 fn get_missing_returns_none() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let id = RawBsonRef::String("missing");
@@ -98,7 +104,8 @@ fn get_missing_returns_none() {
 fn put_overwrite() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let id = RawBsonRef::String("alice");
@@ -119,7 +126,8 @@ fn put_overwrite() {
 fn delete_removes_document() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let id = RawBsonRef::String("alice");
@@ -138,7 +146,8 @@ fn delete_removes_document() {
 fn scan_returns_all_documents() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     for i in 0..3 {
@@ -165,7 +174,8 @@ fn scan_returns_all_documents() {
 fn drop_collection_removes_records() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "alice" };
@@ -178,7 +188,8 @@ fn drop_collection_removes_records() {
 
     // Recreate and verify empty.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
     let results: Vec<_> = txn
         .scan(&handle)
@@ -195,7 +206,8 @@ fn drop_collection_removes_records() {
 fn create_index_backfills_existing_records() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     // Insert docs before index exists.
@@ -225,7 +237,8 @@ fn create_index_backfills_existing_records() {
 fn drop_index_removes_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
@@ -257,7 +270,8 @@ fn drop_index_removes_entries() {
 fn put_maintains_index() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "age").unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
@@ -283,12 +297,7 @@ fn put_maintains_index() {
     // Eq scan for age=25 should match 2.
     let age_25 = bson::Bson::Int32(25);
     let entries: Vec<_> = txn
-        .scan_index(
-            &handle,
-            "age",
-            IndexRange::Eq(&age_25),
-            false,
-        )
+        .scan_index(&handle, "age", IndexRange::Eq(&age_25), false)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
@@ -300,7 +309,8 @@ fn put_maintains_index() {
 fn put_overwrite_updates_index() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
@@ -331,7 +341,8 @@ fn put_overwrite_updates_index() {
 fn delete_removes_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
@@ -361,7 +372,8 @@ fn delete_removes_index_entries() {
 fn drop_collection_removes_index_entries() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
 
     let doc = bson::rawdoc! { "_id": "a", "email": "a@test.com" };
@@ -376,7 +388,8 @@ fn drop_collection_removes_index_entries() {
 
     // Recreate and verify no index entries leak.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
     let entries: Vec<_> = txn
@@ -396,7 +409,8 @@ fn stale_handle_misses_index_on_put() {
 
     // Setup: create collection, no indexes.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.commit().unwrap();
 
     // Another transaction creates an index and commits.
@@ -427,7 +441,11 @@ fn stale_handle_misses_index_on_put() {
     let txn = engine.begin(true).unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
     assert!(handle.indexes().contains(&"email".to_string()));
-    assert!(txn.get(&handle, &RawBsonRef::String("a")).unwrap().is_some());
+    assert!(
+        txn.get(&handle, &RawBsonRef::String("a"))
+            .unwrap()
+            .is_some()
+    );
 
     let entries: Vec<_> = txn
         .scan_index(&handle, "email", IndexRange::Full, false)
@@ -445,7 +463,8 @@ fn stale_handle_misses_index_on_put() {
 fn commit_persists_across_transactions() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
     let doc = bson::rawdoc! { "_id": "alice" };
     txn.put(&handle, &doc).unwrap();
@@ -465,7 +484,8 @@ fn commit_persists_across_transactions() {
 fn rollback_discards_changes() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(false).unwrap();
@@ -490,7 +510,8 @@ fn rollback_discards_changes() {
 fn put_get_string_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let id = RawBsonRef::String("hello");
@@ -506,7 +527,8 @@ fn put_get_string_id() {
 fn put_get_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -523,7 +545,8 @@ fn put_get_objectid_id() {
 fn put_get_i32_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let id = RawBsonRef::Int32(42);
@@ -539,7 +562,8 @@ fn put_get_i32_id() {
 fn put_get_i64_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let id = RawBsonRef::Int64(999_999_999_999);
@@ -555,7 +579,8 @@ fn put_get_i64_id() {
 fn put_nx_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -572,7 +597,8 @@ fn put_nx_objectid_id() {
 fn put_nx_i32_id_duplicate_errors() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let doc = bson::rawdoc! { "_id": 7_i32, "v": 1 };
@@ -587,7 +613,8 @@ fn put_nx_i32_id_duplicate_errors() {
 fn delete_objectid_id() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
@@ -604,13 +631,17 @@ fn delete_objectid_id() {
 fn scan_mixed_id_types() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "c", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
 
     let oid = bson::oid::ObjectId::new();
-    txn.put(&handle, &bson::rawdoc! { "_id": "str", "v": 1 }).unwrap();
-    txn.put(&handle, &bson::rawdoc! { "_id": oid, "v": 2 }).unwrap();
-    txn.put(&handle, &bson::rawdoc! { "_id": 42_i32, "v": 3 }).unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "str", "v": 1 })
+        .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": oid, "v": 2 })
+        .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": 42_i32, "v": 3 })
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
@@ -623,8 +654,16 @@ fn scan_mixed_id_types() {
     assert_eq!(results.len(), 3);
 
     // Verify each can be fetched individually.
-    assert!(txn.get(&handle, &RawBsonRef::String("str")).unwrap().is_some());
-    assert!(txn.get(&handle, &RawBsonRef::ObjectId(oid)).unwrap().is_some());
+    assert!(
+        txn.get(&handle, &RawBsonRef::String("str"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        txn.get(&handle, &RawBsonRef::ObjectId(oid))
+            .unwrap()
+            .is_some()
+    );
     assert!(txn.get(&handle, &RawBsonRef::Int32(42)).unwrap().is_some());
     txn.rollback().unwrap();
 }
@@ -635,13 +674,23 @@ fn scan_mixed_id_types() {
 fn create_and_load_trigger() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"print('audit')")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"print('audit')",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let entries = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Trigger).unwrap();
+    let entries = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Trigger)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "audit");
     assert_eq!(entries[0].source, b"print('audit')");
@@ -652,13 +701,23 @@ fn create_and_load_trigger() {
 fn create_and_load_validator() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "require_name", runtime_tag::LUA, b"assert(doc.name)")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Validator,
+        "require_name",
+        runtime_tag::LUA,
+        b"assert(doc.name)",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let entries = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Validator).unwrap();
+    let entries = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Validator)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "require_name");
     assert_eq!(entries[0].source, b"assert(doc.name)");
@@ -669,13 +728,23 @@ fn create_and_load_validator() {
 fn create_and_load_udf() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", runtime_tag::LUA, b"return first .. last")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Udf,
+        "full_name",
+        runtime_tag::LUA,
+        b"return first .. last",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let entries = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Udf).unwrap();
+    let entries = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Udf)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "full_name");
     assert_eq!(entries[0].source, b"return first .. last");
@@ -686,24 +755,50 @@ fn create_and_load_udf() {
 fn multiple_functions_per_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src1")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", runtime_tag::LUA, b"src2")
-        .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", runtime_tag::LUA, b"src3")
-        .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"src1",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "notify",
+        runtime_tag::LUA,
+        b"src2",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Validator,
+        "check",
+        runtime_tag::LUA,
+        b"src3",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let triggers = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Trigger).unwrap();
+    let triggers = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Trigger)
+        .unwrap();
     assert_eq!(triggers.len(), 2);
     let names: Vec<&str> = triggers.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"audit"));
     assert!(names.contains(&"notify"));
 
     // Validators are separate from triggers.
-    let validators = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Validator).unwrap();
+    let validators = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Validator)
+        .unwrap();
     assert_eq!(validators.len(), 1);
     assert_eq!(validators[0].name, "check");
     txn.rollback().unwrap();
@@ -713,11 +808,26 @@ fn multiple_functions_per_collection() {
 fn drop_function() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "notify", runtime_tag::LUA, b"src2")
-        .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"src",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "notify",
+        runtime_tag::LUA,
+        b"src2",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let mut txn = engine.begin(false).unwrap();
@@ -726,7 +836,9 @@ fn drop_function() {
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let entries = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Trigger).unwrap();
+    let entries = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Trigger)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "notify");
     txn.rollback().unwrap();
@@ -736,13 +848,35 @@ fn drop_function() {
 fn drop_collection_cleans_functions() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"t")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Validator, "check", runtime_tag::LUA, b"v")
-        .unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Udf, "full_name", runtime_tag::LUA, b"d")
-        .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"t",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Validator,
+        "check",
+        runtime_tag::LUA,
+        b"v",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Udf,
+        "full_name",
+        runtime_tag::LUA,
+        b"d",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let mut txn = engine.begin(false).unwrap();
@@ -751,10 +885,20 @@ fn drop_collection_cleans_functions() {
 
     // Recreate and verify no functions leak.
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    for kind in [FunctionKind::Trigger, FunctionKind::Validator, FunctionKind::Udf] {
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    for kind in [
+        FunctionKind::Trigger,
+        FunctionKind::Validator,
+        FunctionKind::Udf,
+    ] {
         let entries = txn.load_functions(DEFAULT_CF, "users", kind).unwrap();
-        assert_eq!(entries.len(), 0, "expected no {:?} entries after drop", kind);
+        assert_eq!(
+            entries.len(),
+            0,
+            "expected no {:?} entries after drop",
+            kind
+        );
     }
     txn.rollback().unwrap();
 }
@@ -763,7 +907,14 @@ fn drop_collection_cleans_functions() {
 fn function_requires_existing_collection() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    let err = txn.create_function(DEFAULT_CF, "nope", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src");
+    let err = txn.create_function(
+        DEFAULT_CF,
+        "nope",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"src",
+    );
     assert!(err.is_err());
     txn.rollback().unwrap();
 }
@@ -772,20 +923,40 @@ fn function_requires_existing_collection() {
 fn functions_isolated_across_collections() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_collection(DEFAULT_CF, "posts", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"users_src")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
-    txn.create_function(DEFAULT_CF, "posts", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"posts_src")
+    txn.create_collection(DEFAULT_CF, "posts", &Default::default())
         .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"users_src",
+    )
+    .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "posts",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"posts_src",
+    )
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = engine.begin(true).unwrap();
-    let user_triggers = txn.load_functions(DEFAULT_CF, "users", FunctionKind::Trigger).unwrap();
+    let user_triggers = txn
+        .load_functions(DEFAULT_CF, "users", FunctionKind::Trigger)
+        .unwrap();
     assert_eq!(user_triggers.len(), 1);
     assert_eq!(user_triggers[0].source, b"users_src");
 
-    let post_triggers = txn.load_functions(DEFAULT_CF, "posts", FunctionKind::Trigger).unwrap();
+    let post_triggers = txn
+        .load_functions(DEFAULT_CF, "posts", FunctionKind::Trigger)
+        .unwrap();
     assert_eq!(post_triggers.len(), 1);
     assert_eq!(post_triggers[0].source, b"posts_src");
     txn.rollback().unwrap();
@@ -795,11 +966,15 @@ fn functions_isolated_across_collections() {
 fn create_index_duplicate_errors() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
 
     let err = txn.create_index(DEFAULT_CF, "users", "email");
-    assert!(err.is_err(), "expected IndexExists error on duplicate create_index");
+    assert!(
+        err.is_err(),
+        "expected IndexExists error on duplicate create_index"
+    );
     txn.rollback().unwrap();
 }
 
@@ -807,11 +982,29 @@ fn create_index_duplicate_errors() {
 fn create_function_duplicate_errors() {
     let engine = engine();
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "users", &Default::default()).unwrap();
-    txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src1")
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
+    txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"src1",
+    )
+    .unwrap();
 
-    let err = txn.create_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit", runtime_tag::LUA, b"src2");
-    assert!(err.is_err(), "expected FunctionExists error on duplicate create_function");
+    let err = txn.create_function(
+        DEFAULT_CF,
+        "users",
+        FunctionKind::Trigger,
+        "audit",
+        runtime_tag::LUA,
+        b"src2",
+    );
+    assert!(
+        err.is_err(),
+        "expected FunctionExists error on duplicate create_function"
+    );
     txn.rollback().unwrap();
 }

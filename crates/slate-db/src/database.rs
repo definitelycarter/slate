@@ -524,7 +524,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .create_collection(&config.cf, &config.name, &options)?;
 
         // Auto-create TTL index; ignore IndexExists for idempotent re-creation.
-        if let Err(e) = self.txn.create_index(&config.cf, &config.name, &config.ttl_path) {
+        if let Err(e) = self
+            .txn
+            .create_index(&config.cf, &config.name, &config.ttl_path)
+        {
             if !matches!(e, slate_engine::EngineError::IndexExists(_)) {
                 return Err(e.into());
             }
@@ -594,12 +597,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Drop a trigger function from a collection.
-    pub fn drop_trigger(
-        &mut self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
+    pub fn drop_trigger(&mut self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Trigger, name)?;
         self.hooks_dirty = true;
@@ -620,12 +618,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Drop a user-defined function from a collection.
-    pub fn drop_udf(
-        &mut self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
+    pub fn drop_udf(&mut self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Udf, name)?;
         Ok(())

@@ -48,8 +48,8 @@ impl Mutation {
     ///
     /// Returns `Ok(None)` if the document is unchanged.
     pub(crate) fn apply(&self, raw: &RawDocument) -> Result<Option<bson::RawDocumentBuf>, DbError> {
-        use crate::mutation::raw::{RawMutationResult, raw_apply_mutation};
         use crate::mutation::ops;
+        use crate::mutation::raw::{RawMutationResult, raw_apply_mutation};
 
         // Fast path: raw byte-level mutation engine
         match raw_apply_mutation(raw, self)? {
@@ -183,7 +183,9 @@ pub fn parse_mutation(doc: &RawDocument, pk_path: &str) -> Result<Mutation, Pars
     for fm in &ops {
         let target = fm.field.split('.').next().unwrap_or(&fm.field);
         if target == pk_path {
-            return Err(ParseError(format!("cannot mutate primary key field '{pk_path}'")));
+            return Err(ParseError(format!(
+                "cannot mutate primary key field '{pk_path}'"
+            )));
         }
     }
 

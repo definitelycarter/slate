@@ -1,7 +1,7 @@
 use bson::raw::RawBsonRef;
 use bson::rawdoc;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_engine::{Catalog, Engine, EngineTransaction, IndexRange, KvEngine, DEFAULT_CF};
+use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, IndexRange, KvEngine};
 use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────
@@ -24,7 +24,8 @@ fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
 fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     let mut txn = engine.begin(false).unwrap();
-    txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+    txn.create_collection(DEFAULT_CF, "bench", &Default::default())
+        .unwrap();
     txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
     txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
     let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
@@ -41,9 +42,7 @@ fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
     for n in [100, 1_000, 10_000] {
         let engine = seeded_engine(n);
-        let id_strings: Vec<String> = (0..100)
-            .map(|i| format!("rec-{}", i * (n / 100)))
-            .collect();
+        let id_strings: Vec<String> = (0..100).map(|i| format!("rec-{}", i * (n / 100))).collect();
 
         group.bench_with_input(BenchmarkId::from_parameter(n), &id_strings, |b, ids| {
             b.iter(|| {
@@ -168,7 +167,8 @@ fn bench_put(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default())
+                .unwrap();
             txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
             txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
             txn.commit().unwrap();
@@ -202,7 +202,8 @@ fn bench_put_nx(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default())
+                .unwrap();
             txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
             txn.create_index(DEFAULT_CF, "bench", "age").unwrap();
             txn.commit().unwrap();
@@ -321,7 +322,8 @@ fn bench_create_index_backfill(c: &mut Criterion) {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
             let mut txn = engine.begin(false).unwrap();
-            txn.create_collection(DEFAULT_CF, "bench", &Default::default()).unwrap();
+            txn.create_collection(DEFAULT_CF, "bench", &Default::default())
+                .unwrap();
             let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
             for doc in generate_docs(n) {
                 txn.put(&handle, &doc).unwrap();

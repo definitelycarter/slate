@@ -169,8 +169,7 @@ impl TryFrom<Record> for RawDocumentBuf {
 
     fn try_from(mut record: Record) -> Result<Self, Self::Error> {
         record.bytes.drain(..record.bson_start);
-        RawDocumentBuf::from_bytes(record.bytes)
-            .map_err(|e| EncodingError::Bson(e).into())
+        RawDocumentBuf::from_bytes(record.bytes).map_err(|e| EncodingError::Bson(e).into())
     }
 }
 
@@ -223,9 +222,8 @@ fn resolve_datetime(bytes: &[u8], base: usize, path: &str) -> Option<i64> {
                 Some(rest) if type_byte == 0x03 => resolve_datetime(bytes, value_start, rest),
                 // Leaf — extract DateTime millis (type 0x09)
                 None if type_byte == 0x09 => {
-                    let ms = i64::from_le_bytes(
-                        bytes[value_start..value_start + 8].try_into().ok()?,
-                    );
+                    let ms =
+                        i64::from_le_bytes(bytes[value_start..value_start + 8].try_into().ok()?);
                     Some(ms)
                 }
                 _ => None,
@@ -285,7 +283,9 @@ mod tests {
     fn with_ttl_at_path_custom_field() {
         let dt = bson::DateTime::from_millis(42_000);
         let doc = bson::rawdoc! { "_id": "a", "expires_at": dt };
-        let record = Record::encoder().with_ttl_at_path("expires_at").encode(&doc);
+        let record = Record::encoder()
+            .with_ttl_at_path("expires_at")
+            .encode(&doc);
         assert_eq!(record.ttl_millis(), Some(42_000));
     }
 
@@ -331,7 +331,9 @@ mod tests {
     fn with_ttl_at_nested_path() {
         let dt = bson::DateTime::from_millis(99_000);
         let doc = bson::rawdoc! { "_id": "a", "meta": { "expires_at": dt } };
-        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        let record = Record::encoder()
+            .with_ttl_at_path("meta.expires_at")
+            .encode(&doc);
         assert_eq!(record.ttl_millis(), Some(99_000));
         assert!(Record::is_expired(record.as_bytes(), 100_000));
         assert!(!Record::is_expired(record.as_bytes(), 50_000));
@@ -348,14 +350,18 @@ mod tests {
     #[test]
     fn with_ttl_at_nested_path_missing() {
         let doc = bson::rawdoc! { "_id": "a", "meta": { "name": "test" } };
-        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        let record = Record::encoder()
+            .with_ttl_at_path("meta.expires_at")
+            .encode(&doc);
         assert_eq!(record.as_bytes()[0], TAG_NO_TTL);
     }
 
     #[test]
     fn with_ttl_at_nested_path_non_document_intermediate() {
         let doc = bson::rawdoc! { "_id": "a", "meta": "not a doc" };
-        let record = Record::encoder().with_ttl_at_path("meta.expires_at").encode(&doc);
+        let record = Record::encoder()
+            .with_ttl_at_path("meta.expires_at")
+            .encode(&doc);
         assert_eq!(record.as_bytes()[0], TAG_NO_TTL);
     }
 }

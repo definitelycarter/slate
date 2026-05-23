@@ -27,7 +27,11 @@ pub(crate) fn configure(lua: &mlua::Lua, instruction_limit: u32) -> Result<(), V
 pub(crate) fn set_instruction_hook(lua: &mlua::Lua, limit: u32) -> Result<(), VmError> {
     lua.set_hook(
         mlua::HookTriggers::new().every_nth_instruction(limit),
-        |_, _| Err(mlua::Error::RuntimeError("instruction limit exceeded".into())),
+        |_, _| {
+            Err(mlua::Error::RuntimeError(
+                "instruction limit exceeded".into(),
+            ))
+        },
     )?;
     Ok(())
 }
@@ -43,12 +47,14 @@ pub(crate) fn read_only_env(lua: &mlua::Lua, base: &mlua::Table) -> Result<mlua:
     meta.set("__index", base.clone())?;
     meta.set(
         "__newindex",
-        lua.create_function(|_, (_t, key, _val): (mlua::Value, mlua::String, mlua::Value)| {
-            Err::<(), _>(mlua::Error::RuntimeError(format!(
-                "cannot set global '{}'",
-                key.to_str()?
-            )))
-        })?,
+        lua.create_function(
+            |_, (_t, key, _val): (mlua::Value, mlua::String, mlua::Value)| {
+                Err::<(), _>(mlua::Error::RuntimeError(format!(
+                    "cannot set global '{}'",
+                    key.to_str()?
+                )))
+            },
+        )?,
     )?;
 
     env.set_metatable(Some(meta))?;

@@ -22,7 +22,8 @@ fn bench_bulk_insert(c: &mut Criterion) {
             })
             .unwrap();
             txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
-            txn.create_index(DEFAULT_CF, "bench", "contacts_count").unwrap();
+            txn.create_index(DEFAULT_CF, "bench", "contacts_count")
+                .unwrap();
             txn.commit().unwrap();
             engine
         };
@@ -35,7 +36,10 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     (txn, docs.clone())
                 },
                 |(mut txn, docs)| {
-                    txn.insert_many(DEFAULT_CF, "bench", docs).unwrap().drain().unwrap();
+                    txn.insert_many(DEFAULT_CF, "bench", docs)
+                        .unwrap()
+                        .drain()
+                        .unwrap();
                     // Don't commit — let txn drop so engine stays empty for next iteration
                 },
                 BatchSize::PerIteration,
@@ -341,8 +345,14 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                txn.distinct(DEFAULT_CF, "bench", "status", rawdoc! {}, DistinctOptions::default())
-                    .unwrap()
+                txn.distinct(
+                    DEFAULT_CF,
+                    "bench",
+                    "status",
+                    rawdoc! {},
+                    DistinctOptions::default(),
+                )
+                .unwrap()
             })
         });
     }

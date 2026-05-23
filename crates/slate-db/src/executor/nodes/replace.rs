@@ -12,8 +12,8 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let replacement_raw = replacement;
-    let pk_key = CString::try_from(handle.pk_path())
-        .map_err(|e| DbError::Serialization(e.to_string()))?;
+    let pk_key =
+        CString::try_from(handle.pk_path()).map_err(|e| DbError::Serialization(e.to_string()))?;
 
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;

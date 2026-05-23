@@ -6,13 +6,13 @@
 //! path for cases it cannot handle (dot-paths, `$rename`, `$lpush`,
 //! Document/Array `$set` values).
 
+use super::{Mutation, MutationOp};
 use bson::raw::RawDocument;
 use bson::spec::ElementType;
 use bson::{Bson, RawDocumentBuf};
-use super::{Mutation, MutationOp};
 
-use crate::executor::raw_bson::{RawField, RawFieldLoc};
 use crate::error::DbError;
+use crate::executor::raw_bson::{RawField, RawFieldLoc};
 use slate_engine::skip_bson_value;
 
 // ── Result type ─────────────────────────────────────────────────
@@ -362,8 +362,7 @@ fn raw_pop(bytes: &mut Vec<u8>, field: &str) -> Result<bool, DbError> {
     }
 
     let arr_start = loc.value_start();
-    let arr_size =
-        i32::from_le_bytes(bytes[arr_start..arr_start + 4].try_into().unwrap()) as usize;
+    let arr_size = i32::from_le_bytes(bytes[arr_start..arr_start + 4].try_into().unwrap()) as usize;
 
     // Walk array elements to find the last one
     let mut last_start: Option<usize> = None;
@@ -888,7 +887,8 @@ mod tests {
     #[test]
     fn orchestrator_inc_produces_valid_bson() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "name": "Alice" });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }, "_id").unwrap();
+        let mutation =
+            crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -910,7 +910,8 @@ mod tests {
     #[test]
     fn orchestrator_unset() {
         let raw = make_raw(&doc! { "_id": "r1", "a": 1, "b": 2 });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }, "_id").unwrap();
+        let mutation =
+            crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -924,7 +925,8 @@ mod tests {
     #[test]
     fn orchestrator_noop_returns_unchanged() {
         let raw = make_raw(&doc! { "a": 10_i32 });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }, "_id").unwrap();
+        let mutation =
+            crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Unchanged
@@ -934,7 +936,8 @@ mod tests {
     #[test]
     fn orchestrator_dot_path_falls_back() {
         let raw = make_raw(&doc! { "a": { "b": 1 } });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }, "_id").unwrap();
+        let mutation =
+            crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -945,7 +948,8 @@ mod tests {
     fn orchestrator_rename_falls_back() {
         let raw = make_raw(&doc! { "old": 1 });
         let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }, "_id").unwrap();
+            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }, "_id")
+                .unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -955,7 +959,8 @@ mod tests {
     #[test]
     fn orchestrator_lpush_falls_back() {
         let raw = make_raw(&doc! { "tags": ["a"] });
-        let mutation = crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }, "_id").unwrap();
+        let mutation =
+            crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback

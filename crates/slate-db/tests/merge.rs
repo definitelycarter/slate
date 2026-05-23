@@ -17,7 +17,11 @@ fn merge_many_inserts_new() {
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
         doc! { "_id": "m2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn.merge_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .merge_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 2);
 
     let found = txn
@@ -47,7 +51,11 @@ fn merge_many_merges_existing() {
 
     // Merge only updates status — score should remain
     let docs = vec![doc! { "_id": "m1", "status": "inactive" }];
-    let result = txn.merge_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .merge_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 1);
 
     let doc = txn
@@ -76,10 +84,14 @@ fn merge_many_index_maintenance() {
     .unwrap();
 
     // Merge changes status
-    txn.merge_many(DEFAULT_CF, COLLECTION, vec![doc! { "_id": "m1", "status": "inactive" }])
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.merge_many(
+        DEFAULT_CF,
+        COLLECTION,
+        vec![doc! { "_id": "m1", "status": "inactive" }],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
 
     // Old index entry gone
     let active = txn
@@ -131,7 +143,11 @@ fn merge_many_unchanged_noop() {
     // But internally raw_merge_update returns false for no-op, so updated stays at 1 because merge_many
     // always increments updated when the record exists
     let docs = vec![doc! { "_id": "m1", "status": "active" }];
-    let result = txn.merge_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .merge_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 1);
 }
 
@@ -141,16 +157,24 @@ fn merge_many_adds_new_field() {
     create_collection(&db, COLLECTION);
     let mut txn = db.begin(false).unwrap();
 
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "m1", "name": "Alice" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "m1", "name": "Alice" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
 
     // Merge adds a new field
-    txn.merge_many(DEFAULT_CF, COLLECTION, vec![doc! { "_id": "m1", "status": "active" }])
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.merge_many(
+        DEFAULT_CF,
+        COLLECTION,
+        vec![doc! { "_id": "m1", "status": "active" }],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
 
     let doc = txn
         .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "m1" })
@@ -179,7 +203,11 @@ fn merge_many_mixed_insert_and_merge() {
         doc! { "_id": "m1", "status": "inactive" }, // merge
         doc! { "_id": "m2", "name": "Bob", "status": "active" }, // insert
     ];
-    let result = txn.merge_many(DEFAULT_CF, COLLECTION, docs).unwrap().drain().unwrap();
+    let result = txn
+        .merge_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
     assert_eq!(result, 2);
 
     let m1 = txn

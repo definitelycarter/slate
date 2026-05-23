@@ -7,7 +7,7 @@ use rocksdb::{
 };
 
 use crate::error::StoreError;
-use crate::store::{increment_prefix, Transaction};
+use crate::store::{Transaction, increment_prefix};
 
 type DB = OptimisticTransactionDB<MultiThreaded>;
 
@@ -122,9 +122,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
             Some(u) => IteratorMode::From(u, Direction::Reverse),
             None => IteratorMode::End,
         };
-        let iter = self
-            .txn()?
-            .iterator_cf(&cf.handle, mode);
+        let iter = self.txn()?.iterator_cf(&cf.handle, mode);
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),

@@ -5,7 +5,7 @@ use std::sync::{Arc, MutexGuard};
 use imbl::ordmap::RangedIter;
 
 use crate::error::StoreError;
-use crate::store::{increment_prefix, Store, Transaction};
+use crate::store::{Store, Transaction, increment_prefix};
 
 use super::store::{ColumnFamily, MemoryStore};
 

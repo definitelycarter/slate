@@ -82,4 +82,3 @@ pub trait ScriptHandle: Send + Sync {
         capabilities: &ScriptCapabilities<'_>,
     ) -> Result<RawDocumentBuf, VmError>;
 }
-

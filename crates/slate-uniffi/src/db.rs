@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use slate_db::{CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, DEFAULT_CF};
+use slate_db::{
+    CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, DEFAULT_CF,
+};
 use slate_query::FindOptions;
 
 use crate::error::SlateError;
@@ -49,9 +51,11 @@ impl SlateDatabase {
 
     fn parse_options(options: Option<Vec<u8>>) -> Result<FindOptions, SlateError> {
         match options {
-            Some(bytes) => bson::deserialize_from_slice(&bytes).map_err(|e| SlateError::InvalidQuery {
-                message: e.to_string(),
-            }),
+            Some(bytes) => {
+                bson::deserialize_from_slice(&bytes).map_err(|e| SlateError::InvalidQuery {
+                    message: e.to_string(),
+                })
+            }
             None => Ok(FindOptions::default()),
         }
     }
@@ -63,7 +67,9 @@ impl SlateDatabase {
     #[uniffi::constructor]
     pub fn memory() -> Arc<Self> {
         let store = slate_store::MemoryStore::new();
-        let db = DatabaseBuilder::new().open(store).expect("failed to open database");
+        let db = DatabaseBuilder::new()
+            .open(store)
+            .expect("failed to open database");
         Arc::new(Self { db })
     }
 }
@@ -77,7 +83,9 @@ impl SlateDatabase {
             StoreImpl::open(std::path::Path::new(&path)).map_err(|e| SlateError::Store {
                 message: e.to_string(),
             })?;
-        let db = DatabaseBuilder::new().open(store).map_err(SlateError::from)?;
+        let db = DatabaseBuilder::new()
+            .open(store)
+            .map_err(SlateError::from)?;
         Ok(Arc::new(Self { db }))
     }
 }
@@ -93,11 +101,7 @@ impl SlateDatabase {
         })
     }
 
-    pub fn insert_many(
-        &self,
-        collection: String,
-        docs: Vec<Vec<u8>>,
-    ) -> Result<u64, SlateError> {
+    pub fn insert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         self.write(|txn| {
             let affected = txn.insert_many(DEFAULT_CF, &collection, docs)?.drain()?;
             Ok(affected)
@@ -143,7 +147,9 @@ impl SlateDatabase {
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let affected = txn.update_one(DEFAULT_CF, &collection, filter, update)?.drain()?;
+            let affected = txn
+                .update_one(DEFAULT_CF, &collection, filter, update)?
+                .drain()?;
             Ok(affected)
         })
     }
@@ -155,7 +161,9 @@ impl SlateDatabase {
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
         self.write(|txn| {
-            let affected = txn.update_many(DEFAULT_CF, &collection, filter, update)?.drain()?;
+            let affected = txn
+                .update_many(DEFAULT_CF, &collection, filter, update)?
+                .drain()?;
             Ok(affected)
         })
     }
@@ -192,11 +200,7 @@ impl SlateDatabase {
 
     // --- Count ---
 
-    pub fn count(
-        &self,
-        collection: String,
-        filter: Option<Vec<u8>>,
-    ) -> Result<u64, SlateError> {
+    pub fn count(&self, collection: String, filter: Option<Vec<u8>>) -> Result<u64, SlateError> {
         let filter = filter.unwrap_or_else(|| bson::rawdoc! {}.into_bytes());
         self.read(|txn| {
             let count = txn.count(DEFAULT_CF, &collection, filter)?;

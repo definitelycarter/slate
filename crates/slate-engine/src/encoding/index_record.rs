@@ -118,7 +118,9 @@ impl IndexRecord {
         let mut entries = Vec::new();
         for field in indexes {
             for val in bson_value::extract_all(doc, field) {
-                entries.push(IndexRecord::encode(collection, field, doc_id, &val, ttl_millis));
+                entries.push(IndexRecord::encode(
+                    collection, field, doc_id, &val, ttl_millis,
+                ));
             }
         }
         entries
@@ -138,10 +140,7 @@ impl IndexRecord {
 
     /// The doc_id extracted from the key.
     pub fn doc_id(&self) -> Option<BsonValue<'_>> {
-        Some(
-            BsonValue::parse_length_prefixed(&self.index_key[self.doc_id_start..])?
-                .0,
-        )
+        Some(BsonValue::parse_length_prefixed(&self.index_key[self.doc_id_start..])?.0)
     }
 
     /// Raw sortable-encoded value bytes (no type tag).
@@ -195,7 +194,6 @@ impl IndexRecord {
     pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
         (self.index_key, self.metadata)
     }
-
 }
 
 /// O(1) TTL expiry check on raw index metadata bytes.
@@ -206,7 +204,11 @@ impl IndexRecord {
 pub fn is_index_expired(data: &[u8], now_millis: i64) -> bool {
     const TTL_OFFSET: usize = 1;
     const WITH_TTL_SIZE: usize = 9;
-    if let Ok(bytes) = data.get(TTL_OFFSET..WITH_TTL_SIZE).unwrap_or_default().try_into() {
+    if let Ok(bytes) = data
+        .get(TTL_OFFSET..WITH_TTL_SIZE)
+        .unwrap_or_default()
+        .try_into()
+    {
         i64::from_le_bytes(bytes) < now_millis
     } else {
         false

@@ -2,11 +2,13 @@ use super::*;
 
 use crate::collection::CollectionConfig;
 use crate::database::Database;
-use slate_engine::{Engine, KvEngine, DEFAULT_CF};
+use slate_engine::{DEFAULT_CF, Engine, KvEngine};
 use slate_store::MemoryStore;
 
 fn seeded_db() -> Database<MemoryStore> {
-    let db = crate::database::DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let db = crate::database::DatabaseBuilder::new()
+        .open(MemoryStore::new())
+        .unwrap();
     let mut txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
@@ -47,7 +49,8 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
     {
         let mut txn = engine.begin(false).unwrap();
-        txn.create_collection(DEFAULT_CF, "test", &Default::default()).unwrap();
+        txn.create_collection(DEFAULT_CF, "test", &Default::default())
+            .unwrap();
         txn.create_index(DEFAULT_CF, "test", "status").unwrap();
         txn.create_index(DEFAULT_CF, "test", "score").unwrap();
         txn.create_index(DEFAULT_CF, "test", "ttl").unwrap();
@@ -269,7 +272,8 @@ fn read_record_skips_dangling_index() {
         // But EngineTransaction::delete removes indexes too. We need to go lower.
         // Alternative: just test via the Database API directly (integration-level test).
         // For now, verify that delete + re-lookup works correctly through the API.
-        txn.delete(&handle, &bson::raw::RawBsonRef::String("2")).unwrap();
+        txn.delete(&handle, &bson::raw::RawBsonRef::String("2"))
+            .unwrap();
         txn.commit().unwrap();
     }
 

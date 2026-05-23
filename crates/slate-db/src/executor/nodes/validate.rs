@@ -1,7 +1,7 @@
 use bson::RawBson;
 use bson::rawdoc;
-use slate_vm::pool::VmPool;
 use slate_vm::ScriptCapabilities;
+use slate_vm::pool::VmPool;
 
 use crate::error::DbError;
 use crate::executor::RawIter;
@@ -47,9 +47,7 @@ fn run_validators(
         // The result is a RawDocumentBuf — parse it to check.
         if let Ok(Some(ok_val)) = result.get("ok") {
             if let bson::raw::RawBsonRef::Boolean(false) = ok_val {
-                let reason = result
-                    .get_str("reason")
-                    .unwrap_or("validation failed");
+                let reason = result.get_str("reason").unwrap_or("validation failed");
                 return Err(DbError::InvalidQuery(format!(
                     "validation failed ({}): {}",
                     validator.name, reason

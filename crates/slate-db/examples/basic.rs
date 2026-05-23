@@ -1,5 +1,5 @@
 use bson::{Bson, RawBson, doc, rawdoc};
-use slate_db::{CollectionConfig, DatabaseBuilder, DbError, DEFAULT_CF};
+use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder, DbError};
 use slate_query::{FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
@@ -58,7 +58,11 @@ fn main() -> Result<(), DbError> {
     let alice = txn
         .find_one(DEFAULT_CF, "users", rawdoc! { "_id": "user-1" })?
         .expect("alice should exist");
-    println!("Found: {} (age {})", alice.get_str("name")?, alice.get_i32("age")?);
+    println!(
+        "Found: {} (age {})",
+        alice.get_str("name")?,
+        alice.get_i32("age")?
+    );
 
     // ── Filter: equality ────────────────────────────────────────
     let engineers: Vec<_> = txn
@@ -139,7 +143,10 @@ fn main() -> Result<(), DbError> {
         // _id is always included; only projected columns are returned
         assert!(d.get("age").unwrap().is_none());
     }
-    println!("Projection returned {} docs (age field excluded)", names_only.len());
+    println!(
+        "Projection returned {} docs (age field excluded)",
+        names_only.len()
+    );
 
     // ── Count ───────────────────────────────────────────────────
     let count = txn.count(DEFAULT_CF, "users", rawdoc! { "role": "engineer" })?;
@@ -244,10 +251,7 @@ fn main() -> Result<(), DbError> {
         )?
         .iter()?
         .collect::<Result<Vec<_>, _>>()?;
-    println!(
-        "Events in 'analytics' CF: {} page views",
-        views.len()
-    );
+    println!("Events in 'analytics' CF: {} page views", views.len());
     drop(txn);
 
     println!("\nDone!");

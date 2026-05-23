@@ -50,7 +50,9 @@ fn ttl_expired_docs_hidden_before_purge() {
         .unwrap();
     assert_eq!(results.len(), 2);
 
-    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" }).unwrap();
+    let result = txn
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" })
+        .unwrap();
     assert!(result.is_none());
 
     let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();
@@ -97,7 +99,9 @@ fn ttl_purge_makes_expired_docs_invisible() {
     names.sort();
     assert_eq!(names, vec!["Fresh", "Permanent"]);
 
-    let result = txn.find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" }).unwrap();
+    let result = txn
+        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "a" })
+        .unwrap();
     assert!(result.is_none());
 
     let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();

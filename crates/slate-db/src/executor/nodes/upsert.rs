@@ -23,8 +23,8 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     source: RawIter<'a>,
 ) -> Result<RawIter<'a>, DbError> {
     let cf = handle.cf_name().to_string();
-    let pk_key = CString::try_from(handle.pk_path())
-        .map_err(|e| DbError::Serialization(e.to_string()))?;
+    let pk_key =
+        CString::try_from(handle.pk_path()).map_err(|e| DbError::Serialization(e.to_string()))?;
     Ok(Box::new(source.map(move |result| {
         let opt_val = result?;
         let mut new_doc = match opt_val {
@@ -159,7 +159,9 @@ mod tests {
         let new = rawdoc! { "_id": "1", "score": 99 };
         let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old).unwrap().unwrap();
+        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_i32("score").unwrap(), 99);
     }
@@ -170,7 +172,9 @@ mod tests {
         let new = rawdoc! { "_id": "1", "email": "a@test.com" };
         let pk_key = CString::try_from("_id").unwrap();
 
-        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old).unwrap().unwrap();
+        let result = build_doc("_id", &pk_key, &UpsertMode::Merge, &new, &old)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.get_str("name").unwrap(), "Alice");
         assert_eq!(result.get_str("email").unwrap(), "a@test.com");
     }

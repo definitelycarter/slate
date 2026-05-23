@@ -28,7 +28,10 @@ pub fn seed_store<S: Store>(store: &S, cf_name: &str, n: usize) {
     let pairs = generate_kv_pairs(n);
     let txn = store.begin(false).unwrap();
     let cf = txn.cf(cf_name).unwrap();
-    let refs: Vec<(&[u8], &[u8])> = pairs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+    let refs: Vec<(&[u8], &[u8])> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
     txn.put_batch(&cf, &refs).unwrap();
     txn.commit().unwrap();
 }

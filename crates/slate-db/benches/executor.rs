@@ -5,8 +5,8 @@ use bson::raw::RawDocumentBuf;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use slate_db::bench::{Executor, Expression, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
 use slate_engine::{
-    Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineError, EngineTransaction,
-    FunctionEntry, FunctionKind, IndexEntry, IndexRange, DEFAULT_CF,
+    Catalog, CollectionHandle, CreateCollectionOptions, DEFAULT_CF, Engine, EngineError,
+    EngineTransaction, FunctionEntry, FunctionKind, IndexEntry, IndexRange,
 };
 
 // ── NoopTransaction ─────────────────────────────────────────
@@ -54,10 +54,8 @@ impl EngineTransaction for NoopTransaction {
     fn scan<'a>(
         &'a self,
         _handle: &CollectionHandle<Self::Cf>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>,
-        EngineError,
-    > {
+    ) -> Result<Box<dyn Iterator<Item = Result<RawDocumentBuf, EngineError>> + 'a>, EngineError>
+    {
         panic!("NoopTransaction::scan called");
     }
 
@@ -67,8 +65,7 @@ impl EngineTransaction for NoopTransaction {
         _field: &str,
         _range: IndexRange<'_>,
         _reverse: bool,
-    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>
-    {
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError> {
         panic!("NoopTransaction::scan_index called");
     }
 
@@ -76,7 +73,11 @@ impl EngineTransaction for NoopTransaction {
         panic!("NoopTransaction::purge called");
     }
 
-    fn purge_before(&self, _handle: &CollectionHandle<Self::Cf>, _as_of_millis: i64) -> Result<u64, EngineError> {
+    fn purge_before(
+        &self,
+        _handle: &CollectionHandle<Self::Cf>,
+        _as_of_millis: i64,
+    ) -> Result<u64, EngineError> {
         panic!("NoopTransaction::purge_before called");
     }
 
@@ -96,7 +97,12 @@ impl Catalog for NoopTransaction {
     fn list_collections(&self, _: Option<&str>) -> Result<Vec<CollectionHandle<()>>, EngineError> {
         panic!("NoopTransaction::list_collections called");
     }
-    fn create_collection(&mut self, _: &str, _: &str, _: &CreateCollectionOptions) -> Result<(), EngineError> {
+    fn create_collection(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: &CreateCollectionOptions,
+    ) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_collection called");
     }
     fn drop_collection(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
@@ -108,13 +114,32 @@ impl Catalog for NoopTransaction {
     fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
     }
-    fn create_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str, _: u8, _: &[u8]) -> Result<(), EngineError> {
+    fn create_function(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: FunctionKind,
+        _: &str,
+        _: u8,
+        _: &[u8],
+    ) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_function called");
     }
-    fn drop_function(&mut self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
+    fn drop_function(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: FunctionKind,
+        _: &str,
+    ) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_function called");
     }
-    fn load_functions(&self, _: &str, _: &str, _: FunctionKind) -> Result<Vec<FunctionEntry>, EngineError> {
+    fn load_functions(
+        &self,
+        _: &str,
+        _: &str,
+        _: FunctionKind,
+    ) -> Result<Vec<FunctionEntry>, EngineError> {
         Ok(vec![])
     }
 }

@@ -80,7 +80,7 @@ mod tests {
         // Layout: [len:4][type:1][key "a\0":2][str_len:4][str data + nul:?][doc nul:1]
         // We claim str_len=99 but only provide 1 byte of string data.
         let bytes: Vec<u8> = vec![
-            13, 0, 0, 0, // doc length = 13 (matches actual byte count)
+            13, 0, 0, 0,    // doc length = 13 (matches actual byte count)
             0x02, // type: string
             b'a', 0, // key: "a\0"
             99, 0, 0, 0, // string length: 99 (bogus)

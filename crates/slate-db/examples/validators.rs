@@ -83,12 +83,8 @@ fn main() -> Result<(), DbError> {
     // ── Another successful insert (age is optional) ─────────────
     println!("--- insert valid document (no age) ---");
     let mut txn = db.begin(false)?;
-    txn.insert_one(
-        "app",
-        "users",
-        doc! { "_id": "u2", "name": "Bob" },
-    )?
-    .drain()?;
+    txn.insert_one("app", "users", doc! { "_id": "u2", "name": "Bob" })?
+        .drain()?;
     txn.commit()?;
     println!("  OK: inserted Bob\n");
 
@@ -99,11 +95,7 @@ fn main() -> Result<(), DbError> {
     {
         let mut txn = db.begin(false)?;
         let result = txn
-            .insert_one(
-                "app",
-                "users",
-                doc! { "_id": "u3", "age": 25 },
-            )?
+            .insert_one("app", "users", doc! { "_id": "u3", "age": 25 })?
             .drain();
         match result {
             Ok(_) => println!("  BUG: should have been rejected"),
@@ -133,11 +125,7 @@ fn main() -> Result<(), DbError> {
     {
         let mut txn = db.begin(false)?;
         let result = txn
-            .insert_one(
-                "app",
-                "users",
-                doc! { "_id": "u5", "name": "", "age": 20 },
-            )?
+            .insert_one("app", "users", doc! { "_id": "u5", "name": "", "age": 20 })?
             .drain();
         match result {
             Ok(_) => println!("  BUG: should have been rejected"),

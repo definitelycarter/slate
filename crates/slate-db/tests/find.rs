@@ -3,7 +3,7 @@ use common::*;
 
 use bson::raw::RawDocument;
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, Database, DEFAULT_CF};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database};
 use slate_query::{FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
@@ -73,10 +73,14 @@ fn find_isnull_filter() {
     create_collection(&db, COLLECTION);
 
     let mut txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "acct-x", "name": "NoStatus" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "acct-x", "name": "NoStatus" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -967,10 +971,14 @@ fn index_covered_preserves_int32_type() {
     .unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "score").unwrap();
     // Insert with Int32
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "rec-1", "score": 100_i32 })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "rec-1", "score": 100_i32 },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     // Query with Int64 -- same encoded bytes, different BSON type
@@ -1010,10 +1018,14 @@ fn index_covered_preserves_string_type() {
     })
     .unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "rec-1", "status": "active" })
-        .unwrap()
-        .drain()
-        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "rec-1", "status": "active" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();

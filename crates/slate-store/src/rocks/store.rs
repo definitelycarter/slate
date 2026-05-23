@@ -94,8 +94,7 @@ impl Store for RocksStore {
 
 impl BackupStore for RocksStore {
     fn backup(&self, dest: &Path) -> Result<(), StoreError> {
-        let cp = Checkpoint::new(&self.db)
-            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        let cp = Checkpoint::new(&self.db).map_err(|e| StoreError::Storage(e.to_string()))?;
         cp.create_checkpoint(dest)
             .map_err(|e| StoreError::Storage(e.to_string()))
     }

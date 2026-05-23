@@ -1,12 +1,12 @@
 use std::cmp::Ordering;
 
 use bson::Bson;
-use bson::raw::RawBsonRef;
 use bson::RawDocument;
+use bson::raw::RawBsonRef;
 
+use super::Expression;
 use crate::error::DbError;
 use crate::executor::raw_bson::RawField;
-use super::Expression;
 
 /// Evaluate whether a raw document matches the given expression.
 pub(crate) fn matches(raw: &RawDocument, expr: &Expression) -> Result<bool, DbError> {

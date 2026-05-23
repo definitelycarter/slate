@@ -1,7 +1,7 @@
 use super::*;
 
 use self::store::seeded_kv_engine;
-use slate_engine::{Engine, DEFAULT_CF};
+use slate_engine::{DEFAULT_CF, Engine};
 
 // seeded_db: Alice(id=1,score=70), Bob(id=2,score=90), Charlie(id=3,score=80)
 // score index order ascending: 70(1), 80(3), 90(2)

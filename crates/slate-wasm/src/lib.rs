@@ -1,5 +1,5 @@
 use bson::{Document, RawDocumentBuf};
-use slate_db::{CollectionConfig, Database, DatabaseBuilder, DbError, DEFAULT_CF};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, DbError};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
 use wasm_bindgen::prelude::*;
@@ -131,11 +131,7 @@ impl SlateDb {
 
     // ── Query ───────────────────────────────────────────────
 
-    pub fn find(
-        &self,
-        collection: &str,
-        filter: JsValue,
-    ) -> Result<js_sys::Array, JsError> {
+    pub fn find(&self, collection: &str, filter: JsValue) -> Result<js_sys::Array, JsError> {
         let raw = js_to_raw(filter)?;
         self.read(|txn| {
             let cursor = txn.find(DEFAULT_CF, collection, raw, FindOptions::default())?;
@@ -143,11 +139,7 @@ impl SlateDb {
         })
     }
 
-    pub fn find_one(
-        &self,
-        collection: &str,
-        filter: JsValue,
-    ) -> Result<JsValue, JsError> {
+    pub fn find_one(&self, collection: &str, filter: JsValue) -> Result<JsValue, JsError> {
         let raw = js_to_raw(filter)?;
         self.read(|txn| {
             let doc = txn.find_one(DEFAULT_CF, collection, raw)?;
@@ -159,11 +151,7 @@ impl SlateDb {
         })
     }
 
-    pub fn count(
-        &self,
-        collection: &str,
-        filter: JsValue,
-    ) -> Result<u32, JsError> {
+    pub fn count(&self, collection: &str, filter: JsValue) -> Result<u32, JsError> {
         let raw = js_to_raw(filter)?;
         self.read(|txn| {
             let count = txn.count(DEFAULT_CF, collection, raw)?;
@@ -210,19 +198,14 @@ impl SlateDb {
         let filter_raw = js_to_raw(filter)?;
         let replacement_raw = js_to_raw(replacement)?;
         self.write(|txn| {
-            let cursor =
-                txn.replace_one(DEFAULT_CF, collection, filter_raw, replacement_raw)?;
+            let cursor = txn.replace_one(DEFAULT_CF, collection, filter_raw, replacement_raw)?;
             Self::collect_cursor(cursor)
         })
     }
 
     // ── Delete ──────────────────────────────────────────────
 
-    pub fn delete_one(
-        &self,
-        collection: &str,
-        filter: JsValue,
-    ) -> Result<js_sys::Array, JsError> {
+    pub fn delete_one(&self, collection: &str, filter: JsValue) -> Result<js_sys::Array, JsError> {
         let filter_raw = js_to_raw(filter)?;
         self.write(|txn| {
             let cursor = txn.delete_one(DEFAULT_CF, collection, filter_raw)?;
@@ -230,11 +213,7 @@ impl SlateDb {
         })
     }
 
-    pub fn delete_many(
-        &self,
-        collection: &str,
-        filter: JsValue,
-    ) -> Result<js_sys::Array, JsError> {
+    pub fn delete_many(&self, collection: &str, filter: JsValue) -> Result<js_sys::Array, JsError> {
         let filter_raw = js_to_raw(filter)?;
         self.write(|txn| {
             let cursor = txn.delete_many(DEFAULT_CF, collection, filter_raw)?;

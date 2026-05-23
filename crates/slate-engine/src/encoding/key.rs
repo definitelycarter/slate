@@ -106,7 +106,8 @@ impl<'a> Key<'a> {
                 buf
             }
             Key::IndexConfig(cf, collection, field) => {
-                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + field.len());
+                let mut buf =
+                    Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + field.len());
                 buf.push(INDEX_CONFIG_TAG);
                 buf.push(SEP);
                 buf.extend_from_slice(cf.as_bytes());
@@ -117,7 +118,8 @@ impl<'a> Key<'a> {
                 buf
             }
             Key::FunctionConfig(kind, cf, collection, name) => {
-                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + name.len());
+                let mut buf =
+                    Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + name.len());
                 buf.push(function_tag(*kind));
                 buf.push(SEP);
                 buf.extend_from_slice(cf.as_bytes());
@@ -272,15 +274,10 @@ impl<'a> Key<'a> {
         }
         let (collection, field, value_bytes, bv) = parse_index_rest(&key_bytes[2..])?;
         Some((
-            Key::Index(
-                Cow::Borrowed(collection),
-                Cow::Borrowed(field),
-                bv,
-            ),
+            Key::Index(Cow::Borrowed(collection), Cow::Borrowed(field), bv),
             value_bytes,
         ))
     }
-
 }
 
 /// Structured prefix for scan operations.

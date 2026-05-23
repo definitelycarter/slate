@@ -181,8 +181,7 @@ mod tests {
         }
 
         fn loads(&self) -> usize {
-            self.load_count
-                .load(std::sync::atomic::Ordering::Relaxed)
+            self.load_count.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -264,15 +263,12 @@ mod tests {
     fn invalidate_all_clears_cache() {
         let (pool, rt) = pool_with_mock();
 
-        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src")
-            .unwrap();
-        pool.get_or_load(RuntimeKind::Lua, "b", 1, b"src")
-            .unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src").unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "b", 1, b"src").unwrap();
 
         pool.invalidate_all();
 
-        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src")
-            .unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src").unwrap();
         assert_eq!(rt.loads(), 3);
     }
 
@@ -292,19 +288,15 @@ mod tests {
         registry.register(RuntimeKind::Lua, rt.clone());
         let pool = VmPool::new(registry).with_max_entries(2);
 
-        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src")
-            .unwrap();
-        pool.get_or_load(RuntimeKind::Lua, "b", 1, b"src")
-            .unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src").unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "b", 1, b"src").unwrap();
         // Cache full (2/2). Next load should evict "a" (oldest).
-        pool.get_or_load(RuntimeKind::Lua, "c", 1, b"src")
-            .unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "c", 1, b"src").unwrap();
 
         assert_eq!(rt.loads(), 3);
 
         // "a" was evicted, loading it again should recompile
-        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src")
-            .unwrap();
+        pool.get_or_load(RuntimeKind::Lua, "a", 1, b"src").unwrap();
         assert_eq!(rt.loads(), 4);
     }
 }

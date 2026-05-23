@@ -1,7 +1,7 @@
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
-use crate::store::{increment_prefix, Transaction};
+use crate::store::{Transaction, increment_prefix};
 
 enum Inner {
     Read(redb::ReadTransaction),
@@ -165,8 +165,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
                             Err(_) => true,
                         })
                         .map(|entry| {
-                            let (k, v) =
-                                entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                            let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
                             Ok((k.value().to_vec(), v.value().to_vec()))
                         }),
                 ))

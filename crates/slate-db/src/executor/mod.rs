@@ -42,16 +42,15 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 limit,
                 covered,
             } => nodes::index_scan::execute(
-                self.txn,
-                collection,
-                field,
-                &range,
-                direction,
-                limit,
-                covered,
+                self.txn, collection, field, &range, direction, limit, covered,
             ),
 
-            Node::IndexMerge { collection, logical, lhs, rhs } => {
+            Node::IndexMerge {
+                collection,
+                logical,
+                lhs,
+                rhs,
+            } => {
                 let left = self.execute_node(*lhs)?;
                 let right = self.execute_node(*rhs)?;
                 nodes::index_merge::execute(collection.pk_path(), logical, left, right)
@@ -77,7 +76,11 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::limit::execute(skip, take, source)
             }
 
-            Node::Projection { collection, columns, source } => {
+            Node::Projection {
+                collection,
+                columns,
+                source,
+            } => {
                 let source = self.execute_node(*source)?;
                 nodes::projection::execute(collection.pk_path(), columns, source)
             }
