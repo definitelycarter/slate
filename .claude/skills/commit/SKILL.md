@@ -21,8 +21,8 @@ Read the diff fully before drafting anything. The message describes *why*, not j
 
 These must all pass before proposing a commit. Run in parallel where possible.
 
-- `cargo fmt` — applies formatting; if it changes files, include them in the commit
-- `cargo test` — all tests must pass
+- `cargo fmt` — applies formatting; if it changes files, include them in the commit. **Skip when the diff touches no `.rs` files** (markdown / config / `.claude/` only). Pre-existing repo-wide fmt drift is not this commit's problem — flag it as a separate cleanup, don't bundle.
+- `cargo test` — all tests must pass. Optional for diffs that touch no Rust at all, but cheap insurance; run unless the user says skip.
 - New functionality must ship with tests. If the diff adds public behavior without a test, stop and surface that to the user before committing.
 
 ## 3. Production-code audit
