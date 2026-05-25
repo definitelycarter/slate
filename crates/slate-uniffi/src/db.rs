@@ -1,11 +1,22 @@
 use std::sync::Arc;
 
+use bson::RawDocumentBuf;
 use slate_db::{
     CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, DEFAULT_CF,
 };
 use slate_query::FindOptions;
 
 use crate::error::SlateError;
+
+fn parse_doc(bytes: Vec<u8>) -> Result<RawDocumentBuf, SlateError> {
+    RawDocumentBuf::from_bytes(bytes).map_err(|e| SlateError::Serialization {
+        message: e.to_string(),
+    })
+}
+
+fn parse_docs(docs: Vec<Vec<u8>>) -> Result<Vec<RawDocumentBuf>, SlateError> {
+    docs.into_iter().map(parse_doc).collect()
+}
 
 // --- Feature-gated store imports and type alias ---
 
@@ -95,6 +106,7 @@ impl SlateDatabase {
     // --- Insert ---
 
     pub fn insert_one(&self, collection: String, doc: Vec<u8>) -> Result<u64, SlateError> {
+        let doc = parse_doc(doc)?;
         self.write(|txn| {
             let affected = txn.insert_one(DEFAULT_CF, &collection, doc)?.drain()?;
             Ok(affected)
@@ -102,6 +114,7 @@ impl SlateDatabase {
     }
 
     pub fn insert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
+        let docs = parse_docs(docs)?;
         self.write(|txn| {
             let affected = txn.insert_many(DEFAULT_CF, &collection, docs)?.drain()?;
             Ok(affected)
@@ -116,6 +129,7 @@ impl SlateDatabase {
         filter: Vec<u8>,
         options: Option<Vec<u8>>,
     ) -> Result<Vec<Vec<u8>>, SlateError> {
+        let filter = parse_doc(filter)?;
         let options = Self::parse_options(options)?;
         self.read(|txn| {
             let results: Vec<Vec<u8>> = txn
@@ -132,6 +146,7 @@ impl SlateDatabase {
         collection: String,
         filter: Vec<u8>,
     ) -> Result<Option<Vec<u8>>, SlateError> {
+        let filter = parse_doc(filter)?;
         self.read(|txn| {
             let raw = txn.find_one(DEFAULT_CF, &collection, filter)?;
             Ok(raw.map(|r| r.into_bytes()))
@@ -146,6 +161,8 @@ impl SlateDatabase {
         filter: Vec<u8>,
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
+        let filter = parse_doc(filter)?;
+        let update = parse_doc(update)?;
         self.write(|txn| {
             let affected = txn
                 .update_one(DEFAULT_CF, &collection, filter, update)?
@@ -160,6 +177,8 @@ impl SlateDatabase {
         filter: Vec<u8>,
         update: Vec<u8>,
     ) -> Result<u64, SlateError> {
+        let filter = parse_doc(filter)?;
+        let update = parse_doc(update)?;
         self.write(|txn| {
             let affected = txn
                 .update_many(DEFAULT_CF, &collection, filter, update)?
@@ -174,6 +193,8 @@ impl SlateDatabase {
         filter: Vec<u8>,
         replacement: Vec<u8>,
     ) -> Result<u64, SlateError> {
+        let filter = parse_doc(filter)?;
+        let replacement = parse_doc(replacement)?;
         self.write(|txn| {
             let affected = txn
                 .replace_one(DEFAULT_CF, &collection, filter, replacement)?
@@ -185,6 +206,7 @@ impl SlateDatabase {
     // --- Delete ---
 
     pub fn delete_one(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
+        let filter = parse_doc(filter)?;
         self.write(|txn| {
             let affected = txn.delete_one(DEFAULT_CF, &collection, filter)?.drain()?;
             Ok(affected)
@@ -192,6 +214,7 @@ impl SlateDatabase {
     }
 
     pub fn delete_many(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
+        let filter = parse_doc(filter)?;
         self.write(|txn| {
             let affected = txn.delete_many(DEFAULT_CF, &collection, filter)?.drain()?;
             Ok(affected)
@@ -201,7 +224,10 @@ impl SlateDatabase {
     // --- Count ---
 
     pub fn count(&self, collection: String, filter: Option<Vec<u8>>) -> Result<u64, SlateError> {
-        let filter = filter.unwrap_or_else(|| bson::rawdoc! {}.into_bytes());
+        let filter = match filter {
+            Some(bytes) => parse_doc(bytes)?,
+            None => bson::rawdoc! {},
+        };
         self.read(|txn| {
             let count = txn.count(DEFAULT_CF, &collection, filter)?;
             Ok(count)
@@ -211,6 +237,7 @@ impl SlateDatabase {
     // --- Bulk ---
 
     pub fn upsert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
+        let docs = parse_docs(docs)?;
         self.write(|txn| {
             let affected = txn.upsert_many(DEFAULT_CF, &collection, docs)?.drain()?;
             Ok(affected)
@@ -218,6 +245,7 @@ impl SlateDatabase {
     }
 
     pub fn merge_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
+        let docs = parse_docs(docs)?;
         self.write(|txn| {
             let affected = txn.merge_many(DEFAULT_CF, &collection, docs)?.drain()?;
             Ok(affected)

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
+use serde::Serialize;
 use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
 use slate_query::{DistinctOptions, FindOptions};
 use slate_store::{BackupStore, Store};
 use slate_vm::pool::VmPool;
 
 use crate::collection::CollectionConfig;
-use crate::convert::IntoRawDocumentBuf;
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::executor;
@@ -175,26 +175,26 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
     /// If the document has no `_id`, an ObjectId is generated.
-    pub fn insert_one(
+    pub fn insert_one<D: Serialize>(
         &mut self,
         cf: &str,
         collection: &str,
-        doc: impl IntoRawDocumentBuf,
+        doc: D,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let raw = doc.into_raw_document_buf()?;
+        let raw = bson::serialize_to_raw_document_buf(&doc)?;
         self.insert_many(cf, collection, vec![raw])
     }
 
     /// Insert multiple documents. Fails per-doc on duplicate `_id`.
-    pub fn insert_many(
+    pub fn insert_many<D: Serialize>(
         &mut self,
         cf: &str,
         collection: &str,
-        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
+        docs: impl IntoIterator<Item = D>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| doc.into_raw_document_buf())
+            .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Insert {
@@ -211,14 +211,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ///
     /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
     /// or drained via [`.drain()`](Cursor::drain) for a count.
-    pub fn find(
+    pub fn find<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
         options: FindOptions,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Find {
             cf,
@@ -233,11 +233,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Find the first document matching a filter.
-    pub fn find_one(
+    pub fn find_one<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
     ) -> Result<Option<RawDocumentBuf>, DbError> {
         let options = FindOptions {
             take: Some(1),
@@ -250,15 +250,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Update operations ───────────────────────────────────────
 
     /// Update the first document matching the filter.
-    pub fn update_one(
+    pub fn update_one<F: Serialize, U: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
-        update: impl IntoRawDocumentBuf,
+        filter: F,
+        update: U,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
-        let raw = update.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+        let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
         let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -273,15 +273,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Update all documents matching the filter.
-    pub fn update_many(
+    pub fn update_many<F: Serialize, U: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
-        update: impl IntoRawDocumentBuf,
+        filter: F,
+        update: U,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
-        let raw = update.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+        let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
         let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -296,15 +296,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Replace the first document matching the filter entirely (no merge).
-    pub fn replace_one(
+    pub fn replace_one<F: Serialize, R: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
-        replacement: impl IntoRawDocumentBuf,
+        filter: F,
+        replacement: R,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
-        let raw = replacement.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+        let raw = bson::serialize_to_raw_document_buf(&replacement)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Replace {
             cf,
@@ -318,13 +318,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Delete operations ───────────────────────────────────────
 
     /// Delete the first document matching the filter.
-    pub fn delete_one(
+    pub fn delete_one<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
             cf,
@@ -336,13 +336,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Delete all documents matching the filter.
-    pub fn delete_many(
+    pub fn delete_many<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
             cf,
@@ -356,15 +356,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Bulk upsert / merge operations ────────────────────────────
 
     /// Upsert (insert-or-replace) a batch of documents by `_id`.
-    pub fn upsert_many(
+    pub fn upsert_many<D: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
+        docs: impl IntoIterator<Item = D>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| doc.into_raw_document_buf())
+            .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Upsert {
@@ -376,15 +376,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Merge (insert-or-patch) a batch of partial documents by `_id`.
-    pub fn merge_many(
+    pub fn merge_many<D: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        docs: impl IntoIterator<Item = impl IntoRawDocumentBuf>,
+        docs: impl IntoIterator<Item = D>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let raw_docs: Vec<RawDocumentBuf> = docs
             .into_iter()
-            .map(|doc| doc.into_raw_document_buf())
+            .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
 
         let stmt = Statement::Merge {
@@ -398,26 +398,26 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Count ───────────────────────────────────────────────────
 
     /// Count documents matching a filter.
-    pub fn count(
+    pub fn count<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
     ) -> Result<u64, DbError> {
         self.find(cf, collection, filter, FindOptions::default())?
             .drain()
     }
 
     /// Return distinct values for a field, with optional filter and sort.
-    pub fn distinct(
+    pub fn distinct<F: Serialize>(
         &self,
         cf: &str,
         collection: &str,
         field: &str,
-        filter: impl IntoRawDocumentBuf,
+        filter: F,
         options: DistinctOptions,
     ) -> Result<bson::RawBson, DbError> {
-        let filter_raw = filter.into_raw_document_buf()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Distinct {
             cf,

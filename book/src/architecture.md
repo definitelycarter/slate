@@ -172,7 +172,7 @@ pub struct DistinctOptions {
 }
 ```
 
-Filters are passed separately as raw BSON bytes (`impl IntoRawDocumentBuf`) at the database API layer — `slate-query` only defines options for pagination, sorting, and projection. The filter document is parsed into an `Expression` tree by `slate-db`'s parser at plan time.
+Filters are passed separately as `impl Serialize` at the database API layer (typically a `bson::doc!`, `rawdoc!`, or any `Serialize` struct) — `slate-query` only defines options for pagination, sorting, and projection. The filter document is serialized to a `RawDocumentBuf` and parsed into an `Expression` tree by `slate-db`'s parser at plan time.
 
 ### Sort
 
