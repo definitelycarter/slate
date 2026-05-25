@@ -42,7 +42,7 @@ fn update_one_merge() {
     let results = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -88,7 +88,7 @@ fn upsert_via_upsert_many() {
     let results = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -125,7 +125,7 @@ fn update_many_multiple() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -154,7 +154,7 @@ fn upsert_many_inserts_new() {
     let found = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -226,7 +226,7 @@ fn upsert_many_mixed() {
     let found = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -258,7 +258,7 @@ fn upsert_many_updates_indexes() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -283,7 +283,7 @@ fn upsert_many_updates_indexes() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -298,7 +298,7 @@ fn upsert_many_updates_indexes() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

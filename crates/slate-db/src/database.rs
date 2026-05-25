@@ -244,7 +244,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             ..Default::default()
         };
         let cursor = self.find(cf, collection, filter, options)?;
-        cursor.iter()?.next().transpose()
+        cursor.iter_raw()?.next().transpose()
     }
 
     // ── Update operations ───────────────────────────────────────

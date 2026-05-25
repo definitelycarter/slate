@@ -62,7 +62,7 @@ fn drop_collection() {
     let txn = db.begin(true).unwrap();
     let result = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .and_then(|c| c.iter()?.collect::<Result<Vec<_>, _>>());
+        .and_then(|c| c.iter_raw()?.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
@@ -102,7 +102,7 @@ fn collection_isolation() {
     let contacts = txn
         .find(DEFAULT_CF, "contacts", rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -112,7 +112,7 @@ fn collection_isolation() {
     let accounts = txn
         .find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -221,7 +221,7 @@ fn register_all_function_types_with_indexes() {
     let results = txn
         .find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

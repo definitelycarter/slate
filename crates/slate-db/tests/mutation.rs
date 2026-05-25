@@ -809,7 +809,7 @@ fn mutation_index_maintained_on_set() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -823,7 +823,7 @@ fn mutation_index_maintained_on_set() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -873,7 +873,7 @@ fn mutation_index_maintained_on_unset() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1171,7 +1171,7 @@ fn delete_many_fires_trigger_successfully() {
     let remaining = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

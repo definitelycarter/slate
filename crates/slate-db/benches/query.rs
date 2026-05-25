@@ -60,7 +60,7 @@ fn bench_query_scan(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", rawdoc! {}, FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -79,7 +79,7 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -102,7 +102,7 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -125,7 +125,7 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -144,7 +144,7 @@ fn bench_query_null_filter(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -170,7 +170,7 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -196,7 +196,7 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -228,7 +228,7 @@ fn bench_query_sort_multi(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -256,7 +256,7 @@ fn bench_query_pagination(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -308,7 +308,7 @@ fn bench_query_projection(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", rawdoc! {}, options.clone())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -327,7 +327,7 @@ fn bench_query_array_match(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -435,7 +435,7 @@ fn bench_query_indexed_range(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -454,7 +454,7 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })
@@ -473,7 +473,7 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
                 let txn = engine.begin(true).unwrap();
                 txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
                     .unwrap()
-                    .iter()
+                    .iter_raw()
                     .unwrap()
                     .count()
             })

@@ -76,7 +76,7 @@ fn insert_one_auto_generated_id() {
     let results = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -110,7 +110,7 @@ fn insert_many_batch() {
     let all = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

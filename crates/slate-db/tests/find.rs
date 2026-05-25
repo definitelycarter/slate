@@ -18,7 +18,7 @@ fn find_no_filters() {
     let results = txn
         .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -39,7 +39,7 @@ fn find_eq_filter() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -60,7 +60,7 @@ fn find_gt_filter() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -100,7 +100,7 @@ fn find_isnull_filter() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -122,7 +122,7 @@ fn find_or_filter() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -151,7 +151,7 @@ fn find_sort_asc() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -180,7 +180,7 @@ fn find_sort_desc() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -212,7 +212,7 @@ fn find_skip_and_take() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -243,7 +243,7 @@ fn find_filter_sort_paginate() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -270,7 +270,7 @@ fn find_with_projection() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -300,7 +300,7 @@ fn find_projection_includes_filter_columns() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -333,7 +333,7 @@ fn find_projection_includes_sort_columns() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -376,7 +376,7 @@ fn nested_doc_write_and_read() {
     let results = txn
         .find(DEFAULT_CF, "nested", rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -418,7 +418,7 @@ fn dot_notation_filter_eq() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -466,7 +466,7 @@ fn dot_notation_sort() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -512,7 +512,7 @@ fn dot_notation_projection() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -565,7 +565,7 @@ fn dot_notation_projection_multiple_subfields() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -606,7 +606,7 @@ fn dot_notation_isnull_missing_parent() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -639,7 +639,7 @@ fn dot_notation_deep_nesting() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -664,7 +664,7 @@ fn projection_only_uses_selective_read() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -736,7 +736,7 @@ fn find_by_id_with_projection() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .next()
         .transpose()
@@ -801,7 +801,7 @@ fn find_with_or_indexed() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -824,7 +824,7 @@ fn find_with_or_same_field() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -847,7 +847,7 @@ fn find_with_or_fallback_scan() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -871,7 +871,7 @@ fn find_with_and_priority() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -897,7 +897,7 @@ fn find_with_nested_and_or() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -920,7 +920,7 @@ fn find_with_or_three_values() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -950,7 +950,7 @@ fn find_with_or_partial_index_per_branch() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -994,7 +994,7 @@ fn index_covered_preserves_int32_type() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1040,7 +1040,7 @@ fn index_covered_preserves_string_type() {
             },
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1088,7 +1088,7 @@ fn find_gt_on_indexed_field() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1139,7 +1139,7 @@ fn find_gte_lte_on_indexed_field() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

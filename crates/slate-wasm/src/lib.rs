@@ -77,9 +77,8 @@ impl SlateDb {
         cursor: slate_db::Cursor<'_, '_, MemoryStore>,
     ) -> Result<js_sys::Array, DbError> {
         let arr = js_sys::Array::new();
-        for doc in cursor.iter()? {
-            let raw = doc?;
-            let d: Document = bson::deserialize_from_slice(raw.as_bytes())?;
+        for doc in cursor.iter::<Document>()? {
+            let d = doc?;
             let js = serde::Serialize::serialize(&d, &SERIALIZER)
                 .map_err(|e| DbError::Serialization(e.to_string()))?;
             arr.push(&js);

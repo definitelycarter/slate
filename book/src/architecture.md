@@ -410,8 +410,12 @@ txn.insert_many(DEFAULT_CF, "users", vec![
 
 // Query — find() returns a Cursor for lazy iteration
 let cursor = txn.find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?;
-for doc in cursor.iter()? {              // CursorIter yields RawDocumentBuf
+for doc in cursor.iter::<User>()? {      // CursorIter<T> — deserializes into T
     let doc = doc?;
+}
+// or zero-copy raw access:
+for raw in cursor.iter_raw()? {          // RawCursorIter — yields RawDocumentBuf
+    let raw = raw?;
 }
 
 let one = txn.find_one(DEFAULT_CF, "users", rawdoc! { "_id": "bob" })?;
@@ -474,7 +478,7 @@ Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMer
 **Two tiers:**
 
 1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
-2. **Raw tier** — everything above `ReadRecord` operates on `Option<RawBson>`. Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns a `Cursor` whose iterator yields `RawDocumentBuf` lazily.
+2. **Raw tier** — everything above `ReadRecord` operates on `Option<RawBson>`. Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes into `T`, or `.iter_raw()` yields `RawDocumentBuf` with no deserialization.
 
 For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed.
 

@@ -1,4 +1,7 @@
+use std::marker::PhantomData;
+
 use bson::RawDocumentBuf;
+use serde::de::DeserializeOwned;
 use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
@@ -12,7 +15,8 @@ type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 /// A prepared query that can be iterated or executed.
 ///
 /// Owns a pre-built `Plan` and a reference to the transaction.
-/// Call [`.iter()`](Cursor::iter) for streaming iteration, or
+/// Call [`.iter()`](Cursor::iter) for deserialized iteration,
+/// [`.iter_raw()`](Cursor::iter_raw) for raw BSON documents, or
 /// [`.drain()`](Cursor::drain) to consume all rows and return a count.
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
@@ -29,10 +33,19 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         Self { txn, plan, pool }
     }
 
-    /// Consume the cursor and return a streaming iterator over documents.
-    pub fn iter(self) -> Result<CursorIter<'txn>, DbError> {
+    /// Consume the cursor and return a streaming iterator that deserializes each document into `T`.
+    pub fn iter<T: DeserializeOwned>(self) -> Result<CursorIter<'txn, T>, DbError> {
         let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
-        Ok(CursorIter { inner: iter })
+        Ok(CursorIter {
+            inner: RawCursorIter { inner: iter },
+            _marker: PhantomData,
+        })
+    }
+
+    /// Consume the cursor and return a streaming iterator over raw BSON documents.
+    pub fn iter_raw(self) -> Result<RawCursorIter<'txn>, DbError> {
+        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
+        Ok(RawCursorIter { inner: iter })
     }
 
     /// Consume the cursor, drain all rows, and return the count of affected rows.
@@ -47,15 +60,29 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     }
 }
 
-/// A streaming iterator over query results.
-///
-/// Each call to [`next()`](Iterator::next) returns the next document
-/// lazily from the underlying query pipeline.
-pub struct CursorIter<'a> {
+/// A streaming iterator that deserializes each document into `T`.
+pub struct CursorIter<'a, T> {
+    inner: RawCursorIter<'a>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: DeserializeOwned> Iterator for CursorIter<'_, T> {
+    type Item = Result<T, DbError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = self.inner.next()?;
+        Some(
+            raw.and_then(|buf| bson::deserialize_from_slice(buf.as_bytes()).map_err(DbError::from)),
+        )
+    }
+}
+
+/// A streaming iterator over raw BSON documents.
+pub struct RawCursorIter<'a> {
     inner: RawIter<'a>,
 }
 
-impl Iterator for CursorIter<'_> {
+impl Iterator for RawCursorIter<'_> {
     type Item = Result<RawDocumentBuf, DbError>;
 
     fn next(&mut self) -> Option<Self::Item> {

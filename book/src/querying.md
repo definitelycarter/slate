@@ -29,7 +29,7 @@ Plan::Trigger { action: "inserted" }        ← after-trigger (sees NEW doc)
 ```
 
 **ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — everything above ReadRecord operates on `Option<RawBson>`. For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose iterator yields `RawDocumentBuf` lazily. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
+**Raw tier** — everything above ReadRecord operates on `Option<RawBson>`. For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes each document into `T`, or `.iter_raw()` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
 ## Query Model
 

@@ -179,7 +179,7 @@ fn upsert_replace_cleans_old_indexes() {
             slate_query::FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -202,7 +202,7 @@ fn upsert_replace_cleans_old_indexes() {
             slate_query::FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

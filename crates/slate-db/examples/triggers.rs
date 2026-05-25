@@ -159,7 +159,7 @@ fn main() -> Result<(), DbError> {
     let txn = db.begin(true)?;
     let audit: Vec<_> = txn
         .find("app", "audit", rawdoc! {}, Default::default())?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
 
     for entry in &audit {
@@ -180,7 +180,7 @@ fn main() -> Result<(), DbError> {
     let txn = db.begin(true)?;
     let users: Vec<_> = txn
         .find("app", "users", rawdoc! {}, Default::default())?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
 
     for u in &users {

@@ -56,7 +56,7 @@ fn create_and_use_index() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -130,7 +130,7 @@ fn index_maintained_on_insert() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -179,7 +179,7 @@ fn index_maintained_on_update() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -194,7 +194,7 @@ fn index_maintained_on_update() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -236,7 +236,7 @@ fn index_maintained_on_delete() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -280,7 +280,7 @@ fn index_on_nested_path() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -327,7 +327,7 @@ fn index_on_array_of_scalars() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -348,7 +348,7 @@ fn index_on_array_of_scalars() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -394,7 +394,7 @@ fn index_on_array_of_objects() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -415,7 +415,7 @@ fn index_on_array_of_objects() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -472,7 +472,7 @@ fn multikey_index_maintained_on_update() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -487,7 +487,7 @@ fn multikey_index_maintained_on_update() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -534,7 +534,7 @@ fn multikey_index_maintained_on_delete() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -577,7 +577,7 @@ fn multikey_index_backfill() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -634,7 +634,7 @@ fn multikey_index_replace_one() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
@@ -651,7 +651,7 @@ fn multikey_index_replace_one() {
             FindOptions::default(),
         )
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -716,7 +716,7 @@ fn create_collection_idempotent() {
     let results = txn
         .find(DEFAULT_CF, "idem", rawdoc! {}, FindOptions::default())
         .unwrap()
-        .iter()
+        .iter_raw()
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

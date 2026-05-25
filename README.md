@@ -73,8 +73,12 @@ txn.commit()?;
 // Query
 let txn = db.begin(true)?;
 let cursor = txn.find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())?;
-for doc in cursor.iter()? {
-    let doc = doc?; // RawDocumentBuf
+for doc in cursor.iter::<MyStruct>()? {   // deserializes into T
+    let doc = doc?;
+}
+// or keep raw bytes:
+for raw in cursor.iter_raw()? {
+    let raw = raw?; // RawDocumentBuf — zero deserialization
 }
 let doc = txn.find_one(DEFAULT_CF, "accounts", rawdoc! { "_id": "acct-1" })?;
 let count = txn.count(DEFAULT_CF, "accounts", rawdoc! {})?;

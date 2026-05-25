@@ -134,7 +134,7 @@ impl SlateDatabase {
         self.read(|txn| {
             let results: Vec<Vec<u8>> = txn
                 .find(DEFAULT_CF, &collection, filter, options)?
-                .iter()?
+                .iter_raw()?
                 .map(|r| r.map(|doc| doc.into_bytes()))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(results)

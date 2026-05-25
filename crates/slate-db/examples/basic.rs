@@ -50,7 +50,7 @@ fn main() -> Result<(), DbError> {
     let txn = db.begin(true)?;
     let all: Vec<_> = txn
         .find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Total users: {}", all.len());
 
@@ -72,7 +72,7 @@ fn main() -> Result<(), DbError> {
             rawdoc! { "role": "engineer" },
             FindOptions::default(),
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Engineers: {}", engineers.len());
 
@@ -84,7 +84,7 @@ fn main() -> Result<(), DbError> {
             rawdoc! { "age": { "$gt": 30 } },
             FindOptions::default(),
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Users over 30: {}", over_30.len());
 
@@ -96,7 +96,7 @@ fn main() -> Result<(), DbError> {
             rawdoc! { "address.city": "Austin" },
             FindOptions::default(),
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Users in Austin: {}", in_austin.len());
 
@@ -116,7 +116,7 @@ fn main() -> Result<(), DbError> {
                 ..Default::default()
             },
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!(
         "Page (sorted by age desc, skip 1, take 2): {}",
@@ -137,7 +137,7 @@ fn main() -> Result<(), DbError> {
                 ..Default::default()
             },
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     for d in &names_only {
         // _id is always included; only projected columns are returned
@@ -192,7 +192,7 @@ fn main() -> Result<(), DbError> {
             rawdoc! { "role": "designer" },
             FindOptions::default(),
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Designers (via index scan): {}", designers.len());
     drop(txn);
@@ -249,7 +249,7 @@ fn main() -> Result<(), DbError> {
             rawdoc! { "type": "page_view" },
             FindOptions::default(),
         )?
-        .iter()?
+        .iter_raw()?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Events in 'analytics' CF: {} page views", views.len());
     drop(txn);
