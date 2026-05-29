@@ -12,7 +12,7 @@ fn insert_and_find_string_id() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": "my-string", "v": 1 })
         .unwrap()
         .drain()
@@ -33,7 +33,7 @@ fn insert_and_find_objectid_id() {
     create_collection(&db, COLLECTION);
 
     let oid = bson::oid::ObjectId::new();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
@@ -53,7 +53,7 @@ fn insert_and_find_i32_id() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 42_i32, "v": 1 })
         .unwrap()
         .drain()
@@ -73,7 +73,7 @@ fn insert_and_find_i64_id() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 999_i64, "v": 1 })
         .unwrap()
         .drain()
@@ -94,7 +94,7 @@ fn insert_objectid_duplicate_fails() {
     create_collection(&db, COLLECTION);
 
     let oid = bson::oid::ObjectId::new();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
@@ -112,7 +112,7 @@ fn insert_i32_duplicate_fails() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": 7_i32, "v": 1 })
         .unwrap()
         .drain()
@@ -131,7 +131,7 @@ fn delete_by_objectid() {
     create_collection(&db, COLLECTION);
 
     let oid = bson::oid::ObjectId::new();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "v": 1 })
         .unwrap()
         .drain()
@@ -178,7 +178,7 @@ fn replace_with_i32_id() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -215,7 +215,7 @@ fn update_with_objectid() {
     create_collection(&db, COLLECTION);
 
     let oid = bson::oid::ObjectId::new();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "_id": oid, "score": 10 })
         .unwrap()
         .drain()
@@ -248,7 +248,7 @@ fn mixed_id_types_in_collection() {
     create_collection(&db, COLLECTION);
 
     let oid = bson::oid::ObjectId::new();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,

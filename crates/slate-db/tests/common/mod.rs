@@ -47,7 +47,7 @@ pub fn create_collection(db: &Database<MemoryStore>, name: &str) {
 /// Insert 5 seed records.
 pub fn seed_records(db: &Database<MemoryStore>) {
     create_collection(db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,

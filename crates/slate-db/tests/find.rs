@@ -72,7 +72,7 @@ fn find_isnull_filter() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -353,7 +353,7 @@ fn nested_doc_write_and_read() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "nested",
@@ -394,7 +394,7 @@ fn dot_notation_filter_eq() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         "nested",
@@ -436,7 +436,7 @@ fn dot_notation_sort() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         "nested",
@@ -481,7 +481,7 @@ fn dot_notation_projection() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "nested",
@@ -530,7 +530,7 @@ fn dot_notation_projection_multiple_subfields() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "nested",
@@ -582,7 +582,7 @@ fn dot_notation_isnull_missing_parent() {
     let (db, _dir) = temp_db();
     create_collection(&db, "nested");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "nested",
@@ -619,7 +619,7 @@ fn dot_notation_deep_nesting() {
     let (db, _dir) = temp_db();
     create_collection(&db, "deep");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "deep",

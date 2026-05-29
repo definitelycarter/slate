@@ -13,7 +13,7 @@ fn list_collections() {
     create_collection(&db, "contacts");
     create_collection(&db, "accounts");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "contacts",
@@ -44,7 +44,7 @@ fn drop_collection() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -79,7 +79,7 @@ fn collection_isolation() {
     create_collection(&db, "contacts");
     create_collection(&db, "accounts");
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "contacts",
@@ -138,7 +138,7 @@ fn register_triggers() {
     txn.commit().unwrap();
 
     // Verify the collection is usable.
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "u1", "name": "Alice" })
         .unwrap()
         .drain()
@@ -206,7 +206,7 @@ fn register_all_function_types_with_indexes() {
     txn.commit().unwrap();
 
     // Verify collection works with all config together.
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         "users",

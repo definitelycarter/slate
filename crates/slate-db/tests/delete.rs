@@ -12,7 +12,7 @@ fn delete_one_removes_record() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,

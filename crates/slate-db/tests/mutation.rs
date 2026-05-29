@@ -37,7 +37,7 @@ fn mutation_set_explicit() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -76,7 +76,7 @@ fn mutation_unset() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -115,7 +115,7 @@ fn mutation_inc_i32() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -152,7 +152,7 @@ fn mutation_inc_missing_field() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -189,7 +189,7 @@ fn mutation_inc_negative_decrement() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -226,7 +226,7 @@ fn mutation_inc_f64() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -263,7 +263,7 @@ fn mutation_rename() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -302,7 +302,7 @@ fn mutation_push() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -339,7 +339,7 @@ fn mutation_push_creates_array() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -376,7 +376,7 @@ fn mutation_lpush() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -413,7 +413,7 @@ fn mutation_pop() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -450,7 +450,7 @@ fn mutation_multiple_operators() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -493,7 +493,7 @@ fn mutation_bare_fields_implicit_set() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -532,7 +532,7 @@ fn mutation_dot_path_set() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -571,7 +571,7 @@ fn mutation_dot_path_inc() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -610,7 +610,7 @@ fn mutation_dot_path_creates_intermediates() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -649,7 +649,7 @@ fn mutation_dot_path_unset() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -689,7 +689,7 @@ fn mutation_dot_path_push() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -892,7 +892,7 @@ fn mutation_push_pop_as_stack() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -951,7 +951,7 @@ fn mutation_lpush_pop_as_queue() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -1010,7 +1010,7 @@ fn mutation_unknown_operator_rejected() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -1044,7 +1044,7 @@ fn mutation_id_rejected() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -1248,7 +1248,7 @@ fn insert_fires_trigger_successfully() {
     txn.commit().unwrap();
 
     // Insert with trigger registered — should succeed
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -1289,7 +1289,7 @@ fn insert_trigger_error_propagates() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let result = txn
         .insert_one(
             DEFAULT_CF,

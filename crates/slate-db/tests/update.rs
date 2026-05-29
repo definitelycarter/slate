@@ -12,7 +12,7 @@ fn update_one_merge() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -165,7 +165,7 @@ fn upsert_many_inserts_new() {
 fn upsert_many_replaces_existing() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     // Insert original
     txn.insert_one(
@@ -201,7 +201,7 @@ fn upsert_many_replaces_existing() {
 fn upsert_many_mixed() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     txn.insert_one(
         DEFAULT_CF,

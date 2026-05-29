@@ -547,7 +547,7 @@ fn multikey_index_backfill() {
     create_collection(&db, "backfill");
 
     // Insert data first, then create the index
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         "backfill",
@@ -696,7 +696,7 @@ fn create_collection_idempotent() {
     txn.commit().unwrap();
 
     // Insert data
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, "idem", doc! { "_id": "r1", "status": "active" })
         .unwrap()
         .drain()

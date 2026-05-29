@@ -24,7 +24,7 @@ fn ttl_expired_docs_hidden_before_purge() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -64,7 +64,7 @@ fn ttl_purge_makes_expired_docs_invisible() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -115,7 +115,7 @@ fn ttl_purge_deletes_expired_docs() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -157,7 +157,7 @@ fn ttl_purge_skips_unexpired_docs() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -226,7 +226,7 @@ fn ttl_index_maintained_on_update() {
     create_collection(&db, COLLECTION);
 
     let old_ttl = future_ttl();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -266,7 +266,7 @@ fn ttl_purge_multiple_expired() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -300,7 +300,7 @@ fn ttl_find_by_id_hides_expired() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -337,7 +337,7 @@ fn ttl_update_skips_expired() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -364,7 +364,7 @@ fn ttl_merge_into_expired_inserts_fresh() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -404,7 +404,7 @@ fn ttl_no_ttl_field_always_visible() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,

@@ -38,7 +38,7 @@ fn merge_many_inserts_new() {
 fn merge_many_merges_existing() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     txn.insert_one(
         DEFAULT_CF,
@@ -128,7 +128,7 @@ fn merge_many_index_maintenance() {
 fn merge_many_unchanged_noop() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     txn.insert_one(
         DEFAULT_CF,
@@ -155,7 +155,7 @@ fn merge_many_unchanged_noop() {
 fn merge_many_adds_new_field() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     txn.insert_one(
         DEFAULT_CF,
@@ -188,7 +188,7 @@ fn merge_many_adds_new_field() {
 fn merge_many_mixed_insert_and_merge() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
 
     txn.insert_one(
         DEFAULT_CF,

@@ -176,7 +176,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
     /// If the document has no `_id`, an ObjectId is generated.
     pub fn insert_one<D: Serialize>(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         doc: D,
@@ -187,7 +187,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Insert multiple documents. Fails per-doc on duplicate `_id`.
     pub fn insert_many<D: Serialize>(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         docs: impl IntoIterator<Item = D>,

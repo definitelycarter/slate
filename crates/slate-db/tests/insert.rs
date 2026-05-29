@@ -12,7 +12,7 @@ fn insert_one_and_find_one() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -38,7 +38,7 @@ fn insert_one_duplicate_id_fails() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(
         DEFAULT_CF,
         COLLECTION,
@@ -64,7 +64,7 @@ fn insert_one_auto_generated_id() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "No ID" })
         .unwrap()
         .drain()
@@ -90,7 +90,7 @@ fn insert_many_batch() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     let count = txn
         .insert_many(
             DEFAULT_CF,
