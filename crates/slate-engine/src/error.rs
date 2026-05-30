@@ -48,6 +48,12 @@ pub enum EngineError {
     InvalidDocument(String),
     IndexExists(String),
     FunctionExists(String),
+    /// A unique index already holds `value` for a different document.
+    UniqueViolation {
+        index: String,
+        value: String,
+        existing_id: String,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -61,6 +67,14 @@ impl fmt::Display for EngineError {
             Self::InvalidDocument(msg) => write!(f, "invalid document: {msg}"),
             Self::IndexExists(desc) => write!(f, "index already exists: {desc}"),
             Self::FunctionExists(desc) => write!(f, "function already exists: {desc}"),
+            Self::UniqueViolation {
+                index,
+                value,
+                existing_id,
+            } => write!(
+                f,
+                "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
+            ),
         }
     }
 }

@@ -37,6 +37,7 @@ struct CollectionHandleInner<Cf> {
     cf_name: String,
     cf: Cf,
     indexes: Vec<String>,
+    unique_indexes: Vec<String>,
     pk_path: String,
     ttl_path: String,
 }
@@ -63,6 +64,7 @@ impl<Cf: fmt::Debug> fmt::Debug for CollectionHandle<Cf> {
             .field("cf_name", &self.inner.cf_name)
             .field("cf", &self.inner.cf)
             .field("indexes", &self.inner.indexes)
+            .field("unique_indexes", &self.inner.unique_indexes)
             .field("pk_path", &self.inner.pk_path)
             .field("ttl_path", &self.inner.ttl_path)
             .finish()
@@ -70,11 +72,13 @@ impl<Cf: fmt::Debug> fmt::Debug for CollectionHandle<Cf> {
 }
 
 impl<Cf: Clone> CollectionHandle<Cf> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         cf_name: String,
         cf: Cf,
         indexes: Vec<String>,
+        unique_indexes: Vec<String>,
         pk_path: String,
         ttl_path: String,
     ) -> Self {
@@ -84,6 +88,7 @@ impl<Cf: Clone> CollectionHandle<Cf> {
                 cf_name,
                 cf,
                 indexes,
+                unique_indexes,
                 pk_path,
                 ttl_path,
             }),
@@ -104,6 +109,11 @@ impl<Cf: Clone> CollectionHandle<Cf> {
 
     pub fn indexes(&self) -> &[String] {
         &self.inner.indexes
+    }
+
+    /// The subset of indexed paths that carry a unique constraint.
+    pub fn unique_indexes(&self) -> &[String] {
+        &self.inner.unique_indexes
     }
 
     pub fn pk_path(&self) -> &str {
@@ -284,6 +294,21 @@ impl IndexEntry {
     }
 }
 
+/// A loaded index definition: the field path and whether it is unique.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSpec {
+    pub path: String,
+    pub unique: bool,
+}
+
+/// Options for creating a new index. Extensible — future index knobs
+/// (sparse, collation, compound order) land here.
+#[derive(Debug, Clone, Default)]
+pub struct IndexOptions {
+    /// Enforce that no two live documents share the same value for this field.
+    pub unique: bool,
+}
+
 /// Options for creating a new collection. All fields are optional
 /// and fall back to engine defaults when `None`.
 #[derive(Debug, Clone, Default)]
@@ -318,7 +343,20 @@ pub trait Catalog: EngineTransaction {
 
     fn drop_collection(&self, cf: &str, name: &str) -> Result<(), EngineError>;
 
-    fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
+    /// Create an index with explicit options (uniqueness, etc.) and backfill
+    /// existing records.
+    fn create_index_with_options(
+        &self,
+        cf: &str,
+        collection: &str,
+        field: &str,
+        options: &IndexOptions,
+    ) -> Result<(), EngineError>;
+
+    /// Create a non-unique index and backfill existing records.
+    fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
+        self.create_index_with_options(cf, collection, field, &IndexOptions::default())
+    }
 
     fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 

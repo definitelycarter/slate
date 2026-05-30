@@ -40,6 +40,15 @@ impl From<DbError> for SlateError {
             DbError::Serialization(msg) => SlateError::Serialization { message: msg },
             DbError::IndexExists(msg) => SlateError::DuplicateKey { message: msg },
             DbError::FunctionExists(msg) => SlateError::DuplicateKey { message: msg },
+            DbError::UniqueViolation {
+                index,
+                value,
+                existing_id,
+            } => SlateError::DuplicateKey {
+                message: format!(
+                    "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
+                ),
+            },
             DbError::Vm(e) => SlateError::Store {
                 message: e.to_string(),
             },

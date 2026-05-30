@@ -7,6 +7,7 @@ const COLLECTION_TAG: u8 = b'c';
 const INDEX_CONFIG_TAG: u8 = b'x';
 const RECORD_TAG: u8 = b'r';
 const INDEX_TAG: u8 = b'i';
+const UNIQUE_INDEX_TAG: u8 = b'u';
 const TRIGGER_TAG: u8 = b't';
 const VALIDATOR_TAG: u8 = b'v';
 const DERIVED_TAG: u8 = b'd';
@@ -195,6 +196,43 @@ impl<'a> Key<'a> {
         buf
     }
 
+    /// Encode a unique-index key: `u\x00{collection}\x00{field}\x00{value_bytes}`.
+    ///
+    /// Unlike [`encode_index`](Key::encode_index), the doc_id is **not** part of
+    /// the key — a unique index holds at most one entry per value. The owning
+    /// doc_id is stored in the entry's value instead. Because there is no
+    /// doc_id suffix, the value bytes run to the end of the key, so embedded
+    /// `\x00` bytes in the value are unambiguous.
+    pub fn encode_unique_index(collection: &str, field: &str, value_bytes: &[u8]) -> Vec<u8> {
+        let mut buf =
+            Vec::with_capacity(2 + collection.len() + 1 + field.len() + 1 + value_bytes.len());
+        buf.push(UNIQUE_INDEX_TAG);
+        buf.push(SEP);
+        buf.extend_from_slice(collection.as_bytes());
+        buf.push(SEP);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(SEP);
+        buf.extend_from_slice(value_bytes);
+        buf
+    }
+
+    /// Decode a unique-index key into `(collection, field, value_bytes)`.
+    ///
+    /// Layout: `u\x00{collection}\x00{field}\x00{value_bytes}`.
+    pub fn decode_unique_index(key: &'a [u8]) -> Option<(&'a str, &'a str, &'a [u8])> {
+        if key.len() < 2 || key[0] != UNIQUE_INDEX_TAG || key[1] != SEP {
+            return None;
+        }
+        let rest = &key[2..];
+        let first_sep = rest.iter().position(|&b| b == SEP)?;
+        let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
+        let after_collection = &rest[first_sep + 1..];
+        let second_sep = after_collection.iter().position(|&b| b == SEP)?;
+        let field = std::str::from_utf8(&after_collection[..second_sep]).ok()?;
+        let value_bytes = &after_collection[second_sep + 1..];
+        Some((collection, field, value_bytes))
+    }
+
     /// Decode a key from its byte representation.
     ///
     /// Returns `None` if the bytes don't match any known key format.
@@ -300,6 +338,8 @@ pub enum KeyPrefix<'a> {
     Record(Cow<'a, str>),
     IndexField(Cow<'a, str>, Cow<'a, str>),
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
+    /// All unique-index entries for a field (`u\x00{collection}\x00{field}\x00`).
+    UniqueIndexField(Cow<'a, str>, Cow<'a, str>),
 }
 
 impl<'a> KeyPrefix<'a> {
@@ -362,6 +402,16 @@ impl<'a> KeyPrefix<'a> {
                 buf.extend_from_slice(field.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(value);
+                buf
+            }
+            KeyPrefix::UniqueIndexField(collection, field) => {
+                let mut buf = Vec::with_capacity(2 + collection.len() + 1 + field.len() + 1);
+                buf.push(UNIQUE_INDEX_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(field.as_bytes());
+                buf.push(SEP);
                 buf
             }
         }

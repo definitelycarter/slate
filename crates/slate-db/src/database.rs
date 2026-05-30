@@ -457,6 +457,26 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         Ok(())
     }
 
+    /// Create a unique index on a field and backfill existing records.
+    ///
+    /// Enforces that no two live documents share the same value for `field`.
+    /// Fails with [`DbError::UniqueViolation`] if existing data already
+    /// contains a duplicate. Scalar paths only (no multikey `[]`).
+    pub fn create_unique_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        field: &str,
+    ) -> Result<(), DbError> {
+        self.txn.create_index_with_options(
+            cf,
+            collection,
+            field,
+            &slate_engine::IndexOptions { unique: true },
+        )?;
+        Ok(())
+    }
+
     /// Drop an index and remove all its entries.
     pub fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
         self.txn.drop_index(cf, collection, field)?;

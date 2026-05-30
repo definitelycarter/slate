@@ -7,7 +7,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **BSON document storage** — schema-flexible documents with zero-copy reads and no deserialization in the query pipeline
 - **Atomic mutations** — `$set`, `$inc`, `$unset`, `$rename`, `$push`, `$pop`, `$lpush` with dot-path support — no read-modify-write required
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
-- **Indexed queries** — single-field indexes with automatic plan optimization (index scans, covered projections)
+- **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, covered projections)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
@@ -94,6 +94,7 @@ txn.commit()?;
 // Indexes
 let mut txn = db.begin(false)?;
 txn.create_index(DEFAULT_CF, "accounts", "status")?;
+txn.create_unique_index(DEFAULT_CF, "accounts", "email")?; // rejects duplicate emails
 txn.commit()?;
 ```
 

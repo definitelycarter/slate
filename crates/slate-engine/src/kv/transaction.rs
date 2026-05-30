@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
+use bson::spec::ElementType;
 use slate_store::{Store, StoreError, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
@@ -60,7 +61,56 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
                 .collect();
             self.txn.put_batch(handle.cf(), &refs)?;
         }
+
+        // Unique-index entries. Deletes are blind — a `u` slot is owned by
+        // exactly one document, so nothing else can have taken it. Process them
+        // before puts so a value moved within this document frees its old slot
+        // first.
+        for key in &changes.unique_deletes {
+            self.txn.delete(handle.cf(), key)?;
+        }
+        // Puts must pass a collision check. Any present slot owned by a
+        // *different* document is a violation — including one whose owner has
+        // expired but not yet been purged (we intentionally fail rather than
+        // steal the slot). A slot already owned by this document is idempotent.
+        // Two concurrent inserts of the same value write the same `u` key and
+        // collide as a write-write conflict at commit, so this in-snapshot check
+        // need only catch already-visible duplicates.
+        for (key, value) in &changes.unique_puts {
+            if let Some(existing) = self.txn.get(handle.cf(), key)? {
+                if existing != *value {
+                    return Err(unique_violation(handle.name(), key, &existing));
+                }
+            }
+            self.txn.put(handle.cf(), key, value)?;
+        }
         Ok(())
+    }
+}
+
+/// Build a [`EngineError::UniqueViolation`] from the colliding `u` key and the
+/// existing slot value (the owning doc_id, length-prefixed).
+pub(crate) fn unique_violation(collection: &str, key: &[u8], existing_value: &[u8]) -> EngineError {
+    let (field, value) = match Key::decode_unique_index(key) {
+        Some((_, field, keyed)) => {
+            // keyed value is `[type_byte][sortable_value_bytes]`
+            let value = keyed
+                .split_first()
+                .and_then(|(tag, bytes)| {
+                    ElementType::from(*tag).map(|t| BsonValue::from_parts(t, bytes).to_string())
+                })
+                .unwrap_or_else(|| "<unknown>".to_string());
+            (field.to_string(), value)
+        }
+        None => ("<unknown>".to_string(), "<unknown>".to_string()),
+    };
+    let existing_id = BsonValue::parse_length_prefixed(existing_value)
+        .map(|(bv, _)| bv.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    EngineError::UniqueViolation {
+        index: format!("{collection}.{field}"),
+        value,
+        existing_id,
     }
 }
 
@@ -110,6 +160,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let changes = IndexDiff::new(&record, &doc_id)
             .with_old_record(old_data.as_deref())
             .with_property_paths(handle.indexes())
+            .with_unique_property_paths(handle.unique_indexes())
             .with_property_path(handle.ttl_path())
             .diff(handle.name())?;
 
@@ -144,6 +195,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         let changes = IndexDiff::new(&record, &doc_id)
             .with_old_record(old_data.as_deref())
             .with_property_paths(handle.indexes())
+            .with_unique_property_paths(handle.unique_indexes())
             .with_property_path(handle.ttl_path())
             .diff(handle.name())?;
 
@@ -167,6 +219,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             let changes = IndexDiff::for_delete(&doc_id)
                 .with_old_record(Some(data.as_slice()))
                 .with_property_paths(handle.indexes())
+                .with_unique_property_paths(handle.unique_indexes())
                 .with_property_path(handle.ttl_path())
                 .diff(handle.name())?;
 
@@ -356,6 +409,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 let changes = IndexDiff::for_delete(doc_id)
                     .with_old_record(Some(data.as_slice()))
                     .with_property_paths(handle.indexes())
+                    .with_unique_property_paths(handle.unique_indexes())
                     .with_property_path(handle.ttl_path())
                     .diff(handle.name())?;
                 self.apply_index_changes(handle, &changes)?;

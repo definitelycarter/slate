@@ -70,6 +70,18 @@ Indexes are created per collection via `create_index(cf, collection, field)`. Th
 // user_id is priority 1, status is priority 2
 ```
 
+### Unique Indexes
+
+A unique index additionally enforces that no two live documents share the same value for a field. Create one with `create_unique_index(cf, collection, field)`; an insert or update that lands on a value already held by another document fails with `UniqueViolation { index, value, existing_id }`.
+
+A unique index keeps its regular value-first `i` entry, so it serves index scans, range scans, and covered projections exactly like any other index. It additionally writes a point-lookup `u` entry — keyed by the value alone (`u\0{collection}\0{field}\0{type}{value}`) with the owning `_id` stored in the entry value. Enforcement is a point read on that `u` key before each write, backed by the store's write-write conflict detection for concurrent writers.
+
+**Scalar values only (for now).** Uniqueness is defined for single scalar values: a non-multikey path resolves to at most one value per document, so the value → `_id` mapping is one-to-one and the doc_id-less `u` key is unambiguous. A unique index on a multikey (`[]`) path is rejected — array fields fan out to multiple values per document, which implies cross-element uniqueness semantics we have not yet committed to. Compound and multikey unique indexes are tracked in the [roadmap](roadmap.md).
+
+**Sparse.** A document that lacks the field (or holds a non-scalar there) produces no `u` entry and is unconstrained — any number of documents may omit a unique field.
+
+**Expired documents keep their slot.** A unique value owned by a document that has expired via TTL but not yet been purged still blocks new inserts of that value. This is conservative — a unique index never silently accepts a duplicate — and the slot is reclaimed when the dead document is purged.
+
 ## Plan Scenarios
 
 The following scenarios show how the planner builds execution plans for different filter combinations. All examples assume:

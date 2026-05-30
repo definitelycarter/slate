@@ -14,6 +14,11 @@ pub enum DbError {
     Serialization(String),
     IndexExists(String),
     FunctionExists(String),
+    UniqueViolation {
+        index: String,
+        value: String,
+        existing_id: String,
+    },
     Vm(slate_vm::VmError),
 }
 
@@ -30,6 +35,14 @@ impl fmt::Display for DbError {
             DbError::Serialization(msg) => write!(f, "serialization error: {msg}"),
             DbError::IndexExists(desc) => write!(f, "index already exists: {desc}"),
             DbError::FunctionExists(desc) => write!(f, "function already exists: {desc}"),
+            DbError::UniqueViolation {
+                index,
+                value,
+                existing_id,
+            } => write!(
+                f,
+                "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
+            ),
             DbError::Vm(e) => write!(f, "vm error: {e}"),
         }
     }
@@ -78,6 +91,15 @@ impl From<slate_engine::EngineError> for DbError {
             slate_engine::EngineError::InvalidDocument(msg) => DbError::InvalidDocument(msg),
             slate_engine::EngineError::IndexExists(desc) => DbError::IndexExists(desc),
             slate_engine::EngineError::FunctionExists(desc) => DbError::FunctionExists(desc),
+            slate_engine::EngineError::UniqueViolation {
+                index,
+                value,
+                existing_id,
+            } => DbError::UniqueViolation {
+                index,
+                value,
+                existing_id,
+            },
             other => DbError::InvalidQuery(other.to_string()),
         }
     }

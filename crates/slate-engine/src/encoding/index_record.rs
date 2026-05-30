@@ -215,6 +215,44 @@ pub fn is_index_expired(data: &[u8], now_millis: i64) -> bool {
     }
 }
 
+/// Compute unique-index entries for a document.
+///
+/// Returns `(u_key, entry_value)` pairs — one per unique path that resolves to
+/// a scalar value. Sparse by construction: a path that is absent or holds a
+/// non-scalar (array/document) produces no entry, since [`extract_all`] yields
+/// nothing for it on a non-multikey path.
+///
+/// Layout:
+/// - key:   `u\0{collection}\0{field}\0{type_byte}{sortable_value_bytes}`
+///   (the type byte is folded into the key so distinct BSON types never alias
+///   onto the same unique slot, even if their sortable encodings collide)
+/// - value: the owning `doc_id`, length-prefixed
+///
+/// [`extract_all`]: bson_value::extract_all
+pub fn unique_entries_from_document(
+    collection: &str,
+    unique_paths: &[String],
+    doc: &RawDocument,
+    doc_id: &BsonValue<'_>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut entries = Vec::new();
+    for path in unique_paths {
+        for val in bson_value::extract_all(doc, path) {
+            let mut keyed_value = Vec::with_capacity(1 + val.bytes.len());
+            keyed_value.push(val.tag as u8);
+            keyed_value.extend_from_slice(&val.bytes);
+            let key = Key::encode_unique_index(collection, path, &keyed_value);
+
+            // length-prefix header is 1 type byte + 2 length bytes
+            let mut value = Vec::with_capacity(3 + doc_id.bytes.len());
+            doc_id.write_length_prefixed(&mut value);
+
+            entries.push((key, value));
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

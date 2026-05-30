@@ -1,12 +1,17 @@
 use bson::raw::RawBsonRef;
 use slate_engine::{
-    Catalog, CollectionHandle, DEFAULT_CF, Engine, EngineTransaction, FunctionKind, IndexRange,
-    KvEngine, runtime_tag,
+    Catalog, CollectionHandle, DEFAULT_CF, Engine, EngineError, EngineTransaction, FunctionKind,
+    IndexOptions, IndexRange, KvEngine, runtime_tag,
 };
 use slate_store::MemoryStore;
 
 fn engine() -> KvEngine<MemoryStore> {
     KvEngine::new(MemoryStore::new())
+}
+
+/// Shorthand for the unique index options used throughout the unique tests.
+fn unique() -> IndexOptions {
+    IndexOptions { unique: true }
 }
 
 // ── Catalog ──────────────────────────────────────────────────
@@ -428,6 +433,7 @@ fn stale_handle_misses_index_on_put() {
         "users".to_string(),
         DEFAULT_CF.to_string(),
         fresh_handle.cf().clone(),
+        vec![],
         vec![],
         "_id".to_string(),
         "ttl".to_string(),
@@ -1007,4 +1013,314 @@ fn create_function_duplicate_errors() {
         "expected FunctionExists error on duplicate create_function"
     );
     txn.rollback().unwrap();
+}
+
+// ── Unique indexes ───────────────────────────────────────────
+//
+// Enforcement is via an in-snapshot existence check on the `u` key plus the
+// store's write-write conflict detection at commit (for concurrent writers).
+// These tests cover the deterministic, single-writer behaviour on MemoryStore;
+// MemoryStore is last-write-wins and does not detect concurrent conflicts, so
+// the concurrent-race guarantee is exercised by the rocks/redb backends, not
+// here.
+
+fn users_with_unique_email(txn: &impl Catalog) {
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    txn.create_index_with_options(DEFAULT_CF, "users", "email", &unique())
+        .unwrap();
+}
+
+#[test]
+fn unique_index_rejects_duplicate_value() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap();
+
+    let err = txn
+        .put_nx(
+            &handle,
+            &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UniqueViolation { .. }),
+        "expected UniqueViolation, got {err:?}"
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn unique_index_allows_distinct_values() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "a@test.com" },
+    )
+    .unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "b@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_is_sparse() {
+    // Documents missing the unique field are not constrained — any number may
+    // omit it.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put_nx(&handle, &bson::rawdoc! { "_id": "a" }).unwrap();
+    txn.put_nx(&handle, &bson::rawdoc! { "_id": "b" }).unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "c", "email": "c@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_same_document_update_is_idempotent() {
+    // Rewriting a document while keeping its unique value must not collide with
+    // itself. Change a non-indexed field so the identical-bytes fast path does
+    // not short-circuit.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com", "n": 1 },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com", "n": 2 },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_value_change_frees_slot() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap();
+    // Move 'a' off of x@test.com.
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "y@test.com" },
+    )
+    .unwrap();
+    // The freed value can now be claimed by another document.
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_delete_frees_slot() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.delete(&handle, &RawBsonRef::String("a")).unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_backfill_detects_existing_duplicates() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    // Two documents share a value before the index exists.
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+    )
+    .unwrap();
+
+    let err = txn
+        .create_index_with_options(DEFAULT_CF, "users", "email", &unique())
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UniqueViolation { .. }),
+        "expected UniqueViolation on dirty backfill, got {err:?}"
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn unique_index_backfill_succeeds_when_distinct() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "a@test.com" },
+    )
+    .unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "b@test.com" },
+    )
+    .unwrap();
+    txn.create_index_with_options(DEFAULT_CF, "users", "email", &unique())
+        .unwrap();
+
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    assert!(handle.unique_indexes().contains(&"email".to_string()));
+    // Enforcement is live after backfill.
+    let err = txn
+        .put_nx(
+            &handle,
+            &bson::rawdoc! { "_id": "c", "email": "a@test.com" },
+        )
+        .unwrap_err();
+    assert!(matches!(err, EngineError::UniqueViolation { .. }));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn unique_index_rejects_multikey_path() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "users", &Default::default())
+        .unwrap();
+    let err = txn
+        .create_index_with_options(DEFAULT_CF, "users", "tags.[]", &unique())
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::InvalidDocument(_)),
+        "expected InvalidDocument for multikey unique path, got {err:?}"
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn dropping_unique_index_lifts_enforcement() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(false).unwrap();
+    txn.drop_index(DEFAULT_CF, "users", "email").unwrap();
+    txn.commit().unwrap();
+
+    // With the index gone, the previously-constrained value is free again.
+    let txn = engine.begin(false).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    assert!(!handle.unique_indexes().contains(&"email".to_string()));
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_index_blocks_value_held_by_expired_document() {
+    // Per design: a unique value held by an expired-but-unpurged document still
+    // blocks new inserts (conservative — we never silently accept a duplicate).
+    // The slot is reclaimed only by purging the dead document.
+    let engine = KvEngine::with_clock(MemoryStore::new(), || 10_000);
+    let txn = engine.begin(false).unwrap();
+    users_with_unique_email(&txn);
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+
+    // 'a' carries a TTL in the past (1_000 < clock 10_000) → expired.
+    let expired = bson::rawdoc! {
+        "_id": "a", "email": "x@test.com", "ttl": bson::DateTime::from_millis(1_000),
+    };
+    txn.put_nx(&handle, &expired).unwrap();
+    // It is invisible to reads.
+    assert!(
+        txn.get(&handle, &RawBsonRef::String("a"))
+            .unwrap()
+            .is_none()
+    );
+    txn.commit().unwrap();
+
+    // A new doc cannot steal the expired slot.
+    let txn = engine.begin(false).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    let err = txn
+        .put_nx(
+            &handle,
+            &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UniqueViolation { .. }),
+        "expected expired slot to still block, got {err:?}"
+    );
+    txn.rollback().unwrap();
+
+    // Purging the dead document frees the slot.
+    let txn = engine.begin(false).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "users").unwrap();
+    txn.purge(&handle).unwrap();
+    txn.put_nx(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "email": "x@test.com" },
+    )
+    .unwrap();
+    txn.commit().unwrap();
 }

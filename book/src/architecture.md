@@ -317,6 +317,7 @@ they can be embedded in index keys without ambiguity.
 - **Function config** — `{tag}\x00{cf}\x00{collection}\x00{name}` stores trigger/validator/UDF metadata.
 - **Record** — `r\x00{collection}\x00{doc_id}` → encoded `Record` (BSON bytes + optional TTL). Lives in the actual CF, not `_sys_`.
 - **Index** — `i\x00{collection}\x00{field}\x00{value_bytes}{doc_id}` → metadata (type byte + optional TTL). Lives in the actual CF.
+- **Unique index** — `u\x00{collection}\x00{field}\x00{type_byte}{value_bytes}` → owning `doc_id`. Written only for unique indexes, *in addition to* the `i` entry: the doc_id is dropped from the key (a unique value has one owner) so the key doubles as a point-lookup enforcement slot. Lives in the actual CF. See [roadmap](roadmap.md) for the enforcement and slot-ownership design.
 
 ### Record Format
 

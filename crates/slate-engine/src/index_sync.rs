@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::encoding::bson_value::BsonValue;
+use crate::encoding::index_record::unique_entries_from_document;
 use crate::encoding::{IndexRecord, Record};
 use crate::error::EngineError;
 
@@ -12,6 +13,12 @@ pub struct IndexChanges {
     pub puts: Vec<(Vec<u8>, Vec<u8>)>,
     /// Index keys to delete.
     pub deletes: Vec<Vec<u8>>,
+    /// Unique-index entries to write: `(u_key, owning_doc_id)`. Each must pass
+    /// a collision check against existing state before it is applied.
+    pub unique_puts: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Unique-index keys to remove. Safe to delete blindly: a `u` key is only
+    /// ever owned by a single document, so no other doc can have taken the slot.
+    pub unique_deletes: Vec<Vec<u8>>,
 }
 
 /// Pure-computation builder for computing index diffs.
@@ -33,6 +40,7 @@ pub struct IndexDiff<'a> {
     doc_id: &'a BsonValue<'a>,
     old_record: Option<&'a [u8]>,
     property_paths: Vec<String>,
+    unique_paths: Vec<String>,
 }
 
 impl<'a> IndexDiff<'a> {
@@ -42,6 +50,7 @@ impl<'a> IndexDiff<'a> {
             doc_id,
             old_record: None,
             property_paths: Vec::new(),
+            unique_paths: Vec::new(),
         }
     }
 
@@ -52,6 +61,7 @@ impl<'a> IndexDiff<'a> {
             doc_id,
             old_record: None,
             property_paths: Vec::new(),
+            unique_paths: Vec::new(),
         }
     }
 
@@ -70,49 +80,80 @@ impl<'a> IndexDiff<'a> {
         self
     }
 
+    /// Register the subset of paths backed by a unique index. These produce
+    /// `u`-keyed enforcement entries in addition to their regular `i` entries.
+    pub fn with_unique_property_paths(mut self, paths: &[String]) -> Self {
+        self.unique_paths.extend(paths.iter().cloned());
+        self
+    }
+
     /// Compute the index diff between old and new documents.
     ///
     /// Pure computation — no store access. Returns the puts and deletes
     /// needed to bring the index entries in sync with the new document.
     pub fn diff(&self, collection: &str) -> Result<IndexChanges, EngineError> {
-        if self.property_paths.is_empty() {
+        if self.property_paths.is_empty() && self.unique_paths.is_empty() {
             return Ok(IndexChanges {
                 puts: Vec::new(),
                 deletes: Vec::new(),
+                unique_puts: Vec::new(),
+                unique_deletes: Vec::new(),
             });
         }
 
-        // Build new index entries (empty when deleting).
-        let new_entries = match self.record {
+        // Build new index entries (both `i` and `u`); empty when deleting.
+        let (new_entries, new_unique) = match self.record {
             Some(record) => {
                 let new_doc = record.doc()?;
                 let new_ttl = record.ttl_millis();
-                IndexRecord::from_document(
+                let entries = IndexRecord::from_document(
                     collection,
                     &self.property_paths,
                     new_doc,
                     self.doc_id,
                     new_ttl,
-                )
+                );
+                let unique = if self.unique_paths.is_empty() {
+                    Vec::new()
+                } else {
+                    unique_entries_from_document(
+                        collection,
+                        &self.unique_paths,
+                        new_doc,
+                        self.doc_id,
+                    )
+                };
+                (entries, unique)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
 
         // Build old index entries (if old record exists).
-        let old_entries = match self.old_record {
+        let (old_entries, old_unique) = match self.old_record {
             Some(data) => {
                 let old_rec = Record::from_bytes(data.to_vec())?;
                 let old_ttl = old_rec.ttl_millis();
                 let old_doc = old_rec.doc()?;
-                IndexRecord::from_document(
+                let entries = IndexRecord::from_document(
                     collection,
                     &self.property_paths,
                     old_doc,
                     self.doc_id,
                     old_ttl,
-                )
+                );
+                let unique = if self.unique_paths.is_empty() {
+                    Vec::new()
+                } else {
+                    unique_entries_from_document(
+                        collection,
+                        &self.unique_paths,
+                        old_doc,
+                        self.doc_id,
+                    )
+                };
+                (entries, unique)
             }
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new()),
         };
 
         // Diff by key + metadata. Entries with matching keys but different
@@ -143,7 +184,38 @@ impl<'a> IndexDiff<'a> {
             }
         }
 
-        Ok(IndexChanges { puts, deletes })
+        // Diff unique entries by key. A `u` key present in both old and new is
+        // unchanged (the doc keeps its value) and needs no work. A key only in
+        // new must be written (and collision-checked); a key only in old is
+        // freed and deleted. Skipped entirely for collections with no unique
+        // index, so the common write path pays nothing for this feature.
+        let mut unique_puts = Vec::new();
+        let mut unique_deletes = Vec::new();
+
+        if !self.unique_paths.is_empty() {
+            let old_unique_keys: HashSet<&[u8]> =
+                old_unique.iter().map(|(k, _)| k.as_slice()).collect();
+            let new_unique_keys: HashSet<&[u8]> =
+                new_unique.iter().map(|(k, _)| k.as_slice()).collect();
+
+            for (key, value) in &new_unique {
+                if !old_unique_keys.contains(key.as_slice()) {
+                    unique_puts.push((key.clone(), value.clone()));
+                }
+            }
+            for (key, _) in &old_unique {
+                if !new_unique_keys.contains(key.as_slice()) {
+                    unique_deletes.push(key.clone());
+                }
+            }
+        }
+
+        Ok(IndexChanges {
+            puts,
+            deletes,
+            unique_puts,
+            unique_deletes,
+        })
     }
 }
 

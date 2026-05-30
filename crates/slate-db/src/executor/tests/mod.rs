@@ -115,8 +115,14 @@ impl Catalog for NoopTransaction {
     fn drop_collection(&self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_collection called");
     }
-    fn create_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
-        panic!("NoopTransaction::create_index called");
+    fn create_index_with_options(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &slate_engine::IndexOptions,
+    ) -> Result<(), EngineError> {
+        panic!("NoopTransaction::create_index_with_options called");
     }
     fn drop_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
@@ -270,8 +276,14 @@ impl Catalog for MockTransaction {
     fn drop_collection(&self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_collection called");
     }
-    fn create_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
-        panic!("MockTransaction::create_index called");
+    fn create_index_with_options(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &slate_engine::IndexOptions,
+    ) -> Result<(), EngineError> {
+        panic!("MockTransaction::create_index_with_options called");
     }
     fn drop_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("MockTransaction::drop_index called");
@@ -333,6 +345,7 @@ fn mock_collection(indexes: Vec<String>) -> CollectionHandle<()> {
         "default_cf".to_string(),
         (),
         indexes,
+        vec![],
         "_id".to_string(),
         "ttl".to_string(),
     )

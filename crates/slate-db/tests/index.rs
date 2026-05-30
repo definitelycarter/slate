@@ -722,3 +722,63 @@ fn create_collection_idempotent() {
         .unwrap();
     assert_eq!(results.len(), 1);
 }
+
+// ── Unique indexes (public API) ─────────────────────────────────
+
+#[test]
+fn unique_index_rejects_duplicate_through_db_api() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let txn = db.begin(false).unwrap();
+    txn.create_unique_index(DEFAULT_CF, COLLECTION, "email")
+        .unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        COLLECTION,
+        doc! { "_id": "a", "email": "x@test.com" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+
+    let err = txn
+        .insert_one(
+            DEFAULT_CF,
+            COLLECTION,
+            doc! { "_id": "b", "email": "x@test.com" },
+        )
+        .unwrap()
+        .drain()
+        .unwrap_err();
+    assert!(
+        matches!(err, slate_db::DbError::UniqueViolation { .. }),
+        "expected DbError::UniqueViolation, got {err:?}"
+    );
+}
+
+#[test]
+fn unique_index_shows_in_list_and_allows_distinct() {
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    let txn = db.begin(false).unwrap();
+    txn.create_unique_index(DEFAULT_CF, COLLECTION, "email")
+        .unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        COLLECTION,
+        vec![
+            doc! { "_id": "a", "email": "a@test.com" },
+            doc! { "_id": "b", "email": "b@test.com" },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
+    assert!(indexes.contains(&"email".to_string()));
+}
