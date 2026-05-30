@@ -753,7 +753,7 @@ fn find_by_id_with_projection() {
 
 /// Create a collection with indexes and seed data for OR/AND tests.
 fn seed_or_test_data(db: &Database<MemoryStore>) {
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "orders".to_string(),
         ..Default::default()
@@ -963,7 +963,7 @@ fn find_with_or_partial_index_per_branch() {
 #[test]
 fn index_covered_preserves_int32_type() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -1011,7 +1011,7 @@ fn index_covered_preserves_int32_type() {
 #[test]
 fn index_covered_preserves_string_type() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -1058,7 +1058,7 @@ fn index_covered_preserves_string_type() {
 #[test]
 fn find_gt_on_indexed_field() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
         ..Default::default()
@@ -1107,7 +1107,7 @@ fn find_gt_on_indexed_field() {
 #[test]
 fn find_gte_lte_on_indexed_field() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "scores".into(),
         ..Default::default()

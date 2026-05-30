@@ -18,7 +18,7 @@ fn engine() -> KvEngine<MemoryStore> {
 /// Create an engine with "users" collection indexed on "status" and "age".
 fn setup() -> KvEngine<MemoryStore> {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "status").unwrap();
@@ -737,7 +737,7 @@ fn upsert_plan() {
 #[test]
 fn collection_not_found() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.commit().unwrap();

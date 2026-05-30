@@ -25,7 +25,7 @@ fn count_index<Txn: EngineTransaction>(
 #[test]
 fn put_nx_creates_index_entries() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -44,7 +44,7 @@ fn put_nx_creates_index_entries() {
 #[test]
 fn put_nx_no_indexed_field_creates_no_entries() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -65,7 +65,7 @@ fn put_nx_no_indexed_field_creates_no_entries() {
 #[test]
 fn put_overwrite_same_value_exactly_one_entry() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -88,7 +88,7 @@ fn put_overwrite_same_value_exactly_one_entry() {
 #[test]
 fn put_overwrite_changed_value_replaces_entry() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -120,7 +120,7 @@ fn put_overwrite_changed_value_replaces_entry() {
 #[test]
 fn put_overwrite_removing_field_deletes_entry() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -144,7 +144,7 @@ fn put_overwrite_removing_field_deletes_entry() {
 #[test]
 fn put_overwrite_adding_field_creates_entry() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -169,7 +169,7 @@ fn put_overwrite_adding_field_creates_entry() {
 #[test]
 fn multiple_indexes_maintained() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -190,7 +190,7 @@ fn multiple_indexes_maintained() {
 #[test]
 fn multiple_indexes_overwrite_partial_change() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -215,7 +215,7 @@ fn multiple_indexes_overwrite_partial_change() {
 #[test]
 fn delete_cleans_all_indexes() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -239,7 +239,7 @@ fn delete_cleans_all_indexes() {
 #[test]
 fn index_on_nested_path() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
@@ -258,7 +258,7 @@ fn index_on_nested_path() {
 #[test]
 fn index_on_nested_path_missing_parent() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
@@ -277,7 +277,7 @@ fn index_on_nested_path_missing_parent() {
 #[test]
 fn index_on_nested_path_overwrite() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "address.city").unwrap();
@@ -301,7 +301,7 @@ fn index_on_nested_path_overwrite() {
 #[test]
 fn array_multikey_creates_entry_per_element() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
@@ -320,7 +320,7 @@ fn array_multikey_creates_entry_per_element() {
 #[test]
 fn array_multikey_overwrite_partial_change() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
@@ -343,7 +343,7 @@ fn array_multikey_overwrite_partial_change() {
 #[test]
 fn array_multikey_overwrite_to_empty_array() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
@@ -365,7 +365,7 @@ fn array_multikey_overwrite_to_empty_array() {
 #[test]
 fn array_multikey_delete_cleans_all() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
@@ -385,7 +385,7 @@ fn array_multikey_delete_cleans_all() {
 #[test]
 fn array_multikey_multiple_docs() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "tags.[]").unwrap();
@@ -418,7 +418,7 @@ fn array_multikey_multiple_docs() {
 #[test]
 fn nested_array_objects_multikey() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "items.[].sku").unwrap();
@@ -452,7 +452,7 @@ fn ttl_expired_doc_hidden_from_index_scan() {
     let clock2 = clock.clone();
     let engine = KvEngine::with_clock(MemoryStore::new(), move || clock2.load(Ordering::Relaxed));
 
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -491,7 +491,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
     let clock2 = clock.clone();
     let engine = KvEngine::with_clock(MemoryStore::new(), move || clock2.load(Ordering::Relaxed));
 
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -517,7 +517,7 @@ fn ttl_unexpired_doc_visible_in_index_scan() {
 #[test]
 fn ttl_no_ttl_field_always_visible() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "name").unwrap();
@@ -544,7 +544,7 @@ fn ttl_no_ttl_field_always_visible() {
 #[test]
 fn many_docs_exact_index_count() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "v").unwrap();
@@ -566,7 +566,7 @@ fn many_docs_exact_index_count() {
 #[test]
 fn many_docs_delete_half_exact_count() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "v").unwrap();
@@ -594,7 +594,7 @@ fn many_docs_delete_half_exact_count() {
 #[test]
 fn many_docs_overwrite_all_exact_count() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "c", "v").unwrap();

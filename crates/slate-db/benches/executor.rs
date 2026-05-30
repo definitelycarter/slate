@@ -98,24 +98,24 @@ impl Catalog for NoopTransaction {
         panic!("NoopTransaction::list_collections called");
     }
     fn create_collection(
-        &mut self,
+        &self,
         _: &str,
         _: &str,
         _: &CreateCollectionOptions,
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_collection called");
     }
-    fn drop_collection(&mut self, _: &str, _: &str) -> Result<(), EngineError> {
+    fn drop_collection(&self, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_collection called");
     }
-    fn create_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
+    fn create_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_index called");
     }
-    fn drop_index(&mut self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
+    fn drop_index(&self, _: &str, _: &str, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_index called");
     }
     fn create_function(
-        &mut self,
+        &self,
         _: &str,
         _: &str,
         _: FunctionKind,
@@ -125,13 +125,7 @@ impl Catalog for NoopTransaction {
     ) -> Result<(), EngineError> {
         panic!("NoopTransaction::create_function called");
     }
-    fn drop_function(
-        &mut self,
-        _: &str,
-        _: &str,
-        _: FunctionKind,
-        _: &str,
-    ) -> Result<(), EngineError> {
+    fn drop_function(&self, _: &str, _: &str, _: FunctionKind, _: &str) -> Result<(), EngineError> {
         panic!("NoopTransaction::drop_function called");
     }
     fn load_functions(

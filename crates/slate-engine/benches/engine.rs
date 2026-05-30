@@ -23,7 +23,7 @@ fn generate_docs(n: usize) -> Vec<bson::RawDocumentBuf> {
 /// and indexes on "status" and "age".
 fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
     let engine = KvEngine::new(MemoryStore::new());
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "bench", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
@@ -166,7 +166,7 @@ fn bench_put(c: &mut Criterion) {
         // Empty collection with indexes — fresh inserts each iteration.
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
-            let mut txn = engine.begin(false).unwrap();
+            let txn = engine.begin(false).unwrap();
             txn.create_collection(DEFAULT_CF, "bench", &Default::default())
                 .unwrap();
             txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
@@ -201,7 +201,7 @@ fn bench_put_nx(c: &mut Criterion) {
     for n in [100, 1_000] {
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
-            let mut txn = engine.begin(false).unwrap();
+            let txn = engine.begin(false).unwrap();
             txn.create_collection(DEFAULT_CF, "bench", &Default::default())
                 .unwrap();
             txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
@@ -321,7 +321,7 @@ fn bench_create_index_backfill(c: &mut Criterion) {
         // Engine with docs but no index on "name".
         let engine = {
             let engine = KvEngine::new(MemoryStore::new());
-            let mut txn = engine.begin(false).unwrap();
+            let txn = engine.begin(false).unwrap();
             txn.create_collection(DEFAULT_CF, "bench", &Default::default())
                 .unwrap();
             let handle = txn.collection(DEFAULT_CF, "bench").unwrap();
@@ -336,7 +336,7 @@ fn bench_create_index_backfill(c: &mut Criterion) {
             b.iter_batched(
                 || {},
                 |_| {
-                    let mut txn = engine.begin(false).unwrap();
+                    let txn = engine.begin(false).unwrap();
                     txn.create_index(DEFAULT_CF, "bench", "name").unwrap();
                     // Don't commit — index doesn't persist.
                 },

@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
@@ -126,7 +127,7 @@ impl<S: Store> Database<S> {
             pool: self.pool.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
-            hooks_dirty: false,
+            hooks_dirty: Cell::new(false),
         })
     }
 
@@ -167,7 +168,7 @@ pub struct Transaction<'db, S: Store + 'db> {
     pool: Option<&'db VmPool>,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
-    hooks_dirty: bool,
+    hooks_dirty: Cell<bool>,
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
@@ -451,13 +452,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Index operations ────────────────────────────────────────
 
     /// Create an index on a field and backfill existing records.
-    pub fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
+    pub fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
         self.txn.create_index(cf, collection, field)?;
         Ok(())
     }
 
     /// Drop an index and remove all its entries.
-    pub fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
+    pub fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
         self.txn.drop_index(cf, collection, field)?;
         Ok(())
     }
@@ -480,9 +481,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Drop a collection and all its data, indexes, and metadata.
-    pub fn drop_collection(&mut self, cf: &str, collection: &str) -> Result<(), DbError> {
+    pub fn drop_collection(&self, cf: &str, collection: &str) -> Result<(), DbError> {
         self.txn.drop_collection(cf, collection)?;
-        self.hooks_dirty = true;
+        self.hooks_dirty.set(true);
         Ok(())
     }
 
@@ -491,7 +492,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn commit(self) -> Result<(), DbError> {
         // If hooks were modified, reload the snapshot before committing
         // so the new snapshot reflects the changes we're about to persist.
-        let new_snapshot = if self.hooks_dirty {
+        let new_snapshot = if self.hooks_dirty.get() {
             Some(HookSnapshot::load_all(&self.txn)?)
         } else {
             None
@@ -515,7 +516,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // ── Collection management ───────────────────────────────────
 
     /// Create a collection with the given config.
-    pub fn create_collection(&mut self, config: &CollectionConfig) -> Result<(), DbError> {
+    pub fn create_collection(&self, config: &CollectionConfig) -> Result<(), DbError> {
         let options = slate_engine::CreateCollectionOptions {
             pk_path: Some(config.pk_path.clone()),
             ttl_path: Some(config.ttl_path.clone()),
@@ -539,7 +540,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Register a trigger function on a collection.
     pub fn register_trigger(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         name: &str,
@@ -553,13 +554,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             slate_engine::runtime_tag::LUA,
             source.as_bytes(),
         )?;
-        self.hooks_dirty = true;
+        self.hooks_dirty.set(true);
         Ok(())
     }
 
     /// Register a validator function on a collection.
     pub fn register_validator(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         name: &str,
@@ -573,13 +574,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             slate_engine::runtime_tag::LUA,
             source.as_bytes(),
         )?;
-        self.hooks_dirty = true;
+        self.hooks_dirty.set(true);
         Ok(())
     }
 
     /// Register a user-defined function on a collection.
     pub fn register_udf(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         name: &str,
@@ -597,28 +598,23 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Drop a trigger function from a collection.
-    pub fn drop_trigger(&mut self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
+    pub fn drop_trigger(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Trigger, name)?;
-        self.hooks_dirty = true;
+        self.hooks_dirty.set(true);
         Ok(())
     }
 
     /// Drop a validator function from a collection.
-    pub fn drop_validator(
-        &mut self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-    ) -> Result<(), DbError> {
+    pub fn drop_validator(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Validator, name)?;
-        self.hooks_dirty = true;
+        self.hooks_dirty.set(true);
         Ok(())
     }
 
     /// Drop a user-defined function from a collection.
-    pub fn drop_udf(&mut self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
+    pub fn drop_udf(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Udf, name)?;
         Ok(())

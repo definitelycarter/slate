@@ -171,7 +171,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(())
     }
 
-    fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn create_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         if self.db.cf_handle(name).is_none() {
             let opts = Options::default();
@@ -186,7 +186,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
         Ok(())
     }
 
-    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn drop_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         self.cf_cache.borrow_mut().remove(name);
         self.db

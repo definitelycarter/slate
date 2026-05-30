@@ -20,7 +20,7 @@ fn to_bson_vec(raw: RawBson) -> Vec<Bson> {
 #[test]
 fn distinct_scalar_field() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -59,7 +59,7 @@ fn distinct_scalar_field() {
 #[test]
 fn distinct_nested_path() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -110,7 +110,7 @@ fn distinct_nested_path() {
 #[test]
 fn distinct_array_field() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -146,7 +146,7 @@ fn distinct_array_field() {
 #[test]
 fn distinct_with_filter() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -197,7 +197,7 @@ fn distinct_with_filter() {
 #[test]
 fn distinct_with_sort_asc() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -244,7 +244,7 @@ fn distinct_with_sort_asc() {
 #[test]
 fn distinct_with_sort_desc() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -291,7 +291,7 @@ fn distinct_with_sort_desc() {
 #[test]
 fn distinct_missing_field() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -324,7 +324,7 @@ fn distinct_missing_field() {
 #[test]
 fn distinct_mixed_presence() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -363,7 +363,7 @@ fn distinct_mixed_presence() {
 #[test]
 fn distinct_array_of_sub_documents() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -414,7 +414,7 @@ fn distinct_array_of_sub_documents() {
 #[test]
 fn distinct_sub_document() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -465,7 +465,7 @@ fn distinct_sub_document() {
 #[test]
 fn distinct_with_take() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -513,7 +513,7 @@ fn distinct_with_take() {
 #[test]
 fn distinct_with_skip_take() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()
@@ -561,7 +561,7 @@ fn distinct_with_skip_take() {
 #[test]
 fn distinct_with_sort_and_limit() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.to_string(),
         ..Default::default()

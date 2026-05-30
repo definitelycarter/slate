@@ -55,7 +55,7 @@ fn drop_collection() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.drop_collection(DEFAULT_CF, COLLECTION).unwrap();
     txn.commit().unwrap();
 
@@ -125,7 +125,7 @@ fn collection_isolation() {
 #[test]
 fn register_triggers() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "users".to_string(),
         ..Default::default()
@@ -149,7 +149,7 @@ fn register_triggers() {
 #[test]
 fn register_validators() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "users".to_string(),
         ..Default::default()
@@ -167,7 +167,7 @@ fn register_validators() {
 #[test]
 fn register_udfs() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "users".to_string(),
         ..Default::default()
@@ -190,7 +190,7 @@ fn register_udfs() {
 #[test]
 fn register_all_function_types_with_indexes() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "users".to_string(),
         ..Default::default()

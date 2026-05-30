@@ -9,7 +9,7 @@ fn seeded_db() -> Database<MemoryStore> {
     let db = crate::database::DatabaseBuilder::new()
         .open(MemoryStore::new())
         .unwrap();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         ..Default::default()
@@ -48,7 +48,7 @@ pub(super) fn seeded_kv_engine() -> KvEngine<MemoryStore> {
     // Re-approach: seed via SlateEngine directly.
     let engine = KvEngine::new(MemoryStore::new());
     {
-        let mut txn = engine.begin(false).unwrap();
+        let txn = engine.begin(false).unwrap();
         txn.create_collection(DEFAULT_CF, "test", &Default::default())
             .unwrap();
         txn.create_index(DEFAULT_CF, "test", "status").unwrap();

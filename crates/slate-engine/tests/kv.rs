@@ -14,7 +14,7 @@ fn engine() -> KvEngine<MemoryStore> {
 #[test]
 fn create_and_list_collection() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let configs = txn.list_collections(None).unwrap();
@@ -35,7 +35,7 @@ fn collection_not_found() {
 #[test]
 fn create_collection_idempotent() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
@@ -48,7 +48,7 @@ fn create_collection_idempotent() {
 #[test]
 fn drop_collection_removes_metadata() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.drop_collection(DEFAULT_CF, "users").unwrap();
@@ -60,7 +60,7 @@ fn drop_collection_removes_metadata() {
 #[test]
 fn drop_nonexistent_collection_is_noop() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_collection(DEFAULT_CF, "nope").unwrap();
     txn.commit().unwrap();
 }
@@ -70,7 +70,7 @@ fn drop_nonexistent_collection_is_noop() {
 #[test]
 fn put_get_roundtrip() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -90,7 +90,7 @@ fn put_get_roundtrip() {
 #[test]
 fn get_missing_returns_none() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -103,7 +103,7 @@ fn get_missing_returns_none() {
 #[test]
 fn put_overwrite() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -125,7 +125,7 @@ fn put_overwrite() {
 #[test]
 fn delete_removes_document() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -145,7 +145,7 @@ fn delete_removes_document() {
 #[test]
 fn scan_returns_all_documents() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -173,7 +173,7 @@ fn scan_returns_all_documents() {
 #[test]
 fn drop_collection_removes_records() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -182,12 +182,12 @@ fn drop_collection_removes_records() {
     txn.put(&handle, &doc).unwrap();
     txn.commit().unwrap();
 
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_collection(DEFAULT_CF, "users").unwrap();
     txn.commit().unwrap();
 
     // Recreate and verify empty.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -205,7 +205,7 @@ fn drop_collection_removes_records() {
 #[test]
 fn create_index_backfills_existing_records() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -236,7 +236,7 @@ fn create_index_backfills_existing_records() {
 #[test]
 fn drop_index_removes_entries() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -247,7 +247,7 @@ fn drop_index_removes_entries() {
     txn.commit().unwrap();
 
     // Drop the index.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_index(DEFAULT_CF, "users", "email").unwrap();
     txn.commit().unwrap();
 
@@ -269,7 +269,7 @@ fn drop_index_removes_entries() {
 #[test]
 fn put_maintains_index() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "age").unwrap();
@@ -308,7 +308,7 @@ fn put_maintains_index() {
 #[test]
 fn put_overwrite_updates_index() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
@@ -340,7 +340,7 @@ fn put_overwrite_updates_index() {
 #[test]
 fn delete_removes_index_entries() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
@@ -371,7 +371,7 @@ fn delete_removes_index_entries() {
 #[test]
 fn drop_collection_removes_index_entries() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -382,12 +382,12 @@ fn drop_collection_removes_index_entries() {
     txn.commit().unwrap();
 
     // Drop the entire collection.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_collection(DEFAULT_CF, "users").unwrap();
     txn.commit().unwrap();
 
     // Recreate and verify no index entries leak.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
@@ -408,13 +408,13 @@ fn stale_handle_misses_index_on_put() {
     let engine = engine();
 
     // Setup: create collection, no indexes.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.commit().unwrap();
 
     // Another transaction creates an index and commits.
-    let mut txn2 = engine.begin(false).unwrap();
+    let txn2 = engine.begin(false).unwrap();
     txn2.create_index(DEFAULT_CF, "users", "email").unwrap();
     txn2.commit().unwrap();
 
@@ -462,7 +462,7 @@ fn stale_handle_misses_index_on_put() {
 #[test]
 fn commit_persists_across_transactions() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "users").unwrap();
@@ -483,7 +483,7 @@ fn commit_persists_across_transactions() {
 #[test]
 fn rollback_discards_changes() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.commit().unwrap();
@@ -509,7 +509,7 @@ fn rollback_discards_changes() {
 #[test]
 fn put_get_string_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -526,7 +526,7 @@ fn put_get_string_id() {
 #[test]
 fn put_get_objectid_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -544,7 +544,7 @@ fn put_get_objectid_id() {
 #[test]
 fn put_get_i32_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -561,7 +561,7 @@ fn put_get_i32_id() {
 #[test]
 fn put_get_i64_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -578,7 +578,7 @@ fn put_get_i64_id() {
 #[test]
 fn put_nx_objectid_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -596,7 +596,7 @@ fn put_nx_objectid_id() {
 #[test]
 fn put_nx_i32_id_duplicate_errors() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -612,7 +612,7 @@ fn put_nx_i32_id_duplicate_errors() {
 #[test]
 fn delete_objectid_id() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -630,7 +630,7 @@ fn delete_objectid_id() {
 #[test]
 fn scan_mixed_id_types() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "c", &Default::default())
         .unwrap();
     let handle = txn.collection(DEFAULT_CF, "c").unwrap();
@@ -673,7 +673,7 @@ fn scan_mixed_id_types() {
 #[test]
 fn create_and_load_trigger() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -700,7 +700,7 @@ fn create_and_load_trigger() {
 #[test]
 fn create_and_load_validator() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -727,7 +727,7 @@ fn create_and_load_validator() {
 #[test]
 fn create_and_load_udf() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -754,7 +754,7 @@ fn create_and_load_udf() {
 #[test]
 fn multiple_functions_per_collection() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -807,7 +807,7 @@ fn multiple_functions_per_collection() {
 #[test]
 fn drop_function() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -830,7 +830,7 @@ fn drop_function() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_function(DEFAULT_CF, "users", FunctionKind::Trigger, "audit")
         .unwrap();
     txn.commit().unwrap();
@@ -847,7 +847,7 @@ fn drop_function() {
 #[test]
 fn drop_collection_cleans_functions() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(
@@ -879,12 +879,12 @@ fn drop_collection_cleans_functions() {
     .unwrap();
     txn.commit().unwrap();
 
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.drop_collection(DEFAULT_CF, "users").unwrap();
     txn.commit().unwrap();
 
     // Recreate and verify no functions leak.
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     for kind in [
@@ -906,7 +906,7 @@ fn drop_collection_cleans_functions() {
 #[test]
 fn function_requires_existing_collection() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     let err = txn.create_function(
         DEFAULT_CF,
         "nope",
@@ -922,7 +922,7 @@ fn function_requires_existing_collection() {
 #[test]
 fn functions_isolated_across_collections() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_collection(DEFAULT_CF, "posts", &Default::default())
@@ -965,7 +965,7 @@ fn functions_isolated_across_collections() {
 #[test]
 fn create_index_duplicate_errors() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_index(DEFAULT_CF, "users", "email").unwrap();
@@ -981,7 +981,7 @@ fn create_index_duplicate_errors() {
 #[test]
 fn create_function_duplicate_errors() {
     let engine = engine();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "users", &Default::default())
         .unwrap();
     txn.create_function(

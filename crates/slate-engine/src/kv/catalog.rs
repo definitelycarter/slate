@@ -119,7 +119,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
     }
 
     fn create_collection(
-        &mut self,
+        &self,
         cf: &str,
         name: &str,
         options: &CreateCollectionOptions,
@@ -149,7 +149,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         Ok(())
     }
 
-    fn drop_collection(&mut self, cf: &str, name: &str) -> Result<(), EngineError> {
+    fn drop_collection(&self, cf: &str, name: &str) -> Result<(), EngineError> {
         let meta = match self.load_collection_meta(cf, name) {
             Ok(meta) => meta,
             Err(EngineError::CollectionNotFound(_)) => return Ok(()),
@@ -196,7 +196,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         Ok(())
     }
 
-    fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
+    fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
         self.load_collection_meta(cf, collection)?;
         let cf_handle = self.txn.cf(cf)?;
 
@@ -241,7 +241,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         Ok(())
     }
 
-    fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
+    fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError> {
         let cf_handle = self.txn.cf(cf)?;
 
         // Delete all index entries for this field.
@@ -263,7 +263,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
     }
 
     fn create_function(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         kind: FunctionKind,
@@ -296,7 +296,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
     }
 
     fn drop_function(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         kind: FunctionKind,

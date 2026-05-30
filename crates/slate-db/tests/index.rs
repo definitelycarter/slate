@@ -11,7 +11,7 @@ fn create_collection_with_indexes(
     name: &str,
     indexes: &[&str],
 ) {
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: name.to_string(),
         ..Default::default()
@@ -30,7 +30,7 @@ fn create_and_use_index() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.insert_many(
         DEFAULT_CF,
         COLLECTION,
@@ -74,7 +74,7 @@ fn drop_index() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
@@ -83,7 +83,7 @@ fn drop_index() {
     indexes.sort();
     assert_eq!(indexes, vec!["status", "ttl"]);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.drop_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.commit().unwrap();
 
@@ -100,7 +100,7 @@ fn index_maintained_on_insert() {
     create_collection(&db, COLLECTION);
 
     // Create index first, then insert
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
         DEFAULT_CF,
@@ -143,7 +143,7 @@ fn index_maintained_on_update() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
         DEFAULT_CF,
@@ -206,7 +206,7 @@ fn index_maintained_on_delete() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
     txn.insert_one(
         DEFAULT_CF,
@@ -248,7 +248,7 @@ fn index_maintained_on_delete() {
 #[test]
 fn index_on_nested_path() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "nested_idx".to_string(),
         ..Default::default()
@@ -296,7 +296,7 @@ fn index_on_nested_path() {
 #[test]
 fn index_on_array_of_scalars() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_idx".to_string(),
         ..Default::default()
@@ -364,7 +364,7 @@ fn index_on_array_of_scalars() {
 #[test]
 fn index_on_array_of_objects() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "items_idx".to_string(),
         ..Default::default()
@@ -431,7 +431,7 @@ fn index_on_array_of_objects() {
 #[test]
 fn multikey_index_maintained_on_update() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_upd".to_string(),
         ..Default::default()
@@ -498,7 +498,7 @@ fn multikey_index_maintained_on_update() {
 #[test]
 fn multikey_index_maintained_on_delete() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_del".to_string(),
         ..Default::default()
@@ -563,7 +563,7 @@ fn multikey_index_backfill() {
     txn.commit().unwrap();
 
     // Now create the index — should backfill
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, "backfill", "tags.[]").unwrap();
     txn.commit().unwrap();
 
@@ -593,7 +593,7 @@ fn multikey_index_backfill() {
 #[test]
 fn multikey_index_replace_one() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "tags_rep".to_string(),
         ..Default::default()
@@ -662,7 +662,7 @@ fn multikey_index_replace_one() {
 #[test]
 fn create_index_shows_in_list() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "configured".to_string(),
         ..Default::default()
@@ -686,7 +686,7 @@ fn create_collection_idempotent() {
     let (db, _dir) = temp_db();
 
     // Create once
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
         ..Default::default()
@@ -704,7 +704,7 @@ fn create_collection_idempotent() {
     txn.commit().unwrap();
 
     // Create again — should be a no-op, data preserved
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idem".to_string(),
         ..Default::default()

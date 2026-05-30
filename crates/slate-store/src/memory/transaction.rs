@@ -258,31 +258,25 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         Ok(())
     }
 
-    fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn create_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         let _ = self.store.create_cf(name);
-        let snap = self
-            .snapshot
-            .get_mut()
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
+        let mut snap_ref = self.snapshot.borrow_mut();
+        let snap = snap_ref.as_mut().ok_or(StoreError::TransactionConsumed)?;
         snap.data
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(ColumnFamily::new()));
-        self.dirty.get_mut().insert(name.to_string());
+        self.dirty.borrow_mut().insert(name.to_string());
         Ok(())
     }
 
-    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn drop_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         self.store.drop_cf(name)?;
-        let snap = self
-            .snapshot
-            .get_mut()
-            .as_mut()
-            .ok_or(StoreError::TransactionConsumed)?;
+        let mut snap_ref = self.snapshot.borrow_mut();
+        let snap = snap_ref.as_mut().ok_or(StoreError::TransactionConsumed)?;
         snap.data.remove(name);
-        self.dirty.get_mut().remove(name);
+        self.dirty.borrow_mut().remove(name);
         Ok(())
     }
 

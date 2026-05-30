@@ -770,7 +770,7 @@ fn mutation_update_many_with_inc() {
 #[test]
 fn mutation_index_maintained_on_set() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idx_mut".to_string(),
         ..Default::default()
@@ -834,7 +834,7 @@ fn mutation_index_maintained_on_set() {
 #[test]
 fn mutation_index_maintained_on_unset() {
     let (db, _dir) = temp_db();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "idx_unset".to_string(),
         ..Default::default()
@@ -1075,7 +1075,7 @@ fn delete_fires_trigger_successfully() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1132,7 +1132,7 @@ fn delete_many_fires_trigger_successfully() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1186,7 +1186,7 @@ fn delete_trigger_error_propagates() {
         .unwrap();
 
     // Seed data first (no triggers yet)
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1203,7 +1203,7 @@ fn delete_trigger_error_propagates() {
     txn.commit().unwrap();
 
     // Register bad trigger in a separate transaction
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.register_trigger(
         DEFAULT_CF,
         COLLECTION,
@@ -1232,7 +1232,7 @@ fn insert_fires_trigger_successfully() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1274,7 +1274,7 @@ fn insert_trigger_error_propagates() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1310,7 +1310,7 @@ fn update_fires_trigger_successfully() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1362,7 +1362,7 @@ fn update_trigger_error_propagates() {
         .unwrap();
 
     // Seed data first (no triggers yet)
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1379,7 +1379,7 @@ fn update_trigger_error_propagates() {
     txn.commit().unwrap();
 
     // Register bad trigger in a separate transaction
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.register_trigger(
         DEFAULT_CF,
         COLLECTION,
@@ -1412,7 +1412,7 @@ fn replace_fires_trigger_successfully() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1466,7 +1466,7 @@ fn upsert_fires_trigger_on_insert() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()
@@ -1508,7 +1508,7 @@ fn upsert_fires_trigger_on_update() {
         .open(MemoryStore::new())
         .unwrap();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLLECTION.into(),
         ..Default::default()

@@ -287,7 +287,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn create_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn create_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         let name = name.to_string();
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&name);
@@ -302,7 +302,7 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
-    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError> {
+    fn drop_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
         let name = name.to_string();
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&name);

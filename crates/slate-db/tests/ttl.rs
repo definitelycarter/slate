@@ -179,7 +179,7 @@ fn ttl_purge_skips_unexpired_docs() {
 fn ttl_purge_cleans_user_indexes() {
     let (db, _dir) = temp_db();
 
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "purge_idx".to_string(),
         ..Default::default()

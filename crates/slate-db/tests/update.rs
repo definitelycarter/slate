@@ -237,7 +237,7 @@ fn upsert_many_mixed() {
 fn upsert_many_updates_indexes() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
 
     txn.insert_one(

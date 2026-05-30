@@ -69,8 +69,8 @@ pub trait Transaction {
     fn delete_batch(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<(), StoreError>;
 
     // Schema
-    fn create_cf(&mut self, name: &str) -> Result<(), StoreError>;
-    fn drop_cf(&mut self, name: &str) -> Result<(), StoreError>;
+    fn create_cf(&self, name: &str) -> Result<(), StoreError>;
+    fn drop_cf(&self, name: &str) -> Result<(), StoreError>;
 
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;

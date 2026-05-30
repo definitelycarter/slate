@@ -9,7 +9,7 @@ fn seeded_db() -> Database<MemoryStore> {
     let db = crate::database::DatabaseBuilder::new()
         .open(MemoryStore::new())
         .unwrap();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         ..Default::default()

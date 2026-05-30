@@ -310,21 +310,21 @@ pub trait Catalog: EngineTransaction {
     ) -> Result<Vec<CollectionHandle<Self::Cf>>, EngineError>;
 
     fn create_collection(
-        &mut self,
+        &self,
         cf: &str,
         name: &str,
         options: &CreateCollectionOptions,
     ) -> Result<(), EngineError>;
 
-    fn drop_collection(&mut self, cf: &str, name: &str) -> Result<(), EngineError>;
+    fn drop_collection(&self, cf: &str, name: &str) -> Result<(), EngineError>;
 
-    fn create_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
+    fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 
-    fn drop_index(&mut self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
+    fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
 
     /// Store a named function (trigger, validator, or computed field) for a collection.
     fn create_function(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         kind: FunctionKind,
@@ -335,7 +335,7 @@ pub trait Catalog: EngineTransaction {
 
     /// Remove a named function from a collection.
     fn drop_function(
-        &mut self,
+        &self,
         cf: &str,
         collection: &str,
         kind: FunctionKind,

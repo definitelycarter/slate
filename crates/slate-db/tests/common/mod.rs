@@ -35,7 +35,7 @@ pub fn eq_filter(field: &str, value: Bson) -> bson::RawDocumentBuf {
 }
 
 pub fn create_collection(db: &Database<MemoryStore>, name: &str) {
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: name.to_string(),
         ..Default::default()

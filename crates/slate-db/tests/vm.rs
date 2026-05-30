@@ -16,7 +16,7 @@ fn database_with_scripting() {
         .with_scripting(scripting_pool())
         .open(MemoryStore::new())
         .unwrap();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         ..Default::default()
@@ -36,7 +36,7 @@ fn database_with_scripting() {
 fn database_without_scripting() {
     // Database works fine without a pool — functions are stored but not executed.
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
-    let mut txn = db.begin(false).unwrap();
+    let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         ..Default::default()
