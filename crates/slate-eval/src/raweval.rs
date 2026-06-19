@@ -16,8 +16,8 @@
 
 use std::cmp::Ordering;
 
-use bson::raw::{RawBsonRef, RawDocument};
-use bson::{Bson, Document, RawBson};
+use bson::raw::{CString, RawArrayBuf, RawBsonRef, RawDocument, RawDocumentBuf};
+use bson::{Bson, RawBson};
 
 use crate::error::{EvalError, Result};
 use crate::eval::{
@@ -29,12 +29,17 @@ use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
 /// The result of evaluating a [`ScalarExpr`] over raw bytes.
 ///
 /// `Ref` borrows directly from the input document (the common, fast case);
-/// `Owned` holds a value computed during evaluation.
+/// `Owned`/`OwnedRaw` hold a value computed during evaluation.
 #[derive(Debug, Clone)]
 pub enum RawValue<'a> {
     Undefined,
     Ref(RawBsonRef<'a>),
+    /// A computed scalar/value held as owned `Bson` (arithmetic, function
+    /// results) — reuses the owned evaluator's logic.
     Owned(Bson),
+    /// A computed value already in raw form (a constructed object/array). Kept
+    /// raw so it reaches the output stream without a re-serialize round-trip.
+    OwnedRaw(RawBson),
 }
 
 impl<'a> RawValue<'a> {
@@ -69,6 +74,9 @@ impl<'a> RawValue<'a> {
             RawValue::Undefined => Value::Undefined,
             RawValue::Owned(b) => Value::Defined(b),
             RawValue::Ref(r) => Value::Defined(Bson::try_from(r).map_err(decode_err)?),
+            RawValue::OwnedRaw(rb) => {
+                Value::Defined(Bson::try_from(rb.as_raw_bson_ref()).map_err(decode_err)?)
+            }
         })
     }
 
@@ -82,6 +90,8 @@ impl<'a> RawValue<'a> {
             RawValue::Owned(b) => Some(RawBson::try_from(b).map_err(|e| EvalError {
                 message: format!("could not encode projected value: {e}"),
             })?),
+            // Already raw — no re-serialize.
+            RawValue::OwnedRaw(rb) => Some(rb),
         })
     }
 }
@@ -140,17 +150,69 @@ pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
 
         ScalarExpr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, env),
 
-        ScalarExpr::Function { name, args } => {
-            let mut vals = Vec::with_capacity(args.len());
-            for a in args {
-                vals.push(eval(a, env)?.into_value()?);
-            }
-            crate::functions::call(name, vals).map(RawValue::from_value)
-        }
+        ScalarExpr::Function { name, args } => eval_function(name, args, env),
 
         ScalarExpr::Object(fields) => build_object(fields, env),
         ScalarExpr::Array(items) => build_array(items, env),
     }
+}
+
+/// Dispatch a function call. The hottest predicates have zero-materialization
+/// fast paths — they walk raw bytes instead of converting arguments to owned
+/// `Bson` — and must agree with [`crate::functions`], which the differential
+/// `raw_matches_owned` test pins down. Everything else materializes its
+/// arguments and dispatches through the shared [`crate::functions::call`].
+fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+    if args.len() == 1 {
+        if name.eq_ignore_ascii_case("IS_DEFINED") {
+            return Ok(bool_value(!eval(&args[0], env)?.is_undefined()));
+        }
+        if name.eq_ignore_ascii_case("IS_NULL") {
+            return Ok(bool_value(is_null(&eval(&args[0], env)?)));
+        }
+    }
+    if args.len() == 2 && name.eq_ignore_ascii_case("ARRAY_CONTAINS") {
+        let arr = eval(&args[0], env)?;
+        let needle = eval(&args[1], env)?;
+        return Ok(array_contains(&arr, &needle));
+    }
+
+    let mut vals = Vec::with_capacity(args.len());
+    for a in args {
+        vals.push(eval(a, env)?.into_value()?);
+    }
+    crate::functions::call(name, vals).map(RawValue::from_value)
+}
+
+fn is_null(v: &RawValue) -> bool {
+    matches!(
+        v,
+        RawValue::Ref(RawBsonRef::Null) | RawValue::Owned(Bson::Null)
+    )
+}
+
+/// `ARRAY_CONTAINS(array, needle)` over raw bytes: iterate the array in place
+/// and compare each element to `needle` with the shared scalar comparator — no
+/// materialization of the array. Mirrors the owned [`crate::functions`] version:
+/// a non-array `array` (or undefined `needle`) yields undefined.
+fn array_contains<'a>(arr: &RawValue, needle: &RawValue) -> RawValue<'a> {
+    if needle.is_undefined() {
+        return RawValue::Undefined;
+    }
+    let nscalar = value_scalar(needle);
+    let eq = |elem: Option<Scalar>| match (&elem, &nscalar) {
+        (Some(e), Some(n)) => compare_scalar(e, n) == Some(Ordering::Equal),
+        _ => false,
+    };
+    let found = match arr {
+        RawValue::Ref(RawBsonRef::Array(a)) => a.into_iter().any(|e| match e {
+            Ok(elem) => eq(scalar_of_raw(elem)),
+            Err(_) => false,
+        }),
+        RawValue::Owned(Bson::Array(items)) => items.iter().any(|b| eq(scalar_of_bson(b))),
+        _ => return RawValue::Undefined,
+    };
+    bool_value(found)
 }
 
 fn literal_value(lit: &Literal) -> RawValue<'_> {
@@ -176,6 +238,10 @@ fn member_access<'a>(base: RawValue<'a>, field: &str) -> Result<RawValue<'a>> {
         RawValue::Owned(Bson::Document(mut doc)) => doc
             .remove(field)
             .map_or(RawValue::Undefined, RawValue::Owned),
+        RawValue::OwnedRaw(RawBson::Document(buf)) => match get_field(&buf, field)? {
+            Some(r) => RawValue::OwnedRaw(RawBson::from(r)),
+            None => RawValue::Undefined,
+        },
         _ => RawValue::Undefined,
     })
 }
@@ -206,6 +272,21 @@ fn index_access<'a>(base: RawValue<'a>, index: RawValue<'a>) -> Result<RawValue<
         },
         RawValue::Owned(Bson::Document(mut doc)) => match value_as_str(&index) {
             Some(k) => doc.remove(k).map_or(RawValue::Undefined, RawValue::Owned),
+            None => RawValue::Undefined,
+        },
+        // Computed *raw* array/object indexing: clone the element out.
+        RawValue::OwnedRaw(RawBson::Array(buf)) => match value_as_usize(&index) {
+            Some(i) => match buf.get(i).map_err(decode_err)? {
+                Some(v) => RawValue::OwnedRaw(RawBson::from(v)),
+                None => RawValue::Undefined,
+            },
+            None => RawValue::Undefined,
+        },
+        RawValue::OwnedRaw(RawBson::Document(buf)) => match value_as_str(&index) {
+            Some(k) => match get_field(&buf, k)? {
+                Some(v) => RawValue::OwnedRaw(RawBson::from(v)),
+                None => RawValue::Undefined,
+            },
             None => RawValue::Undefined,
         },
         _ => RawValue::Undefined,
@@ -288,25 +369,30 @@ fn eval_binop<'a>(op: BinOp, l: RawValue<'a>, r: RawValue<'a>) -> RawValue<'a> {
 // ── Object / array construction ─────────────────────────────────
 
 fn build_object<'a>(fields: &'a [(String, ScalarExpr)], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
-    let mut doc = Document::new();
+    // Build the result directly in raw form: each field value is appended as
+    // raw bytes, so the projected document needs no Bson round-trip on output.
+    let mut doc = RawDocumentBuf::new();
     for (k, v) in fields {
         // Undefined fields are omitted (Cosmos behavior).
-        if let Value::Defined(b) = eval(v, env)?.into_value()? {
-            doc.insert(k.clone(), b);
+        if let Some(raw) = eval(v, env)?.into_raw()? {
+            let key = CString::try_from(k.as_str()).map_err(|e| EvalError {
+                message: format!("invalid object key '{k}': {e}"),
+            })?;
+            doc.append(key, raw);
         }
     }
-    Ok(RawValue::Owned(Bson::Document(doc)))
+    Ok(RawValue::OwnedRaw(RawBson::Document(doc)))
 }
 
 fn build_array<'a>(items: &'a [ScalarExpr], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
-    let mut arr = Vec::with_capacity(items.len());
+    let mut arr = RawArrayBuf::new();
     for it in items {
         // Undefined elements are omitted (Cosmos behavior).
-        if let Value::Defined(b) = eval(it, env)?.into_value()? {
-            arr.push(b);
+        if let Some(raw) = eval(it, env)?.into_raw()? {
+            arr.push(raw);
         }
     }
-    Ok(RawValue::Owned(Bson::Array(arr)))
+    Ok(RawValue::OwnedRaw(RawBson::Array(arr)))
 }
 
 // ── Shared scalar views over a RawValue ─────────────────────────
@@ -317,6 +403,7 @@ fn value_scalar<'a>(v: &'a RawValue) -> Option<Scalar<'a>> {
     match v {
         RawValue::Ref(r) => scalar_of_raw(*r),
         RawValue::Owned(b) => scalar_of_bson(b),
+        RawValue::OwnedRaw(rb) => scalar_of_raw(rb.as_raw_bson_ref()),
         RawValue::Undefined => None,
     }
 }
@@ -342,6 +429,7 @@ fn value_num(v: &RawValue) -> Option<Num> {
     match v {
         RawValue::Ref(r) => raw_as_number(*r),
         RawValue::Owned(b) => as_number(b),
+        RawValue::OwnedRaw(rb) => raw_as_number(rb.as_raw_bson_ref()),
         RawValue::Undefined => None,
     }
 }
@@ -385,7 +473,7 @@ fn decode_err(e: bson::error::Error) -> EvalError {
 mod tests {
     use super::*;
     use crate::eval::{Env, eval as owned_eval};
-    use bson::{RawDocumentBuf, bson};
+    use bson::{Document, RawDocumentBuf, bson};
     use slate_ast::SelectClause;
 
     fn parse_expr(src: &str) -> ScalarExpr {
