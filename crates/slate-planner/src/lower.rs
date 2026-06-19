@@ -137,7 +137,12 @@ fn plan_source(
     };
 
     // Top-level OR → IndexMerge(Or) when fully indexable; recheck the full OR.
-    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. }) {
+    // A whole-filter Mongo implicit-equality (`f = v OR ARRAY_CONTAINS(f, v)`)
+    // is *not* a real disjunction — it is sargable as an equality on `f`, so it
+    // falls through to the conjunction path below rather than taking this route.
+    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. })
+        && as_mongo_eq(&expr, alias).is_none()
+    {
         return match index_source_for(&expr, alias, container, meta) {
             Some(ids) => (key_lookup(container, ids), Some(expr)),
             None => (scan(container), Some(expr)),
@@ -147,10 +152,11 @@ fn plan_source(
     let mut conjuncts = Vec::new();
     flatten_and(expr, &mut conjuncts);
 
-    // Priority 1: primary-key equality → direct point lookup.
+    // Priority 1: primary-key equality (a plain `Eq` or the Mongo idiom) →
+    // direct point lookup. The pk is never an array, so the `ARRAY_CONTAINS`
+    // branch is always false and the equality is exact (safe to consume).
     for i in 0..conjuncts.len() {
-        if let Some((field, BinOp::Eq, value)) = as_atom(&conjuncts[i], alias)
-            && field == meta.pk_path
+        if let Some(value) = pk_eq_value(&conjuncts[i], alias, &meta.pk_path)
             && let Some(id) = bson_to_raw(&value)
         {
             let source = Node::KeyLookup {
@@ -174,10 +180,25 @@ fn plan_source(
         }
     }
 
+    // Mongo implicit-equality on an indexed field → an index Eq lookup. Kept as
+    // a residual recheck (NOT consumed): a plain index Eq alone could miss
+    // array-containing documents if the index isn't multikey, so the original
+    // `OR` still runs over the narrowed candidates.
+    for conjunct in &conjuncts {
+        if let Some((field, value)) = as_mongo_eq(conjunct, alias)
+            && meta.indexes.contains(&field)
+        {
+            sources.push(index_scan(container, &field, IndexScanRange::Eq(value)));
+        }
+    }
+
     // OR sub-groups that are fully indexable become IndexMerge(Or) inputs.
     for (i, conjunct) in conjuncts.iter().enumerate() {
         if consumed.contains(&i) {
             continue;
+        }
+        if as_mongo_eq(conjunct, alias).is_some() {
+            continue; // already handled above
         }
         if matches!(conjunct, ScalarExpr::Binary { op: BinOp::Or, .. })
             && let Some(ids) = index_source_for(conjunct, alias, container, meta)
@@ -377,6 +398,59 @@ fn as_atom(expr: &ScalarExpr, alias: &str) -> Option<(String, BinOp, Bson)> {
         Some((path, flip(*op), lit))
     } else {
         None
+    }
+}
+
+/// Recognize the Mongo implicit-equality idiom the find front-end emits:
+/// `alias.field = lit OR ARRAY_CONTAINS(alias.field, lit)` (same field, same
+/// literal). Returns the field path and value — it is sargable as an equality
+/// on `field`, because an index/pk lookup for `lit` finds both the
+/// scalar-equal and the array-containing documents.
+fn as_mongo_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
+    let ScalarExpr::Binary {
+        op: BinOp::Or,
+        lhs,
+        rhs,
+    } = expr
+    else {
+        return None;
+    };
+    // lhs: `field = lit`
+    let (eq_field, BinOp::Eq, eq_val) = as_atom(lhs.as_ref(), alias)? else {
+        return None;
+    };
+    // rhs: `ARRAY_CONTAINS(field, lit)` over the same field and value
+    let (ac_field, ac_val) = as_array_contains(rhs.as_ref(), alias)?;
+    if ac_field == eq_field && ac_val == eq_val {
+        Some((eq_field, eq_val))
+    } else {
+        None
+    }
+}
+
+/// Interpret `ARRAY_CONTAINS(alias.<path>, <literal>)`, returning the field
+/// path and the literal value.
+fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
+    let ScalarExpr::Function { name, args } = expr else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("ARRAY_CONTAINS") || args.len() != 2 {
+        return None;
+    }
+    Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
+}
+
+/// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo
+/// idiom (whose `ARRAY_CONTAINS` branch is vacuous for a non-array pk).
+fn pk_eq_value(expr: &ScalarExpr, alias: &str, pk: &str) -> Option<Bson> {
+    if let Some((field, BinOp::Eq, value)) = as_atom(expr, alias)
+        && field == pk
+    {
+        return Some(value);
+    }
+    match as_mongo_eq(expr, alias) {
+        Some((field, value)) if field == pk => Some(value),
+        _ => None,
     }
 }
 
@@ -729,6 +803,64 @@ mod tests {
     fn or_with_non_indexed_branch_falls_back_to_scan() {
         let node = lower_with(
             r#"SELECT VALUE c FROM c WHERE c.age = 41 OR c.name = "x""#,
+            &age_indexed(),
+        );
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        let Node::Filter { source, .. } = *source else {
+            panic!("expected Filter");
+        };
+        assert!(matches!(*source, Node::Scan { .. }));
+    }
+
+    // ── Mongo implicit-equality idiom (`f = v OR ARRAY_CONTAINS(f, v)`) ──
+
+    #[test]
+    fn mongo_eq_on_pk_uses_point_lookup() {
+        // The find front-end's `{_id: "2"}`. Must be a direct pk lookup, not a
+        // scan — and the (vacuous) idiom is consumed, so no residual Filter.
+        let node = lower_with(
+            r#"SELECT VALUE c FROM c WHERE c._id = "2" OR ARRAY_CONTAINS(c._id, "2")"#,
+            &age_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => assert!(matches!(*source, Node::Values(_))),
+            other => panic!("expected KeyLookup(Values), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mongo_eq_on_indexed_field_uses_index_with_recheck() {
+        // `{age: 41}` on an indexed field → index Eq, with the OR kept as a
+        // residual recheck (array safety).
+        let node = lower_with(
+            "SELECT VALUE c FROM c WHERE c.age = 41 OR ARRAY_CONTAINS(c.age, 41)",
+            &age_indexed(),
+        );
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        let Node::Filter { source, .. } = *source else {
+            panic!("expected residual Filter recheck");
+        };
+        match *source {
+            Node::KeyLookup { source, .. } => assert!(matches!(
+                *source,
+                Node::IndexScan {
+                    range: IndexScanRange::Eq(_),
+                    ..
+                }
+            )),
+            other => panic!("expected KeyLookup(IndexScan), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mongo_eq_on_unindexed_field_scans() {
+        // `{name: "x"}` — name not indexed → scan + residual recheck.
+        let node = lower_with(
+            r#"SELECT VALUE c FROM c WHERE c.name = "x" OR ARRAY_CONTAINS(c.name, "x")"#,
             &age_indexed(),
         );
         let Node::Project { source, .. } = node else {
