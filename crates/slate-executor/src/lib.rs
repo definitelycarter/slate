@@ -183,19 +183,31 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::unwind::execute(alias, array, source)
             }
 
-            Node::Project { expr, source } => {
+            Node::Project {
+                expr,
+                binding,
+                source,
+            } => {
                 let source = self.execute_node(*source)?;
-                nodes::project::execute(expr, source)
+                nodes::project::execute(expr, binding, source)
             }
 
-            Node::Filter { predicate, source } => {
+            Node::Filter {
+                predicate,
+                binding,
+                source,
+            } => {
                 let source = self.execute_node(*source)?;
-                nodes::filter::execute(predicate, source)
+                nodes::filter::execute(predicate, binding, source)
             }
 
-            Node::Sort { keys, source } => {
+            Node::Sort {
+                keys,
+                binding,
+                source,
+            } => {
                 let source = self.execute_node(*source)?;
-                nodes::sort::execute(keys, source)?
+                nodes::sort::execute(keys, binding, source)?
             }
 
             Node::Limit { skip, take, source } => {
@@ -406,7 +418,7 @@ mod write_path {
     use crate::nodes::test_support::{people_ref, pred, seeded_people, sv};
     use bson::{RawBson, rawdoc};
     use slate_engine::{Engine, EngineTransaction, KvEngine};
-    use slate_planner::{Node, Plan, UpsertMode};
+    use slate_planner::{Node, Plan, RowBinding, UpsertMode};
     use slate_store::MemoryStore;
 
     /// Find the document with `_id` in a scan result.
@@ -438,17 +450,18 @@ mod write_path {
         out
     }
 
-    /// `Scan → Bind(c) → Filter(pred) → Project(c)` — bare docs matching `pred`.
+    /// `Scan → Filter(pred) → Project(c)` — bare docs matching `pred`, in
+    /// single-binding (`Alias`) mode (no `Bind`, matching what the planner now
+    /// emits for a join-free query).
     fn matched_docs(pred_src: &str) -> Node {
         Node::Project {
             expr: sv("c"),
+            binding: RowBinding::Alias("c".into()),
             source: Box::new(Node::Filter {
                 predicate: pred(pred_src),
-                source: Box::new(Node::Bind {
-                    alias: "c".into(),
-                    source: Box::new(Node::Scan {
-                        collection: people_ref(),
-                    }),
+                binding: RowBinding::Alias("c".into()),
+                source: Box::new(Node::Scan {
+                    collection: people_ref(),
                 }),
             }),
         }

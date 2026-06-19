@@ -27,7 +27,9 @@
 use bson::{Bson, RawBson};
 use slate_sql::ast::{BinOp, FromSource, Literal, Query, ScalarExpr, SelectClause};
 
-use crate::plan::{CollectionRef, IndexScanRange, LogicalOp, Node, Plan, ScanDirection};
+use crate::plan::{
+    CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
+};
 
 /// Index metadata for the queried collection, used to choose a scan source.
 #[derive(Debug, Clone, Default)]
@@ -54,25 +56,32 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     // Choose a source (Scan or an index path), pushing sargable predicates in.
     let (source, residual) = plan_source(filter, &alias, &container, meta);
 
-    // FROM c  →  <source> → Bind(c)
-    let mut node = Node::Bind {
-        alias,
-        source: Box::new(source),
-    };
-
-    // JOIN t IN <arr>  →  Unwind, left to right
-    for join in from.joins {
-        node = Node::Unwind {
-            alias: join.alias,
-            array: join.array,
-            source: Box::new(node),
+    // Without joins, the bound rows are the bare source documents and binding
+    // is a zero-cost single alias. With joins we materialize a row environment:
+    // `Bind(c)` attaches the first alias, `Unwind` adds one per array element,
+    // and the binding-aware nodes read its fields.
+    let (binding, mut node) = if from.joins.is_empty() {
+        (RowBinding::Alias(alias), source)
+    } else {
+        let mut node = Node::Bind {
+            alias,
+            source: Box::new(source),
         };
-    }
+        for join in from.joins {
+            node = Node::Unwind {
+                alias: join.alias,
+                array: join.array,
+                source: Box::new(node),
+            };
+        }
+        (RowBinding::Env, node)
+    };
 
     // Residual WHERE  →  Filter
     if let Some(predicate) = residual {
         node = Node::Filter {
             predicate,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
@@ -81,6 +90,7 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     if !order_by.is_empty() {
         node = Node::Sort {
             keys: order_by,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
@@ -89,6 +99,7 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     let SelectClause::Value(expr) = select;
     node = Node::Project {
         expr,
+        binding,
         source: Box::new(node),
     };
 
@@ -497,22 +508,22 @@ mod tests {
     // ── Structural lowering (no index) ──────────────────────────
 
     #[test]
-    fn minimal_is_project_bind_scan() {
+    fn minimal_is_project_scan() {
+        // No joins → no Bind wrapper; the alias binds the bare scan rows.
         match lower_sql("SELECT VALUE c FROM c") {
-            Node::Project { source, .. } => match *source {
-                Node::Bind { alias, source } => {
-                    assert_eq!(alias, "c");
-                    assert!(matches!(*source, Node::Scan { .. }));
-                }
-                other => panic!("expected Bind, got {other:?}"),
-            },
+            Node::Project {
+                source, binding, ..
+            } => {
+                assert_eq!(binding, RowBinding::Alias("c".into()));
+                assert!(matches!(*source, Node::Scan { .. }));
+            }
             other => panic!("expected Project, got {other:?}"),
         }
     }
 
     #[test]
     fn full_pipeline_nesting() {
-        // Limit(Project(Sort(Filter(Bind(Scan)))))
+        // Limit(Project(Sort(Filter(Scan)))) — no Bind without joins.
         let node = lower_sql(
             "SELECT VALUE c.name FROM c WHERE c.age > 40 ORDER BY c.age OFFSET 1 LIMIT 2",
         );
@@ -529,9 +540,6 @@ mod tests {
         };
         let Node::Filter { source, .. } = *source else {
             panic!("expected Filter");
-        };
-        let Node::Bind { source, .. } = *source else {
-            panic!("expected Bind");
         };
         assert!(matches!(*source, Node::Scan { .. }));
     }
@@ -551,20 +559,16 @@ mod tests {
 
     // ── Sargability ─────────────────────────────────────────────
 
-    /// Unwrap `Project(Bind(<source>))` and return the source under Bind.
+    /// Unwrap `Project(<source>)` — or `Project(Filter(<source>))` — and return
+    /// the scan/index source. With no joins there is no `Bind` wrapper.
     fn source_under_bind(node: Node) -> Node {
         let Node::Project { source, .. } = node else {
             panic!("expected Project");
         };
-        // May be Project(Bind(..)) or Project(Filter(Bind(..)))
-        let inner = match *source {
+        match *source {
             Node::Filter { source, .. } => *source,
             other => other,
-        };
-        let Node::Bind { source, .. } = inner else {
-            panic!("expected Bind");
-        };
-        *source
+        }
     }
 
     #[test]
@@ -619,9 +623,6 @@ mod tests {
         let Node::Filter { source, .. } = *source else {
             panic!("expected residual Filter");
         };
-        let Node::Bind { source, .. } = *source else {
-            panic!("expected Bind");
-        };
         assert!(matches!(*source, Node::Scan { .. }));
     }
 
@@ -639,9 +640,6 @@ mod tests {
         let Node::Filter { source, .. } = *source else {
             panic!("expected residual Filter");
         };
-        let Node::Bind { source, .. } = *source else {
-            panic!("expected Bind");
-        };
         // ...and the source is the index path.
         assert!(matches!(*source, Node::KeyLookup { .. }));
     }
@@ -655,9 +653,6 @@ mod tests {
         };
         let Node::Filter { source, .. } = *source else {
             panic!("expected Filter");
-        };
-        let Node::Bind { source, .. } = *source else {
-            panic!("expected Bind");
         };
         assert!(matches!(*source, Node::Scan { .. }));
     }
@@ -738,9 +733,6 @@ mod tests {
         };
         let Node::Filter { source, .. } = *source else {
             panic!("expected Filter");
-        };
-        let Node::Bind { source, .. } = *source else {
-            panic!("expected Bind");
         };
         assert!(matches!(*source, Node::Scan { .. }));
     }

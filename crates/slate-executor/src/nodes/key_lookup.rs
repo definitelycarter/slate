@@ -48,7 +48,7 @@ mod tests {
     use crate::nodes::test_support::{people_ref, seeded_people, sv};
     use bson::{Bson, RawBson, rawdoc};
     use slate_engine::Engine;
-    use slate_planner::{IndexScanRange, Node, Plan, ScanDirection};
+    use slate_planner::{IndexScanRange, Node, Plan, RowBinding, ScanDirection};
 
     fn index_eq(age: i64) -> Node {
         Node::IndexScan {
@@ -117,6 +117,7 @@ mod tests {
         let txn = engine.begin(true).unwrap();
         let plan = Plan::Query(Node::Project {
             expr: sv("c.name"),
+            binding: RowBinding::Env,
             source: Box::new(Node::Bind {
                 alias: "c".into(),
                 source: Box::new(Node::KeyLookup {

@@ -24,7 +24,9 @@
 //! - [`ast`] — the query / scalar-expression syntax tree.
 //! - [`parser`] — tokens → [`ast::Query`] (recursive-descent + precedence).
 //! - [`value`] — the [`value::Value`] domain (`Defined(Bson)` vs `Undefined`).
-//! - [`eval`] — scalar-expression evaluation over a binding environment.
+//! - [`eval`] — scalar-expression evaluation over owned `bson::Bson`.
+//! - [`raweval`] — the storage-path twin of [`eval`]: zero-copy evaluation
+//!   over raw BSON bytes, sharing every leaf rule with [`eval`].
 //! - [`functions`] — built-in scalar function dispatch.
 //! - [`exec`] — the in-memory `SELECT VALUE` execution engine.
 //! - [`agg`] — aggregate-function surface (planned; not yet wired into `exec`).
@@ -46,6 +48,7 @@ pub mod exec;
 pub mod functions;
 pub mod lexer;
 pub mod parser;
+pub mod raweval;
 pub mod token;
 pub mod value;
 

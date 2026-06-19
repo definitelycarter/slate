@@ -5,17 +5,22 @@
 //! Rows where the predicate is false *or* undefined are dropped (the 3-valued
 //! rule).
 
-use bson::{Bson, RawBson};
-use slate_sql::Value;
+use bson::RawBson;
+use slate_planner::RowBinding;
 use slate_sql::ast::ScalarExpr;
+use slate_sql::raweval;
 
 use super::env;
 use crate::{ExecError, ValueIter};
 
 /// Wrap `source`, keeping only rows where `predicate` evaluates to `true`.
-pub(crate) fn execute<'a>(predicate: ScalarExpr, source: ValueIter<'a>) -> ValueIter<'a> {
+pub(crate) fn execute<'a>(
+    predicate: ScalarExpr,
+    binding: RowBinding,
+    source: ValueIter<'a>,
+) -> ValueIter<'a> {
     Box::new(
-        source.filter_map(move |item| match keep_row(item, &predicate) {
+        source.filter_map(move |item| match keep_row(item, &binding, &predicate) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept
             Ok(None) => None,                         // dropped
             Err(e) => Some(Err(e)),                   // surface the error
@@ -27,17 +32,21 @@ pub(crate) fn execute<'a>(predicate: ScalarExpr, source: ValueIter<'a>) -> Value
 /// drop it, or `Err`.
 fn keep_row(
     item: Result<Option<RawBson>, ExecError>,
+    binding: &RowBinding,
     predicate: &ScalarExpr,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
     };
 
-    let bindings = env::decode(&row)?;
-    match env::eval_in(&bindings, predicate)? {
-        Value::Defined(Bson::Boolean(true)) => Ok(Some(row)),
-        _ => Ok(None),
-    }
+    // Evaluate the predicate against bindings that borrow from `row`; the
+    // borrow ends before we move `row` through. Only `Some(true)` keeps the
+    // row (3-valued rule: false *or* undefined drops it).
+    let keep = env::with_env(&row, binding, |renv| {
+        Ok(raweval::eval(predicate, renv)?.as_bool() == Some(true))
+    })?;
+
+    if keep { Ok(Some(row)) } else { Ok(None) }
 }
 
 #[cfg(test)]
@@ -47,6 +56,7 @@ mod tests {
     use crate::nodes::project;
     use crate::nodes::test_support::{bind_c, pred, sv};
     use bson::{RawBson, rawdoc};
+    use slate_planner::RowBinding;
 
     fn people() -> Vec<RawBson> {
         vec![
@@ -61,7 +71,8 @@ mod tests {
         // Project `c` to recover the bound document for comparison.
         collect(project::execute(
             sv("c"),
-            execute(pred(pred_src), bind_c(docs)),
+            RowBinding::Env,
+            execute(pred(pred_src), RowBinding::Env, bind_c(docs)),
         ))
         .unwrap()
     }
@@ -98,8 +109,11 @@ mod tests {
     #[test]
     fn filter_then_project_composes() {
         // SELECT VALUE c.name FROM c WHERE c.age > 40
-        let projected =
-            project::execute(sv("c.name"), execute(pred("c.age > 40"), bind_c(people())));
+        let projected = project::execute(
+            sv("c.name"),
+            RowBinding::Env,
+            execute(pred("c.age > 40"), RowBinding::Env, bind_c(people())),
+        );
         assert_eq!(
             collect(projected).unwrap(),
             vec![

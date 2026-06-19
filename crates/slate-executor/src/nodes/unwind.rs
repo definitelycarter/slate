@@ -4,10 +4,11 @@
 //! one row per element, extending the environment with `{alias: element}`. A
 //! non-array or undefined `array` yields no rows (inner-join semantics).
 
+use bson::raw::{BindRawBsonRef, CString, RawBsonRef, RawDocumentBuf};
 use bson::{Bson, RawBson};
 use slate_sql::SqlError;
-use slate_sql::Value;
 use slate_sql::ast::ScalarExpr;
+use slate_sql::raweval::{self, RawValue};
 
 use super::env;
 use crate::{ExecError, ValueIter};
@@ -33,23 +34,59 @@ pub(crate) fn execute<'a>(
 
 /// Produce the extended environment rows for one input row.
 fn expand(row: &RawBson, alias: &str, array: &ScalarExpr) -> Result<Vec<RawBson>, ExecError> {
-    let bindings = env::decode(row)?;
-    let items = match env::eval_in(&bindings, array)? {
-        Value::Defined(Bson::Array(items)) => items,
-        _ => return Ok(Vec::new()), // non-array / undefined → inner join drops the row
-    };
+    let bindings = env::bindings_of(row)?;
+    let renv = env::raw_env(&bindings);
 
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        // Each output row needs its own environment copy.
-        let mut env = bindings.clone();
-        env.insert(alias.to_string(), item);
-        let raw = RawBson::try_from(Bson::Document(env)).map_err(|e| SqlError::Eval {
-            message: format!("could not encode unwound row: {e}"),
-        })?;
-        out.push(raw);
+    let mut out = Vec::new();
+    // Each output row is `{<existing bindings>, alias: <element>}`, built by
+    // appending raw refs — no whole-document decode. A non-array / undefined
+    // `array` yields no rows (inner-join semantics).
+    match raweval::eval(array, &renv)? {
+        RawValue::Ref(RawBsonRef::Array(a)) => {
+            for elem in a {
+                let elem = elem.map_err(|e| SqlError::Eval {
+                    message: format!("could not read array element: {e}"),
+                })?;
+                out.push(extend_env(&bindings, alias, elem)?);
+            }
+        }
+        // Computed array (e.g. from an object/function): elements are owned.
+        RawValue::Owned(Bson::Array(items)) => {
+            for item in items {
+                let raw = RawBson::try_from(item).map_err(|e| SqlError::Eval {
+                    message: format!("could not encode unwound element: {e}"),
+                })?;
+                out.push(extend_env(&bindings, alias, raw)?);
+            }
+        }
+        _ => {}
     }
     Ok(out)
+}
+
+/// Build one extended environment document: the existing `bindings` plus
+/// `alias -> elem`. `elem` may be a borrowed `RawBsonRef` or an owned `RawBson`
+/// (both bind into the buffer).
+fn extend_env(
+    bindings: &[(&str, RawBsonRef<'_>)],
+    alias: &str,
+    elem: impl BindRawBsonRef,
+) -> Result<RawBson, ExecError> {
+    let mut doc = RawDocumentBuf::new();
+    for (k, v) in bindings {
+        doc.append(cstring(k)?, *v);
+    }
+    doc.append(cstring(alias)?, elem);
+    Ok(RawBson::Document(doc))
+}
+
+fn cstring(s: &str) -> Result<CString, ExecError> {
+    CString::try_from(s).map_err(|e| {
+        SqlError::Eval {
+            message: format!("invalid binding alias '{s}': {e}"),
+        }
+        .into()
+    })
 }
 
 #[cfg(test)]
@@ -59,6 +96,7 @@ mod tests {
     use crate::nodes::test_support::sv;
     use crate::nodes::{bind, project, values};
     use bson::{RawBson, rawdoc};
+    use slate_planner::RowBinding;
 
     fn person(name: &str, tags: &[&str]) -> RawBson {
         let tag_arr: Vec<_> = tags
@@ -73,7 +111,11 @@ mod tests {
     fn join_project(docs: Vec<RawBson>) -> Vec<RawBson> {
         let bound = bind::execute("c".into(), values::execute(docs));
         let unwound = execute("t".into(), sv("c.tags"), bound);
-        let projected = project::execute(sv(r#"{ "who": c.name, "tag": t }"#), unwound);
+        let projected = project::execute(
+            sv(r#"{ "who": c.name, "tag": t }"#),
+            RowBinding::Env,
+            unwound,
+        );
         collect(projected).unwrap()
     }
 

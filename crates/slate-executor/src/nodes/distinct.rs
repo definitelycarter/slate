@@ -85,6 +85,7 @@ mod tests {
     use crate::nodes::test_support::{bind_c, sv};
     use crate::nodes::{project, values};
     use bson::{RawBson, rawdoc};
+    use slate_planner::RowBinding;
 
     #[test]
     fn dedups_scalars_first_occurrence_order() {
@@ -117,7 +118,7 @@ mod tests {
             RawBson::Document(rawdoc! { "team": "b" }),
             RawBson::Document(rawdoc! { "team": "a" }),
         ];
-        let projected = project::execute(sv("c.team"), bind_c(docs));
+        let projected = project::execute(sv("c.team"), RowBinding::Env, bind_c(docs));
         let out = collect(execute(projected)).unwrap();
         assert_eq!(
             out,

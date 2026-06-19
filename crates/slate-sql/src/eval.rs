@@ -204,7 +204,7 @@ fn eval_binop(op: BinOp, l: Value, r: Value) -> Value {
     }
 }
 
-fn cmp_pred(op: BinOp, o: Ordering) -> bool {
+pub(crate) fn cmp_pred(op: BinOp, o: Ordering) -> bool {
     match op {
         BinOp::Lt => o == Ordering::Less,
         BinOp::Lte => o != Ordering::Greater,
@@ -217,16 +217,45 @@ fn cmp_pred(op: BinOp, o: Ordering) -> bool {
 /// Three-valued comparison. Returns `None` when the values are not
 /// order-comparable (different domains), which callers map to undefined.
 pub fn compare_values(a: &Bson, b: &Bson) -> Option<Ordering> {
-    if let (Some(x), Some(y)) = (as_number(a), as_number(b)) {
-        return num_f64(&x).partial_cmp(&num_f64(&y));
-    }
+    compare_scalar(&scalar_of_bson(a)?, &scalar_of_bson(b)?)
+}
+
+/// A comparable, borrowing view of a scalar value. This is the neutral domain
+/// the order/equality rules are defined over, so the owned evaluator (here) and
+/// the raw evaluator ([`crate::raweval`]) share one comparison definition and
+/// cannot drift. Non-scalar values (arrays, documents) have no `Scalar` and so
+/// are never order-comparable.
+pub(crate) enum Scalar<'a> {
+    Num(Num),
+    Str(&'a str),
+    Bool(bool),
+    Null,
+    /// Milliseconds since the Unix epoch.
+    DateTime(i64),
+}
+
+/// Extract the comparable scalar from an owned `Bson`, or `None` for non-scalars.
+pub(crate) fn scalar_of_bson(b: &Bson) -> Option<Scalar<'_>> {
+    Some(match b {
+        Bson::Int32(i) => Scalar::Num(Num::Int(*i as i64)),
+        Bson::Int64(i) => Scalar::Num(Num::Int(*i)),
+        Bson::Double(f) => Scalar::Num(Num::Float(*f)),
+        Bson::String(s) => Scalar::Str(s),
+        Bson::Boolean(x) => Scalar::Bool(*x),
+        Bson::Null => Scalar::Null,
+        Bson::DateTime(dt) => Scalar::DateTime(dt.timestamp_millis()),
+        _ => return None,
+    })
+}
+
+/// The single comparison rule, shared by the owned and raw evaluators.
+pub(crate) fn compare_scalar(a: &Scalar, b: &Scalar) -> Option<Ordering> {
     match (a, b) {
-        (Bson::String(x), Bson::String(y)) => Some(x.cmp(y)),
-        (Bson::Boolean(x), Bson::Boolean(y)) => Some(x.cmp(y)),
-        (Bson::Null, Bson::Null) => Some(Ordering::Equal),
-        (Bson::DateTime(x), Bson::DateTime(y)) => {
-            Some(x.timestamp_millis().cmp(&y.timestamp_millis()))
-        }
+        (Scalar::Num(x), Scalar::Num(y)) => num_f64(x).partial_cmp(&num_f64(y)),
+        (Scalar::Str(x), Scalar::Str(y)) => Some(x.cmp(y)),
+        (Scalar::Bool(x), Scalar::Bool(y)) => Some(x.cmp(y)),
+        (Scalar::Null, Scalar::Null) => Some(Ordering::Equal),
+        (Scalar::DateTime(x), Scalar::DateTime(y)) => Some(x.cmp(y)),
         _ => None,
     }
 }
@@ -261,12 +290,12 @@ fn type_rank(b: &Bson) -> u8 {
 
 // ── Numeric helpers ─────────────────────────────────────────────
 
-enum Num {
+pub(crate) enum Num {
     Int(i64),
     Float(f64),
 }
 
-fn as_number(b: &Bson) -> Option<Num> {
+pub(crate) fn as_number(b: &Bson) -> Option<Num> {
     match b {
         Bson::Int32(i) => Some(Num::Int(*i as i64)),
         Bson::Int64(i) => Some(Num::Int(*i)),
@@ -275,14 +304,14 @@ fn as_number(b: &Bson) -> Option<Num> {
     }
 }
 
-fn num_f64(n: &Num) -> f64 {
+pub(crate) fn num_f64(n: &Num) -> f64 {
     match n {
         Num::Int(i) => *i as f64,
         Num::Float(f) => *f,
     }
 }
 
-fn arith(op: BinOp, a: Num, b: Num) -> Value {
+pub(crate) fn arith(op: BinOp, a: Num, b: Num) -> Value {
     // Division always yields a double (Cosmos numbers are doubles); the other
     // ops keep integer results when both operands are integers.
     match (op, &a, &b) {
@@ -319,7 +348,7 @@ fn arith(op: BinOp, a: Num, b: Num) -> Value {
     }
 }
 
-fn int_or_undef(v: Option<i64>) -> Value {
+pub(crate) fn int_or_undef(v: Option<i64>) -> Value {
     match v {
         Some(i) => Value::Defined(Bson::Int64(i)),
         None => Value::Undefined, // overflow
@@ -335,7 +364,7 @@ fn truthy(v: &Value) -> Option<bool> {
     }
 }
 
-fn and3(l: Option<bool>, r: Option<bool>) -> Value {
+pub(crate) fn and3(l: Option<bool>, r: Option<bool>) -> Value {
     match (l, r) {
         (Some(false), _) | (_, Some(false)) => Value::Defined(Bson::Boolean(false)),
         (Some(true), Some(true)) => Value::Defined(Bson::Boolean(true)),
@@ -343,7 +372,7 @@ fn and3(l: Option<bool>, r: Option<bool>) -> Value {
     }
 }
 
-fn or3(l: Option<bool>, r: Option<bool>) -> Value {
+pub(crate) fn or3(l: Option<bool>, r: Option<bool>) -> Value {
     match (l, r) {
         (Some(true), _) | (_, Some(true)) => Value::Defined(Bson::Boolean(true)),
         (Some(false), Some(false)) => Value::Defined(Bson::Boolean(false)),

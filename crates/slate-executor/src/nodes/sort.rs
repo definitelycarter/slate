@@ -10,9 +10,11 @@
 use std::cmp::Ordering;
 
 use bson::RawBson;
+use slate_planner::RowBinding;
 use slate_sql::Value;
 use slate_sql::ast::{OrderByItem, SortDirection};
 use slate_sql::eval::order_values;
+use slate_sql::raweval;
 
 use super::env;
 use crate::{ExecError, ValueIter};
@@ -20,6 +22,7 @@ use crate::{ExecError, ValueIter};
 /// Buffer, sort by `keys` (evaluated against each row environment), emit.
 pub(crate) fn execute<'a>(
     keys: Vec<OrderByItem>,
+    binding: RowBinding,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let mut rows: Vec<(Vec<Value>, RawBson)> = Vec::new();
@@ -27,7 +30,7 @@ pub(crate) fn execute<'a>(
         // Undefined upstream rows are dropped (they'd be dropped at the
         // output boundary anyway).
         let Some(row) = item? else { continue };
-        let key_values = eval_keys(&row, &keys)?;
+        let key_values = eval_keys(&row, &binding, &keys)?;
         rows.push((key_values, row));
     }
 
@@ -37,13 +40,21 @@ pub(crate) fn execute<'a>(
 }
 
 /// Evaluate each sort key expression against one row environment.
-fn eval_keys(row: &RawBson, keys: &[OrderByItem]) -> Result<Vec<Value>, ExecError> {
-    let bindings = env::decode(row)?;
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
-        out.push(env::eval_in(&bindings, &key.expr)?);
-    }
-    Ok(out)
+fn eval_keys(
+    row: &RawBson,
+    binding: &RowBinding,
+    keys: &[OrderByItem],
+) -> Result<Vec<Value>, ExecError> {
+    env::with_env(row, binding, |renv| {
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            // Sort keys are buffered, so they materialize to owned `Value`; the
+            // ordering itself is the shared `order_values`, so `ORDER BY` can't
+            // drift.
+            out.push(raweval::eval(&key.expr, renv)?.into_value()?);
+        }
+        Ok(out)
+    })
 }
 
 /// Lexicographic comparison of two rows' key vectors, honoring each key's
@@ -69,6 +80,7 @@ mod tests {
     use crate::nodes::project;
     use crate::nodes::test_support::{bind_c, sv};
     use bson::{RawBson, rawdoc};
+    use slate_planner::RowBinding;
     use slate_sql::ast::OrderByItem;
 
     /// Parse `ORDER BY <src>` out of a query.
@@ -79,8 +91,8 @@ mod tests {
 
     /// Sort `docs` (bound to `c`) and recover the documents via `SELECT VALUE c`.
     fn sorted(order_src: &str, docs: Vec<RawBson>) -> Vec<RawBson> {
-        let sorted = execute(order_by(order_src), bind_c(docs)).unwrap();
-        collect(project::execute(sv("c"), sorted)).unwrap()
+        let sorted = execute(order_by(order_src), RowBinding::Env, bind_c(docs)).unwrap();
+        collect(project::execute(sv("c"), RowBinding::Env, sorted)).unwrap()
     }
 
     fn people() -> Vec<RawBson> {

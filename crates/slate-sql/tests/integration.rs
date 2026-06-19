@@ -58,6 +58,33 @@ fn arithmetic_and_functions() {
 }
 
 #[test]
+fn object_projection_with_array_contains() {
+    // Cosmos-style `SELECT VALUE { ... }`: build a new shape per row, setting
+    // properties from path access, a function (ARRAY_CONTAINS), and a
+    // comparison. Undefined fields are omitted (here `gizmo` has no `sale` tag,
+    // but the bool is still defined as `false`).
+    let out = query(
+        r#"SELECT VALUE {
+               "product": c.name,
+               "onSale": ARRAY_CONTAINS(c.tags, "sale"),
+               "cheap": c.price < 10
+           }
+           FROM c
+           ORDER BY c.id"#,
+        &catalog(),
+    )
+    .unwrap();
+    assert_eq!(
+        out,
+        vec![
+            bson!({ "product": "widget", "onSale": true,  "cheap": true }),
+            bson!({ "product": "gadget", "onSale": false, "cheap": false }),
+            bson!({ "product": "gizmo",  "onSale": false, "cheap": true }),
+        ]
+    );
+}
+
+#[test]
 fn limit_offset() {
     let out = query(
         "SELECT VALUE c.id FROM c ORDER BY c.id DESC OFFSET 1 LIMIT 1",

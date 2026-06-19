@@ -13,8 +13,11 @@ use slate_store::MemoryStore;
 // v1 internals
 use slate_db::bench::{Executor as V1Executor, Expression, Node as V1Node, Plan as V1Plan};
 // v2
-use slate_planner::{CollectionRef, Node as V2Node, Plan as V2Plan};
+use slate_planner::{
+    CollectionMeta, CollectionRef, Node as V2Node, Plan as V2Plan, RowBinding, lower,
+};
 use slate_sql::ast::{BinOp, Literal, ScalarExpr};
+use slate_sql::parse;
 
 const COLL: &str = "bench";
 const N: usize = 10_000;
@@ -32,11 +35,17 @@ fn seed(n: usize) -> KvEngine<MemoryStore> {
         let txn = engine.begin(false).unwrap();
         let handle = txn.collection(DEFAULT_CF, COLL).unwrap();
         for i in 0..n {
+            let tags: Vec<&str> = if i % 3 == 0 {
+                vec!["sale", "new"]
+            } else {
+                vec!["new"]
+            };
             let d: Document = doc! {
                 "_id": format!("{i:06}"),
                 "name": format!("user-{i}"),
                 "age": (18 + (i % 60)) as i32,
                 "status": if i % 2 == 0 { "active" } else { "inactive" },
+                "tags": tags,
             };
             txn.put(&handle, &RawDocumentBuf::try_from(&d).unwrap())
                 .unwrap();
@@ -85,11 +94,9 @@ fn bench_scan(c: &mut Criterion) {
             || {
                 V2Plan::Query(V2Node::Project {
                     expr: ScalarExpr::Identifier("c".into()),
-                    source: Box::new(V2Node::Bind {
-                        alias: "c".into(),
-                        source: Box::new(V2Node::Scan {
-                            collection: v2_coll(),
-                        }),
+                    binding: RowBinding::Alias("c".into()),
+                    source: Box::new(V2Node::Scan {
+                        collection: v2_coll(),
                     }),
                 })
             },
@@ -138,15 +145,14 @@ fn bench_filter(c: &mut Criterion) {
                         lhs: Box::new(v2_path("age")),
                         rhs: Box::new(ScalarExpr::Literal(Literal::Int(50))),
                     },
-                    source: Box::new(V2Node::Bind {
-                        alias: "c".into(),
-                        source: Box::new(V2Node::Scan {
-                            collection: v2_coll(),
-                        }),
+                    binding: RowBinding::Alias("c".into()),
+                    source: Box::new(V2Node::Scan {
+                        collection: v2_coll(),
                     }),
                 };
                 V2Plan::Query(V2Node::Project {
                     expr: ScalarExpr::Identifier("c".into()),
+                    binding: RowBinding::Alias("c".into()),
                     source: Box::new(filter),
                 })
             },
@@ -163,5 +169,42 @@ fn bench_filter(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_scan, bench_filter);
+/// Object-construction projection — `SELECT VALUE { ... }` building a new shape
+/// per row from path access, a comparison, and `ARRAY_CONTAINS`. This is
+/// **v2-only**: v1's `find` API has no object-construction / function
+/// projection, so there is nothing to compare against — the bench measures the
+/// raw evaluator's throughput on the Cosmos object-projection shape. The plan
+/// is built (parse → lower) in untimed setup, so only execution is measured.
+fn bench_project_object(c: &mut Criterion) {
+    let engine = seed(N);
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, COLL).unwrap();
+    let meta = CollectionMeta {
+        indexes: handle.indexes().to_vec(),
+        pk_path: handle.pk_path().to_string(),
+    };
+
+    const SQL: &str = r#"SELECT VALUE {
+        "name": c.name,
+        "senior": c.age >= 50,
+        "onSale": ARRAY_CONTAINS(c.tags, "sale")
+    } FROM c"#;
+
+    let mut group = c.benchmark_group("pipeline_project_object");
+    group.bench_function("v2", |b| {
+        b.iter_batched(
+            || lower(parse(SQL).unwrap(), v2_coll(), &meta),
+            |plan| {
+                slate_executor::Executor::new(&txn)
+                    .execute(plan)
+                    .unwrap()
+                    .count()
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_scan, bench_filter, bench_project_object);
 criterion_main!(benches);

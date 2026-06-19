@@ -19,7 +19,7 @@ use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
 
-use slate_planner::{CollectionRef, Node, Plan, UpsertMode};
+use slate_planner::{CollectionRef, Node, Plan, RowBinding, UpsertMode};
 use slate_query::DistinctOptions;
 use slate_sql::ast::{BinOp, Literal, OrderByItem, ScalarExpr, SortDirection, UnaryOp};
 
@@ -159,20 +159,21 @@ pub fn assert_same_set(v1: Vec<Document>, v2: Vec<Document>) {
 
 /// Translate a find request into a v2 plan, or `None` if untranslatable.
 pub fn v2_plan(filter: &Document, options: &FindOptions) -> Option<Plan> {
-    let mut node = Node::Bind {
-        alias: "c".into(),
-        source: Box::new(Node::Scan {
-            collection: CollectionRef {
-                cf: DEFAULT_CF.into(),
-                collection: COLL.into(),
-            },
-        }),
+    // Single-binding (`Alias`) mode, matching what the planner emits for a
+    // join-free find: the scan rows are bound directly to `c`, no `Bind`.
+    let binding = RowBinding::Alias("c".into());
+    let mut node = Node::Scan {
+        collection: CollectionRef {
+            cf: DEFAULT_CF.into(),
+            collection: COLL.into(),
+        },
     };
 
     let raw = RawDocumentBuf::try_from(filter).ok()?;
     if let Some(predicate) = translate_filter(&raw)? {
         node = Node::Filter {
             predicate,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
@@ -191,6 +192,7 @@ pub fn v2_plan(filter: &Document, options: &FindOptions) -> Option<Plan> {
             .collect();
         node = Node::Sort {
             keys,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
@@ -211,6 +213,7 @@ pub fn v2_plan(filter: &Document, options: &FindOptions) -> Option<Plan> {
     };
     node = Node::Project {
         expr: proj,
+        binding,
         source: Box::new(node),
     };
 
@@ -382,23 +385,24 @@ fn collection_ref() -> CollectionRef {
     }
 }
 
-/// `Scan → Bind(c) → [Filter] → Project(c)` — the matched documents for a write.
+/// `Scan → [Filter] → Project(c)` — the matched documents for a write, in
+/// single-binding mode.
 fn matched_source(filter: &Document) -> Option<Node> {
-    let mut node = Node::Bind {
-        alias: "c".into(),
-        source: Box::new(Node::Scan {
-            collection: collection_ref(),
-        }),
+    let binding = RowBinding::Alias("c".into());
+    let mut node = Node::Scan {
+        collection: collection_ref(),
     };
     let raw = RawDocumentBuf::try_from(filter).ok()?;
     if let Some(pred) = translate_filter(&raw)? {
         node = Node::Filter {
             predicate: pred,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
     Some(Node::Project {
         expr: ScalarExpr::Identifier("c".into()),
+        binding,
         source: Box::new(node),
     })
 }
@@ -542,22 +546,22 @@ pub fn assert_same_distinct(field: &str, filter: Document) {
         _ => panic!("distinct did not return an array"),
     };
 
-    // v2: Scan → Bind → [Filter] → Project(c.field) → Distinct.
-    let mut node = Node::Bind {
-        alias: "c".into(),
-        source: Box::new(Node::Scan {
-            collection: collection_ref(),
-        }),
+    // v2: Scan → [Filter] → Project(c.field) → Distinct (single-binding mode).
+    let binding = RowBinding::Alias("c".into());
+    let mut node = Node::Scan {
+        collection: collection_ref(),
     };
     let raw = RawDocumentBuf::try_from(&filter).unwrap();
     if let Some(Some(pred)) = Some(translate_filter(&raw)).flatten() {
         node = Node::Filter {
             predicate: pred,
+            binding: binding.clone(),
             source: Box::new(node),
         };
     }
     node = Node::Project {
         expr: path(field),
+        binding,
         source: Box::new(node),
     };
     node = Node::Distinct {

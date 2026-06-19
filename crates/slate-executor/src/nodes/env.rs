@@ -2,38 +2,71 @@
 //!
 //! A row flowing into `Filter`/`Project`/`Sort`/`Unwind` is an *environment
 //! document*: a `RawBson::Document` whose top-level fields are the bound aliases
-//! (`{c: <doc>, t: <elem>}`). These helpers decode such a row and evaluate
-//! expressions against its bindings via the shared `slate-sql` evaluator.
+//! (`{c: <doc>, t: <elem>}`). These helpers read such a row **without decoding
+//! it into owned BSON** — the bindings borrow straight out of the raw bytes —
+//! and evaluate expressions against them via the shared `slate-sql` raw
+//! evaluator.
 
-use bson::{Bson, Document, RawBson};
-use slate_sql::ast::ScalarExpr;
-use slate_sql::eval::{Env, eval};
-use slate_sql::{SqlError, Value};
+use bson::RawBson;
+use bson::raw::RawBsonRef;
+use slate_planner::RowBinding;
+use slate_sql::SqlError;
+use slate_sql::raweval::RawEnv;
 
 use crate::ExecError;
 
-/// Decode an environment-document row into an owned `Document` of bindings.
-pub(crate) fn decode(row: &RawBson) -> Result<Document, ExecError> {
-    match Bson::try_from(row.as_raw_bson_ref()) {
-        Ok(Bson::Document(d)) => Ok(d),
-        Ok(other) => Err(SqlError::Eval {
-            message: format!(
-                "expected an environment row, got {:?}",
-                other.element_type()
-            ),
+/// Borrow the top-level `(alias, value)` bindings out of an environment row.
+///
+/// Zero-copy: each value is a `RawBsonRef` into the row's bytes, so this never
+/// materializes the bound documents.
+pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, ExecError> {
+    let doc = match row.as_raw_bson_ref() {
+        RawBsonRef::Document(d) => d,
+        other => {
+            return Err(SqlError::Eval {
+                message: format!(
+                    "expected an environment row, got {:?}",
+                    other.element_type()
+                ),
+            }
+            .into());
         }
-        .into()),
-        Err(e) => Err(SqlError::Eval {
-            message: format!("could not decode row: {e}"),
-        }
-        .into()),
+    };
+
+    let mut binds = Vec::new();
+    for entry in doc.iter() {
+        let (k, v) = entry.map_err(|e| SqlError::Eval {
+            message: format!("could not read row bindings: {e}"),
+        })?;
+        binds.push((k.as_str(), v));
     }
+    Ok(binds)
 }
 
-/// Evaluate `expr` against the bindings of an already-decoded environment.
-pub(crate) fn eval_in(bindings: &Document, expr: &ScalarExpr) -> Result<Value, ExecError> {
-    let params = Document::new();
-    let binds: Vec<(&str, &Bson)> = bindings.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    let env = Env::new(&binds, &params);
-    eval(expr, &env).map_err(Into::into)
+/// Build a raw evaluation environment over already-extracted bindings.
+pub(crate) fn raw_env<'a>(bindings: &'a [(&'a str, RawBsonRef<'a>)]) -> RawEnv<'a> {
+    RawEnv::new(bindings, None)
+}
+
+/// Run `f` with a raw evaluation environment for `row` under `binding`.
+///
+/// In [`RowBinding::Alias`] mode the whole row is bound to one alias with **no
+/// allocation** (a one-element stack array); in [`RowBinding::Env`] mode the
+/// row's top-level fields are the bindings. The closure returns an owned value
+/// (it must not borrow the environment, which is dropped on return).
+pub(crate) fn with_env<R>(
+    row: &RawBson,
+    binding: &RowBinding,
+    f: impl FnOnce(&RawEnv) -> Result<R, ExecError>,
+) -> Result<R, ExecError> {
+    match binding {
+        RowBinding::Alias(alias) => {
+            let binds = [(alias.as_str(), row.as_raw_bson_ref())];
+            f(&RawEnv::new(&binds, None))
+        }
+        RowBinding::Env => {
+            let binds = bindings_of(row)?;
+            f(&RawEnv::new(&binds, None))
+        }
+    }
 }

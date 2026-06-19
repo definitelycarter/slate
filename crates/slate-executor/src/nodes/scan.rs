@@ -29,7 +29,7 @@ mod tests {
     use crate::nodes::test_support::{people_ref, pred, seeded_people, sv};
     use bson::RawBson;
     use slate_engine::Engine;
-    use slate_planner::{Node, Plan};
+    use slate_planner::{Node, Plan, RowBinding};
 
     #[test]
     fn scan_yields_all_documents() {
@@ -50,8 +50,10 @@ mod tests {
         let txn = engine.begin(true).unwrap();
         let plan = Plan::Query(Node::Project {
             expr: sv("c.name"),
+            binding: RowBinding::Env,
             source: Box::new(Node::Filter {
                 predicate: pred("c.age > 40"),
+                binding: RowBinding::Env,
                 source: Box::new(Node::Bind {
                     alias: "c".into(),
                     source: Box::new(Node::Scan {

@@ -71,6 +71,23 @@ pub enum Plan {
     },
 }
 
+/// How a binding-aware node ([`Node::Filter`], [`Node::Project`],
+/// [`Node::Sort`]) reads its input row.
+///
+/// This is the optimization that avoids the row-environment wrapper for the
+/// common single-source query (`FROM c` with no `JOIN`): the source streams
+/// bare documents and the node binds the whole row to one alias, with no
+/// per-row allocation. When a query has joins, [`Node::Bind`]/[`Node::Unwind`]
+/// build a real environment document and the node reads its fields instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowBinding {
+    /// The row is the bare bound value; bind the whole row to this alias.
+    Alias(String),
+    /// The row is an environment document; its top-level fields are the
+    /// bindings (the multi-binding, post-`JOIN` shape).
+    Env,
+}
+
 /// How an [`Plan::Upsert`] writes over an existing document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertMode {
@@ -191,8 +208,13 @@ pub enum Node {
 
     /// `SELECT VALUE <expr>` — evaluate `expr` against the row environment and
     /// emit its value. An undefined result omits the row. For `find`, the
-    /// projection is the identity (`c`) and emits the bound document.
-    Project { expr: ScalarExpr, source: Box<Node> },
+    /// projection is the identity (`c`) and emits the bound document — which,
+    /// in [`RowBinding::Alias`] mode, passes the row through with no copy.
+    Project {
+        expr: ScalarExpr,
+        binding: RowBinding,
+        source: Box<Node>,
+    },
 
     /// `WHERE <predicate>` — keep only rows where `predicate` evaluates to true.
     ///
@@ -202,6 +224,7 @@ pub enum Node {
     /// predicate is false *or* undefined are dropped (the 3-valued rule).
     Filter {
         predicate: ScalarExpr,
+        binding: RowBinding,
         source: Box<Node>,
     },
 
@@ -209,6 +232,7 @@ pub enum Node {
     /// A *blocking* transform: it consumes its source fully before emitting.
     Sort {
         keys: Vec<OrderByItem>,
+        binding: RowBinding,
         source: Box<Node>,
     },
 
