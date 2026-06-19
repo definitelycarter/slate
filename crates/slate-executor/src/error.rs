@@ -3,14 +3,14 @@
 use std::fmt;
 
 use slate_engine::EngineError;
+use slate_eval::EvalError;
 use slate_mutation::MutationError;
-use slate_sql::SqlError;
 use slate_vm::VmError;
 
 /// An error raised while executing a plan.
 #[derive(Debug)]
 pub enum ExecError {
-    Eval(SqlError),
+    Eval(EvalError),
     Engine(EngineError),
     Mutation(MutationError),
     /// A script (validator/trigger) runtime error.
@@ -45,8 +45,8 @@ impl From<VmError> for ExecError {
     }
 }
 
-impl From<SqlError> for ExecError {
-    fn from(e: SqlError) -> Self {
+impl From<EvalError> for ExecError {
+    fn from(e: EvalError) -> Self {
         ExecError::Eval(e)
     }
 }

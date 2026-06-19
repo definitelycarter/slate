@@ -7,7 +7,7 @@
 use bson::RawBson;
 use bson::raw::{CString, RawDocumentBuf};
 use slate_engine::{CollectionHandle, EngineTransaction};
-use slate_sql::SqlError;
+use slate_eval::EvalError;
 
 use crate::{ExecError, ValueIter};
 
@@ -17,7 +17,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     replacement: RawDocumentBuf,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    let pk_key = CString::try_from(handle.pk_path()).map_err(|e| SqlError::Eval {
+    let pk_key = CString::try_from(handle.pk_path()).map_err(|e| EvalError {
         message: format!("invalid pk path: {e}"),
     })?;
 
@@ -30,10 +30,10 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         let pk = handle.pk_path();
         let id = old
             .get(pk)
-            .map_err(|e| SqlError::Eval {
+            .map_err(|e| EvalError {
                 message: format!("malformed document: {e}"),
             })?
-            .ok_or_else(|| SqlError::Eval {
+            .ok_or_else(|| EvalError {
                 message: "replace requires a document with a primary key".into(),
             })?;
 
@@ -41,7 +41,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         let mut buf = RawDocumentBuf::new();
         buf.append(&pk_key, id);
         for entry in replacement.iter() {
-            let (key, value) = entry.map_err(|e| SqlError::Eval {
+            let (key, value) = entry.map_err(|e| EvalError {
                 message: format!("malformed replacement: {e}"),
             })?;
             if key != pk {

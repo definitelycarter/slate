@@ -6,7 +6,7 @@
 //! deliberately small for now — see the crate docs for the planned set.
 
 use bson::{Bson, RawBson, RawDocumentBuf};
-use slate_sql::ast::{OrderByItem, ScalarExpr};
+use slate_ast::{OrderByItem, ScalarExpr};
 use slate_vm::ResolvedHook;
 
 /// A top-level plan: a read query, or a write whose `source` is a read-node

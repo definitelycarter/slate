@@ -1,4 +1,4 @@
-//! Lowering: a parsed [`slate_sql::ast::Query`] into an executable [`Plan`].
+//! Lowering: a parsed [`slate_ast::Query`] into an executable [`Plan`].
 //!
 //! The query's `FROM` clause supplies only the alias — the container is chosen
 //! by the caller (matching Cosmos) and passed in as `container`, along with its
@@ -25,7 +25,7 @@
 //! falls through to the residual.
 
 use bson::{Bson, RawBson};
-use slate_sql::ast::{BinOp, FromSource, Literal, Query, ScalarExpr, SelectClause};
+use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr, SelectClause};
 
 use crate::plan::{
     CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,

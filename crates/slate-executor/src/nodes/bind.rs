@@ -6,7 +6,7 @@
 
 use bson::RawBson;
 use bson::raw::{CString, RawDocumentBuf};
-use slate_sql::SqlError;
+use slate_eval::EvalError;
 
 use crate::ValueIter;
 
@@ -16,7 +16,7 @@ pub(crate) fn execute<'a>(alias: String, source: ValueIter<'a>) -> ValueIter<'a>
         let Some(value) = item? else {
             return Ok(None);
         };
-        let key = CString::try_from(alias.as_str()).map_err(|e| SqlError::Eval {
+        let key = CString::try_from(alias.as_str()).map_err(|e| EvalError {
             message: format!("invalid binding alias '{alias}': {e}"),
         })?;
         let mut doc = RawDocumentBuf::new();

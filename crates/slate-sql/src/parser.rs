@@ -6,9 +6,9 @@
 //!
 //! Comparison is non-associative (a single `a <op> b`), matching SQL.
 
-use crate::ast::*;
 use crate::error::{Result, SqlError};
 use crate::token::Token;
+use slate_ast::*;
 
 pub struct Parser {
     tokens: Vec<Token>,

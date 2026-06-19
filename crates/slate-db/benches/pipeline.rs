@@ -13,10 +13,10 @@ use slate_store::MemoryStore;
 // v1 internals
 use slate_db::bench::{Executor as V1Executor, Expression, Node as V1Node, Plan as V1Plan};
 // v2
+use slate_ast::{BinOp, Literal, ScalarExpr};
 use slate_planner::{
     CollectionMeta, CollectionRef, Node as V2Node, Plan as V2Plan, RowBinding, lower,
 };
-use slate_sql::ast::{BinOp, Literal, ScalarExpr};
 use slate_sql::parse;
 
 const COLL: &str = "bench";

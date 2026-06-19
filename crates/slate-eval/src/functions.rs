@@ -2,7 +2,7 @@
 //!
 //! Conventions, matching Cosmos:
 //! - Function names are case-insensitive.
-//! - Wrong **arity** is a hard [`SqlError::Eval`].
+//! - Wrong **arity** is a hard [`EvalError`].
 //! - Wrong argument **types** (or undefined args) generally yield
 //!   [`Value::Undefined`] rather than an error. The type-test functions
 //!   (`IS_DEFINED`, `IS_NULL`) are the deliberate exceptions.
@@ -12,7 +12,7 @@
 
 use bson::Bson;
 
-use crate::error::{Result, SqlError};
+use crate::error::{EvalError, Result};
 use crate::value::Value;
 
 /// Call a scalar function by name with already-evaluated arguments.
@@ -106,7 +106,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
                 _ => Value::Undefined,
             })
         }
-        other => Err(SqlError::Eval {
+        other => Err(EvalError {
             message: format!("unknown function: {other}"),
         }),
     }
@@ -122,8 +122,8 @@ fn arity(name: &str, args: &[Value], n: usize) -> Result<()> {
     }
 }
 
-fn arity_err(name: &str, expected: &str) -> SqlError {
-    SqlError::Eval {
+fn arity_err(name: &str, expected: &str) -> EvalError {
+    EvalError {
         message: format!("{name} expects {expected} argument(s)"),
     }
 }

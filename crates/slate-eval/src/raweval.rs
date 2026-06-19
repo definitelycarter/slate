@@ -19,12 +19,12 @@ use std::cmp::Ordering;
 use bson::raw::{RawBsonRef, RawDocument};
 use bson::{Bson, Document, RawBson};
 
-use crate::ast::{BinOp, Literal, ScalarExpr, UnaryOp};
-use crate::error::{Result, SqlError};
+use crate::error::{EvalError, Result};
 use crate::eval::{
     Num, Scalar, and3, arith, as_number, cmp_pred, compare_scalar, or3, scalar_of_bson,
 };
 use crate::value::Value;
+use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
 
 /// The result of evaluating a [`ScalarExpr`] over raw bytes.
 ///
@@ -79,7 +79,7 @@ impl<'a> RawValue<'a> {
         Ok(match self {
             RawValue::Undefined => None,
             RawValue::Ref(r) => Some(RawBson::from(r)),
-            RawValue::Owned(b) => Some(RawBson::try_from(b).map_err(|e| SqlError::Eval {
+            RawValue::Owned(b) => Some(RawBson::try_from(b).map_err(|e| EvalError {
                 message: format!("could not encode projected value: {e}"),
             })?),
         })
@@ -210,7 +210,7 @@ fn index_access<'a>(base: RawValue<'a>, index: RawValue<'a>) -> Result<RawValue<
 }
 
 fn get_field<'a>(d: &'a RawDocument, field: &str) -> Result<Option<RawBsonRef<'a>>> {
-    d.get(field).map_err(|e| SqlError::Eval {
+    d.get(field).map_err(|e| EvalError {
         message: format!("could not read field '{field}': {e}"),
     })
 }
@@ -372,8 +372,8 @@ fn bool_value<'a>(b: bool) -> RawValue<'a> {
     RawValue::Ref(RawBsonRef::Boolean(b))
 }
 
-fn decode_err(e: bson::error::Error) -> SqlError {
-    SqlError::Eval {
+fn decode_err(e: bson::error::Error) -> EvalError {
+    EvalError {
         message: format!("could not decode raw value: {e}"),
     }
 }
@@ -381,12 +381,12 @@ fn decode_err(e: bson::error::Error) -> SqlError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::SelectClause;
     use crate::eval::{Env, eval as owned_eval};
     use bson::{RawDocumentBuf, bson};
+    use slate_ast::SelectClause;
 
     fn parse_expr(src: &str) -> ScalarExpr {
-        let q = crate::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
+        let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
         let SelectClause::Value(e) = q.select;
         e
     }

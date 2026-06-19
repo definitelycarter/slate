@@ -4,14 +4,14 @@
 //! document*: a `RawBson::Document` whose top-level fields are the bound aliases
 //! (`{c: <doc>, t: <elem>}`). These helpers read such a row **without decoding
 //! it into owned BSON** — the bindings borrow straight out of the raw bytes —
-//! and evaluate expressions against them via the shared `slate-sql` raw
+//! and evaluate expressions against them via the shared `slate-eval` raw
 //! evaluator.
 
 use bson::RawBson;
 use bson::raw::RawBsonRef;
+use slate_eval::EvalError;
+use slate_eval::raweval::RawEnv;
 use slate_planner::RowBinding;
-use slate_sql::SqlError;
-use slate_sql::raweval::RawEnv;
 
 use crate::ExecError;
 
@@ -23,7 +23,7 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
     let doc = match row.as_raw_bson_ref() {
         RawBsonRef::Document(d) => d,
         other => {
-            return Err(SqlError::Eval {
+            return Err(EvalError {
                 message: format!(
                     "expected an environment row, got {:?}",
                     other.element_type()
@@ -35,7 +35,7 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
 
     let mut binds = Vec::new();
     for entry in doc.iter() {
-        let (k, v) = entry.map_err(|e| SqlError::Eval {
+        let (k, v) = entry.map_err(|e| EvalError {
             message: format!("could not read row bindings: {e}"),
         })?;
         binds.push((k.as_str(), v));

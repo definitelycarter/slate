@@ -1355,6 +1355,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slate-ast"
+version = "0.1.0"
+
+[[package]]
 name = "slate-db"
 version = "0.1.0"
 dependencies = [
@@ -1364,6 +1368,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "serde",
+ "slate-ast",
  "slate-engine",
  "slate-executor",
  "slate-mutation",
@@ -1386,11 +1391,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-eval"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "regex",
+ "slate-ast",
+ "slate-sql",
+]
+
+[[package]]
 name = "slate-executor"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "slate-ast",
  "slate-engine",
+ "slate-eval",
  "slate-mutation",
  "slate-planner",
  "slate-sql",
@@ -1411,6 +1428,7 @@ name = "slate-planner"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "slate-ast",
  "slate-mutation",
  "slate-sql",
  "slate-vm",
@@ -1430,7 +1448,8 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "criterion",
- "regex",
+ "slate-ast",
+ "slate-eval",
 ]
 
 [[package]]

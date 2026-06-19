@@ -1,14 +1,14 @@
 //! The `Project` node — `SELECT VALUE <expr>`.
 //!
 //! Evaluates the projection expression against the row environment using the
-//! shared `slate-sql` evaluator, and emits the result. An undefined result
+//! shared `slate-eval` raw evaluator, and emits the result. An undefined result
 //! drops the row at the output boundary. For `find`, the expression is the
 //! identity (`c`) and the bound document passes through.
 
 use bson::RawBson;
+use slate_ast::ScalarExpr;
+use slate_eval::raweval;
 use slate_planner::RowBinding;
-use slate_sql::ast::ScalarExpr;
-use slate_sql::raweval;
 
 use super::env;
 use crate::{ExecError, ValueIter};

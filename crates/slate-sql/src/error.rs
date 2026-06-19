@@ -12,9 +12,15 @@ pub enum SqlError {
     Parse { message: String },
     /// Evaluation error — unknown function, wrong arity, etc.
     ///
-    /// Note: *type* mismatches generally produce [`crate::value::Value::Undefined`]
+    /// Note: *type* mismatches generally produce [`slate_eval::Value::Undefined`]
     /// (matching Cosmos semantics) rather than an error.
     Eval { message: String },
+}
+
+impl From<slate_eval::EvalError> for SqlError {
+    fn from(e: slate_eval::EvalError) -> Self {
+        SqlError::Eval { message: e.message }
+    }
 }
 
 impl fmt::Display for SqlError {

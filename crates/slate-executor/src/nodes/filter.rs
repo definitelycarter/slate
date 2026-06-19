@@ -1,14 +1,14 @@
 //! The `Filter` node — `WHERE <predicate>` (and residual/recheck/HAVING/ON).
 //!
 //! Evaluates a boolean predicate against the row environment using the shared
-//! `slate-sql` evaluator, and passes the row through unchanged when it holds.
-//! Rows where the predicate is false *or* undefined are dropped (the 3-valued
-//! rule).
+//! `slate-eval` raw evaluator, and passes the row through unchanged when it
+//! holds. Rows where the predicate is false *or* undefined are dropped (the
+//! 3-valued rule).
 
 use bson::RawBson;
+use slate_ast::ScalarExpr;
+use slate_eval::raweval;
 use slate_planner::RowBinding;
-use slate_sql::ast::ScalarExpr;
-use slate_sql::raweval;
 
 use super::env;
 use crate::{ExecError, ValueIter};

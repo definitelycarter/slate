@@ -11,10 +11,10 @@ use std::cmp::Ordering;
 
 use bson::{Bson, Document};
 
-use crate::ast::{FromSource, OrderByItem, Query, SelectClause, SortDirection};
 use crate::error::Result;
-use crate::eval::{self, Env};
-use crate::value::Value;
+use slate_ast::{FromSource, OrderByItem, Query, SelectClause, SortDirection};
+use slate_eval::Value;
+use slate_eval::eval::{self, Env};
 
 /// One binding in a row: either a borrow into the source slice (the base
 /// document) or an owned value (a join-unwound array element).

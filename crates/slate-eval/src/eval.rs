@@ -9,9 +9,9 @@ use std::cmp::Ordering;
 
 use bson::{Bson, Document};
 
-use crate::ast::{BinOp, Literal, ScalarExpr, UnaryOp};
 use crate::error::Result;
 use crate::value::Value;
+use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
 
 /// The bindings visible to an expression: alias → bound document/value, plus
 /// query parameters (`@name`).
@@ -395,8 +395,8 @@ mod tests {
 
     fn parse_expr(src: &str) -> ScalarExpr {
         // Reuse the full query parser to get a scalar expression.
-        let q = crate::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
-        let crate::ast::SelectClause::Value(e) = q.select;
+        let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
+        let slate_ast::SelectClause::Value(e) = q.select;
         e
     }
 

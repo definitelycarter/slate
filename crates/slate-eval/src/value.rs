@@ -2,7 +2,7 @@
 
 use bson::Bson;
 
-/// The result of evaluating a [`crate::ast::ScalarExpr`].
+/// The result of evaluating a [`slate_ast::ScalarExpr`].
 ///
 /// CosmosDB SQL distinguishes **undefined** (a missing path, an out-of-range
 /// index, a type-incompatible operation) from an explicit `null`. Undefined

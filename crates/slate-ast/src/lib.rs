@@ -1,4 +1,10 @@
-//! Abstract syntax tree for the v1 query surface.
+//! `slate-ast` — the shared query AST.
+//!
+//! The single intermediate representation that every query surface targets:
+//! `slate-sql` parses SQL text into it, `slate-query` translates a Mongo-style
+//! find into it, `slate-planner` lowers it to a physical plan, and `slate-eval`
+//! gives it meaning. Keeping it a dependency-free leaf is what lets all of those
+//! share one expression language without anyone depending on a sibling surface.
 //!
 //! The shapes here intentionally leave room to grow (see the `Future:` notes)
 //! without reshaping existing variants:
@@ -9,7 +15,8 @@
 /// A literal scalar value as written in the source.
 ///
 /// Kept distinct from `bson::Bson` so the AST stays `PartialEq` and free of
-/// BSON-only variants; [`crate::eval`] lowers these to `Bson` at eval time.
+/// BSON-only variants; the evaluator (`slate-eval`) lowers these to `Bson` at
+/// eval time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Null,

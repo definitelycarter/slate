@@ -1,6 +1,13 @@
-//! `slate-sql` — a CosmosDB-style SQL frontend for Slate.
+//! `slate-sql` — a CosmosDB-style SQL **front-end** for Slate.
 //!
-//! ## v1 surface
+//! One of two query surfaces (the other being the Mongo-style `slate-query`).
+//! Its job is narrow: lex and parse SQL text into the shared [`slate_ast`]
+//! query AST. The AST's *meaning* lives in [`slate_eval`]; lowering it to a
+//! physical plan lives in `slate-planner`. The in-memory [`exec`] engine here
+//! is a convenience for iterating on language semantics over a `&[bson::Bson]`
+//! source without touching storage.
+//!
+//! ## SQL surface
 //!
 //! ```text
 //! SELECT VALUE <expr>
@@ -21,15 +28,13 @@
 //!
 //! - [`token`] — the token enum produced by the lexer.
 //! - [`lexer`] — source text → `Vec<Token>`.
-//! - [`ast`] — the query / scalar-expression syntax tree.
-//! - [`parser`] — tokens → [`ast::Query`] (recursive-descent + precedence).
-//! - [`value`] — the [`value::Value`] domain (`Defined(Bson)` vs `Undefined`).
-//! - [`eval`] — scalar-expression evaluation over owned `bson::Bson`.
-//! - [`raweval`] — the storage-path twin of [`eval`]: zero-copy evaluation
-//!   over raw BSON bytes, sharing every leaf rule with [`eval`].
-//! - [`functions`] — built-in scalar function dispatch.
+//! - [`parser`] — tokens → [`slate_ast::Query`] (recursive-descent + precedence).
 //! - [`exec`] — the in-memory `SELECT VALUE` execution engine.
 //! - [`agg`] — aggregate-function surface (planned; not yet wired into `exec`).
+//!
+//! The AST ([`slate_ast`]), the value domain and evaluators ([`slate_eval`]),
+//! and the scalar functions ([`slate_eval::functions`]) live in their own
+//! crates so the Mongo surface and the executor share them.
 //!
 //! ## Not yet supported (tracked for later milestones)
 //!
@@ -38,23 +43,17 @@
 //! - Cross-collection `JOIN` (a deliberate *extension* beyond Cosmos, which
 //!   only supports intra-document array unwind).
 //! - User-defined functions — the runtime exists in `slate-vm`; wiring is future.
-//! - Lowering an [`ast::Query`] onto a `slate-db` plan for the scan-backed path.
 
 pub mod agg;
-pub mod ast;
 pub mod error;
-pub mod eval;
 pub mod exec;
-pub mod functions;
 pub mod lexer;
 pub mod parser;
-pub mod raweval;
 pub mod token;
-pub mod value;
 
-pub use ast::Query;
 pub use error::{Result, SqlError};
-pub use value::Value;
+pub use slate_ast::Query;
+pub use slate_eval::Value;
 
 /// Parse SQL source into a [`Query`] AST.
 pub fn parse(sql: &str) -> Result<Query> {

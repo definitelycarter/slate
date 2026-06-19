@@ -1,20 +1,20 @@
 //! The `Sort` node — `ORDER BY <expr> [ASC|DESC], ...`.
 //!
 //! A *blocking* transform: it buffers the whole source, evaluates each row's
-//! sort keys against the row environment with the shared `slate-sql` evaluator,
+//! sort keys against the row environment with the shared evaluator,
 //! sorts, then emits. Because it consumes the source eagerly (which can fail),
-//! its `execute` is fallible. The value ordering is `slate_sql::eval::order_values`
+//! its `execute` is fallible. The value ordering is `slate_eval::eval::order_values`
 //! — the one definition shared with the in-memory engine, so `ORDER BY` can't
 //! drift.
 
 use std::cmp::Ordering;
 
 use bson::RawBson;
+use slate_ast::{OrderByItem, SortDirection};
+use slate_eval::Value;
+use slate_eval::eval::order_values;
+use slate_eval::raweval;
 use slate_planner::RowBinding;
-use slate_sql::Value;
-use slate_sql::ast::{OrderByItem, SortDirection};
-use slate_sql::eval::order_values;
-use slate_sql::raweval;
 
 use super::env;
 use crate::{ExecError, ValueIter};
@@ -80,8 +80,8 @@ mod tests {
     use crate::nodes::project;
     use crate::nodes::test_support::{bind_c, sv};
     use bson::{RawBson, rawdoc};
+    use slate_ast::OrderByItem;
     use slate_planner::RowBinding;
-    use slate_sql::ast::OrderByItem;
 
     /// Parse `ORDER BY <src>` out of a query.
     fn order_by(src: &str) -> Vec<OrderByItem> {

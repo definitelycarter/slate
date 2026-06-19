@@ -20,10 +20,10 @@
 //! ## Expression evaluation
 //!
 //! Like toydb, the planner embeds expressions and the executor *calls*
-//! evaluation — the evaluator lives with the expression type in `slate-sql`, so
-//! there is exactly one of it across find and SQL. (`Project`/`Filter` decode
-//! each row to `Bson` at the boundary today; a future raw evaluator removes
-//! those hops without changing the stream type.)
+//! evaluation — the evaluator lives with the expression type (in `slate-eval`,
+//! over the `slate-ast` types), so there is exactly one of it across find and
+//! SQL. `Project`/`Filter` use the **raw** evaluator, walking row bytes
+//! zero-copy rather than decoding each row to `Bson`.
 
 mod error;
 mod nodes;

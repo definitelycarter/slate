@@ -23,6 +23,7 @@ arc-swap = "1.8.2"
 
 
 [dev-dependencies]
+slate-ast = { path = "../slate-ast" }
 slate-executor = { path = "../slate-executor" }
 slate-planner = { path = "../slate-planner" }
 slate-sql = { path = "../slate-sql" }

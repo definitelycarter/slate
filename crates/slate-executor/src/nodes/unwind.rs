@@ -6,9 +6,9 @@
 
 use bson::raw::{BindRawBsonRef, CString, RawBsonRef, RawDocumentBuf};
 use bson::{Bson, RawBson};
-use slate_sql::SqlError;
-use slate_sql::ast::ScalarExpr;
-use slate_sql::raweval::{self, RawValue};
+use slate_ast::ScalarExpr;
+use slate_eval::EvalError;
+use slate_eval::raweval::{self, RawValue};
 
 use super::env;
 use crate::{ExecError, ValueIter};
@@ -44,7 +44,7 @@ fn expand(row: &RawBson, alias: &str, array: &ScalarExpr) -> Result<Vec<RawBson>
     match raweval::eval(array, &renv)? {
         RawValue::Ref(RawBsonRef::Array(a)) => {
             for elem in a {
-                let elem = elem.map_err(|e| SqlError::Eval {
+                let elem = elem.map_err(|e| EvalError {
                     message: format!("could not read array element: {e}"),
                 })?;
                 out.push(extend_env(&bindings, alias, elem)?);
@@ -53,7 +53,7 @@ fn expand(row: &RawBson, alias: &str, array: &ScalarExpr) -> Result<Vec<RawBson>
         // Computed array (e.g. from an object/function): elements are owned.
         RawValue::Owned(Bson::Array(items)) => {
             for item in items {
-                let raw = RawBson::try_from(item).map_err(|e| SqlError::Eval {
+                let raw = RawBson::try_from(item).map_err(|e| EvalError {
                     message: format!("could not encode unwound element: {e}"),
                 })?;
                 out.push(extend_env(&bindings, alias, raw)?);
@@ -82,7 +82,7 @@ fn extend_env(
 
 fn cstring(s: &str) -> Result<CString, ExecError> {
     CString::try_from(s).map_err(|e| {
-        SqlError::Eval {
+        EvalError {
             message: format!("invalid binding alias '{s}': {e}"),
         }
         .into()

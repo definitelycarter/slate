@@ -9,9 +9,9 @@
 use bson::raw::{CString, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
+use slate_eval::EvalError;
 use slate_mutation::raw_merge;
 use slate_planner::UpsertMode;
-use slate_sql::SqlError;
 use slate_vm::{ResolvedHook, pool::VmPool};
 
 use super::trigger::fire_hooks;
@@ -26,7 +26,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let cf = handle.cf_name().to_string();
-    let pk_key = CString::try_from(handle.pk_path()).map_err(|e| SqlError::Eval {
+    let pk_key = CString::try_from(handle.pk_path()).map_err(|e| EvalError {
         message: format!("invalid pk path: {e}"),
     })?;
 
@@ -34,7 +34,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
         let mut new_doc = match result? {
             Some(RawBson::Document(d)) => d,
             _ => {
-                return Err(ExecError::Eval(SqlError::Eval {
+                return Err(ExecError::Eval(EvalError {
                     message: "upsert requires a document".into(),
                 }));
             }
@@ -48,7 +48,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
         }
 
         let raw_id = new_doc.get(pk).map_err(decode_err)?.ok_or_else(|| {
-            ExecError::Eval(SqlError::Eval {
+            ExecError::Eval(EvalError {
                 message: "primary key missing after ensure".into(),
             })
         })?;
@@ -103,7 +103,7 @@ fn build_doc(
 }
 
 fn decode_err(e: bson::error::Error) -> ExecError {
-    ExecError::Eval(SqlError::Eval {
+    ExecError::Eval(EvalError {
         message: format!("malformed document: {e}"),
     })
 }

@@ -4,7 +4,7 @@
 //! change the execution model: unlike scalar functions, which map a single row
 //! to a single value, aggregates fold the *entire* row stream into one (or, with
 //! `GROUP BY`, one-per-group) result. Wiring them requires an accumulation phase
-//! in the executor and a grouping key in [`crate::ast::Query`].
+//! in the executor and a grouping key in [`slate_ast::Query`].
 //!
 //! This module fixes the name/identity surface now so that phase can be added
 //! without reshaping the AST or the scalar-function path. The variants are not
@@ -24,7 +24,7 @@ impl AggregateFn {
     /// Resolve a (case-insensitive) function name to an aggregate, if it is one.
     ///
     /// Used later by the parser/planner to decide whether a `Function` node is
-    /// scalar (dispatched via [`crate::functions`]) or aggregate (handled by a
+    /// scalar (dispatched via [`slate_eval::functions`]) or aggregate (handled by a
     /// future grouping phase).
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_uppercase().as_str() {

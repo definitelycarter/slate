@@ -3,7 +3,7 @@
 //! This is the *logical* half of a clean-slate rebuild that runs alongside
 //! (and does not touch) the v1 planner/executor in `slate-db`. It owns the
 //! [`Plan`]/[`Node`] IR and — as it grows — the lowering from the query API
-//! (`slate_sql::ast::Query`, a find-style request) into a `Plan`. Physical
+//! (`slate_ast::Query`, a find-style request) into a `Plan`. Physical
 //! execution lives in the separate `slate-executor` crate; this crate makes
 //! *decisions* (sargability, index choice, join order), not row streaming.
 //!

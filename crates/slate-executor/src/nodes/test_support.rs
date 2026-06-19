@@ -2,9 +2,9 @@
 //! parsing shortcuts.
 
 use bson::rawdoc;
+use slate_ast::ScalarExpr;
 use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
 use slate_planner::CollectionRef;
-use slate_sql::ast::ScalarExpr;
 use slate_store::MemoryStore;
 
 /// A `KvEngine` with a `people` collection (indexed on `age`) holding three
@@ -43,7 +43,7 @@ pub(crate) fn people_ref() -> CollectionRef {
 /// Parse `SELECT VALUE <src> FROM c` and return the projection expression.
 pub(crate) fn sv(src: &str) -> ScalarExpr {
     let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
-    let slate_sql::ast::SelectClause::Value(e) = q.select;
+    let slate_ast::SelectClause::Value(e) = q.select;
     e
 }
 

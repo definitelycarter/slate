@@ -19,9 +19,9 @@ use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
 
+use slate_ast::{BinOp, Literal, OrderByItem, ScalarExpr, SortDirection, UnaryOp};
 use slate_planner::{CollectionRef, Node, Plan, RowBinding, UpsertMode};
 use slate_query::DistinctOptions;
-use slate_sql::ast::{BinOp, Literal, OrderByItem, ScalarExpr, SortDirection, UnaryOp};
 
 pub const COLL: &str = "people";
 
