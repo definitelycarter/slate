@@ -123,6 +123,9 @@ impl<'a> RawEnv<'a> {
 pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     match expr {
         ScalarExpr::Literal(lit) => Ok(literal_value(lit)),
+        // A materialized value: cheap to clone (literals are scalars). The
+        // borrowed-bytes fast paths apply to bound rows, not query constants.
+        ScalarExpr::Value(b) => Ok(RawValue::Owned(b.clone())),
         ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
         ScalarExpr::Parameter(name) => env.param(name),
 

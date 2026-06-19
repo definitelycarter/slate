@@ -49,6 +49,7 @@ impl<'a> Env<'a> {
 pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
     match expr {
         ScalarExpr::Literal(lit) => Ok(Value::Defined(literal_to_bson(lit))),
+        ScalarExpr::Value(b) => Ok(Value::Defined(b.clone())),
         ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
         ScalarExpr::Parameter(name) => Ok(env.param(name)),
 

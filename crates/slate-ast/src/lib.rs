@@ -29,7 +29,15 @@ pub enum Literal {
 /// A value-producing expression (the core of `SELECT VALUE`, `WHERE`, etc.).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarExpr {
+    /// A literal written in source text (SQL) — kept BSON-free so it stays
+    /// purely syntactic.
     Literal(Literal),
+    /// An already-materialized BSON value. Unlike [`Literal`], this preserves
+    /// the exact BSON type (e.g. `Int32` vs `Int64`) and can hold non-textual
+    /// values (`DateTime`, `ObjectId`). The Mongo front-end emits these so a
+    /// filter literal round-trips with the same type it had in the request —
+    /// which matters for index bounds, whose key encoding is type-tagged.
+    Value(bson::Bson),
     /// A bare name — resolves against the FROM/JOIN bindings (e.g. `c`, `t`).
     Identifier(String),
     /// `@name` query parameter.

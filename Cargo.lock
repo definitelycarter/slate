@@ -1357,6 +1357,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slate-ast"
 version = "0.1.0"
+dependencies = [
+ "bson",
+]
 
 [[package]]
 name = "slate-db"
@@ -1440,6 +1443,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "serde",
+ "slate-ast",
 ]
 
 [[package]]

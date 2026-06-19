@@ -3,23 +3,24 @@
 //! Seeds two identical engines — a v1 [`Database`] and a raw `KvEngine` for v2 —
 //! runs the same find request through each pipeline, and compares the results.
 //! The common input is the find request `(filter_doc, FindOptions)` (matching
-//! v1's public API and the existing benches); the v2 side translates that
-//! request into a [`slate_planner::Plan`].
+//! v1's public API); the v2 side runs it through the **real** production path —
+//! `slate_query::find_to_query` (the Mongo front-end) then `slate_planner::lower`
+//! — so these tests validate exactly what `slate-db` will route `find` through,
+//! index paths included.
 //!
-//! Untranslatable requests (e.g. `$regex`, which v2's evaluator can't yet
-//! express) translate to `None`, letting a test skip — those gaps are exactly
-//! what differential testing surfaces.
+//! Untranslatable requests (a filter the front-end can't yet express, e.g. a
+//! document-valued comparison operand) translate to `None`, letting a test
+//! skip — those gaps are exactly what differential testing surfaces.
 
 #![allow(dead_code)]
 
-use bson::raw::RawBsonRef;
-use bson::{Document, RawDocument, RawDocumentBuf, doc};
+use bson::{Document, RawDocumentBuf, doc};
 use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
 use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
 
-use slate_ast::{BinOp, Literal, OrderByItem, ScalarExpr, SortDirection, UnaryOp};
+use slate_ast::ScalarExpr;
 use slate_planner::{CollectionRef, Node, Plan, RowBinding, UpsertMode};
 use slate_query::DistinctOptions;
 
@@ -158,194 +159,28 @@ pub fn assert_same_set(v1: Vec<Document>, v2: Vec<Document>) {
 // ── Request → v2 Plan translation ───────────────────────────────
 
 /// Translate a find request into a v2 plan, or `None` if untranslatable.
+///
+/// This is the **real production path**: the Mongo front-end (`slate-query`)
+/// translates the request into the shared AST, and `slate-planner` lowers it —
+/// the same code `slate-db` will route `find` through. `None` means the filter
+/// hits a known gap (e.g. a non-scalar literal), so the test skips.
 pub fn v2_plan(filter: &Document, options: &FindOptions) -> Option<Plan> {
-    // Single-binding (`Alias`) mode, matching what the planner emits for a
-    // join-free find: the scan rows are bound directly to `c`, no `Bind`.
-    let binding = RowBinding::Alias("c".into());
-    let mut node = Node::Scan {
-        collection: CollectionRef {
-            cf: DEFAULT_CF.into(),
-            collection: COLL.into(),
-        },
-    };
-
     let raw = RawDocumentBuf::try_from(filter).ok()?;
-    if let Some(predicate) = translate_filter(&raw)? {
-        node = Node::Filter {
-            predicate,
-            binding: binding.clone(),
-            source: Box::new(node),
-        };
-    }
-
-    if !options.sort.is_empty() {
-        let keys = options
-            .sort
-            .iter()
-            .map(|s| OrderByItem {
-                expr: path(&s.field),
-                direction: match s.direction {
-                    slate_query::SortDirection::Asc => SortDirection::Asc,
-                    slate_query::SortDirection::Desc => SortDirection::Desc,
-                },
-            })
-            .collect();
-        node = Node::Sort {
-            keys,
-            binding: binding.clone(),
-            source: Box::new(node),
-        };
-    }
-
-    // Projection: v1 always includes the pk plus the selected columns.
-    let proj = match &options.columns {
-        None => ScalarExpr::Identifier("c".into()),
-        Some(cols) => {
-            let mut fields = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for col in std::iter::once("_id").chain(cols.iter().map(|s| s.as_str())) {
-                if seen.insert(col.to_string()) {
-                    fields.push((col.to_string(), path(col)));
-                }
-            }
-            ScalarExpr::Object(fields)
-        }
-    };
-    node = Node::Project {
-        expr: proj,
-        binding,
-        source: Box::new(node),
-    };
-
-    if options.skip.is_some() || options.take.is_some() {
-        node = Node::Limit {
-            skip: options.skip.unwrap_or(0),
-            take: options.take,
-            source: Box::new(node),
-        };
-    }
-
-    Some(Plan::Query(node))
+    let query = slate_query::find_to_query(&raw, options).ok()?;
+    Some(slate_planner::lower(query, collection_ref(), &meta()))
 }
 
-/// `Some(None)` = match-all (no predicate). `None` = untranslatable.
-fn translate_filter(doc: &RawDocument) -> Option<Option<ScalarExpr>> {
-    let mut conjuncts = Vec::new();
-    for entry in doc.iter() {
-        let (key, value) = entry.ok()?;
-        match key.as_str() {
-            "$and" => conjuncts.push(translate_logical(value, BinOp::And)?),
-            "$or" => conjuncts.push(translate_logical(value, BinOp::Or)?),
-            k if k.starts_with('$') => return None,
-            field => conjuncts.push(translate_field(field, value)?),
-        }
+/// Index/pk metadata matching the seeded collection, so `lower` can choose
+/// index paths. (Differential results must match regardless of the path taken.)
+fn meta() -> slate_planner::CollectionMeta {
+    slate_planner::CollectionMeta {
+        indexes: indexes().iter().map(|s| s.to_string()).collect(),
+        pk_path: "_id".into(),
     }
-    Some(fold(conjuncts, BinOp::And))
 }
 
-fn translate_logical(value: RawBsonRef, op: BinOp) -> Option<ScalarExpr> {
-    let RawBsonRef::Array(arr) = value else {
-        return None;
-    };
-    let mut parts = Vec::new();
-    for elem in arr.into_iter() {
-        let RawBsonRef::Document(sub) = elem.ok()? else {
-            return None;
-        };
-        parts.push(translate_filter(sub)??);
-    }
-    fold(parts, op)
-}
-
-fn translate_field(field: &str, value: RawBsonRef) -> Option<ScalarExpr> {
-    // Operator sub-document if the first key starts with `$`.
-    if let RawBsonRef::Document(sub) = value
-        && let Some(Ok((first, _))) = sub.iter().next()
-        && first.as_str().starts_with('$')
-    {
-        return translate_operators(field, sub);
-    }
-    eq_or_contains(field, value)
-}
-
-/// Mongo `{field: value}` equality: matches a scalar field *or* an array field
-/// containing the value. Mirrors v1's implicit array-aware equality.
-fn eq_or_contains(field: &str, value: RawBsonRef) -> Option<ScalarExpr> {
-    let lit = literal(value)?;
-    let eq = binary(BinOp::Eq, path(field), lit.clone());
-    let contains = ScalarExpr::Function {
-        name: "ARRAY_CONTAINS".into(),
-        args: vec![path(field), lit],
-    };
-    Some(binary(BinOp::Or, eq, contains))
-}
-
-fn translate_operators(field: &str, doc: &RawDocument) -> Option<ScalarExpr> {
-    // Special-case $regex (with optional $options) → REGEXMATCH.
-    let mut pattern: Option<String> = None;
-    let mut options: Option<String> = None;
-    let mut has_other = false;
-    for entry in doc.iter() {
-        let (op, value) = entry.ok()?;
-        match op.as_str() {
-            "$regex" => match value {
-                RawBsonRef::String(s) => pattern = Some(s.to_string()),
-                _ => return None,
-            },
-            "$options" => match value {
-                RawBsonRef::String(s) => options = Some(s.to_string()),
-                _ => return None,
-            },
-            _ => has_other = true,
-        }
-    }
-    if let Some(pat) = pattern {
-        if has_other {
-            return None; // $regex mixed with other operators: skip
-        }
-        let full = match options {
-            Some(opts) => format!("(?{opts}){pat}"),
-            None => pat,
-        };
-        return Some(ScalarExpr::Function {
-            name: "REGEXMATCH".into(),
-            args: vec![path(field), ScalarExpr::Literal(Literal::Str(full))],
-        });
-    }
-
-    let mut conds = Vec::new();
-    for entry in doc.iter() {
-        let (op, value) = entry.ok()?;
-        let cond = match op.as_str() {
-            "$eq" => eq_or_contains(field, value)?,
-            "$gt" => binary(BinOp::Gt, path(field), literal(value)?),
-            "$gte" => binary(BinOp::Gte, path(field), literal(value)?),
-            "$lt" => binary(BinOp::Lt, path(field), literal(value)?),
-            "$lte" => binary(BinOp::Lte, path(field), literal(value)?),
-            "$exists" => {
-                let RawBsonRef::Boolean(b) = value else {
-                    return None;
-                };
-                let is_def = ScalarExpr::Function {
-                    name: "IS_DEFINED".into(),
-                    args: vec![path(field)],
-                };
-                if b {
-                    is_def
-                } else {
-                    ScalarExpr::Unary {
-                        op: UnaryOp::Not,
-                        expr: Box::new(is_def),
-                    }
-                }
-            }
-            _ => return None, // $regex and friends: not expressible in v2 yet
-        };
-        conds.push(cond);
-    }
-    fold(conds, BinOp::And)
-}
-
+/// Member path `c.a.b` for a dotted field — used by the distinct builder, which
+/// constructs a `Project` over the field directly.
 fn path(field: &str) -> ScalarExpr {
     let mut expr = ScalarExpr::Identifier("c".into());
     for part in field.split('.') {
@@ -357,27 +192,6 @@ fn path(field: &str) -> ScalarExpr {
     expr
 }
 
-fn literal(value: RawBsonRef) -> Option<ScalarExpr> {
-    let lit = match value {
-        RawBsonRef::String(s) => Literal::Str(s.to_string()),
-        RawBsonRef::Int32(i) => Literal::Int(i as i64),
-        RawBsonRef::Int64(i) => Literal::Int(i),
-        RawBsonRef::Double(f) => Literal::Float(f),
-        RawBsonRef::Boolean(b) => Literal::Bool(b),
-        RawBsonRef::Null => Literal::Null,
-        _ => return None,
-    };
-    Some(ScalarExpr::Literal(lit))
-}
-
-fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
-    ScalarExpr::Binary {
-        op,
-        lhs: Box::new(lhs),
-        rhs: Box::new(rhs),
-    }
-}
-
 fn collection_ref() -> CollectionRef {
     CollectionRef {
         cf: DEFAULT_CF.into(),
@@ -385,26 +199,17 @@ fn collection_ref() -> CollectionRef {
     }
 }
 
-/// `Scan → [Filter] → Project(c)` — the matched documents for a write, in
-/// single-binding mode.
+/// The read-source node for a write: translate the filter through the real
+/// front-end and lower it, then unwrap the resulting `Plan::Query` node (the
+/// `Scan → [Filter] → Project(c)` tree) to wrap in a write plan — exactly the
+/// shape `slate-db`'s write APIs will build.
 fn matched_source(filter: &Document) -> Option<Node> {
-    let binding = RowBinding::Alias("c".into());
-    let mut node = Node::Scan {
-        collection: collection_ref(),
-    };
     let raw = RawDocumentBuf::try_from(filter).ok()?;
-    if let Some(pred) = translate_filter(&raw)? {
-        node = Node::Filter {
-            predicate: pred,
-            binding: binding.clone(),
-            source: Box::new(node),
-        };
+    let query = slate_query::find_to_query(&raw, &FindOptions::default()).ok()?;
+    match slate_planner::lower(query, collection_ref(), &meta()) {
+        Plan::Query(node) => Some(node),
+        _ => None,
     }
-    Some(Node::Project {
-        expr: ScalarExpr::Identifier("c".into()),
-        binding,
-        source: Box::new(node),
-    })
 }
 
 // ── Write-state comparison ──────────────────────────────────────
@@ -552,7 +357,7 @@ pub fn assert_same_distinct(field: &str, filter: Document) {
         collection: collection_ref(),
     };
     let raw = RawDocumentBuf::try_from(&filter).unwrap();
-    if let Some(Some(pred)) = Some(translate_filter(&raw)).flatten() {
+    if let Ok(Some(pred)) = slate_query::translate_filter(&raw) {
         node = Node::Filter {
             predicate: pred,
             binding: binding.clone(),
@@ -581,16 +386,4 @@ pub fn assert_same_distinct(field: &str, filter: Document) {
     v1.sort_by_key(key);
     v2.sort_by_key(key);
     assert_eq!(v1, v2, "distinct values differ");
-}
-
-fn fold(mut parts: Vec<ScalarExpr>, op: BinOp) -> Option<ScalarExpr> {
-    match parts.len() {
-        0 => None,
-        1 => Some(parts.pop().unwrap()),
-        _ => {
-            let mut iter = parts.into_iter();
-            let first = iter.next().unwrap();
-            Some(iter.fold(first, |acc, e| binary(op, acc, e)))
-        }
-    }
 }

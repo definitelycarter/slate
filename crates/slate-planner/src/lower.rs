@@ -395,6 +395,9 @@ fn path_of(expr: &ScalarExpr, alias: &str) -> Option<String> {
 fn as_literal(expr: &ScalarExpr) -> Option<Bson> {
     match expr {
         ScalarExpr::Literal(lit) => Some(literal_to_bson(lit)),
+        // A materialized value preserves its exact BSON type — important here,
+        // since an index bound must match the stored key's numeric type.
+        ScalarExpr::Value(b) => Some(b.clone()),
         _ => None,
     }
 }
