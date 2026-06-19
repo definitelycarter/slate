@@ -12,15 +12,21 @@ use slate_vm::pool::VmPool;
 
 type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 
+/// A prepared plan from either query engine.
+enum Prepared<Cf: Clone> {
+    V1(Plan<Cf>),
+    V2(slate_planner::Plan),
+}
+
 /// A prepared query that can be iterated or executed.
 ///
-/// Owns a pre-built `Plan` and a reference to the transaction.
-/// Call [`.iter()`](Cursor::iter) for deserialized iteration,
+/// Owns a pre-built plan (from either engine) and a reference to the
+/// transaction. Call [`.iter()`](Cursor::iter) for deserialized iteration,
 /// [`.iter_raw()`](Cursor::iter_raw) for raw BSON documents, or
 /// [`.drain()`](Cursor::drain) to consume all rows and return a count.
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
-    plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
+    plan: Prepared<<KvTxn<'db, S> as EngineTransaction>::Cf>,
     pool: Option<&'txn VmPool>,
 }
 
@@ -30,27 +36,58 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
         pool: Option<&'txn VmPool>,
     ) -> Self {
-        Self { txn, plan, pool }
+        Self {
+            txn,
+            plan: Prepared::V1(plan),
+            pool,
+        }
+    }
+
+    pub(crate) fn new_v2(
+        txn: &'txn KvTxn<'db, S>,
+        plan: slate_planner::Plan,
+        pool: Option<&'txn VmPool>,
+    ) -> Self {
+        Self {
+            txn,
+            plan: Prepared::V2(plan),
+            pool,
+        }
+    }
+
+    /// Execute the plan on the appropriate engine, normalizing both to a
+    /// `RawIter` of `Result<Option<RawBson>, DbError>`.
+    fn execute(self) -> Result<RawIter<'txn>, DbError> {
+        match self.plan {
+            Prepared::V1(plan) => Executor::new(self.txn, self.pool).execute(plan),
+            Prepared::V2(plan) => {
+                let iter =
+                    slate_executor::Executor::with_pool(self.txn, self.pool).execute(plan)?;
+                Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
+            }
+        }
     }
 
     /// Consume the cursor and return a streaming iterator that deserializes each document into `T`.
     pub fn iter<T: DeserializeOwned>(self) -> Result<CursorIter<'txn, T>, DbError> {
-        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
         Ok(CursorIter {
-            inner: RawCursorIter { inner: iter },
+            inner: RawCursorIter {
+                inner: self.execute()?,
+            },
             _marker: PhantomData,
         })
     }
 
     /// Consume the cursor and return a streaming iterator over raw BSON documents.
     pub fn iter_raw(self) -> Result<RawCursorIter<'txn>, DbError> {
-        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
-        Ok(RawCursorIter { inner: iter })
+        Ok(RawCursorIter {
+            inner: self.execute()?,
+        })
     }
 
     /// Consume the cursor, drain all rows, and return the count of affected rows.
     pub fn drain(self) -> Result<u64, DbError> {
-        let iter = Executor::new(self.txn, self.pool).execute(self.plan)?;
+        let iter = self.execute()?;
         let mut count = 0u64;
         for result in iter {
             result?;

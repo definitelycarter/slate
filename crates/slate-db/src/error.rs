@@ -113,3 +113,16 @@ impl From<slate_engine::EngineError> for DbError {
         }
     }
 }
+
+impl From<slate_executor::ExecError> for DbError {
+    fn from(e: slate_executor::ExecError) -> Self {
+        use slate_executor::ExecError as E;
+        match e {
+            E::Eval(ev) => DbError::InvalidQuery(ev.to_string()),
+            E::Engine(en) => en.into(),
+            E::Mutation(m) => m.into(),
+            E::Vm(v) => DbError::Vm(v),
+            E::Validation(msg) => DbError::InvalidDocument(msg),
+        }
+    }
+}

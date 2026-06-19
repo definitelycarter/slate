@@ -20,9 +20,23 @@ use crate::statement::Statement;
 
 // ── DatabaseBuilder ────────────────────────────────────────
 
+/// Which query engine backs reads.
+///
+/// `V1` is the original planner/executor in this crate. `V2` routes `find`
+/// through the new stack — the Mongo front-end (`slate-query`) → shared AST →
+/// `slate-planner` → `slate-executor` — running alongside v1 while it is brought
+/// to full parity. Default is [`QueryEngine::V1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryEngine {
+    #[default]
+    V1,
+    V2,
+}
+
 pub struct DatabaseBuilder {
     pool: Option<VmPool>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    engine: QueryEngine,
     #[cfg(feature = "runtime")]
     sweep_interval: Option<std::time::Duration>,
 }
@@ -32,9 +46,16 @@ impl DatabaseBuilder {
         Self {
             pool: None,
             clock: None,
+            engine: QueryEngine::V1,
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
+    }
+
+    /// Select the query engine backing reads (default [`QueryEngine::V1`]).
+    pub fn query_engine(mut self, engine: QueryEngine) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// Attach a script execution pool.
@@ -89,6 +110,7 @@ impl DatabaseBuilder {
 
         Ok(Database {
             engine,
+            query_engine: self.engine,
             pool: self.pool,
             registry,
             #[cfg(feature = "runtime")]
@@ -101,6 +123,7 @@ impl DatabaseBuilder {
 
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
+    query_engine: QueryEngine,
     pool: Option<VmPool>,
     registry: Option<HookRegistry>,
     #[cfg(feature = "runtime")]
@@ -124,6 +147,7 @@ impl<S: Store> Database<S> {
         let snapshot = self.registry.as_ref().map(|r| r.snapshot());
         Ok(Transaction {
             txn,
+            query_engine: self.query_engine,
             pool: self.pool.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
@@ -165,6 +189,7 @@ impl<S: Store> Database<S> {
 
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
+    query_engine: QueryEngine,
     pool: Option<&'db VmPool>,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
@@ -220,6 +245,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         options: FindOptions,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+
+        if self.query_engine == QueryEngine::V2 {
+            return self.find_v2(cf, collection, &filter_raw, options);
+        }
+
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Find {
             cf,
@@ -231,6 +261,55 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             projection: options.columns,
         };
         self.prepare_cursor(stmt)
+    }
+
+    /// The v2 read path: Mongo find → shared AST → lower → a v2 plan run by
+    /// `slate-executor`. Falls back to v1 if the filter isn't yet translatable.
+    fn find_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        filter_raw: &RawDocumentBuf,
+        options: FindOptions,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let query = match slate_query::find_to_query(filter_raw, &options) {
+            Ok(q) => q,
+            // A filter v2 can't express yet (e.g. `$in`): fall back to v1 so the
+            // engine toggle never loses functionality.
+            Err(_) => {
+                let predicate = Self::parse_optional_filter(Some(filter_raw))?;
+                let stmt = Statement::Find {
+                    cf,
+                    collection,
+                    predicate,
+                    sort: options.sort,
+                    skip: options.skip,
+                    take: options.take,
+                    projection: options.columns,
+                };
+                return self.prepare_cursor(stmt);
+            }
+        };
+        let meta = self.collection_meta(cf, collection)?;
+        let container = slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        };
+        let plan = slate_planner::lower(query, container, &meta);
+        Ok(Cursor::new_v2(&self.txn, plan, self.pool))
+    }
+
+    /// Read the index/pk metadata `slate-planner` needs to choose a scan source.
+    fn collection_meta(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Result<slate_planner::CollectionMeta, DbError> {
+        let handle = self.txn.collection(cf, collection)?;
+        Ok(slate_planner::CollectionMeta {
+            indexes: handle.indexes().to_vec(),
+            pk_path: handle.pk_path().to_string(),
+        })
     }
 
     /// Find the first document matching a filter.
