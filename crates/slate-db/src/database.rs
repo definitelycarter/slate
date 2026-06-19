@@ -13,10 +13,23 @@ use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::executor;
 use crate::expression::Expression;
-use crate::hooks::{HookRegistry, HookSnapshot};
+use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
 use crate::parser;
 use crate::planner::planner::Planner;
 use crate::statement::Statement;
+
+/// Build the member-access expression `c.a.b.c` for a dotted field path, bound
+/// to the synthetic alias `c` (used by v2 distinct's field projection).
+fn member_path(field: &str) -> slate_ast::ScalarExpr {
+    let mut expr = slate_ast::ScalarExpr::Identifier("c".into());
+    for part in field.split('.') {
+        expr = slate_ast::ScalarExpr::Member {
+            base: Box::new(expr),
+            field: part.into(),
+        };
+    }
+    expr
+}
 
 // ── DatabaseBuilder ────────────────────────────────────────
 
@@ -223,6 +236,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
 
+        if self.query_engine == QueryEngine::V2 {
+            let values = raw_docs.into_iter().map(RawBson::Document).collect();
+            return Ok(self.insert_v2(cf, collection, values));
+        }
+
         let stmt = Statement::Insert {
             cf,
             collection,
@@ -312,6 +330,277 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         })
     }
 
+    // ── v2 write planning ───────────────────────────────────────
+    //
+    // These mirror v1's `Planner` write methods (`wrap_before`/`wrap_after`,
+    // `plan_read_source`) but build the handle-free `slate-planner` IR and route
+    // the matched-document source through the Mongo front-end + `lower`, so the
+    // filter is translated exactly as `find` translates it. Each returns `None`
+    // when the filter isn't translatable yet, so the caller falls back to v1.
+
+    fn v2_container(&self, cf: &str, collection: &str) -> slate_planner::CollectionRef {
+        slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        }
+    }
+
+    fn v2_validators(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.validators_for(cf, collection).to_vec())
+            .unwrap_or_default()
+    }
+
+    fn v2_triggers(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+        self.snapshot
+            .as_ref()
+            .map(|s| s.triggers_for(cf, collection).to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Wrap a write source with the collection's validators then before-triggers
+    /// (the order v1 uses): `Trigger(before) → Validate → source`.
+    fn v2_wrap_before(
+        &self,
+        cf: &str,
+        collection: &str,
+        action: &str,
+        source: slate_planner::Node,
+    ) -> slate_planner::Node {
+        let mut node = source;
+        let validators = self.v2_validators(cf, collection);
+        if !validators.is_empty() {
+            node = slate_planner::Node::Validate {
+                validators,
+                source: Box::new(node),
+            };
+        }
+        self.v2_wrap_before_triggers(cf, collection, action, node)
+    }
+
+    /// Wrap a write source with the collection's before-triggers only (no
+    /// validators) — used by delete, which performs no write.
+    fn v2_wrap_before_triggers(
+        &self,
+        cf: &str,
+        collection: &str,
+        action: &str,
+        source: slate_planner::Node,
+    ) -> slate_planner::Node {
+        let triggers = self.v2_triggers(cf, collection);
+        if triggers.is_empty() {
+            source
+        } else {
+            slate_planner::Node::Trigger {
+                cf: cf.into(),
+                action: action.into(),
+                hooks: triggers,
+                source: Box::new(source),
+            }
+        }
+    }
+
+    /// Wrap a finished write plan with the collection's after-triggers.
+    fn v2_wrap_after(
+        &self,
+        cf: &str,
+        collection: &str,
+        action: &str,
+        plan: slate_planner::Plan,
+    ) -> slate_planner::Plan {
+        let triggers = self.v2_triggers(cf, collection);
+        if triggers.is_empty() {
+            plan
+        } else {
+            slate_planner::Plan::Trigger {
+                cf: cf.into(),
+                action: action.into(),
+                hooks: triggers,
+                plan: Box::new(plan),
+            }
+        }
+    }
+
+    /// The read-source node selecting the documents a write targets: the matched
+    /// documents (identity projection) from the filter, optionally limited.
+    /// `None` if the filter can't be translated to v2 yet.
+    fn v2_write_source(
+        &self,
+        cf: &str,
+        collection: &str,
+        filter_raw: &RawDocumentBuf,
+        take: Option<usize>,
+    ) -> Result<Option<slate_planner::Node>, DbError> {
+        let options = FindOptions {
+            take,
+            ..Default::default()
+        };
+        let query = match slate_query::find_to_query(filter_raw, &options) {
+            Ok(q) => q,
+            Err(_) => return Ok(None),
+        };
+        let meta = self.collection_meta(cf, collection)?;
+        match slate_planner::lower(query, self.v2_container(cf, collection), &meta) {
+            slate_planner::Plan::Query(node) => Ok(Some(node)),
+            _ => Ok(None),
+        }
+    }
+
+    fn insert_v2(&self, cf: &str, collection: &str, docs: Vec<RawBson>) -> Cursor<'db, '_, S> {
+        let source = self.v2_wrap_before(
+            cf,
+            collection,
+            "inserting",
+            slate_planner::Node::Values(docs),
+        );
+        let plan = slate_planner::Plan::Insert {
+            collection: self.v2_container(cf, collection),
+            source,
+        };
+        let plan = self.v2_wrap_after(cf, collection, "inserted", plan);
+        Cursor::new_v2(&self.txn, plan, self.pool)
+    }
+
+    /// Build the v2 update plan from an already-resolved read `source` (so a
+    /// non-translatable filter can fall back to v1 without losing `mutation`).
+    fn build_update_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        source: slate_planner::Node,
+        mutation: slate_mutation::Mutation,
+    ) -> Cursor<'db, '_, S> {
+        let source = self.v2_wrap_before(cf, collection, "updating", source);
+        let plan = slate_planner::Plan::Update {
+            collection: self.v2_container(cf, collection),
+            mutation,
+            source,
+        };
+        let plan = self.v2_wrap_after(cf, collection, "updated", plan);
+        Cursor::new_v2(&self.txn, plan, self.pool)
+    }
+
+    fn build_replace_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        source: slate_planner::Node,
+        replacement: RawDocumentBuf,
+    ) -> Cursor<'db, '_, S> {
+        let source = self.v2_wrap_before(cf, collection, "updating", source);
+        let plan = slate_planner::Plan::Replace {
+            collection: self.v2_container(cf, collection),
+            replacement,
+            source,
+        };
+        let plan = self.v2_wrap_after(cf, collection, "updated", plan);
+        Cursor::new_v2(&self.txn, plan, self.pool)
+    }
+
+    fn build_delete_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        source: slate_planner::Node,
+    ) -> Cursor<'db, '_, S> {
+        let source = self.v2_wrap_before_triggers(cf, collection, "deleting", source);
+        let plan = slate_planner::Plan::Delete {
+            collection: self.v2_container(cf, collection),
+            source,
+        };
+        let plan = self.v2_wrap_after(cf, collection, "deleted", plan);
+        Cursor::new_v2(&self.txn, plan, self.pool)
+    }
+
+    fn upsert_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        docs: Vec<RawBson>,
+        mode: slate_planner::UpsertMode,
+    ) -> Cursor<'db, '_, S> {
+        let plan = slate_planner::Plan::Upsert {
+            collection: self.v2_container(cf, collection),
+            mode,
+            hooks: self.v2_triggers(cf, collection),
+            source: slate_planner::Node::Values(docs),
+        };
+        Cursor::new_v2(&self.txn, plan, self.pool)
+    }
+
+    /// v2 distinct: `Scan → [Filter] → Project(c.field) → Distinct → [Sort] →
+    /// [Limit]`, run directly and collected into a single array (matching v1's
+    /// return shape). `None` if the filter isn't translatable yet.
+    fn distinct_v2(
+        &self,
+        cf: &str,
+        collection: &str,
+        field: &str,
+        filter_raw: &RawDocumentBuf,
+        options: &DistinctOptions,
+    ) -> Result<Option<bson::RawBson>, DbError> {
+        let binding = slate_planner::RowBinding::Alias("c".into());
+        let mut node = slate_planner::Node::Scan {
+            collection: self.v2_container(cf, collection),
+        };
+        match slate_query::translate_filter(filter_raw) {
+            Ok(Some(predicate)) => {
+                node = slate_planner::Node::Filter {
+                    predicate,
+                    binding: binding.clone(),
+                    source: Box::new(node),
+                };
+            }
+            Ok(None) => {} // match-all
+            Err(_) => return Ok(None),
+        }
+        node = slate_planner::Node::Project {
+            expr: member_path(field),
+            binding: binding.clone(),
+            source: Box::new(node),
+        };
+        node = slate_planner::Node::Distinct {
+            source: Box::new(node),
+        };
+        if let Some(dir) = options.sort {
+            let direction = match dir {
+                slate_query::SortDirection::Asc => slate_ast::SortDirection::Asc,
+                slate_query::SortDirection::Desc => slate_ast::SortDirection::Desc,
+            };
+            // The distinct values are the bare rows, bound to `c`, so ordering
+            // by `c` sorts the values themselves.
+            node = slate_planner::Node::Sort {
+                keys: vec![slate_ast::OrderByItem {
+                    expr: slate_ast::ScalarExpr::Identifier("c".into()),
+                    direction,
+                }],
+                binding,
+                source: Box::new(node),
+            };
+        }
+        if options.skip.is_some() || options.take.is_some() {
+            node = slate_planner::Node::Limit {
+                skip: options.skip.unwrap_or(0),
+                take: options.take,
+                source: Box::new(node),
+            };
+        }
+
+        // Distinct yields bare scalar values, not documents, so run the plan
+        // directly and gather them rather than going through `Cursor` (which
+        // expects documents).
+        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool)
+            .execute(slate_planner::Plan::Query(node))?;
+        let mut arr = bson::RawArrayBuf::new();
+        for item in iter {
+            if let Some(value) = item.map_err(DbError::from)? {
+                arr.push(value);
+            }
+        }
+        Ok(Some(bson::RawBson::Array(arr)))
+    }
+
     /// Find the first document matching a filter.
     pub fn find_one<F: Serialize>(
         &self,
@@ -341,6 +630,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
         let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+        {
+            return Ok(self.build_update_v2(cf, collection, source, mutation));
+        }
+
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,
@@ -364,6 +660,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
         let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, None)?
+        {
+            return Ok(self.build_update_v2(cf, collection, source, mutation));
+        }
+
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,
@@ -385,6 +688,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let raw = bson::serialize_to_raw_document_buf(&replacement)?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+        {
+            return Ok(self.build_replace_v2(cf, collection, source, raw));
+        }
+
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Replace {
             cf,
@@ -405,6 +715,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+        {
+            return Ok(self.build_delete_v2(cf, collection, source));
+        }
+
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
             cf,
@@ -423,6 +740,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, None)?
+        {
+            return Ok(self.build_delete_v2(cf, collection, source));
+        }
+
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Delete {
             cf,
@@ -447,6 +771,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
 
+        if self.query_engine == QueryEngine::V2 {
+            let values = raw_docs.into_iter().map(RawBson::Document).collect();
+            return Ok(self.upsert_v2(cf, collection, values, slate_planner::UpsertMode::Replace));
+        }
+
         let stmt = Statement::Upsert {
             cf,
             collection,
@@ -466,6 +795,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .into_iter()
             .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
             .collect::<Result<Vec<_>, DbError>>()?;
+
+        if self.query_engine == QueryEngine::V2 {
+            let values = raw_docs.into_iter().map(RawBson::Document).collect();
+            return Ok(self.upsert_v2(cf, collection, values, slate_planner::UpsertMode::Merge));
+        }
 
         let stmt = Statement::Merge {
             cf,
@@ -498,6 +832,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         options: DistinctOptions,
     ) -> Result<bson::RawBson, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+
+        if self.query_engine == QueryEngine::V2
+            && let Some(array) = self.distinct_v2(cf, collection, field, &filter_raw, &options)?
+        {
+            return Ok(array);
+        }
+
         let predicate = Self::parse_optional_filter(Some(&filter_raw))?;
         let stmt = Statement::Distinct {
             cf,

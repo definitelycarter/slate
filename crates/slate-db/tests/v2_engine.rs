@@ -3,9 +3,11 @@
 //! which `diff_*` covers). This is the production read path: find → slate-query
 //! → slate-planner → slate-executor.
 
-use bson::{Document, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, QueryEngine};
-use slate_query::{FindOptions, Sort, SortDirection};
+use bson::{Bson, Document, doc};
+use slate_db::{
+    CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, DatabaseTransaction, QueryEngine,
+};
+use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
 const COLL: &str = "people";
@@ -155,6 +157,174 @@ fn projection_columns() {
         ..Default::default()
     };
     assert_same(doc! { "status": "active" }, opts);
+}
+
+// ── Write parity: apply the same write on each engine, compare end state ──
+
+/// Apply `write` in a transaction on a fresh DB for `engine`, commit, then read
+/// the whole collection back as `_id`-sorted, field-order-insensitive docs.
+fn state_after(
+    engine: QueryEngine,
+    write: impl FnOnce(&DatabaseTransaction<MemoryStore>),
+) -> Vec<std::collections::BTreeMap<String, Bson>> {
+    let db = db(engine);
+    {
+        let txn = db.begin(false).unwrap();
+        write(&txn);
+        txn.commit().unwrap();
+    }
+    let mut out: Vec<std::collections::BTreeMap<String, Bson>> =
+        run(&db, doc! {}, FindOptions::default())
+            .iter()
+            .map(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .collect();
+    out.sort_by_key(|m| {
+        m.get("_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    });
+    out
+}
+
+/// The write must produce identical collection state on V1 and V2.
+fn assert_write_same(write: impl Fn(&DatabaseTransaction<MemoryStore>)) {
+    let v1 = state_after(QueryEngine::V1, &write);
+    let v2 = state_after(QueryEngine::V2, &write);
+    assert_eq!(v1, v2, "v1 (left) and v2 (right) collection state differs");
+}
+
+#[test]
+fn delete_many_matches() {
+    assert_write_same(|txn| {
+        txn.delete_many(DEFAULT_CF, COLL, doc! { "age": { "$gt": 40 } })
+            .unwrap()
+            .drain()
+            .unwrap();
+    });
+}
+
+#[test]
+fn delete_one_matches() {
+    assert_write_same(|txn| {
+        txn.delete_one(DEFAULT_CF, COLL, doc! { "_id": "2" })
+            .unwrap()
+            .drain()
+            .unwrap();
+    });
+}
+
+#[test]
+fn update_many_matches() {
+    assert_write_same(|txn| {
+        txn.update_many(
+            DEFAULT_CF,
+            COLL,
+            doc! { "status": "active" },
+            doc! { "$set": { "status": "archived" }, "$inc": { "age": 1 } },
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    });
+}
+
+#[test]
+fn replace_one_matches() {
+    assert_write_same(|txn| {
+        txn.replace_one(
+            DEFAULT_CF,
+            COLL,
+            doc! { "_id": "3" },
+            doc! { "name": "grace h.", "age": 45 },
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    });
+}
+
+#[test]
+fn insert_many_matches() {
+    assert_write_same(|txn| {
+        txn.insert_many(
+            DEFAULT_CF,
+            COLL,
+            vec![doc! { "_id": "9", "name": "ken", "age": 70, "status": "active" }],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    });
+}
+
+#[test]
+fn upsert_many_matches() {
+    assert_write_same(|txn| {
+        txn.upsert_many(
+            DEFAULT_CF,
+            COLL,
+            vec![
+                doc! { "_id": "2", "name": "ALAN", "age": 99 }, // replaces existing
+                doc! { "_id": "8", "name": "newbie", "age": 20 }, // inserts
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    });
+}
+
+#[test]
+fn merge_many_matches() {
+    assert_write_same(|txn| {
+        txn.merge_many(
+            DEFAULT_CF,
+            COLL,
+            vec![
+                doc! { "_id": "1", "city": "london" }, // patches existing
+                doc! { "_id": "7", "name": "fresh" },  // inserts
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+    });
+}
+
+// ── Distinct parity ──────────────────────────────────────────────
+
+fn distinct_values(engine: QueryEngine, field: &str, filter: Document) -> Vec<Bson> {
+    let db = db(engine);
+    let txn = db.begin(true).unwrap();
+    let raw = txn
+        .distinct(DEFAULT_CF, COLL, field, filter, DistinctOptions::default())
+        .unwrap();
+    let mut vals: Vec<Bson> = match raw {
+        bson::RawBson::Array(a) => a
+            .into_iter()
+            .map(|r| Bson::try_from(r.unwrap()).unwrap())
+            .collect(),
+        other => panic!("distinct returned non-array: {other:?}"),
+    };
+    vals.sort_by_key(|b| format!("{b:?}"));
+    vals
+}
+
+#[test]
+fn distinct_matches() {
+    assert_eq!(
+        distinct_values(QueryEngine::V1, "status", doc! {}),
+        distinct_values(QueryEngine::V2, "status", doc! {}),
+    );
+}
+
+#[test]
+fn distinct_with_filter_matches() {
+    assert_eq!(
+        distinct_values(QueryEngine::V1, "name", doc! { "age": { "$gt": 40 } }),
+        distinct_values(QueryEngine::V2, "name", doc! { "age": { "$gt": 40 } }),
+    );
 }
 
 #[test]
