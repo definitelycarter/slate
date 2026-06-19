@@ -1365,7 +1365,11 @@ dependencies = [
  "regex",
  "serde",
  "slate-engine",
+ "slate-executor",
+ "slate-mutation",
+ "slate-planner",
  "slate-query",
+ "slate-sql",
  "slate-store",
  "slate-vm",
  "tempfile",
@@ -1382,11 +1386,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-executor"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "slate-engine",
+ "slate-mutation",
+ "slate-planner",
+ "slate-sql",
+ "slate-store",
+ "slate-vm",
+]
+
+[[package]]
+name = "slate-mutation"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "slate-engine",
+]
+
+[[package]]
+name = "slate-planner"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "slate-mutation",
+ "slate-sql",
+ "slate-vm",
+]
+
+[[package]]
 name = "slate-query"
 version = "0.1.0"
 dependencies = [
  "bson",
  "serde",
+]
+
+[[package]]
+name = "slate-sql"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "criterion",
+ "regex",
 ]
 
 [[package]]

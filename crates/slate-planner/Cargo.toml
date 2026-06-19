@@ -1,0 +1,10 @@
+[package]
+name = "slate-planner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bson = { workspace = true }
+slate-sql = { path = "../slate-sql" }
+slate-mutation = { path = "../slate-mutation" }
+slate-vm = { path = "../slate-vm" }

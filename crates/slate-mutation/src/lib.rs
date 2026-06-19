@@ -1,10 +1,46 @@
+//! `slate-mutation` — field-level document mutation engine.
+//!
+//! A [`Mutation`] is a list of `(field, operator)` pairs (`$set`, `$inc`,
+//! `$push`, …); [`Mutation::apply`] applies it to a raw BSON document, with a
+//! byte-level fast path and a `bson::Document` fallback. Storage-agnostic
+//! (depends only on `bson` and `slate-engine`'s BSON byte utilities), so both
+//! the v1 (`slate-db`) and v2 (`slate-executor`) engines share one engine.
+
 mod ops;
-pub(crate) mod raw;
+mod raw;
+
+pub use raw::raw_merge;
+
+use std::fmt;
 
 use bson::Bson;
 use bson::raw::{RawBsonRef, RawDocument};
 
-use crate::error::DbError;
+/// An error applying a mutation to a document.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MutationError {
+    /// The mutation is invalid for the document (e.g. `$inc` on a string).
+    Invalid(String),
+    /// A document could not be (de)serialized while applying the mutation.
+    Serialization(String),
+}
+
+impl fmt::Display for MutationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MutationError::Invalid(m) => write!(f, "invalid mutation: {m}"),
+            MutationError::Serialization(m) => write!(f, "serialization error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for MutationError {}
+
+impl From<bson::error::Error> for MutationError {
+    fn from(e: bson::error::Error) -> Self {
+        MutationError::Serialization(e.to_string())
+    }
+}
 
 /// A single field-level mutation operator.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,9 +83,9 @@ impl Mutation {
     /// for dot-paths, `$rename`, `$lpush`, and Document/Array `$set` values.
     ///
     /// Returns `Ok(None)` if the document is unchanged.
-    pub(crate) fn apply(&self, raw: &RawDocument) -> Result<Option<bson::RawDocumentBuf>, DbError> {
-        use crate::mutation::ops;
-        use crate::mutation::raw::{RawMutationResult, raw_apply_mutation};
+    pub fn apply(&self, raw: &RawDocument) -> Result<Option<bson::RawDocumentBuf>, MutationError> {
+        use crate::ops;
+        use crate::raw::{RawMutationResult, raw_apply_mutation};
 
         // Fast path: raw byte-level mutation engine
         match raw_apply_mutation(raw, self)? {

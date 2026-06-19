@@ -62,9 +62,18 @@ impl From<bson::error::Error> for DbError {
     }
 }
 
-impl From<crate::mutation::ParseError> for DbError {
-    fn from(e: crate::mutation::ParseError) -> Self {
+impl From<slate_mutation::ParseError> for DbError {
+    fn from(e: slate_mutation::ParseError) -> Self {
         DbError::InvalidQuery(e.to_string())
+    }
+}
+
+impl From<slate_mutation::MutationError> for DbError {
+    fn from(e: slate_mutation::MutationError) -> Self {
+        match e {
+            slate_mutation::MutationError::Invalid(m) => DbError::InvalidQuery(m),
+            slate_mutation::MutationError::Serialization(m) => DbError::Serialization(m),
+        }
     }
 }
 

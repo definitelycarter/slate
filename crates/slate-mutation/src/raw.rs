@@ -7,13 +7,13 @@
 //! Document/Array `$set` values).
 
 use super::{Mutation, MutationOp};
+use crate::MutationError;
 use bson::raw::RawDocument;
 use bson::spec::ElementType;
 use bson::{Bson, RawDocumentBuf};
 
-use crate::error::DbError;
-use crate::executor::raw_bson::{RawField, RawFieldLoc};
 use slate_engine::skip_bson_value;
+use slate_engine::{RawField, RawFieldLoc};
 
 // ── Result type ─────────────────────────────────────────────────
 
@@ -120,7 +120,7 @@ fn raw_unset(bytes: &mut Vec<u8>, field: &str) -> bool {
 }
 
 /// `$inc` on a flat field. Returns `Ok(true)` if changed, `Err` on type error.
-fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbError> {
+fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, MutationError> {
     match locate(bytes, field) {
         Some(loc) => {
             match (loc.element_type(), amount) {
@@ -248,7 +248,7 @@ fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbEr
                         .copy_from_slice(&sum.to_le_bytes());
                     Ok(true)
                 }
-                _ => Err(DbError::InvalidQuery(format!(
+                _ => Err(MutationError::Invalid(format!(
                     "$inc: field '{field}' is not numeric"
                 ))),
             }
@@ -260,7 +260,7 @@ fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbEr
                 Bson::Int64(n) => (ElementType::Int64, n.to_le_bytes().to_vec()),
                 Bson::Double(f) => (ElementType::Double, f.to_le_bytes().to_vec()),
                 _ => {
-                    return Err(DbError::InvalidQuery("$inc: amount is not numeric".into()));
+                    return Err(MutationError::Invalid("$inc: amount is not numeric".into()));
                 }
             };
             let new_elem = encode_element(field, element_type, &val_bytes);
@@ -273,7 +273,7 @@ fn raw_inc(bytes: &mut Vec<u8>, field: &str, amount: &Bson) -> Result<bool, DbEr
 }
 
 /// `$push` on a flat field — append value to array.
-fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<bool>, DbError> {
+fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<bool>, MutationError> {
     let (val_type, val_bytes) = match encode_bson_value(value) {
         Some(v) => v,
         None => return Ok(None), // unsupported value type → fallback
@@ -282,7 +282,7 @@ fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<boo
     match locate(bytes, field) {
         Some(loc) => {
             if loc.element_type() != ElementType::Array {
-                return Err(DbError::InvalidQuery(format!(
+                return Err(MutationError::Invalid(format!(
                     "$push: field '{field}' is not an array"
                 )));
             }
@@ -349,14 +349,14 @@ fn raw_push(bytes: &mut Vec<u8>, field: &str, value: &Bson) -> Result<Option<boo
 }
 
 /// `$pop` on a flat field — remove last element from array.
-fn raw_pop(bytes: &mut Vec<u8>, field: &str) -> Result<bool, DbError> {
+fn raw_pop(bytes: &mut Vec<u8>, field: &str) -> Result<bool, MutationError> {
     let loc = match locate(bytes, field) {
         Some(l) => l,
         None => return Ok(false),
     };
 
     if loc.element_type() != ElementType::Array {
-        return Err(DbError::InvalidQuery(format!(
+        return Err(MutationError::Invalid(format!(
             "$pop: field '{field}' is not an array"
         )));
     }
@@ -424,7 +424,7 @@ fn op_eligible(fm: &super::FieldMutation) -> bool {
 pub(crate) fn raw_apply_mutation(
     old_raw: &RawDocument,
     mutation: &Mutation,
-) -> Result<RawMutationResult, DbError> {
+) -> Result<RawMutationResult, MutationError> {
     // Pre-scan: if any op needs fallback, bail out entirely
     if !mutation.ops.iter().all(op_eligible) {
         return Ok(RawMutationResult::Fallback);
@@ -463,8 +463,9 @@ pub(crate) fn raw_apply_mutation(
         return Ok(RawMutationResult::Unchanged);
     }
 
-    let buf = RawDocumentBuf::from_bytes(bytes)
-        .map_err(|e| DbError::Serialization(format!("raw mutation produced invalid BSON: {e}")))?;
+    let buf = RawDocumentBuf::from_bytes(bytes).map_err(|e| {
+        MutationError::Serialization(format!("raw mutation produced invalid BSON: {e}"))
+    })?;
     Ok(RawMutationResult::Applied(buf))
 }
 
@@ -472,11 +473,11 @@ pub(crate) fn raw_apply_mutation(
 /// Uses in-place overwrites instead of rebuilding the entire document.
 ///
 /// Returns `None` if nothing changed (all values identical).
-pub(crate) fn raw_merge(
+pub fn raw_merge(
     old_raw: &RawDocument,
     update: &RawDocument,
     pk_path: &str,
-) -> Result<Option<RawDocumentBuf>, DbError> {
+) -> Result<Option<RawDocumentBuf>, MutationError> {
     let mut bytes = old_raw.as_bytes().to_vec();
     let mut changed = false;
 
@@ -531,8 +532,9 @@ pub(crate) fn raw_merge(
         return Ok(None);
     }
 
-    let buf = RawDocumentBuf::from_bytes(bytes)
-        .map_err(|e| DbError::Serialization(format!("raw merge produced invalid BSON: {e}")))?;
+    let buf = RawDocumentBuf::from_bytes(bytes).map_err(|e| {
+        MutationError::Serialization(format!("raw merge produced invalid BSON: {e}"))
+    })?;
     Ok(Some(buf))
 }
 
@@ -887,8 +889,7 @@ mod tests {
     #[test]
     fn orchestrator_inc_produces_valid_bson() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "name": "Alice" });
-        let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }, "_id").unwrap();
+        let mutation = crate::parse_mutation(&rawdoc! { "$inc": { "score": 5 } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -910,8 +911,7 @@ mod tests {
     #[test]
     fn orchestrator_unset() {
         let raw = make_raw(&doc! { "_id": "r1", "a": 1, "b": 2 });
-        let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$unset": { "a": "" } }, "_id").unwrap();
+        let mutation = crate::parse_mutation(&rawdoc! { "$unset": { "a": "" } }, "_id").unwrap();
         match raw_apply_mutation(&raw, &mutation).unwrap() {
             RawMutationResult::Applied(buf) => {
                 let result = to_doc(&buf);
@@ -925,8 +925,7 @@ mod tests {
     #[test]
     fn orchestrator_noop_returns_unchanged() {
         let raw = make_raw(&doc! { "a": 10_i32 });
-        let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$set": { "a": 10 } }, "_id").unwrap();
+        let mutation = crate::parse_mutation(&rawdoc! { "$set": { "a": 10 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Unchanged
@@ -936,8 +935,7 @@ mod tests {
     #[test]
     fn orchestrator_dot_path_falls_back() {
         let raw = make_raw(&doc! { "a": { "b": 1 } });
-        let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }, "_id").unwrap();
+        let mutation = crate::parse_mutation(&rawdoc! { "$set": { "a.b": 2 } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -948,8 +946,7 @@ mod tests {
     fn orchestrator_rename_falls_back() {
         let raw = make_raw(&doc! { "old": 1 });
         let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }, "_id")
-                .unwrap();
+            crate::parse_mutation(&rawdoc! { "$rename": { "old": "new" } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -960,7 +957,7 @@ mod tests {
     fn orchestrator_lpush_falls_back() {
         let raw = make_raw(&doc! { "tags": ["a"] });
         let mutation =
-            crate::mutation::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }, "_id").unwrap();
+            crate::parse_mutation(&rawdoc! { "$lpush": { "tags": "z" } }, "_id").unwrap();
         assert!(matches!(
             raw_apply_mutation(&raw, &mutation).unwrap(),
             RawMutationResult::Fallback
@@ -970,7 +967,7 @@ mod tests {
     #[test]
     fn orchestrator_multiple_ops() {
         let raw = make_raw(&doc! { "_id": "r1", "score": 10_i32, "status": "active" });
-        let mutation = crate::mutation::parse_mutation(
+        let mutation = crate::parse_mutation(
             &rawdoc! { "$inc": { "score": 5 }, "$set": { "status": "done" } },
             "_id",
         )

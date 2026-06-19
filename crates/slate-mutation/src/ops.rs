@@ -1,6 +1,5 @@
+use crate::MutationError;
 use bson::{Bson, Document};
-
-use crate::error::DbError;
 
 /// Resolve a dot-path to its parent document and leaf field name.
 ///
@@ -11,10 +10,10 @@ pub(crate) fn resolve_parent_mut<'a>(
     doc: &'a mut Document,
     path: &'a str,
     create: bool,
-) -> Result<Option<(&'a mut Document, &'a str)>, DbError> {
+) -> Result<Option<(&'a mut Document, &'a str)>, MutationError> {
     let segments: Vec<&str> = path.split('.').collect();
     if segments.is_empty() {
-        return Err(DbError::InvalidQuery("empty field path".into()));
+        return Err(MutationError::Invalid("empty field path".into()));
     }
     if segments.len() == 1 {
         // Return a self-referential borrow — caller gets (doc, leaf).
@@ -49,7 +48,7 @@ pub(crate) fn resolve_parent_mut<'a>(
                 current = sub as *mut Document;
             }
             Some(_) => {
-                return Err(DbError::InvalidQuery(format!(
+                return Err(MutationError::Invalid(format!(
                     "field path '{path}': intermediate '{segment}' is not a document"
                 )));
             }
@@ -61,7 +60,7 @@ pub(crate) fn resolve_parent_mut<'a>(
 }
 
 /// `$set` — Set field to value. Creates the field if it doesn't exist.
-pub(crate) fn op_set(doc: &mut Document, field: &str, value: &Bson) -> Result<bool, DbError> {
+pub(crate) fn op_set(doc: &mut Document, field: &str, value: &Bson) -> Result<bool, MutationError> {
     let existing = doc.get(field);
     if existing == Some(value) {
         return Ok(false);
@@ -71,7 +70,7 @@ pub(crate) fn op_set(doc: &mut Document, field: &str, value: &Bson) -> Result<bo
 }
 
 /// `$unset` — Remove field from document.
-pub(crate) fn op_unset(doc: &mut Document, field: &str) -> Result<bool, DbError> {
+pub(crate) fn op_unset(doc: &mut Document, field: &str) -> Result<bool, MutationError> {
     Ok(doc.remove(field).is_some())
 }
 
@@ -83,7 +82,11 @@ pub(crate) fn op_unset(doc: &mut Document, field: &str) -> Result<bool, DbError>
 /// - i64 + i64 → i64
 /// - any + f64 → f64
 /// - missing field treated as 0 with the same type as the increment value
-pub(crate) fn op_inc(doc: &mut Document, field: &str, amount: &Bson) -> Result<bool, DbError> {
+pub(crate) fn op_inc(
+    doc: &mut Document,
+    field: &str,
+    amount: &Bson,
+) -> Result<bool, MutationError> {
     let current = doc.get(field).cloned().unwrap_or_else(|| match amount {
         Bson::Int32(_) => Bson::Int32(0),
         Bson::Int64(_) => Bson::Int64(0),
@@ -105,7 +108,7 @@ pub(crate) fn op_inc(doc: &mut Document, field: &str, amount: &Bson) -> Result<b
         (Bson::Double(a), Bson::Int32(b)) => Bson::Double(a + *b as f64),
         (Bson::Double(a), Bson::Int64(b)) => Bson::Double(a + *b as f64),
         _ => {
-            return Err(DbError::InvalidQuery(format!(
+            return Err(MutationError::Invalid(format!(
                 "$inc: field '{field}' is not numeric"
             )));
         }
@@ -116,7 +119,11 @@ pub(crate) fn op_inc(doc: &mut Document, field: &str, amount: &Bson) -> Result<b
 }
 
 /// `$rename` — Rename a field within the same parent document.
-pub(crate) fn op_rename(doc: &mut Document, field: &str, new_name: &str) -> Result<bool, DbError> {
+pub(crate) fn op_rename(
+    doc: &mut Document,
+    field: &str,
+    new_name: &str,
+) -> Result<bool, MutationError> {
     match doc.remove(field) {
         Some(val) => {
             doc.insert(new_name.to_string(), val);
@@ -127,13 +134,17 @@ pub(crate) fn op_rename(doc: &mut Document, field: &str, new_name: &str) -> Resu
 }
 
 /// `$push` — Append a value to the end of an array field.
-pub(crate) fn op_push(doc: &mut Document, field: &str, value: &Bson) -> Result<bool, DbError> {
+pub(crate) fn op_push(
+    doc: &mut Document,
+    field: &str,
+    value: &Bson,
+) -> Result<bool, MutationError> {
     match doc.get_mut(field) {
         Some(Bson::Array(arr)) => {
             arr.push(value.clone());
             Ok(true)
         }
-        Some(_) => Err(DbError::InvalidQuery(format!(
+        Some(_) => Err(MutationError::Invalid(format!(
             "$push: field '{field}' is not an array"
         ))),
         None => {
@@ -144,13 +155,17 @@ pub(crate) fn op_push(doc: &mut Document, field: &str, value: &Bson) -> Result<b
 }
 
 /// `$lpush` — Prepend a value to the beginning of an array field.
-pub(crate) fn op_lpush(doc: &mut Document, field: &str, value: &Bson) -> Result<bool, DbError> {
+pub(crate) fn op_lpush(
+    doc: &mut Document,
+    field: &str,
+    value: &Bson,
+) -> Result<bool, MutationError> {
     match doc.get_mut(field) {
         Some(Bson::Array(arr)) => {
             arr.insert(0, value.clone());
             Ok(true)
         }
-        Some(_) => Err(DbError::InvalidQuery(format!(
+        Some(_) => Err(MutationError::Invalid(format!(
             "$lpush: field '{field}' is not an array"
         ))),
         None => {
@@ -161,7 +176,7 @@ pub(crate) fn op_lpush(doc: &mut Document, field: &str, value: &Bson) -> Result<
 }
 
 /// `$pop` — Remove the last element of an array field.
-pub(crate) fn op_pop(doc: &mut Document, field: &str) -> Result<bool, DbError> {
+pub(crate) fn op_pop(doc: &mut Document, field: &str) -> Result<bool, MutationError> {
     match doc.get_mut(field) {
         Some(Bson::Array(arr)) => {
             if arr.is_empty() {
@@ -171,7 +186,7 @@ pub(crate) fn op_pop(doc: &mut Document, field: &str) -> Result<bool, DbError> {
                 Ok(true)
             }
         }
-        Some(_) => Err(DbError::InvalidQuery(format!(
+        Some(_) => Err(MutationError::Invalid(format!(
             "$pop: field '{field}' is not an array"
         ))),
         None => Ok(false),

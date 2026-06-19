@@ -261,7 +261,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
-        let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
+        let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,
@@ -284,7 +284,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let raw = bson::serialize_to_raw_document_buf(&update)?;
         let handle = self.txn.collection(cf, collection)?;
-        let mutation = crate::mutation::parse_mutation(&raw, handle.pk_path())?;
+        let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
         let predicate = Self::parse_required_filter(&filter_raw)?;
         let stmt = Statement::Update {
             cf,

@@ -3,7 +3,7 @@ use slate_engine::{CollectionHandle, EngineTransaction};
 
 use crate::error::DbError;
 use crate::executor::RawIter;
-use crate::mutation::Mutation;
+use slate_mutation::Mutation;
 
 pub(crate) fn execute<'a, T: EngineTransaction>(
     txn: &'a T,

@@ -29,6 +29,30 @@ pub enum RuntimeKind {
     Wasm,
 }
 
+/// A pre-resolved hook (validator or trigger) — everything needed to fire it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHook {
+    pub name: String,
+    pub runtime: u8,
+    pub source: Vec<u8>,
+    pub source_hash: u64,
+}
+
+/// Map a stored runtime tag byte to a [`RuntimeKind`].
+pub fn runtime_kind(tag: u8) -> RuntimeKind {
+    #[cfg(feature = "lua")]
+    if tag == 0x01 {
+        return RuntimeKind::Lua;
+    }
+
+    #[cfg(feature = "js")]
+    if tag == 0x03 {
+        return RuntimeKind::Js;
+    }
+
+    panic!("unsupported runtime tag: {tag:#x}")
+}
+
 /// A borrowed callback for use within a single scoped script call.
 ///
 /// Does not require `Send` or `'static`, enabling capture of borrowed

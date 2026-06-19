@@ -5,7 +5,7 @@ use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::hooks::ResolvedHook;
-use crate::mutation::raw as raw_mutation;
+use slate_mutation::raw_merge;
 use slate_vm::pool::VmPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ fn build_doc(
             }
             Ok(Some(buf))
         }
-        UpsertMode::Merge => Ok(raw_mutation::raw_merge(old_raw, new_raw, pk_path)?),
+        UpsertMode::Merge => Ok(raw_merge(old_raw, new_raw, pk_path)?),
     }
 }
 

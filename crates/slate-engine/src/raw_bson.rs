@@ -8,9 +8,9 @@
 //! Used by the mutation engine (`raw_mutation.rs`), filter evaluation, sort
 //! key extraction, and projection.
 
+use crate::skip_bson_value;
 use bson::raw::{RawArray, RawBsonRef, RawDocument};
 use bson::spec::ElementType;
-use slate_engine::skip_bson_value;
 
 // ── RawField ────────────────────────────────────────────────────
 
@@ -18,7 +18,7 @@ use slate_engine::skip_bson_value;
 ///
 /// Holds a reference to the document bytes and the field's position
 /// metadata. Value parsing is deferred until `.value()` is called.
-pub(crate) struct RawField<'a> {
+pub struct RawField<'a> {
     bytes: &'a [u8],
     element_type: ElementType,
     element_start: usize,
@@ -53,7 +53,6 @@ impl<'a> RawField<'a> {
     // ── Accessors ───────────────────────────────────────────────
 
     /// The BSON element type.
-    #[cfg(test)]
     pub fn element_type(&self) -> ElementType {
         self.element_type
     }
@@ -140,19 +139,16 @@ impl<'a> RawField<'a> {
     // ── Byte-level access (for tests) ──────────────────────────
 
     /// The raw value bytes (`value_start..element_end`).
-    #[cfg(test)]
     pub fn value_bytes(&self) -> &'a [u8] {
         &self.bytes[self.value_start..self.element_end]
     }
 
     /// Byte offset where the value bytes begin.
-    #[cfg(test)]
     pub fn value_start(&self) -> usize {
         self.value_start
     }
 
     /// Byte offset immediately after the value bytes.
-    #[cfg(test)]
     pub fn element_end(&self) -> usize {
         self.element_end
     }
@@ -178,7 +174,7 @@ impl<'a> RawField<'a> {
 /// holding a reference to the document bytes. Used by the mutation engine
 /// to capture a field's location then mutate the buffer.
 #[derive(Clone, Copy)]
-pub(crate) struct RawFieldLoc {
+pub struct RawFieldLoc {
     element_type: ElementType,
     element_start: usize,
     value_start: usize,
