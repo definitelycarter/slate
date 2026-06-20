@@ -6,6 +6,13 @@
 //! - Wrong argument **types** (or undefined args) generally yield
 //!   [`Value::Undefined`] rather than an error. The type-test functions
 //!   (`IS_DEFINED`, `IS_NULL`, `IS_STRING`, …) are the deliberate exceptions.
+//! - **Type-identity** tests are strict by BSON type (a `Double` is not an
+//!   integer, so `IS_INTEGER` is the odd one out — it is a *value/range* test,
+//!   matching Cosmos). Comparison still coerces numerics by value (`5 = 5.0`);
+//!   that is a separate concern from a type test.
+//! - Each function's tests mirror the worked example on its Cosmos doc page
+//!   (`learn.microsoft.com/en-us/cosmos-db/query/<name>`), cited in the test, so
+//!   we track the spec rather than our own guesses.
 //!
 //! One file per function: each `fn eval` lives next to its tests in
 //! `functions/<name>.rs`, and [`call`] is the flat name→module dispatch. Adding
@@ -22,8 +29,16 @@ mod array_contains;
 mod array_length;
 mod concat;
 mod contains;
+mod is_array;
+mod is_bool;
 mod is_defined;
+mod is_finite_number;
+mod is_integer;
 mod is_null;
+mod is_number;
+mod is_object;
+mod is_primitive;
+mod is_string;
 mod length;
 mod lower;
 mod regexmatch;
@@ -35,6 +50,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
     match name.to_ascii_uppercase().as_str() {
         "IS_DEFINED" => is_defined::eval(name, args),
         "IS_NULL" => is_null::eval(name, args),
+        "IS_STRING" => is_string::eval(name, args),
+        "IS_NUMBER" => is_number::eval(name, args),
+        "IS_BOOL" => is_bool::eval(name, args),
+        "IS_ARRAY" => is_array::eval(name, args),
+        "IS_OBJECT" => is_object::eval(name, args),
+        "IS_PRIMITIVE" => is_primitive::eval(name, args),
+        "IS_INTEGER" => is_integer::eval(name, args),
+        "IS_FINITE_NUMBER" => is_finite_number::eval(name, args),
         "UPPER" => upper::eval(name, args),
         "LOWER" => lower::eval(name, args),
         "LENGTH" => length::eval(name, args),

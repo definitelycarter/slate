@@ -8,8 +8,14 @@ can work through it incrementally.
 fun · 🚧 needs new infrastructure (deferred).
 
 **How we work through it:** one commit per item (or per small batch of
-functions), each to Cosmos semantics with tests. Scalar functions are pure adds
-to `slate-eval/functions.rs`; keywords/clauses touch the parser → AST → planner.
+functions). Each scalar function is a new file in `slate-eval/functions/` whose
+tests mirror the worked example on its Cosmos doc page
+(`learn.microsoft.com/en-us/cosmos-db/query/<name>`), so we track the spec, not
+our own guesses. Keywords/clauses touch the parser → AST → planner.
+
+**Type semantics:** type-identity tests (`IS_STRING`, …) are strict by BSON
+type; `IS_INTEGER` is a value/range test (Cosmos); comparison coerces numerics
+by value. See `slate-eval/functions/mod.rs`.
 
 ## Current surface
 
@@ -67,8 +73,8 @@ literals.
 ### Type checking (Tier 0)
 
 - [x] `IS_DEFINED`  [x] `IS_NULL`
-- [ ] `IS_STRING`  [ ] `IS_NUMBER`  [ ] `IS_BOOL`  [ ] `IS_ARRAY`  [ ] `IS_OBJECT`  [ ] `IS_PRIMITIVE`
-- [ ] `IS_INTEGER`  [ ] `IS_FINITE_NUMBER`
+- [x] `IS_STRING`  [x] `IS_NUMBER`  [x] `IS_BOOL`  [x] `IS_ARRAY`  [x] `IS_OBJECT`  [x] `IS_PRIMITIVE`
+- [x] `IS_INTEGER`  [x] `IS_FINITE_NUMBER`
 
 ### Conditional (Tier 1)
 
