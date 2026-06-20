@@ -53,6 +53,11 @@ mod exp;
 mod floor;
 mod iif;
 mod index_of;
+mod intadd;
+mod intdiv;
+mod intmod;
+mod intmul;
+mod intsub;
 mod is_array;
 mod is_bool;
 mod is_defined;
@@ -134,6 +139,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "ATN2" => atn2::eval(name, args),
         "DEGREES" => degrees::eval(name, args),
         "RADIANS" => radians::eval(name, args),
+        "INTADD" => intadd::eval(name, args),
+        "INTSUB" => intsub::eval(name, args),
+        "INTMUL" => intmul::eval(name, args),
+        "INTDIV" => intdiv::eval(name, args),
+        "INTMOD" => intmod::eval(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),
@@ -214,6 +224,25 @@ fn f64_arg(v: &Value) -> Option<f64> {
         Value::Defined(Bson::Int32(i)) => Some(*i as f64),
         Value::Defined(Bson::Int64(i)) => Some(*i as f64),
         Value::Defined(Bson::Double(f)) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Extract a strict integer value — Cosmos's `INT*` and bitwise functions operate
+/// on integers only. Integer-typed, or a `Double` with no fractional part; a
+/// fractional or non-numeric argument yields `None` (→ undefined).
+fn int_value(v: &Value) -> Option<i64> {
+    match v {
+        Value::Defined(Bson::Int32(i)) => Some(*i as i64),
+        Value::Defined(Bson::Int64(i)) => Some(*i),
+        Value::Defined(Bson::Double(f))
+            if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64 =>
+        {
+            Some(*f as i64)
+        }
         _ => None,
     }
 }

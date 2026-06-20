@@ -57,7 +57,7 @@ aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
 - [x] `PI`  [ ] `RAND` *(non-deterministic — needs the txn's RNG/clock)*
 - [ ] `NUMBERBIN` *(round to a multiple)*
 - [x] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
-- [ ] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(i64-typed)*
+- [x] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(integer args only; ÷/mod 0 → undefined)*
 - [ ] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
 
 ### String (Tier 0)
