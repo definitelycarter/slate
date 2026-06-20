@@ -71,6 +71,35 @@ fn dt(ticks: i128) -> Value {
     }
 }
 
+// ── GETCURRENT* (clock-dependent) ────────────────────────────────
+
+/// Whether `name` is a `GETCURRENT*` function (including the `…STATIC` forms).
+/// These read an injected "now" rather than a syscall, so they're evaluated in
+/// the executor (which threads `now`) rather than the pure dispatch.
+pub(super) fn is_current(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "GETCURRENTDATETIME"
+            | "GETCURRENTDATETIMESTATIC"
+            | "GETCURRENTTIMESTAMP"
+            | "GETCURRENTTIMESTAMPSTATIC"
+            | "GETCURRENTTICKS"
+            | "GETCURRENTTICKSSTATIC"
+    )
+}
+
+/// Resolve a `GETCURRENT*` function from `now_ms`. The plain and `…STATIC` forms
+/// are equivalent here (now is fixed for the transaction).
+pub(super) fn current(name: &str, now_ms: i64) -> Value {
+    let ticks = now_ms as i128 * TICKS_PER_MS;
+    match name.to_ascii_uppercase().as_str() {
+        "GETCURRENTDATETIME" | "GETCURRENTDATETIMESTATIC" => dt(ticks),
+        "GETCURRENTTIMESTAMP" | "GETCURRENTTIMESTAMPSTATIC" => Value::Defined(Bson::Int64(now_ms)),
+        "GETCURRENTTICKS" | "GETCURRENTTICKSSTATIC" => Value::Defined(Bson::Int64(ticks as i64)),
+        _ => Value::Undefined,
+    }
+}
+
 // ── functions ────────────────────────────────────────────────────
 
 pub(super) fn to_ticks(name: &str, args: Vec<Value>) -> Result<Value> {

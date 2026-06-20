@@ -926,6 +926,33 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn getcurrent_uses_the_injected_clock() {
+    // GETCURRENT* read the engine's injectable clock (the wasm hook) — no
+    // syscall — so a fixed clock makes them deterministic.
+    let db = DatabaseBuilder::new()
+        .with_clock(|| 1000) // 1000ms after the Unix epoch
+        .open(MemoryStore::new())
+        .unwrap();
+    let txn = db.begin(true).unwrap();
+    let ts: Vec<i64> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTTIMESTAMP()")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(ts, vec![1000]);
+    let dt: Vec<String> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTDATETIME()")
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(dt, vec!["1970-01-01T00:00:01.0000000Z"]);
+}
+
+#[test]
 fn unqualified_identifier_is_rejected() {
     // Cosmos requires bound paths; an unqualified column is an error, not undefined.
     let db = seeded();

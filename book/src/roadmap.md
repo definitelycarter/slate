@@ -386,6 +386,25 @@ and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
 
 ---
 
+## wasm: feature-gate the VM backend
+
+`slate-executor` hardcodes `slate-vm = { features = ["lua"] }`, which drags
+`mlua` (native Lua, C-vendored) into *every* build — so `slate-wasm` can't
+compile to `wasm32` even though the wasm story is the `js` VM backend
+(JS-side Lua via wasm-bindgen). Fix: make the backend a propagated feature.
+
+- `slate-executor`: depend on `slate-vm` with `default-features = false`; add
+  `lua = ["slate-vm/lua"]` / `js = ["slate-vm/js"]`.
+- `slate-db`: extend its `lua`/`js` features to also flip
+  `slate-executor/lua`|`/js`, and take `slate-executor` with
+  `default-features = false`.
+- `slate-wasm`: `slate-db = { default-features = false, features = ["js"] }`.
+
+Native keeps `lua` (slate-db default). Verify `slate-eval` already builds for
+`wasm32` (it does — `chrono` has no wall-clock feature; `GETCURRENT*` use the
+injected clock). Check whether `slate-executor`'s own tests need a default
+`lua`.
+
 ## Interactive Shell (CLI) — Done
 
 `slate-cli` ships a native REPL (`cargo run -p slate-cli`) so the database can be

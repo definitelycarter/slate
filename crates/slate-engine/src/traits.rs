@@ -138,6 +138,11 @@ pub trait Engine {
 pub trait EngineTransaction {
     type Cf: Clone;
 
+    /// Epoch milliseconds captured when the transaction began (from the engine's
+    /// clock, which is injectable — e.g. for wasm). Used by the SQL `GETCURRENT*`
+    /// functions so "now" is consistent across the transaction and platform-clean.
+    fn now_millis(&self) -> i64;
+
     // ── Document operations ────────────────────────────────────
 
     /// Fetch a document by `_id`. Constructs the internal key encoding

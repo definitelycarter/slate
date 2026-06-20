@@ -80,7 +80,17 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         match self.plan {
             Prepared::V1(plan) => Executor::new(self.txn, self.pool).execute(plan),
             Prepared::V2(plan) => {
-                let params = self.params.map(std::rc::Rc::new);
+                // Inject `$now` (epoch ms, captured when the txn began from the
+                // engine's injectable clock) so the SQL `GETCURRENT*` functions
+                // resolve against it — consistent across the txn and wasm-clean
+                // (no syscall in the evaluator). Threaded via the existing params
+                // channel, so it reaches every evaluating node.
+                let mut doc: bson::Document = match &self.params {
+                    Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
+                    None => bson::Document::new(),
+                };
+                doc.insert("$now", self.txn.now_millis());
+                let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
                 let iter =
                     slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
                         .execute(plan)?;

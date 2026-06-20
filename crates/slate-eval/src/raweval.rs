@@ -206,12 +206,28 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
         let needle = eval(&args[1], env)?;
         return array_contains_value(arr, needle);
     }
+    if args.is_empty() && crate::functions::is_current_time(name) {
+        return current_time(name, env);
+    }
 
     let mut vals = Vec::with_capacity(args.len());
     for a in args {
         vals.push(eval(a, env)?.into_value()?);
     }
     crate::functions::call(name, vals).map(RawValue::from_value)
+}
+
+/// Resolve a `GETCURRENT*` function from the injected `$now` (epoch ms) the
+/// executor threads through the params channel. Undefined if `$now` is absent.
+fn current_time<'a>(name: &str, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+    let now_ms = match env.param("$now")? {
+        RawValue::Ref(RawBsonRef::Int64(n)) => n,
+        RawValue::Owned(Bson::Int64(n)) => n,
+        _ => return Ok(RawValue::Undefined),
+    };
+    Ok(RawValue::from_value(crate::functions::current_time(
+        name, now_ms,
+    )))
 }
 
 fn is_null(v: &RawValue) -> bool {
@@ -910,6 +926,9 @@ pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'
             Ok(RawValue::from_value(or3(eq, contains)))
         }
         Compiled::Call { name, args } => {
+            if args.is_empty() && crate::functions::is_current_time(name) {
+                return current_time(name, env);
+            }
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval_compiled(a, env)?.into_value()?);

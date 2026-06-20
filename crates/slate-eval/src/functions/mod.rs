@@ -208,6 +208,17 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
     }
 }
 
+/// Whether `name` is a clock-dependent `GETCURRENT*` function. The evaluator
+/// handles these specially (they read the injected "now", not a syscall).
+pub(crate) fn is_current_time(name: &str) -> bool {
+    datetime::is_current(name)
+}
+
+/// Resolve a `GETCURRENT*` function from the injected epoch-millis "now".
+pub(crate) fn current_time(name: &str, now_ms: i64) -> Value {
+    datetime::current(name, now_ms)
+}
+
 // ── Shared helpers (visible to the function submodules) ─────────────
 
 fn arity(name: &str, args: &[Value], n: usize) -> Result<()> {

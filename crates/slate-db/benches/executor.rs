@@ -19,6 +19,10 @@ struct NoopTransaction;
 impl EngineTransaction for NoopTransaction {
     type Cf = ();
 
+    fn now_millis(&self) -> i64 {
+        0
+    }
+
     fn get(
         &self,
         _handle: &CollectionHandle<Self::Cf>,

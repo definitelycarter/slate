@@ -95,8 +95,10 @@ are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
 `chrono` (no wall-clock feature → wasm-safe).
 - [x] `DATETIMEADD`  [x] `DATETIMEDIFF`  [x] `DATETIMEPART`  [x] `DATETIMEBIN`  [x] `DATETIMEFROMPARTS`
 - [x] `DATETIMETOTIMESTAMP`  [x] `DATETIMETOTICKS`  [x] `TIMESTAMPTODATETIME`  [x] `TICKSTODATETIME`
-- [ ] `GETCURRENTDATETIME` / `…STATIC`  [ ] `GETCURRENTTIMESTAMP` / `…STATIC`  [ ] `GETCURRENTTICKS` / `…STATIC`
-  — need the injected clock threaded into the eval context (next).
+- [x] `GETCURRENTDATETIME` / `…STATIC`  [x] `GETCURRENTTIMESTAMP` / `…STATIC`  [x] `GETCURRENTTICKS` / `…STATIC`
+  — read the engine's injectable clock (`EngineTransaction::now_millis`, captured
+  at txn begin) threaded into the eval context via `$now`. No syscall in the
+  evaluator, so it stays wasm-clean; on wasm supply `with_clock(|| Date.now())`.
 
 ### Item (Tier 1)
 
