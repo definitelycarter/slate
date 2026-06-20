@@ -20,6 +20,7 @@ pub enum Token {
     Where,
     Join,
     In,
+    Between,
     Order,
     By,
     Asc,

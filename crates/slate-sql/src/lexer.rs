@@ -80,6 +80,7 @@ fn keyword_or_ident(word: String) -> Token {
         "where" => Token::Where,
         "join" => Token::Join,
         "in" => Token::In,
+        "between" => Token::Between,
         "order" => Token::Order,
         "by" => Token::By,
         "asc" => Token::Asc,

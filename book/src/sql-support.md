@@ -26,7 +26,7 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 
 Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
 `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
-literals.
+literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`.
 
 ---
 
@@ -101,8 +101,8 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 
 ## Keywords (Tier 1 unless noted)
 
-- [ ] `IN (a, b, …)`  ⭐ *(sargable → `IndexMerge(Or)`)*
-- [ ] `BETWEEN x AND y`  ⭐ *(sargable → range)*
+- [x] `IN (a, b, …)`  ⭐ *(desugars to OR-of-equalities → sargable `IndexMerge(Or)`; `NOT IN` supported)*
+- [x] `BETWEEN x AND y`  ⭐ *(desugars to `>= x AND <= y`, inclusive → sargable range; `NOT BETWEEN` supported)*
 - [ ] `LIKE <pattern>` *(lower to regex)*
 - [ ] `DISTINCT` (`SELECT DISTINCT …`) *(maps onto the existing `Distinct` node — Tier 2)*
 - [ ] `TOP N` *(Cosmos alias for `LIMIT`)*

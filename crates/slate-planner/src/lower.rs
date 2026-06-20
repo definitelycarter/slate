@@ -890,6 +890,45 @@ mod tests {
     }
 
     #[test]
+    fn in_list_uses_index_merge_or() {
+        // `IN (…)` desugars to an OR of equalities, so it indexes like one — the
+        // planner needs no IN-specific handling.
+        let node = lower_with(
+            "SELECT VALUE c FROM c WHERE c.age IN (41, 44)",
+            &age_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => assert!(matches!(
+                *source,
+                Node::IndexMerge {
+                    logical: LogicalOp::Or,
+                    ..
+                }
+            )),
+            other => panic!("expected KeyLookup(IndexMerge Or), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn between_uses_range_index_scan() {
+        // `BETWEEN lo AND hi` desugars to `>= lo AND <= hi`, a single range scan.
+        let node = lower_with(
+            "SELECT VALUE c FROM c WHERE c.age BETWEEN 40 AND 50",
+            &age_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => match *source {
+                Node::IndexScan {
+                    range: IndexScanRange::Range { lower, upper },
+                    ..
+                } => assert!(lower.is_some() && upper.is_some()),
+                other => panic!("expected single IndexScan range, got {other:?}"),
+            },
+            other => panic!("expected KeyLookup(IndexScan), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn or_with_non_indexed_branch_falls_back_to_scan() {
         let node = lower_with(
             r#"SELECT VALUE c FROM c WHERE c.age = 41 OR c.name = "x""#,

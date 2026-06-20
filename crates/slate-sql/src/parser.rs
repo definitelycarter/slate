@@ -242,6 +242,35 @@ impl Parser {
 
     fn parse_comparison(&mut self) -> Result<ScalarExpr> {
         let lhs = self.parse_additive()?;
+
+        // `IN (…)` and `BETWEEN … AND …`, each optionally negated with `NOT`.
+        // An infix `NOT` at this position can only introduce one of these two,
+        // so it is safe to consume speculatively.
+        let negated = if self.peek() == &Token::Not {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        match self.peek() {
+            Token::In => {
+                self.advance();
+                let expr = self.parse_in_list(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
+            Token::Between => {
+                self.advance();
+                let expr = self.parse_between(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
+            other if negated => {
+                return Err(SqlError::Parse {
+                    message: format!("expected IN or BETWEEN after NOT, found {other:?}"),
+                });
+            }
+            _ => {}
+        }
+
         let op = match self.peek() {
             Token::Eq => BinOp::Eq,
             Token::Neq => BinOp::Neq,
@@ -254,6 +283,48 @@ impl Parser {
         self.advance();
         let rhs = self.parse_additive()?;
         Ok(binary(op, lhs, rhs))
+    }
+
+    /// Desugar `lhs IN (a, b, …)` into `lhs = a OR lhs = b OR …`. Reusing the
+    /// equality path means the planner indexes it as an `IndexMerge(Or)` for
+    /// free. The LHS is cloned into each disjunct because the OR-of-equalities
+    /// encoding inherently repeats it; the operands are small AST nodes.
+    fn parse_in_list(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        self.expect(&Token::LParen)?;
+        if self.peek() == &Token::RParen {
+            return Err(SqlError::Parse {
+                message: "IN requires at least one value".into(),
+            });
+        }
+        let mut disjunction: Option<ScalarExpr> = None;
+        loop {
+            let item = self.parse_expr()?;
+            let eq = binary(BinOp::Eq, lhs.clone(), item);
+            disjunction = Some(match disjunction {
+                Some(prev) => binary(BinOp::Or, prev, eq),
+                None => eq,
+            });
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        disjunction.ok_or_else(|| SqlError::Parse {
+            message: "IN requires at least one value".into(),
+        })
+    }
+
+    /// Desugar `lhs BETWEEN lo AND hi` into `lhs >= lo AND lhs <= hi` —
+    /// inclusive on both ends, as in Cosmos. The bounds parse at additive
+    /// precedence (the same level as the operands of `=`/`<`), so the middle
+    /// `AND` is the BETWEEN separator rather than boolean conjunction.
+    fn parse_between(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        let lower = self.parse_additive()?;
+        self.expect(&Token::And)?;
+        let upper = self.parse_additive()?;
+        let ge = binary(BinOp::Gte, lhs.clone(), lower);
+        let le = binary(BinOp::Lte, lhs, upper);
+        Ok(binary(BinOp::And, ge, le))
     }
 
     fn parse_additive(&mut self) -> Result<ScalarExpr> {
@@ -423,6 +494,18 @@ fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
     }
 }
 
+/// Wrap `expr` in a logical `NOT` when `negated`, else return it unchanged.
+fn maybe_not(negated: bool, expr: ScalarExpr) -> ScalarExpr {
+    if negated {
+        ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(expr),
+        }
+    } else {
+        expr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,6 +668,106 @@ mod tests {
         assert!(matches!(
             parse_err("SELECT VALUE c FROM c garbage"),
             SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn in_list_desugars_to_or_of_equalities() {
+        // c.status IN (1, 2, 3)  =>  (status = 1 OR status = 2) OR status = 3
+        let q = parse("SELECT VALUE c FROM c WHERE c.status IN (1, 2, 3)");
+        let Some(ScalarExpr::Binary {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+        }) = q.filter
+        else {
+            panic!("expected a top-level OR");
+        };
+        // The last disjunct is `status = 3`.
+        let ScalarExpr::Binary {
+            op: BinOp::Eq,
+            rhs: eq_rhs,
+            ..
+        } = *rhs
+        else {
+            panic!("expected equality as the last disjunct");
+        };
+        assert!(matches!(*eq_rhs, ScalarExpr::Literal(Literal::Int(3))));
+        // The earlier values fold left into another OR.
+        assert!(matches!(*lhs, ScalarExpr::Binary { op: BinOp::Or, .. }));
+    }
+
+    #[test]
+    fn between_desugars_to_inclusive_range() {
+        // c.age BETWEEN 18 AND 65  =>  age >= 18 AND age <= 65
+        let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 18 AND 65");
+        let Some(ScalarExpr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) = q.filter
+        else {
+            panic!("expected a top-level AND");
+        };
+        let ScalarExpr::Binary {
+            op: BinOp::Gte,
+            rhs: lo,
+            ..
+        } = *lhs
+        else {
+            panic!("expected >= as the lower bound");
+        };
+        let ScalarExpr::Binary {
+            op: BinOp::Lte,
+            rhs: hi,
+            ..
+        } = *rhs
+        else {
+            panic!("expected <= as the upper bound");
+        };
+        assert!(matches!(*lo, ScalarExpr::Literal(Literal::Int(18))));
+        assert!(matches!(*hi, ScalarExpr::Literal(Literal::Int(65))));
+    }
+
+    #[test]
+    fn not_in_and_not_between_wrap_in_not() {
+        let q = parse("SELECT VALUE c FROM c WHERE c.status NOT IN (1, 2)");
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared IN");
+        };
+        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::Or, .. }));
+
+        let q = parse("SELECT VALUE c FROM c WHERE c.age NOT BETWEEN 1 AND 2");
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared BETWEEN");
+        };
+        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::And, .. }));
+    }
+
+    #[test]
+    fn empty_in_list_errors() {
+        assert!(matches!(
+            parse_err("SELECT VALUE c FROM c WHERE c.status IN ()"),
+            SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn between_respects_outer_boolean_precedence() {
+        // `age BETWEEN 1 AND 2 OR c.x = 9` is `(age>=1 AND age<=2) OR x=9` — the
+        // trailing OR is boolean, not the BETWEEN separator.
+        let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 1 AND 2 OR c.x = 9");
+        assert!(matches!(
+            q.filter,
+            Some(ScalarExpr::Binary { op: BinOp::Or, .. })
         ));
     }
 }

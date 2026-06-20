@@ -78,6 +78,53 @@ fn where_numeric_range() {
 }
 
 #[test]
+fn where_in_list() {
+    // `name` is indexed, so `IN (…)` desugars to an OR of equalities and takes
+    // the sargable IndexMerge(Or) path.
+    let db = seeded();
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE c.name IN ("ada", "grace") ORDER BY c.age ASC"#
+        ),
+        vec!["ada", "grace"]
+    );
+}
+
+#[test]
+fn where_not_in_list() {
+    let db = seeded();
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE c.name NOT IN ("ada") ORDER BY c.age ASC"#
+        ),
+        vec!["alan", "grace"]
+    );
+}
+
+#[test]
+fn where_between_is_inclusive() {
+    let db = seeded();
+    // Inclusive on both ends: 41 (alan) and 44 (grace) are both included.
+    assert_eq!(
+        strings(
+            &db,
+            "SELECT VALUE c.name FROM c WHERE c.age BETWEEN 41 AND 44 ORDER BY c.age ASC"
+        ),
+        vec!["alan", "grace"]
+    );
+    // Inclusive lower bound picks up ada (36); the upper bound 40 excludes alan.
+    assert_eq!(
+        strings(
+            &db,
+            "SELECT VALUE c.name FROM c WHERE c.age BETWEEN 36 AND 40 ORDER BY c.age ASC"
+        ),
+        vec!["ada"]
+    );
+}
+
+#[test]
 fn offset_limit() {
     let db = seeded();
     assert_eq!(
