@@ -61,10 +61,14 @@ literals.
 ### String (Tier 0)
 
 - [x] `CONCAT`  [x] `CONTAINS`  [x] `STARTSWITH`  [x] `LENGTH`  [x] `LOWER`  [x] `UPPER`  [x] `REGEXMATCH`
-- [ ] `ENDSWITH`  [ ] `INDEX_OF`  [ ] `SUBSTRING`  [ ] `LEFT`  [ ] `RIGHT`
-- [ ] `TRIM`  [ ] `LTRIM`  [ ] `RTRIM`  [ ] `REPLACE`  [ ] `REPLICATE`  [ ] `REVERSE`
-- [ ] `STRINGEQUALS`  [ ] `STRINGJOIN`  [ ] `STRINGSPLIT`  [ ] `TOSTRING`
+- [x] `ENDSWITH`  [x] `INDEX_OF`  [x] `SUBSTRING`  [x] `LEFT`  [x] `RIGHT`
+- [x] `TRIM`  [x] `LTRIM`  [x] `RTRIM`  [x] `REPLACE`  [x] `REPLICATE`  [x] `REVERSE`
+- [x] `STRINGEQUALS`  [ ] `STRINGJOIN`  [ ] `STRINGSPLIT`  [ ] `TOSTRING`
 - [ ] Parsing: `STRINGTONUMBER` `STRINGTOBOOLEAN` `STRINGTONULL` `STRINGTOARRAY` `STRINGTOOBJECT`
+
+The string predicates `STARTSWITH`/`ENDSWITH`/`CONTAINS`/`STRINGEQUALS` accept an
+optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
+`SUBSTRING`, `LEFT`, and `RIGHT` index by character (not byte).
 
 ### Array (Tier 0)
 

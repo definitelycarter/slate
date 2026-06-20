@@ -34,8 +34,10 @@ mod array_length;
 mod ceiling;
 mod concat;
 mod contains;
+mod endswith;
 mod exp;
 mod floor;
+mod index_of;
 mod is_array;
 mod is_bool;
 mod is_defined;
@@ -46,18 +48,28 @@ mod is_number;
 mod is_object;
 mod is_primitive;
 mod is_string;
+mod left;
 mod length;
 mod log;
 mod log10;
 mod lower;
+mod ltrim;
 mod pi;
 mod power;
 mod regexmatch;
+mod replace;
+mod replicate;
+mod reverse;
+mod right;
 mod round;
+mod rtrim;
 mod sign;
 mod sqrt;
 mod square;
 mod starts_with;
+mod stringequals;
+mod substring;
+mod trim;
 mod trunc;
 mod upper;
 
@@ -95,6 +107,18 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "CONTAINS" => contains::eval(name, args),
         "STARTSWITH" => starts_with::eval(name, args),
+        "ENDSWITH" => endswith::eval(name, args),
+        "STRINGEQUALS" => stringequals::eval(name, args),
+        "INDEX_OF" => index_of::eval(name, args),
+        "SUBSTRING" => substring::eval(name, args),
+        "LEFT" => left::eval(name, args),
+        "RIGHT" => right::eval(name, args),
+        "TRIM" => trim::eval(name, args),
+        "LTRIM" => ltrim::eval(name, args),
+        "RTRIM" => rtrim::eval(name, args),
+        "REPLACE" => replace::eval(name, args),
+        "REPLICATE" => replicate::eval(name, args),
+        "REVERSE" => reverse::eval(name, args),
         "REGEXMATCH" => regexmatch::eval(name, args),
         other => Err(EvalError {
             message: format!("unknown function: {other}"),
@@ -154,10 +178,43 @@ fn f64_arg(v: &Value) -> Option<f64> {
     }
 }
 
-fn str2_bool(a: &Value, b: &Value, f: impl Fn(&str, &str) -> bool) -> Value {
-    match (str_arg(a), str_arg(b)) {
-        (Some(s), Some(t)) => Value::Defined(Bson::Boolean(f(s, t))),
+/// Extract a numeric argument as `i64`, truncating a finite `Double`. Used by
+/// the string functions for character positions, lengths, and counts.
+fn int_arg(v: &Value) -> Option<i64> {
+    match v {
+        Value::Defined(Bson::Int32(i)) => Some(*i as i64),
+        Value::Defined(Bson::Int64(i)) => Some(*i),
+        Value::Defined(Bson::Double(f)) if f.is_finite() => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Shared logic for the string predicate functions (`STARTSWITH`, `ENDSWITH`,
+/// `CONTAINS`, `STRINGEQUALS`): pull two string args plus an optional
+/// case-insensitivity flag (arg index 2, default `false`), then apply `f`. A
+/// non-string in either of the first two args yields `Undefined`. Callers must
+/// arity-check that at least two args are present.
+fn str_match(args: &[Value], f: impl Fn(&str, &str) -> bool) -> Value {
+    let ignore_case = matches!(args.get(2), Some(Value::Defined(Bson::Boolean(true))));
+    match (str_arg(&args[0]), str_arg(&args[1])) {
+        (Some(a), Some(b)) => {
+            let matched = if ignore_case {
+                f(&a.to_lowercase(), &b.to_lowercase())
+            } else {
+                f(a, b)
+            };
+            Value::Defined(Bson::Boolean(matched))
+        }
         _ => Value::Undefined,
+    }
+}
+
+/// Arity check for the string predicates that take an optional ignore-case flag.
+fn arity_2_or_3(name: &str, args: &[Value]) -> Result<()> {
+    if args.len() == 2 || args.len() == 3 {
+        Ok(())
+    } else {
+        Err(arity_err(name, "2 or 3"))
     }
 }
 

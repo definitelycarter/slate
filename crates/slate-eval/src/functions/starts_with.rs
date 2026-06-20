@@ -1,13 +1,14 @@
-//! `STARTSWITH(str, prefix)` — whether a string starts with a prefix.
+//! `STARTSWITH(str, prefix [, ignoreCase])` — whether a string starts with a
+//! prefix. An optional third argument requests a case-insensitive search.
 
 use crate::error::Result;
 use crate::value::Value;
 
-use super::{arity, str2_bool};
+use super::{arity_2_or_3, str_match};
 
 pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
-    arity(name, &args, 2)?;
-    Ok(str2_bool(&args[0], &args[1], |s, p| s.starts_with(p)))
+    arity_2_or_3(name, &args)?;
+    Ok(str_match(&args, |s, p| s.starts_with(p)))
 }
 
 #[cfg(test)]
@@ -23,6 +24,18 @@ mod tests {
         assert_eq!(
             call("STARTSWITH", vec![def("hello"), def("lo")]).unwrap(),
             def(false)
+        );
+    }
+
+    #[test]
+    fn ignore_case_flag() {
+        assert_eq!(
+            call("STARTSWITH", vec![def("Hello"), def("HE")]).unwrap(),
+            def(false)
+        );
+        assert_eq!(
+            call("STARTSWITH", vec![def("Hello"), def("HE"), def(true)]).unwrap(),
+            def(true)
         );
     }
 
