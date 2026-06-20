@@ -249,6 +249,21 @@ pub enum Node {
     /// (`Project(c.city) → Distinct` yields distinct cities).
     Distinct { source: Box<Node> },
 
+    /// Aggregation — `GROUP BY` and/or aggregate functions in `SELECT`. A
+    /// *blocking* transform: it buffers the source, groups rows by `group_keys`
+    /// (empty = a single group over the whole input), folds each aggregate's
+    /// accumulator per group, and emits one **environment** row per group of the
+    /// form `{ $key0: …, $agg0: … }`. With no group keys and an empty input it
+    /// still emits one row (so `COUNT` is `0`). The downstream `Project` shapes
+    /// the output, referencing the `$keyN`/`$aggN` slots the lowering substituted
+    /// in.
+    Aggregate {
+        group_keys: Vec<GroupKey>,
+        aggregates: Vec<AggregateExpr>,
+        binding: RowBinding,
+        source: Box<Node>,
+    },
+
     /// Before-mutation trigger tap: fire `hooks` with `action` on each document
     /// as a side effect, passing the document through unchanged.
     Trigger {
@@ -264,4 +279,23 @@ pub enum Node {
         validators: Vec<ResolvedHook>,
         source: Box<Node>,
     },
+}
+
+/// One grouping key of an [`Node::Aggregate`]: `expr` is evaluated per input row
+/// to form the group identity, and its value is bound to `slot` (e.g. `$key0`)
+/// in the emitted environment row so the downstream `Project` can reference it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupKey {
+    pub slot: String,
+    pub expr: ScalarExpr,
+}
+
+/// One aggregate of an [`Node::Aggregate`]: the recognized function name (e.g.
+/// `"COUNT"`), its single argument expression (evaluated per row), and the
+/// output `slot` (e.g. `$agg0`) its result binds to in the emitted row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateExpr {
+    pub func: String,
+    pub arg: ScalarExpr,
+    pub slot: String,
 }

@@ -14,6 +14,7 @@
 //! `WHERE`/`ORDER BY` cannot drift between them. The [`value::Value`] domain
 //! carries Cosmos's `undefined` vs `null` distinction.
 
+pub mod agg;
 pub mod error;
 pub mod eval;
 pub mod functions;

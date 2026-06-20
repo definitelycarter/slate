@@ -16,6 +16,7 @@
 //! The binding-aware nodes (`Bind`, `Unwind`, `Filter`, `Project`, `Sort`)
 //! operate on *environment documents* — see [`env`].
 
+pub(crate) mod aggregate;
 pub(crate) mod bind;
 pub(crate) mod delete;
 pub(crate) mod distinct;

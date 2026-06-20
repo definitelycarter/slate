@@ -243,6 +243,22 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::distinct::execute(source)
             }
 
+            Node::Aggregate {
+                group_keys,
+                aggregates,
+                binding,
+                source,
+            } => {
+                let source = self.execute_node(*source)?;
+                nodes::aggregate::execute(
+                    group_keys,
+                    aggregates,
+                    binding,
+                    source,
+                    self.params.clone(),
+                )?
+            }
+
             Node::Trigger {
                 cf,
                 action,
@@ -335,6 +351,62 @@ mod end_to_end {
                 RawBson::String("ada".into()),
                 RawBson::String("grace".into())
             ]
+        );
+    }
+
+    // ── Aggregates (no GROUP BY) ────────────────────────────────
+
+    #[test]
+    fn aggregate_count_all() {
+        // people: ada/36, alan/41, grace/44
+        assert_eq!(run("SELECT VALUE COUNT(1) FROM c"), vec![RawBson::Int64(3)]);
+    }
+
+    #[test]
+    fn aggregate_count_with_filter() {
+        assert_eq!(
+            run("SELECT VALUE COUNT(1) FROM c WHERE c.age > 40"),
+            vec![RawBson::Int64(2)]
+        );
+    }
+
+    #[test]
+    fn aggregate_count_empty_is_zero() {
+        // A bare aggregate over zero matching rows still emits one row.
+        assert_eq!(
+            run("SELECT VALUE COUNT(1) FROM c WHERE c.age > 100"),
+            vec![RawBson::Int64(0)]
+        );
+    }
+
+    #[test]
+    fn aggregate_min_max_preserve_type() {
+        // ages are Int32 → MIN/MAX return the actual value, type preserved.
+        assert_eq!(
+            run("SELECT VALUE MIN(c.age) FROM c"),
+            vec![RawBson::Int32(36)]
+        );
+        assert_eq!(
+            run("SELECT VALUE MAX(c.age) FROM c"),
+            vec![RawBson::Int32(44)]
+        );
+    }
+
+    #[test]
+    fn aggregate_sum_is_double() {
+        // 36 + 41 + 44 = 121, returned as a Double (the all-double convention).
+        assert_eq!(
+            run("SELECT VALUE SUM(c.age) FROM c"),
+            vec![RawBson::Double(121.0)]
+        );
+    }
+
+    #[test]
+    fn aggregate_tabular_projection() {
+        // SELECT COUNT(1) AS n  →  [{ "n": 3 }]
+        assert_eq!(
+            run("SELECT COUNT(1) AS n FROM c"),
+            vec![RawBson::Document(rawdoc! { "n": 3_i64 })]
         );
     }
 }

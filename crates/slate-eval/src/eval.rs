@@ -331,6 +331,14 @@ pub fn compare_bson(a: &Bson, b: &Bson) -> Option<Ordering> {
     compare_scalar(&scalar_of_bson(a)?, &scalar_of_bson(b)?)
 }
 
+/// Total order over two defined BSON values: the numeric/lexicographic rule
+/// where they're comparable, else a stable cross-domain type ranking. Shared by
+/// [`order_values`] (`ORDER BY`) and the `MIN`/`MAX` aggregates so all three
+/// agree on ordering.
+pub fn order_bson(a: &Bson, b: &Bson) -> Ordering {
+    compare_values(a, b).unwrap_or_else(|| type_rank(a).cmp(&type_rank(b)))
+}
+
 /// Total order over values, for `ORDER BY`. Undefined sorts first; values from
 /// different domains fall back to a stable type ranking. This is the single
 /// definition of sort ordering, shared by the in-memory engine here and the v2
@@ -340,9 +348,7 @@ pub fn order_values(a: &Value, b: &Value) -> Ordering {
         (Value::Undefined, Value::Undefined) => Ordering::Equal,
         (Value::Undefined, _) => Ordering::Less,
         (_, Value::Undefined) => Ordering::Greater,
-        (Value::Defined(x), Value::Defined(y)) => {
-            compare_values(x, y).unwrap_or_else(|| type_rank(x).cmp(&type_rank(y)))
-        }
+        (Value::Defined(x), Value::Defined(y)) => order_bson(x, y),
     }
 }
 

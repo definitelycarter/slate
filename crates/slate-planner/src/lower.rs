@@ -28,7 +28,7 @@ use bson::{Bson, RawBson};
 use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr};
 
 use crate::plan::{
-    CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
+    AggregateExpr, CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
 };
 
 /// Index metadata for the queried collection, used to choose a scan source.
@@ -54,8 +54,20 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     let FromSource::ImplicitContainer { alias } = from.source;
 
     // Resolve the projection up front, while the `FROM` alias is still in hand
-    // (`SELECT *` lowers to the row identity for that alias).
-    let project_expr = select.into_value_expr(&alias);
+    // (`SELECT *` lowers to the row identity for that alias). Then pull any
+    // aggregate calls out of it: each `AGG(arg)` becomes a `$aggN` slot the
+    // aggregation node fills, and the projection is rewritten to read the slot.
+    // Only rebuild the projection when it actually contains an aggregate — the
+    // read-only pre-check keeps `find` and non-aggregate SQL allocation-free.
+    let value_expr = select.into_value_expr(&alias);
+    let (project_expr, aggregates) = if contains_aggregate(&value_expr) {
+        let mut aggregates = Vec::new();
+        let project_expr = extract_aggregates(value_expr, &mut aggregates);
+        (project_expr, aggregates)
+    } else {
+        (value_expr, Vec::new())
+    };
+    let aggregating = !aggregates.is_empty();
 
     // Choose a source (Scan or an index path), pushing sargable predicates in.
     let (source, residual) = plan_source(filter, &alias, &container, meta);
@@ -90,21 +102,39 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
         };
     }
 
-    // ORDER BY  →  Sort (before projection — keys reference the row environment)
-    if !order_by.is_empty() {
-        node = Node::Sort {
-            keys: order_by,
-            binding: binding.clone(),
+    if aggregating {
+        // Aggregation collapses the rows into one row per group, then the
+        // projection (rewritten to read the `$aggN` slots) shapes each. The
+        // emitted rows are environment documents, so the projection binds as
+        // `Env`. (`ORDER BY` over aggregate results is handled with `GROUP BY`.)
+        node = Node::Aggregate {
+            group_keys: Vec::new(),
+            aggregates,
+            binding,
+            source: Box::new(node),
+        };
+        node = Node::Project {
+            expr: project_expr,
+            binding: RowBinding::Env,
+            source: Box::new(node),
+        };
+    } else {
+        // ORDER BY  →  Sort (before projection — keys reference the row environment)
+        if !order_by.is_empty() {
+            node = Node::Sort {
+                keys: order_by,
+                binding: binding.clone(),
+                source: Box::new(node),
+            };
+        }
+
+        // SELECT ...  →  Project (resolved above)
+        node = Node::Project {
+            expr: project_expr,
+            binding,
             source: Box::new(node),
         };
     }
-
-    // SELECT ...  →  Project (resolved above)
-    node = Node::Project {
-        expr: project_expr,
-        binding,
-        source: Box::new(node),
-    };
 
     // OFFSET / LIMIT  →  Limit (after projection — on result rows)
     if offset.is_some() || limit.is_some() {
@@ -116,6 +146,93 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     }
 
     Plan::Query(node)
+}
+
+// ── Aggregation ─────────────────────────────────────────────────
+
+/// Whether `name` (case-insensitive) is an aggregate function.
+fn is_aggregate_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
+    )
+}
+
+/// Read-only check for whether `expr` mentions any aggregate, so lowering can
+/// skip the (allocating) rewrite for the common non-aggregate projection.
+fn contains_aggregate(expr: &ScalarExpr) -> bool {
+    match expr {
+        ScalarExpr::Function { name, args } => {
+            is_aggregate_name(name) || args.iter().any(contains_aggregate)
+        }
+        ScalarExpr::Binary { lhs, rhs, .. } => contains_aggregate(lhs) || contains_aggregate(rhs),
+        ScalarExpr::Unary { expr, .. } => contains_aggregate(expr),
+        ScalarExpr::Member { base, .. } => contains_aggregate(base),
+        ScalarExpr::Index { base, index } => contains_aggregate(base) || contains_aggregate(index),
+        ScalarExpr::Object(fields) => fields.iter().any(|(_, v)| contains_aggregate(v)),
+        ScalarExpr::Array(items) => items.iter().any(contains_aggregate),
+        _ => false,
+    }
+}
+
+/// Pull aggregate calls out of a projection expression: each `AGG(arg)` is
+/// replaced by a reference to a fresh `$aggN` slot and recorded in `out` (with
+/// its function name and argument), while every other sub-expression is rebuilt
+/// unchanged. Aggregate arguments aren't re-scanned — aggregates don't nest.
+fn extract_aggregates(expr: ScalarExpr, out: &mut Vec<AggregateExpr>) -> ScalarExpr {
+    match expr {
+        ScalarExpr::Function { name, args } if is_aggregate_name(&name) => {
+            let arg = args
+                .into_iter()
+                .next()
+                .unwrap_or(ScalarExpr::Literal(Literal::Int(1)));
+            let slot = format!("$agg{}", out.len());
+            out.push(AggregateExpr {
+                func: name,
+                arg,
+                slot: slot.clone(),
+            });
+            ScalarExpr::Identifier(slot)
+        }
+        ScalarExpr::Function { name, args } => ScalarExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(|a| extract_aggregates(a, out))
+                .collect(),
+        },
+        ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
+            op,
+            lhs: Box::new(extract_aggregates(*lhs, out)),
+            rhs: Box::new(extract_aggregates(*rhs, out)),
+        },
+        ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
+            op,
+            expr: Box::new(extract_aggregates(*expr, out)),
+        },
+        ScalarExpr::Member { base, field } => ScalarExpr::Member {
+            base: Box::new(extract_aggregates(*base, out)),
+            field,
+        },
+        ScalarExpr::Index { base, index } => ScalarExpr::Index {
+            base: Box::new(extract_aggregates(*base, out)),
+            index: Box::new(extract_aggregates(*index, out)),
+        },
+        ScalarExpr::Object(fields) => ScalarExpr::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, extract_aggregates(v, out)))
+                .collect(),
+        ),
+        ScalarExpr::Array(items) => ScalarExpr::Array(
+            items
+                .into_iter()
+                .map(|i| extract_aggregates(i, out))
+                .collect(),
+        ),
+        // Leaves and Mongo-only constructs — no SQL aggregates nested inside.
+        other => other,
+    }
 }
 
 // ── Sargability ─────────────────────────────────────────────────
@@ -887,6 +1004,42 @@ mod tests {
             },
             other => panic!("expected KeyLookup(IndexScan), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn aggregate_select_lowers_to_aggregate_node() {
+        // SELECT VALUE COUNT(1) FROM c  →  Project(Aggregate{ one agg, no keys })
+        let node = lower_sql("SELECT VALUE COUNT(1) FROM c");
+        let Node::Project {
+            source, binding, ..
+        } = node
+        else {
+            panic!("expected Project at the root, got {node:?}");
+        };
+        assert_eq!(binding, RowBinding::Env);
+        match *source {
+            Node::Aggregate {
+                aggregates,
+                group_keys,
+                ..
+            } => {
+                assert_eq!(aggregates.len(), 1);
+                assert_eq!(aggregates[0].func, "COUNT");
+                assert!(group_keys.is_empty());
+            }
+            other => panic!("expected Aggregate under Project, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_aggregate_select_has_no_aggregate_node() {
+        // A plain projection must not introduce an Aggregate node.
+        let node = lower_sql("SELECT VALUE c.name FROM c");
+        assert!(matches!(node, Node::Project { .. }));
+        let Node::Project { source, .. } = node else {
+            unreachable!()
+        };
+        assert!(!matches!(*source, Node::Aggregate { .. }));
     }
 
     #[test]

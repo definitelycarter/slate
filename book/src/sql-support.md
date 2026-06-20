@@ -26,7 +26,8 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 
 Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
 `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
-literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`.
+literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
+(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, no `GROUP BY` yet).
 
 ---
 
@@ -119,9 +120,16 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 
 ## Aggregation functions (Tier 2)
 
-Need an `Aggregate` executor node (whole-result first, then per-group with
-`GROUP BY`).
-- [ ] `COUNT`  [ ] `SUM`  [ ] `AVG`  [ ] `MIN`  [ ] `MAX`
+Whole-result aggregation runs through a blocking `Aggregate` executor node;
+per-group (`GROUP BY`) is the next chunk (reuses the same node with group keys).
+- [x] `COUNT`  [x] `SUM`  [x] `AVG`  [x] `MIN`  [x] `MAX`
+
+Semantics (Cosmos): `COUNT(expr)` counts defined values (`COUNT(1)` counts all),
+empty → `0`. `SUM`/`AVG` skip undefined but a non-numeric *defined* value poisons
+the result to undefined; empty → undefined. `MIN`/`MAX` use the shared total
+order, preserve the winning value's type, and have no poison rule. `COUNT` →
+`Int64`, `SUM`/`AVG` → `Double` (the all-double convention), `MIN`/`MAX` → the
+actual value.
 
 ---
 

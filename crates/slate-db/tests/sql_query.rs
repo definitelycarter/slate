@@ -550,3 +550,83 @@ fn count_via_drain() {
         .unwrap();
     assert_eq!(n, 2);
 }
+
+// ── Aggregates (no GROUP BY) ────────────────────────────────────
+
+/// Run a `SELECT VALUE <aggregate>` and deserialize each bare value into `T`.
+fn agg<T: serde::de::DeserializeOwned>(db: &Database<MemoryStore>, sql: &str) -> Vec<T> {
+    let txn = db.begin(true).unwrap();
+    txn.query(DEFAULT_CF, "people", sql)
+        .unwrap()
+        .iter_values::<T>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn aggregate_count_and_sum() {
+    // people: ada/36, alan/41, grace/44
+    let db = seeded();
+    assert_eq!(agg::<i64>(&db, "SELECT VALUE COUNT(1) FROM c"), vec![3]);
+    assert_eq!(
+        agg::<f64>(&db, "SELECT VALUE SUM(c.age) FROM c"),
+        vec![121.0]
+    );
+}
+
+#[test]
+fn aggregate_avg_and_extremes() {
+    let db = seeded();
+    // alan(41) + grace(44) → average 42.5 (divides evenly).
+    assert_eq!(
+        agg::<f64>(&db, "SELECT VALUE AVG(c.age) FROM c WHERE c.age >= 41"),
+        vec![42.5]
+    );
+    // MIN/MAX preserve the stored Int32 type.
+    assert_eq!(agg::<i32>(&db, "SELECT VALUE MIN(c.age) FROM c"), vec![36]);
+    assert_eq!(agg::<i32>(&db, "SELECT VALUE MAX(c.age) FROM c"), vec![44]);
+}
+
+#[test]
+fn aggregate_multiple_in_tabular_projection() {
+    let db = seeded();
+    assert_eq!(
+        docs(&db, "SELECT COUNT(1) AS total, MAX(c.age) AS oldest FROM c"),
+        vec![doc! { "total": 3_i64, "oldest": 44_i32 }]
+    );
+}
+
+#[test]
+fn aggregate_over_empty_set() {
+    let db = seeded();
+    // COUNT over no rows is 0 (one row); SUM has no values → undefined → the
+    // SELECT VALUE row is omitted (empty result).
+    assert_eq!(
+        agg::<i64>(&db, "SELECT VALUE COUNT(1) FROM c WHERE c.age > 100"),
+        vec![0]
+    );
+    assert_eq!(
+        agg::<f64>(&db, "SELECT VALUE SUM(c.age) FROM c WHERE c.age > 100"),
+        Vec::<f64>::new()
+    );
+}
+
+#[test]
+fn aggregate_with_parameter_filter() {
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let n: Vec<i64> = txn
+        .query_with_params(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE COUNT(1) FROM c WHERE c.age > @min",
+            doc! { "min": 40 },
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(n, vec![2]);
+}

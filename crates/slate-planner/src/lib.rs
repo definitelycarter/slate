@@ -33,5 +33,6 @@ pub mod plan;
 
 pub use lower::{CollectionMeta, lower};
 pub use plan::{
-    CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection, UpsertMode,
+    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
+    ScanDirection, UpsertMode,
 };
