@@ -1,0 +1,22 @@
+[package]
+name = "slate-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "slate"
+path = "src/main.rs"
+
+[features]
+default = ["memory"]
+memory = ["slate-store/memory"]
+rocksdb = ["slate-store/rocksdb"]
+redb = ["slate-store/redb"]
+
+[dependencies]
+slate-db = { path = "../slate-db" }
+slate-sql = { path = "../slate-sql" }
+slate-store = { path = "../slate-store", default-features = false }
+bson = { workspace = true, features = ["serde_json-1"] }
+serde_json = "1"
+rustyline = "14"

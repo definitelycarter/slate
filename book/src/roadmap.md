@@ -386,6 +386,23 @@ and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
 
 ---
 
+## Interactive Shell (CLI) — Done
+
+`slate-cli` ships a native REPL (`cargo run -p slate-cli`) so the database can be
+probed without writing a throwaway binary. Lines beginning with `.` are
+meta-commands (`.create`, `.use`, `.insert`, `.update`, `.delete`, `.count`,
+`.index`, `.indexes`, `.collections`, `.drop`, `.seed`); anything else runs as
+SQL against the active collection. It opens an in-memory database by default, or
+a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
+
+The command/session/format core lives in the crate's library (not the binary):
+a line is parsed to a `Command`, run against a `Database<S>` into a semantic
+`Output`, then rendered. That read→parse→execute→format core is the seam the
+browser playground below can reuse behind `slate-wasm` instead of reimplementing.
+
+Not yet covered: managing Lua hooks (triggers/validators/UDFs), a `.plan`/`.ast`
+inspector, multi-statement transactions, and Mongo-style `.find`.
+
 ## Browser Playground
 
 ### Concept
