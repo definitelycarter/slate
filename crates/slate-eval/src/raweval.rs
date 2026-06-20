@@ -217,7 +217,9 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
 fn is_null(v: &RawValue) -> bool {
     matches!(
         v,
-        RawValue::Ref(RawBsonRef::Null) | RawValue::Owned(Bson::Null)
+        RawValue::Ref(RawBsonRef::Null)
+            | RawValue::Owned(Bson::Null)
+            | RawValue::OwnedRaw(RawBson::Null)
     )
 }
 

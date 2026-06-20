@@ -926,6 +926,22 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn is_null_recognizes_a_null_object_field() {
+    // Accessing a null field of a computed object yields a raw null; IS_NULL
+    // must recognize it (regression for the OwnedRaw(Null) case).
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<bool> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE IS_NULL({a: 1, b: null}.b)")
+        .unwrap()
+        .iter_values::<bool>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![true]);
+}
+
+#[test]
 fn from_container_alias_form() {
     // CosmosDB's `FROM <container> [AS] <alias>` — the container name is just a
     // label (the container is chosen out-of-band), so the alias binds to it.
