@@ -99,19 +99,27 @@ every undefined/omission and JOIN edge case (join on non-array/missing → no ro
 field access on a scalar element → undefined, double join → cross product)
 produces identical results.
 
-## Known divergences
+## Remaining divergences
 
-1. **Unqualified identifiers** (`SELECT id FROM c`, `SELECT VALUE name FROM c`,
-   `WHERE foo = 1`) — Cosmos returns `400 BadRequest` ("must be fully
-   qualified"); slate resolves them to undefined and omits/drops them. slate is
-   too lenient — it should reject unqualified names.
-2. **`… (SELECT COUNT(1) … FROM t) … JOIN t IN c.tags`** — a subquery whose
-   `FROM` names an outer alias (item-scoped). Cosmos iterates the single bound
-   value (`len: 1`); slate re-scans the outer container (`len: 3`). Bug in
-   slate's subquery lowering.
-3. **Divide / modulo by zero** (`SELECT VALUE 1 / 0`, `5 % 0`) — the emulator
-   raises `400 BadRequest`; slate returns undefined (drops the row). (Confirm
-   against hosted Cosmos — but a clear behavioral divergence to track.)
-4. **Reserved word as alias** (`AS top`) — `TOP` is reserved in Cosmos, so it
-   can't alias a column; slate doesn't reserve it (we don't implement `TOP`
-   yet). Expected to resolve when `TOP` lands.
+Real slate gaps:
+- **Divide / modulo by zero** (`SELECT VALUE 1 / 0`, `5 % 0`) — the emulator
+  raises `400 BadRequest`; slate returns undefined (drops the row). (Confirm
+  against hosted Cosmos — but a clear behavioral divergence to track.)
+- **Reserved word as alias** (`AS top`) — `TOP` is reserved in Cosmos, so it
+  can't alias a column; slate doesn't reserve it (we don't implement `TOP` yet).
+- **Not-yet-implemented functions** — date/time, spatial (`ST_*`), `NUMBERBIN`,
+  `VECTORDISTANCE` (the bulk of the corpus's remaining slate-errors).
+- **Subroot FROM** (`FROM a.b e`) — the one remaining corpus parse error.
+
+Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Cosmos):
+- **Multi-value subquery as a JOIN source** (`JOIN j IN (SELECT …)`) returns `[]`
+  in the emulator even when rows should match; slate returns the correct rows
+  (the Cosmos docs show this form working).
+- **`COUNT` scalar-subquery in `WHERE`** raises an internal `localCount must be a
+  number` error in the emulator; slate evaluates it.
+
+Fixed (kept here as the trail): unqualified identifiers now rejected; FROM
+`<container> [AS] alias`; item-scoped `FROM <outer-alias>` subqueries; subqueries
+in JOIN/nested-FROM sources; `IS_NULL` of a computed null; oversized integer
+literals; trig / integer / bitwise / string-conversion functions; the
+3-arg `ARRAY_CONTAINS`/`REGEXMATCH` and 2-arg `ObjectToArray` forms.

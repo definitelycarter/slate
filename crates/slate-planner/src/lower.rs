@@ -423,6 +423,110 @@ pub struct PlanError {
     pub message: String,
 }
 
+/// Reject unqualified identifiers (Cosmos requires every property reference to be
+/// bound — `SELECT id FROM c` is invalid; it must be `c.id`). An identifier is
+/// valid only if it names a binding in scope (the `FROM`/`JOIN` aliases, plus the
+/// enclosing aliases inside a subquery) or one of the special value words.
+pub fn validate_bindings(query: &Query) -> Result<(), PlanError> {
+    check_query(query, &[])
+}
+
+/// `undefined`/`NaN`/`Infinity` are value words, not bound identifiers — Cosmos
+/// accepts them anywhere a value is expected.
+fn is_special_ident(name: &str) -> bool {
+    matches!(name, "undefined" | "NaN" | "Infinity")
+}
+
+fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
+    let mut scope: Vec<&str> = outer.to_vec();
+    if let Some(from) = &query.from {
+        match &from.source {
+            FromSource::ImplicitContainer { alias } => scope.push(alias),
+            // The array is evaluated before its alias is bound.
+            FromSource::Array { alias, array } => {
+                check_expr(array, &scope)?;
+                scope.push(alias);
+            }
+        }
+        for join in &from.joins {
+            check_expr(&join.array, &scope)?;
+            scope.push(&join.alias);
+        }
+    }
+    match &query.select {
+        SelectClause::Star => {}
+        SelectClause::Value(e) => check_expr(e, &scope)?,
+        SelectClause::Projections(items) => {
+            for it in items {
+                check_expr(&it.expr, &scope)?;
+            }
+        }
+    }
+    if let Some(f) = &query.filter {
+        check_expr(f, &scope)?;
+    }
+    for k in &query.group_by {
+        check_expr(k, &scope)?;
+    }
+    for o in &query.order_by {
+        check_expr(&o.expr, &scope)?;
+    }
+    Ok(())
+}
+
+fn check_expr(expr: &ScalarExpr, scope: &[&str]) -> Result<(), PlanError> {
+    match expr {
+        ScalarExpr::Identifier(name) => {
+            if scope.contains(&name.as_str()) || is_special_ident(name) || name.starts_with('$') {
+                Ok(())
+            } else {
+                Err(PlanError {
+                    message: format!(
+                        "unqualified identifier `{name}` — Cosmos requires a bound path \
+                         (did you mean an alias like `c.{name}`?)"
+                    ),
+                })
+            }
+        }
+        ScalarExpr::Subquery { query, .. } => check_query(query, scope),
+        ScalarExpr::Member { base, .. } => check_expr(base, scope),
+        ScalarExpr::Index { base, index } => {
+            check_expr(base, scope)?;
+            check_expr(index, scope)
+        }
+        ScalarExpr::Unary { expr, .. } => check_expr(expr, scope),
+        ScalarExpr::Binary { lhs, rhs, .. } => {
+            check_expr(lhs, scope)?;
+            check_expr(rhs, scope)
+        }
+        ScalarExpr::Function { args, .. } => {
+            for a in args {
+                check_expr(a, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Object(fields) => {
+            for (_, v) in fields {
+                check_expr(v, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Array(items) => {
+            for i in items {
+                check_expr(i, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::PathGet { base, .. } => check_expr(base, scope),
+        ScalarExpr::MultikeyEq { base, value, .. } => {
+            check_expr(base, scope)?;
+            check_expr(value, scope)
+        }
+        // Literals, pre-converted values, and `@parameter`s bind no identifier.
+        ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Parameter(_) => Ok(()),
+    }
+}
+
 /// Enforce the `GROUP BY`/aggregate column rule (Cosmos): when a query groups or
 /// aggregates, every projected — and `ORDER BY` — expression must be built from
 /// the group keys, aggregates, and constants. A bare row reference (a column

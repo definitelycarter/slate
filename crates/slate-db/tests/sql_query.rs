@@ -926,6 +926,30 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn unqualified_identifier_is_rejected() {
+    // Cosmos requires bound paths; an unqualified column is an error, not undefined.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE name FROM c")
+            .is_err()
+    );
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE d.name FROM c")
+            .is_err()
+    );
+    // Qualified paths and the special value words are fine.
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE c.name FROM c")
+            .is_ok()
+    );
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE undefined FROM c")
+            .is_ok()
+    );
+}
+
+#[test]
 fn join_source_subquery() {
     // A multi-value subquery as a JOIN source: `JOIN t IN (SELECT …)` unwinds the
     // correlated subquery's result.

@@ -365,8 +365,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             }
         }
 
-        // Reject an ungrouped non-aggregate column in a GROUP BY / aggregate
-        // query (Cosmos errors rather than returning undefined).
+        // Reject unqualified identifiers (Cosmos requires bound paths like `c.x`)
+        // and an ungrouped non-aggregate column in a GROUP BY / aggregate query —
+        // both are errors in Cosmos rather than silently undefined.
+        slate_planner::validate_bindings(&query)?;
         slate_planner::validate_grouping(&query)?;
 
         // A FROM-less query (`SELECT VALUE 1`) reads no container, so it neither
