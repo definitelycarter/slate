@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bson = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 regex = "1"
 # `preserve_order` keeps object key order through STRINGTOOBJECT (matching Cosmos).
 serde_json = { version = "1", features = ["preserve_order"] }

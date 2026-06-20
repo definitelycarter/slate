@@ -88,12 +88,15 @@ optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
 
 - [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [ ] `??` coalesce operator
 
-### Date & time (Tier 0–1, own batch)
+### Date & time (Tier 0–1)
 
-Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_millis`.
+Cosmos datetimes are ISO-8601 strings (`…fffffffZ`, 100ns precision); timestamps
+are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
+`chrono` (no wall-clock feature → wasm-safe).
+- [x] `DATETIMEADD`  [x] `DATETIMEDIFF`  [x] `DATETIMEPART`  [x] `DATETIMEBIN`  [x] `DATETIMEFROMPARTS`
+- [x] `DATETIMETOTIMESTAMP`  [x] `DATETIMETOTICKS`  [x] `TIMESTAMPTODATETIME`  [x] `TICKSTODATETIME`
 - [ ] `GETCURRENTDATETIME` / `…STATIC`  [ ] `GETCURRENTTIMESTAMP` / `…STATIC`  [ ] `GETCURRENTTICKS` / `…STATIC`
-- [ ] `DATETIMEADD`  [ ] `DATETIMEDIFF`  [ ] `DATETIMEPART`  [ ] `DATETIMEBIN`  [ ] `DATETIMEFROMPARTS`
-- [ ] `DATETIMETOTIMESTAMP`  [ ] `DATETIMETOTICKS`  [ ] `TIMESTAMPTODATETIME`  [ ] `TICKSTODATETIME`
+  — need the injected clock threaded into the eval context (next).
 
 ### Item (Tier 1)
 

@@ -47,6 +47,7 @@ mod concat;
 mod contains;
 mod cos;
 mod cot;
+mod datetime;
 mod degrees;
 mod endswith;
 mod exp;
@@ -161,6 +162,15 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "INTBITNOT" => intbitnot::eval(name, args),
         "INTBITLEFTSHIFT" => intbitleftshift::eval(name, args),
         "INTBITRIGHTSHIFT" => intbitrightshift::eval(name, args),
+        "DATETIMEADD" => datetime::add(name, args),
+        "DATETIMEDIFF" => datetime::diff(name, args),
+        "DATETIMEPART" => datetime::part(name, args),
+        "DATETIMEBIN" => datetime::bin(name, args),
+        "DATETIMEFROMPARTS" => datetime::from_parts(name, args),
+        "DATETIMETOTICKS" => datetime::to_ticks(name, args),
+        "DATETIMETOTIMESTAMP" => datetime::to_timestamp(name, args),
+        "TICKSTODATETIME" => datetime::from_ticks(name, args),
+        "TIMESTAMPTODATETIME" => datetime::from_timestamp(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),
