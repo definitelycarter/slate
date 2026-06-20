@@ -148,6 +148,10 @@ pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
         ScalarExpr::Value(b) => Ok(RawValue::Owned(b.clone())),
         ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
         ScalarExpr::Parameter(name) => env.param(name),
+        // Extracted into a correlated-apply node by the planner; never seen here.
+        ScalarExpr::Subquery { .. } => Err(EvalError {
+            message: "subquery must be lowered by the planner, not evaluated directly".into(),
+        }),
 
         ScalarExpr::Member { base, field } => member_access(eval(base, env)?, field),
         ScalarExpr::Index { base, index } => {
@@ -566,6 +570,9 @@ fn decode_err(e: bson::error::Error) -> EvalError {
 /// A scalar expression with all data-independent work resolved ahead of time.
 /// Built once per query by [`compile`]; evaluated per row by [`eval_compiled`].
 pub enum Compiled {
+    /// An expression `compile` can't lower (currently only a raw `Subquery`,
+    /// which the planner is expected to have extracted). Errors if evaluated.
+    Unsupported(String),
     Literal(Literal),
     /// A query constant pre-converted to raw bytes, so each row borrows it as a
     /// `Ref` instead of cloning a fresh `Bson` (the per-row cost in `eval`).
@@ -735,6 +742,9 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
                 .collect(),
             value: Box::new(compile(value, sole)),
         },
+        ScalarExpr::Subquery { .. } => {
+            Compiled::Unsupported("subquery must be lowered by the planner".into())
+        }
     }
 }
 
@@ -797,6 +807,9 @@ fn compile_function(name: &str, args: &[ScalarExpr], sole: Option<&str>) -> Comp
 /// [`eval`] over the source [`ScalarExpr`].
 pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     match c {
+        Compiled::Unsupported(msg) => Err(EvalError {
+            message: msg.clone(),
+        }),
         Compiled::Literal(l) => Ok(literal_value(l)),
         // Borrow the pre-converted constant — no per-row allocation.
         Compiled::Value(raw) => Ok(RawValue::Ref(raw.as_raw_bson_ref())),

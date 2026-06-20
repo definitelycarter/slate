@@ -32,6 +32,7 @@ use std::rc::Rc;
 
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, EngineTransaction};
+use slate_eval::EvalError;
 use slate_planner::{Node, Plan};
 use slate_vm::pool::VmPool;
 
@@ -86,13 +87,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     /// happen as the stream is consumed (drain it to apply them).
     pub fn execute(&self, plan: Plan) -> Result<ValueIter<'a>, ExecError> {
         match plan {
-            Plan::Query(node) => self.execute_node(node),
+            Plan::Query(node) => self.execute_node(node, None),
 
             Plan::Insert { collection, source } => {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
-                let source = self.execute_node(source)?;
+                let source = self.execute_node(source, None)?;
                 nodes::insert::execute(self.txn, handle, source)
             }
 
@@ -100,7 +101,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
-                let source = self.execute_node(source)?;
+                let source = self.execute_node(source, None)?;
                 nodes::delete::execute(self.txn, handle, source)
             }
 
@@ -112,7 +113,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
-                let source = self.execute_node(source)?;
+                let source = self.execute_node(source, None)?;
                 nodes::replace::execute(self.txn, handle, replacement, source)
             }
 
@@ -124,7 +125,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
-                let source = self.execute_node(source)?;
+                let source = self.execute_node(source, None)?;
                 nodes::mutate::execute(self.txn, handle, mutation, source)
             }
 
@@ -147,7 +148,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
-                let source = self.execute_node(source)?;
+                let source = self.execute_node(source, None)?;
                 nodes::upsert::execute(self.txn, self.pool, hooks, handle, mode, source)
             }
         }
@@ -160,7 +161,15 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     }
 
     /// Dispatch a node to its per-node executor, recursing into children first.
-    fn execute_node(&self, node: Node) -> Result<ValueIter<'a>, ExecError> {
+    ///
+    /// `current` is the outer row supplied by an enclosing [`Node::Subquery`],
+    /// threaded down so a [`Node::CurrentRow`] leaf can yield it (correlation);
+    /// it's `None` outside any subquery.
+    fn execute_node(
+        &self,
+        node: Node,
+        current: Option<&RawBson>,
+    ) -> Result<ValueIter<'a>, ExecError> {
         Ok(match node {
             Node::Values(values) => nodes::values::execute(values),
 
@@ -177,7 +186,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             }
 
             Node::KeyLookup { collection, source } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::key_lookup::execute(self.txn, &collection, source)?
             }
 
@@ -187,13 +196,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 lhs,
                 rhs,
             } => {
-                let left = self.execute_node(*lhs)?;
-                let right = self.execute_node(*rhs)?;
+                let left = self.execute_node(*lhs, current)?;
+                let right = self.execute_node(*rhs, current)?;
                 nodes::index_merge::execute(self.txn, &collection, logical, left, right)?
             }
 
             Node::Bind { alias, source } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::bind::execute(alias, source)
             }
 
@@ -202,7 +211,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 array,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::unwind::execute(alias, array, source, self.params.clone())
             }
 
@@ -211,7 +220,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 binding,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::project::execute(expr, binding, source, self.params.clone())
             }
 
@@ -220,7 +229,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 binding,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::filter::execute(predicate, binding, source, self.params.clone())
             }
 
@@ -229,17 +238,17 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 binding,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::sort::execute(keys, binding, source, self.params.clone())?
             }
 
             Node::Limit { skip, take, source } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::limit::execute(skip, take, source)
             }
 
             Node::Distinct { source } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::distinct::execute(source)
             }
 
@@ -249,7 +258,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 binding,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::aggregate::execute(
                     group_keys,
                     aggregates,
@@ -265,13 +274,45 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 hooks,
                 source,
             } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::trigger::execute(self.txn, self.pool, cf, action, hooks, source)?
             }
 
             Node::Validate { validators, source } => {
-                let source = self.execute_node(*source)?;
+                let source = self.execute_node(*source, current)?;
                 nodes::validate::execute(self.pool, validators, source)?
+            }
+
+            // The single outer row fed in by an enclosing `Subquery`.
+            Node::CurrentRow => match current {
+                Some(row) => Box::new(std::iter::once(Ok(Some(row.clone())))),
+                None => Box::new(std::iter::once(Err(EvalError {
+                    message: "CurrentRow evaluated outside a subquery".into(),
+                }
+                .into()))),
+            },
+
+            // Correlated apply: for each outer row, run the subplan with that row
+            // fed in via `CurrentRow`, reduce by `kind`, and attach to the slot.
+            // Blocking (eager) so the result stream borrows only the txn, not the
+            // executor. The subplan is cloned per row because re-running it
+            // consumes a fresh `Node`; this is the nested-loop baseline that
+            // decorrelation would optimize.
+            Node::Subquery {
+                slot,
+                kind,
+                subplan,
+                source,
+            } => {
+                let source = self.execute_node(*source, current)?;
+                let mut out: Vec<RawBson> = Vec::new();
+                for item in source {
+                    let Some(row) = item? else { continue };
+                    let sub = self.execute_node((*subplan).clone(), Some(&row))?;
+                    let value = nodes::subquery::reduce(sub, kind)?;
+                    out.push(nodes::subquery::augment(row, &slot, value)?);
+                }
+                Box::new(out.into_iter().map(|v| Ok(Some(v))))
             }
         })
     }

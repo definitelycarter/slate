@@ -27,7 +27,8 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
 `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
 literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
-(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`.
+(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
+(scalar / `EXISTS` / `ARRAY` over `FROM x IN <array>`).
 
 ---
 
@@ -117,7 +118,11 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
   reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
   aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,
   matching Cosmos.
-- [ ] Subquery  *(Tier 4 — correlated array subqueries first)*
+- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)` over an
+  in-document array (`FROM x IN <array>`), correlated or uncorrelated, nesting
+  to any depth. Each lowers to a correlated-apply (`Subquery`) node over a
+  `CurrentRow` leaf, reusing the full node set inside the subplan. *Not yet: a
+  multi-value subquery as a `JOIN` source (`JOIN t IN (SELECT …)`).*
 
 ---
 

@@ -96,6 +96,15 @@ impl Parser {
     // ── Top-level query ─────────────────────────────────────────
 
     pub fn parse_query(&mut self) -> Result<Query> {
+        let query = self.parse_query_body()?;
+        self.expect(&Token::Eof)?;
+        Ok(query)
+    }
+
+    /// Parse a query body without the trailing end-of-input check — shared by the
+    /// top-level [`parse_query`](Self::parse_query) and by subqueries, which end
+    /// at `)` rather than at end-of-input.
+    fn parse_query_body(&mut self) -> Result<Query> {
         self.expect(&Token::Select)?;
         let select = self.parse_select()?;
 
@@ -132,8 +141,6 @@ impl Parser {
         } else {
             None
         };
-
-        self.expect(&Token::Eof)?;
 
         Ok(Query {
             select,
@@ -192,7 +199,16 @@ impl Parser {
 
     fn parse_from(&mut self) -> Result<FromClause> {
         let alias = self.parse_ident()?;
-        let source = FromSource::ImplicitContainer { alias };
+        // `FROM x IN <array>` (a subquery's array source) vs `FROM <alias>` (the
+        // container). The `IN` form binds the alias to each array element.
+        let source = if self.matches(&Token::In) {
+            FromSource::Array {
+                alias,
+                array: self.parse_expr()?,
+            }
+        } else {
+            FromSource::ImplicitContainer { alias }
+        };
 
         let mut joins = Vec::new();
         while self.matches(&Token::Join) {
@@ -477,13 +493,45 @@ impl Parser {
             Token::Null => Ok(ScalarExpr::Literal(Literal::Null)),
             Token::Param(p) => Ok(ScalarExpr::Parameter(p)),
             Token::LParen => {
-                let expr = self.parse_expr()?;
-                self.expect(&Token::RParen)?;
-                Ok(expr)
+                // `(SELECT …)` is a scalar subquery; otherwise a grouped expr.
+                if self.peek() == &Token::Select {
+                    let query = self.parse_query_body()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(ScalarExpr::Subquery {
+                        query: Box::new(query),
+                        kind: SubqueryKind::Scalar,
+                    })
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(expr)
+                }
             }
             Token::LBrace => self.parse_object(),
             Token::LBracket => self.parse_array(),
             Token::Ident(name) => {
+                // `EXISTS (SELECT …)` / `ARRAY (SELECT …)` are subquery forms;
+                // otherwise these are ordinary identifiers/function calls.
+                let upper = name.to_ascii_uppercase();
+                if (upper == "EXISTS" || upper == "ARRAY") && self.peek() == &Token::LParen {
+                    self.advance(); // consume `(`
+                    if self.peek() == &Token::Select {
+                        let query = self.parse_query_body()?;
+                        self.expect(&Token::RParen)?;
+                        let kind = if upper == "EXISTS" {
+                            SubqueryKind::Exists
+                        } else {
+                            SubqueryKind::Array
+                        };
+                        return Ok(ScalarExpr::Subquery {
+                            query: Box::new(query),
+                            kind,
+                        });
+                    }
+                    // Not a subquery — a normal call (`(` already consumed).
+                    let args = self.parse_call_args()?;
+                    return Ok(ScalarExpr::Function { name, args });
+                }
                 if self.peek() == &Token::LParen {
                     self.advance();
                     let args = self.parse_call_args()?;
@@ -988,5 +1036,52 @@ mod tests {
     #[test]
     fn no_group_by_is_empty() {
         assert!(parse("SELECT VALUE c FROM c").group_by.is_empty());
+    }
+
+    #[test]
+    fn scalar_subquery_parses() {
+        let q = parse("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c");
+        let SelectClause::Value(ScalarExpr::Subquery { kind, query }) = q.select else {
+            panic!("expected a scalar subquery");
+        };
+        assert_eq!(kind, SubqueryKind::Scalar);
+        // The inner query's FROM is an array source.
+        assert!(matches!(query.from.source, FromSource::Array { ref alias, .. } if alias == "t"));
+    }
+
+    #[test]
+    fn exists_and_array_subqueries_parse() {
+        let q = parse("SELECT VALUE c FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags)");
+        assert!(matches!(
+            q.filter,
+            Some(ScalarExpr::Subquery {
+                kind: SubqueryKind::Exists,
+                ..
+            })
+        ));
+        let q = parse("SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Subquery {
+                kind: SubqueryKind::Array,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn from_array_source_parses() {
+        let q = parse("SELECT VALUE x FROM x IN [1, 2, 3]");
+        assert!(matches!(q.from.source, FromSource::Array { ref alias, .. } if alias == "x"));
+    }
+
+    #[test]
+    fn exists_without_subquery_is_a_normal_function() {
+        // `EXISTS(...)` not followed by SELECT stays an ordinary function call.
+        let q = parse("SELECT VALUE EXISTS(c.x) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
+        ));
     }
 }

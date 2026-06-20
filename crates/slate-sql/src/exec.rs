@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 
 use bson::{Bson, Document};
 
-use crate::error::Result;
+use crate::error::{Result, SqlError};
 use slate_ast::{FromSource, OrderByItem, Query, SortDirection};
 use slate_eval::Value;
 use slate_eval::eval::{self, Env};
@@ -44,6 +44,13 @@ pub fn execute(query: &Query, docs: &[Bson]) -> Result<Vec<Bson>> {
 pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> Result<Vec<Bson>> {
     let base_alias = match &query.from.source {
         FromSource::ImplicitContainer { alias } => alias.as_str(),
+        // An array source only appears inside a subquery, which this standalone
+        // in-memory executor doesn't run (the planner/executor path does).
+        FromSource::Array { .. } => {
+            return Err(SqlError::Eval {
+                message: "FROM <alias> IN <array> is only valid inside a subquery".into(),
+            });
+        }
     };
 
     // Base rows: one per source document.

@@ -65,6 +65,16 @@ fn expand(
                 out.push(extend_env(&bindings, alias, raw)?);
             }
         }
+        // A constructed array kept in raw form — an array literal (`[…]`) or a
+        // function/subquery result.
+        RawValue::OwnedRaw(RawBson::Array(arr)) => {
+            for elem in &*arr {
+                let elem = elem.map_err(|e| EvalError {
+                    message: format!("could not read array element: {e}"),
+                })?;
+                out.push(extend_env(&bindings, alias, elem)?);
+            }
+        }
         _ => {}
     }
     Ok(out)

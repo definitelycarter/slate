@@ -631,6 +631,140 @@ fn aggregate_with_parameter_filter() {
     assert_eq!(n, vec![2]);
 }
 
+// ── Subqueries ──────────────────────────────────────────────────
+
+#[test]
+fn scalar_subquery_counts_in_document_array() {
+    // Per doc, count its tags via a correlated scalar (aggregate) subquery.
+    // ada ["x","y"]→2, alan ["y","z"]→2, grace []→0.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let counts: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c ORDER BY c.age ASC",
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(counts, vec![2, 2, 0]);
+}
+
+#[test]
+fn scalar_subquery_with_inner_filter_is_correlated() {
+    // Count only the "y" tags per doc: ada→1, alan→1, grace→0.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let counts: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            r#"SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags WHERE t = "y") FROM c ORDER BY c.age ASC"#,
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(counts, vec![1, 1, 0]);
+}
+
+#[test]
+fn exists_subquery_in_where() {
+    // Keep docs whose tags contain "z" → only alan ["y","z"].
+    let db = seeded();
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t = "z") ORDER BY c.age ASC"#
+        ),
+        vec!["alan"]
+    );
+}
+
+#[test]
+fn uncorrelated_subquery_is_constant_per_row() {
+    // The inner array is a literal — independent of the outer row — so every
+    // outer doc gets the same value (3).
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let counts: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE (SELECT VALUE COUNT(1) FROM x IN [10, 20, 30]) FROM c",
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(counts, vec![3, 3, 3]);
+}
+
+#[test]
+fn nested_subqueries() {
+    // Three correlation levels: count each doc's groups whose items contain "x".
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    {
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "nest".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "nest",
+            vec![
+                doc! { "_id": "1", "groups": [ { "items": ["x", "y"] }, { "items": ["z"] } ] },
+                doc! { "_id": "2", "groups": [ { "items": ["a"] } ] },
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "nest",
+            r#"SELECT VALUE (
+                 SELECT VALUE COUNT(1) FROM g IN c.groups
+                 WHERE EXISTS (SELECT VALUE i FROM i IN g.items WHERE i = "x")
+               ) FROM c ORDER BY c._id ASC"#,
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![1, 0]); // doc 1: one group has "x"; doc 2: none
+}
+
+#[test]
+fn array_subquery_collects_into_array() {
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<Vec<String>> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            r#"SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c WHERE c.name = "ada""#,
+        )
+        .unwrap()
+        .iter_values::<Vec<String>>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![vec!["x".to_string(), "y".to_string()]]);
+}
+
 // ── GROUP BY ────────────────────────────────────────────────────
 
 #[test]

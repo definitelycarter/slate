@@ -6,7 +6,7 @@
 //! deliberately small for now — see the crate docs for the planned set.
 
 use bson::{Bson, RawBson, RawDocumentBuf};
-use slate_ast::{OrderByItem, ScalarExpr};
+use slate_ast::{OrderByItem, ScalarExpr, SubqueryKind};
 use slate_vm::ResolvedHook;
 
 /// A top-level plan: a read query, or a write whose `source` is a read-node
@@ -279,6 +279,24 @@ pub enum Node {
         validators: Vec<ResolvedHook>,
         source: Box<Node>,
     },
+
+    /// A correlated subquery (an `Apply`): for each row from `source`, run
+    /// `subplan` — with that row fed in via [`Node::CurrentRow`] so the subplan's
+    /// correlated fields resolve — reduce the subplan's rows by `kind`
+    /// (scalar / exists / array), and emit the row extended with `{slot: value}`.
+    /// Rows flow from `source`; `subplan` is a per-row subroutine, not a second
+    /// input. Always produces an environment row, so downstream binds as `Env`.
+    Subquery {
+        slot: String,
+        kind: SubqueryKind,
+        subplan: Box<Node>,
+        source: Box<Node>,
+    },
+
+    /// The single row supplied by the enclosing [`Node::Subquery`] for the
+    /// current outer iteration — the leaf of a subplan, in place of a `Scan`.
+    /// It carries the outer environment so correlated array sources resolve.
+    CurrentRow,
 }
 
 /// One grouping key of an [`Node::Aggregate`]: `expr` is evaluated per input row

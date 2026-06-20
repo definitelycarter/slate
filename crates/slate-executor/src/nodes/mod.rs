@@ -32,6 +32,7 @@ pub(crate) mod project;
 pub(crate) mod replace;
 pub(crate) mod scan;
 pub(crate) mod sort;
+pub(crate) mod subquery;
 pub(crate) mod trigger;
 pub(crate) mod unwind;
 pub(crate) mod upsert;

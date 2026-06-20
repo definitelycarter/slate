@@ -52,6 +52,11 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
         ScalarExpr::Value(b) => Ok(Value::Defined(b.clone())),
         ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
         ScalarExpr::Parameter(name) => Ok(env.param(name)),
+        // The planner extracts subqueries into a correlated-apply node, so the
+        // evaluator never sees this variant in a well-formed plan.
+        ScalarExpr::Subquery { .. } => Err(crate::EvalError {
+            message: "subquery must be lowered by the planner, not evaluated directly".into(),
+        }),
 
         ScalarExpr::Member { base, field } => Ok(member_access(eval(base, env)?, field)),
         ScalarExpr::Index { base, index } => Ok(index_access(eval(base, env)?, eval(index, env)?)),

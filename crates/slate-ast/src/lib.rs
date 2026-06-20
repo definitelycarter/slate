@@ -93,6 +93,27 @@ pub enum ScalarExpr {
         index_path: String,
         value: Box<ScalarExpr>,
     },
+
+    /// A subquery used in scalar position — `(SELECT …)`, `EXISTS (…)`, or
+    /// `ARRAY (…)`. The inner [`Query`] ranges over an in-document array (its
+    /// `FROM x IN <array>`) and may reference the outer row (correlated). The
+    /// planner extracts these out of the surrounding expression into a
+    /// correlated-apply node, so the evaluators never see this variant directly.
+    Subquery {
+        query: Box<Query>,
+        kind: SubqueryKind,
+    },
+}
+
+/// How a [`ScalarExpr::Subquery`]'s row stream is reduced to a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubqueryKind {
+    /// `(SELECT …)` — the single produced value, or undefined if none.
+    Scalar,
+    /// `EXISTS (…)` — whether the subquery produced any row.
+    Exists,
+    /// `ARRAY (…)` — the produced values collected into an array.
+    Array,
 }
 
 impl ScalarExpr {
@@ -130,6 +151,8 @@ impl ScalarExpr {
                     e.collect_parameters(out);
                 }
             }
+            // A subquery may reference outer `@params`; descend into it.
+            ScalarExpr::Subquery { query, .. } => query.collect_parameters(out),
         }
     }
 }
@@ -180,33 +203,44 @@ pub struct Query {
 
 impl Query {
     /// The names of every `@parameter` referenced anywhere in the query — the
-    /// projection, `JOIN … IN` array expressions, `WHERE`, and `ORDER BY` — with
-    /// the leading `@` stripped, deduplicated and sorted. Used to validate that a
-    /// caller supplied a value for each referenced parameter.
+    /// projection, `JOIN … IN`/`FROM … IN` array expressions, `WHERE`,
+    /// `GROUP BY`, `ORDER BY`, and any nested subqueries — with the leading `@`
+    /// stripped, deduplicated and sorted. Used to validate that a caller supplied
+    /// a value for each referenced parameter.
     pub fn parameter_names(&self) -> BTreeSet<&str> {
         let mut out = BTreeSet::new();
+        self.collect_parameters(&mut out);
+        out
+    }
+
+    /// Add every referenced `@parameter` name to `out` (recursing into nested
+    /// subqueries). Shared by [`parameter_names`](Self::parameter_names) and the
+    /// subquery arm of [`ScalarExpr::collect_parameters`].
+    pub fn collect_parameters<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
         match &self.select {
-            SelectClause::Value(e) => e.collect_parameters(&mut out),
+            SelectClause::Value(e) => e.collect_parameters(out),
             SelectClause::Star => {}
             SelectClause::Projections(items) => {
                 for it in items {
-                    it.expr.collect_parameters(&mut out);
+                    it.expr.collect_parameters(out);
                 }
             }
         }
+        if let FromSource::Array { array, .. } = &self.from.source {
+            array.collect_parameters(out);
+        }
         for join in &self.from.joins {
-            join.array.collect_parameters(&mut out);
+            join.array.collect_parameters(out);
         }
         if let Some(filter) = &self.filter {
-            filter.collect_parameters(&mut out);
+            filter.collect_parameters(out);
         }
         for key in &self.group_by {
-            key.collect_parameters(&mut out);
+            key.collect_parameters(out);
         }
         for item in &self.order_by {
-            item.expr.collect_parameters(&mut out);
+            item.expr.collect_parameters(out);
         }
-        out
     }
 }
 
@@ -261,6 +295,10 @@ pub enum FromSource {
     /// chosen out-of-band by the caller. There is no collection name in the
     /// SQL text (matching Cosmos).
     ImplicitContainer { alias: String },
+    /// `FROM <alias> IN <array>` — the alias binds to each element of an array
+    /// expression, with no container scan. Used by subqueries, whose source is
+    /// an in-document array (correlated) or a literal (uncorrelated).
+    Array { alias: String, array: ScalarExpr },
     // Future: `Collection { name: String, alias: String }` for cross-collection joins.
 }
 

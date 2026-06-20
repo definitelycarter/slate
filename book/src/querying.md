@@ -95,6 +95,8 @@ Two deliberate differences from a Mongo `find` projection:
 
 **Aggregates and `GROUP BY`.** `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` in a `SELECT` collapse the matching rows to one result row — `SELECT VALUE COUNT(1) FROM c` → `[3]`, `SELECT MAX(c.age) AS oldest FROM c` → `[{ "oldest": 44 }]`. `COUNT` over an empty set is `0`; `SUM`/`AVG`/`MIN`/`MAX` over no values are undefined. With `GROUP BY <expr>, …` the rows collapse to one per distinct group instead — `SELECT c.kind, COUNT(c.tags) AS n FROM c GROUP BY c.kind` yields a row per `kind`. `SELECT` and `ORDER BY` may reference only the group-key expressions or aggregates (`ORDER BY` sorts the resulting group rows); an ungrouped non-aggregate column is rejected, as in Cosmos.
 
+**Subqueries.** A subquery ranges over an *in-document array* (`FROM x IN <array>`), never another container, so it's a per-row sub-pipeline rather than a second scan. Three forms are supported: a scalar `(SELECT …)` (its single value, or undefined), `EXISTS (…)` (a boolean), and `ARRAY (…)` (the rows collected into an array). They appear in `SELECT` and `WHERE`, may be **correlated** (referencing the outer row, e.g. `(SELECT VALUE COUNT(1) FROM t IN c.tags)`) or uncorrelated (a literal source), and may nest to any depth — e.g. `WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t.key = "fabric")`. (A subquery as a `JOIN` source isn't supported yet.)
+
 ### Iterating results
 
 A `Cursor` — from `find` or `query` — exposes:
