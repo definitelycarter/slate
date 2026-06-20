@@ -23,15 +23,22 @@
 //! a function is a new file plus one arm here. Aggregate functions live in
 //! [`crate::agg`].
 
+use std::cmp::Ordering;
+
 use bson::Bson;
 
 use crate::error::{EvalError, Result};
 use crate::value::Value;
 
 mod abs;
+mod array_concat;
 mod array_contains;
+mod array_contains_all;
+mod array_contains_any;
 mod array_length;
+mod array_slice;
 mod ceiling;
+mod choose;
 mod concat;
 mod contains;
 mod endswith;
@@ -54,6 +61,7 @@ mod log;
 mod log10;
 mod lower;
 mod ltrim;
+mod objecttoarray;
 mod pi;
 mod power;
 mod regexmatch;
@@ -63,6 +71,8 @@ mod reverse;
 mod right;
 mod round;
 mod rtrim;
+mod setintersect;
+mod setunion;
 mod sign;
 mod sqrt;
 mod square;
@@ -105,6 +115,14 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "PI" => pi::eval(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
+        "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),
+        "ARRAY_CONTAINS_ANY" => array_contains_any::eval(name, args),
+        "ARRAY_CONCAT" => array_concat::eval(name, args),
+        "ARRAY_SLICE" => array_slice::eval(name, args),
+        "CHOOSE" => choose::eval(name, args),
+        "SETINTERSECT" => setintersect::eval(name, args),
+        "SETUNION" => setunion::eval(name, args),
+        "OBJECTTOARRAY" => objecttoarray::eval(name, args),
         "CONTAINS" => contains::eval(name, args),
         "STARTSWITH" => starts_with::eval(name, args),
         "ENDSWITH" => endswith::eval(name, args),
@@ -187,6 +205,32 @@ fn int_arg(v: &Value) -> Option<i64> {
         Value::Defined(Bson::Double(f)) if f.is_finite() => Some(*f as i64),
         _ => None,
     }
+}
+
+/// Consume a `Value` into an owned BSON array, or `None` if it is not an array.
+/// Lets the array functions build their result by moving elements rather than
+/// cloning them.
+fn into_array(v: Value) -> Option<Vec<Bson>> {
+    match v {
+        Value::Defined(Bson::Array(a)) => Some(a),
+        _ => None,
+    }
+}
+
+/// Value-based element equality for the array/set functions: numerics coerce by
+/// value (the same rule `=` and `ARRAY_CONTAINS` use), and the structural types
+/// the scalar comparator can't order (arrays, documents) fall back to BSON
+/// equality.
+fn bson_eq(a: &Bson, b: &Bson) -> bool {
+    match crate::eval::compare_values(a, b) {
+        Some(ord) => ord == Ordering::Equal,
+        None => a == b,
+    }
+}
+
+/// Whether `arr` contains an element equal to `needle` under [`bson_eq`].
+fn contains_eq(arr: &[Bson], needle: &Bson) -> bool {
+    arr.iter().any(|e| bson_eq(e, needle))
 }
 
 /// Shared logic for the string predicate functions (`STARTSWITH`, `ENDSWITH`,

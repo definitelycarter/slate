@@ -73,8 +73,8 @@ optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
 ### Array (Tier 0)
 
 - [x] `ARRAY_CONTAINS`  [x] `ARRAY_LENGTH`
-- [ ] `ARRAY_CONCAT`  [ ] `ARRAY_SLICE`  [ ] `ARRAY_CONTAINS_ALL`  [ ] `ARRAY_CONTAINS_ANY`
-- [ ] `CHOOSE`  [ ] `SETINTERSECT`  [ ] `SETUNION`  [ ] `OBJECTTOARRAY`
+- [x] `ARRAY_CONCAT`  [x] `ARRAY_SLICE`  [x] `ARRAY_CONTAINS_ALL`  [x] `ARRAY_CONTAINS_ANY`
+- [x] `CHOOSE`  [x] `SETINTERSECT`  [x] `SETUNION`  [x] `OBJECTTOARRAY`
 
 ### Type checking (Tier 0)
 
