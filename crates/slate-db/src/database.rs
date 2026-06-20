@@ -328,7 +328,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let params = bson::serialize_to_raw_document_buf(&params)?;
         let plan = self.lower_sql(cf, collection, sql)?;
-        Ok(Cursor::new_v2_with_params(&self.txn, plan, self.pool, params))
+        Ok(Cursor::new_v2_with_params(
+            &self.txn, plan, self.pool, params,
+        ))
     }
 
     /// Parse and lower a SQL string into a v2 plan (shared by `query` and
