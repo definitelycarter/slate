@@ -54,6 +54,12 @@ mod floor;
 mod iif;
 mod index_of;
 mod intadd;
+mod intbitand;
+mod intbitleftshift;
+mod intbitnot;
+mod intbitor;
+mod intbitrightshift;
+mod intbitxor;
 mod intdiv;
 mod intmod;
 mod intmul;
@@ -144,6 +150,12 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "INTMUL" => intmul::eval(name, args),
         "INTDIV" => intdiv::eval(name, args),
         "INTMOD" => intmod::eval(name, args),
+        "INTBITAND" => intbitand::eval(name, args),
+        "INTBITOR" => intbitor::eval(name, args),
+        "INTBITXOR" => intbitxor::eval(name, args),
+        "INTBITNOT" => intbitnot::eval(name, args),
+        "INTBITLEFTSHIFT" => intbitleftshift::eval(name, args),
+        "INTBITRIGHTSHIFT" => intbitrightshift::eval(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),

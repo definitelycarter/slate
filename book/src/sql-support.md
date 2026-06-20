@@ -58,7 +58,7 @@ aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
 - [ ] `NUMBERBIN` *(round to a multiple)*
 - [x] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
 - [x] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(integer args only; ÷/mod 0 → undefined)*
-- [ ] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
+- [x] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
 
 ### String (Tier 0)
 
