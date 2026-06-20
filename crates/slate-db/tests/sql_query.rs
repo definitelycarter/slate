@@ -15,8 +15,8 @@ fn seeded() -> Database<MemoryStore> {
         ..Default::default()
     })
     .unwrap();
-    // Index a string field — numeric filters stay non-indexed to sidestep the
-    // documented mixed-numeric index-range gap (SQL int literals are Int64).
+    // A string index exercises the sargable string path; numeric cross-type
+    // index behaviour is covered by `indexed_numeric_queries_are_correct_across_types`.
     txn.create_index(DEFAULT_CF, "people", "name").unwrap();
     txn.insert_many(
         DEFAULT_CF,
@@ -226,6 +226,138 @@ fn duplicate_projected_key_is_an_error() {
         txn.query(DEFAULT_CF, "people", "SELECT c.name, c.age AS name FROM c")
             .is_err()
     );
+}
+
+#[test]
+fn indexed_numeric_queries_are_correct_across_types() {
+    // Regression: SQL int literals are i64; an *indexed* numeric field stores
+    // values of varied types (Int32/Int64/Double). Index scans must compare
+    // cross-type, not over/under-return (a typed range scan let age=36 match
+    // `age > 40`).
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "n".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.create_index(DEFAULT_CF, "n", "age").unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "n",
+        vec![
+            doc! { "_id": "a", "age": 36_i32 },   // Int32
+            doc! { "_id": "b", "age": 41_i64 },   // Int64
+            doc! { "_id": "c", "age": 44.0_f64 }, // Double
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    let ids = |sql: &str| -> Vec<String> {
+        let mut out: Vec<String> = txn
+            .query(DEFAULT_CF, "n", sql)
+            .unwrap()
+            .iter_values::<String>()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        ids("SELECT VALUE c._id FROM c WHERE c.age > 40"),
+        vec!["b", "c"]
+    );
+    assert_eq!(
+        ids("SELECT VALUE c._id FROM c WHERE c.age < 42"),
+        vec!["a", "b"]
+    );
+    assert_eq!(
+        ids("SELECT VALUE c._id FROM c WHERE c.age >= 44"),
+        vec!["c"]
+    );
+    assert_eq!(ids("SELECT VALUE c._id FROM c WHERE c.age = 41"), vec!["b"]);
+    // a Double bound against Int32/Int64-stored values
+    assert_eq!(
+        ids("SELECT VALUE c._id FROM c WHERE c.age > 40.5"),
+        vec!["b", "c"]
+    );
+}
+
+#[test]
+fn fuzz_indexed_numeric_matches_brute_force() {
+    // Property test for the cross-type index fix. The v1↔v2 differential fuzz
+    // can't cover this — v1 shares the numeric-range over-return bug, so the two
+    // engines would diverge — so this checks v2 against a brute-force reference
+    // (the evaluator promotes numerics to f64, so the reference does too).
+    use bson::Bson;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    for seed in 0..150u64 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "f".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.create_index(DEFAULT_CF, "f", "age").unwrap();
+
+        // Each doc's indexed `age` is a random numeric of a random BSON type.
+        let mut expected: Vec<(String, f64)> = Vec::new();
+        let mut docs = Vec::new();
+        for i in 0..8 {
+            let id = format!("d{i}");
+            let n: i32 = rng.gen_range(-50..50);
+            let (age, as_f64) = match rng.gen_range(0..3) {
+                0 => (Bson::Int32(n), n as f64),
+                1 => (Bson::Int64(n as i64), n as f64),
+                _ => (Bson::Double(n as f64 + 0.5), n as f64 + 0.5),
+            };
+            docs.push(doc! { "_id": id.clone(), "age": age });
+            expected.push((id, as_f64));
+        }
+        txn.insert_many(DEFAULT_CF, "f", docs)
+            .unwrap()
+            .drain()
+            .unwrap();
+        txn.commit().unwrap();
+
+        // A random comparison against an integer bound (SQL int literal → i64).
+        let bound: i32 = rng.gen_range(-50..50);
+        let bf = bound as f64;
+        let (op, pred): (&str, fn(f64, f64) -> bool) = match rng.gen_range(0..5) {
+            0 => (">", |a, b| a > b),
+            1 => (">=", |a, b| a >= b),
+            2 => ("<", |a, b| a < b),
+            3 => ("<=", |a, b| a <= b),
+            _ => ("=", |a, b| a == b),
+        };
+        let sql = format!("SELECT VALUE c._id FROM c WHERE c.age {op} {bound}");
+
+        let txn = db.begin(true).unwrap();
+        let mut got: Vec<String> = txn
+            .query(DEFAULT_CF, "f", &sql)
+            .unwrap()
+            .iter_values::<String>()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        got.sort();
+        let mut want: Vec<String> = expected
+            .iter()
+            .filter(|(_, a)| pred(*a, bf))
+            .map(|(id, _)| id.clone())
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "seed={seed} sql=`{sql}`");
+    }
 }
 
 #[test]

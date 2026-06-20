@@ -21,4 +21,5 @@ pub mod raweval;
 pub mod value;
 
 pub use error::{EvalError, Result};
+pub use eval::compare_bson;
 pub use value::Value;

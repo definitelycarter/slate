@@ -72,17 +72,28 @@ fn assert_parity(filter: Document) {
 
 #[test]
 fn mixed_numeric_equality_coerces() {
-    // age is stored as Int32 (1,4) / Int64 (2) / Double (3). A numeric query
-    // value should match across representations.
-    assert_parity(doc! { "age": 30 });
-    assert_parity(doc! { "age": 40 });
-    assert_parity(doc! { "age": 50 });
+    // age is stored as Int32 (1) / Int64 (2, 4) / Double (3). A numeric query
+    // value matches across representations. v1 is NOT a clean oracle here: its
+    // index-Eq post-filter only coerces Int32/Int64 (it drops Double), so we
+    // pin v2 against the correct result rather than against v1.
+    assert_eq!(ids(QueryEngine::V2, doc! { "age": 30 }), vec!["1", "4"]);
+    assert_eq!(ids(QueryEngine::V2, doc! { "age": 40 }), vec!["2"]);
+    assert_eq!(ids(QueryEngine::V2, doc! { "age": 50 }), vec!["3"]); // Double-stored
 }
 
 #[test]
 fn numeric_range_across_types() {
-    assert_parity(doc! { "age": { "$gt": 35 } });
-    assert_parity(doc! { "age": { "$gte": 40, "$lt": 50 } });
+    // Cross-type numeric ranges over an indexed field. v1 is NOT a clean oracle:
+    // a typed index range scan over-returns when the bound's type differs from
+    // the stored values, so pin v2 == correct. ages: 30(i32) 40(i64) 50.0(f64) 30(i64).
+    assert_eq!(
+        ids(QueryEngine::V2, doc! { "age": { "$gt": 35 } }),
+        vec!["2", "3"]
+    );
+    assert_eq!(
+        ids(QueryEngine::V2, doc! { "age": { "$gte": 40, "$lt": 50 } }),
+        vec!["2"]
+    );
 }
 
 #[test]

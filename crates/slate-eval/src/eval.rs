@@ -322,6 +322,15 @@ pub(crate) fn compare_scalar(a: &Scalar, b: &Scalar) -> Option<Ordering> {
     }
 }
 
+/// The shared scalar comparison over two owned BSON values — the exact rule
+/// `WHERE` uses (numeric coercion across `Int32`/`Int64`/`Double`, lexicographic
+/// strings, …). `None` when the two aren't comparable (different domains, or a
+/// non-scalar). Re-exported so the index scan's cross-type post-filter agrees
+/// with evaluation rather than re-deriving its own numeric rules.
+pub fn compare_bson(a: &Bson, b: &Bson) -> Option<Ordering> {
+    compare_scalar(&scalar_of_bson(a)?, &scalar_of_bson(b)?)
+}
+
 /// Total order over values, for `ORDER BY`. Undefined sorts first; values from
 /// different domains fall back to a stable type ranking. This is the single
 /// definition of sort ordering, shared by the in-memory engine here and the v2
