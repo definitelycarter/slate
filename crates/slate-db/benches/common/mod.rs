@@ -44,12 +44,15 @@ pub fn consume_rows(iter: RawIter) -> usize {
     iter.count()
 }
 
-/// A builder honoring the `SLATE_V2` env toggle: set it to run reads through
-/// the v2 engine (`SLATE_V2=1 cargo bench --bench query ...`), for A/B timing
-/// against the default v1 path.
+/// A builder honoring env toggles for A/B timing. Reads default to **v2** (the
+/// builder default); set `SLATE_V1=1` to force the old engine for comparison
+/// (e.g. `SLATE_V1=1 cargo bench --bench query ... --save-baseline v1`).
+/// `SLATE_V2=1` forces v2 explicitly.
 pub fn db_builder() -> DatabaseBuilder {
     let mut b = DatabaseBuilder::new();
-    if std::env::var_os("SLATE_V2").is_some() {
+    if std::env::var_os("SLATE_V1").is_some() {
+        b = b.query_engine(slate_db::QueryEngine::V1);
+    } else if std::env::var_os("SLATE_V2").is_some() {
         b = b.query_engine(slate_db::QueryEngine::V2);
     }
     b

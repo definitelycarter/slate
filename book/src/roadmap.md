@@ -1,5 +1,28 @@
 # Roadmap
 
+## Query Engine v2 — Default (v1 pending removal)
+
+`find` and SQL now run through the v2 stack by default: the Mongo front-end
+(`slate-query`) and SQL front-end (`slate-sql`) lower to one shared AST
+(`slate-ast`), planned by `slate-planner`, executed by `slate-executor`, with
+expression evaluation in `slate-eval` (over the fast `slate-rawbson` field
+scanner). Two query surfaces, one planner/executor/evaluator, so they can't
+drift.
+
+`QueryEngine::V1` (the original in-crate planner/executor) is still selectable
+via `DatabaseBuilder::query_engine` and remains the differential oracle for
+testing; untranslatable filters fall back to it automatically.
+
+### Remaining before deleting v1
+
+- **Soak** v2-as-default for a release before removing v1 (treat "make default"
+  and "delete v1" as two steps).
+- Parity is established (whole suite green under v2; `tests/diff_fuzz.rs` +
+  `tests/parity_audit.rs` cross-check v1↔v2). Per-row perf is at/near v1 on the
+  common shapes after the compiled-expression pass; the remaining gaps
+  (projection object construction, prepared statements for point lookups) are
+  constant-factor, not correctness or plan-shape.
+
 ## Collect Node (Plan Materialization Barrier)
 
 ### Concept

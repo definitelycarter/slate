@@ -33,14 +33,15 @@ fn distinct_field_expr(field: &str) -> slate_ast::ScalarExpr {
 
 /// Which query engine backs reads.
 ///
-/// `V1` is the original planner/executor in this crate. `V2` routes `find`
-/// through the new stack — the Mongo front-end (`slate-query`) → shared AST →
-/// `slate-planner` → `slate-executor` — running alongside v1 while it is brought
-/// to full parity. Default is [`QueryEngine::V1`].
+/// `V2` (the default) routes `find` through the new stack — the Mongo
+/// front-end (`slate-query`) → shared AST → `slate-planner` → `slate-executor`.
+/// `V1` is the original planner/executor in this crate, kept for a soak period
+/// and as the differential oracle for v1↔v2 testing; untranslatable filters
+/// under `V2` still fall back to it automatically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryEngine {
-    #[default]
     V1,
+    #[default]
     V2,
 }
 
@@ -57,13 +58,13 @@ impl DatabaseBuilder {
         Self {
             pool: None,
             clock: None,
-            engine: QueryEngine::V1,
+            engine: QueryEngine::V2,
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
     }
 
-    /// Select the query engine backing reads (default [`QueryEngine::V1`]).
+    /// Select the query engine backing reads (default [`QueryEngine::V2`]).
     pub fn query_engine(mut self, engine: QueryEngine) -> Self {
         self.engine = engine;
         self
