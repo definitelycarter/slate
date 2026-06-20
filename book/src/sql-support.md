@@ -113,10 +113,10 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 ## Clauses
 
 - [x] `FROM`  [x] `WHERE`  [x] `ORDER BY`  [x] `OFFSET … LIMIT`  [x] `SELECT`
-- [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` references
-  group keys and/or aggregates. *Limitations: `ORDER BY` together with `GROUP BY`
-  isn't supported yet (the `ORDER BY` is ignored), and an ungrouped non-aggregate
-  `SELECT` column resolves to undefined rather than being rejected (Cosmos errors).*
+- [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` and `ORDER BY`
+  reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
+  aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,
+  matching Cosmos.
 - [ ] Subquery  *(Tier 4 — correlated array subqueries first)*
 
 ---

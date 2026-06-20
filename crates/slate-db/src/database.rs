@@ -365,6 +365,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             }
         }
 
+        // Reject an ungrouped non-aggregate column in a GROUP BY / aggregate
+        // query (Cosmos errors rather than returning undefined).
+        slate_planner::validate_grouping(&query)?;
+
         let meta = self.collection_meta(cf, collection)?;
         let container = slate_planner::CollectionRef {
             cf: cf.to_string(),

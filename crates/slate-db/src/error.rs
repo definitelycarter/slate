@@ -89,6 +89,12 @@ impl From<slate_sql::SqlError> for DbError {
     }
 }
 
+impl From<slate_planner::PlanError> for DbError {
+    fn from(e: slate_planner::PlanError) -> Self {
+        DbError::InvalidQuery(e.message)
+    }
+}
+
 impl From<slate_vm::VmError> for DbError {
     fn from(e: slate_vm::VmError) -> Self {
         DbError::Vm(e)

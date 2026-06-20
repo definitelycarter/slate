@@ -685,3 +685,38 @@ fn group_by_counts_per_group() {
         ]
     );
 }
+
+#[test]
+fn group_by_with_order_by_sorts_groups() {
+    // people: ada/36, alan/41, grace/44. Group by senior-ness, order the two
+    // groups by count descending — the larger (41+) group comes first.
+    let db = seeded();
+    let out = docs(
+        &db,
+        "SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+         GROUP BY c.age >= 41 ORDER BY COUNT(1) DESC",
+    );
+    assert_eq!(
+        out,
+        vec![
+            doc! { "senior": true, "n": 2_i64 },
+            doc! { "senior": false, "n": 1_i64 },
+        ]
+    );
+}
+
+#[test]
+fn group_by_rejects_ungrouped_column() {
+    // `c.name` is neither a group key nor inside an aggregate → rejected, as in
+    // Cosmos (rather than resolving to undefined).
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query(
+            DEFAULT_CF,
+            "people",
+            "SELECT c.name, COUNT(1) FROM c GROUP BY c.age",
+        )
+        .is_err()
+    );
+}

@@ -25,7 +25,7 @@
 //! falls through to the residual.
 
 use bson::{Bson, RawBson};
-use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr};
+use slate_ast::{BinOp, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause};
 
 use crate::plan::{
     AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
@@ -71,13 +71,25 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     // `AGG(arg)` becomes a `$aggN` slot the aggregation node fills. The
     // read-only pre-check keeps `find` and non-aggregate SQL allocation-free.
     let value_expr = select.into_value_expr(&alias);
-    let aggregating = !group_keys.is_empty() || contains_aggregate(&value_expr);
-    let (project_expr, aggregates) = if aggregating {
+    let aggregating = !group_keys.is_empty()
+        || contains_aggregate(&value_expr)
+        || order_by.iter().any(|item| contains_aggregate(&item.expr));
+    let (project_expr, order_by, aggregates) = if aggregating {
         let mut aggregates = Vec::new();
         let project_expr = rewrite_projection(value_expr, &group_keys, &mut aggregates);
-        (project_expr, aggregates)
+        // ORDER BY runs after aggregation, so its keys reference the group keys
+        // and aggregates — rewrite them into the same `$keyN`/`$aggN` slots (an
+        // aggregate appearing only in ORDER BY is still computed by the node).
+        let order_by: Vec<OrderByItem> = order_by
+            .into_iter()
+            .map(|item| OrderByItem {
+                expr: rewrite_projection(item.expr, &group_keys, &mut aggregates),
+                direction: item.direction,
+            })
+            .collect();
+        (project_expr, order_by, aggregates)
     } else {
-        (value_expr, Vec::new())
+        (value_expr, order_by, Vec::new())
     };
 
     // Choose a source (Scan or an index path), pushing sargable predicates in.
@@ -114,16 +126,22 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     }
 
     if aggregating {
-        // Aggregation collapses the rows into one row per group, then the
-        // projection (rewritten to read the `$aggN` slots) shapes each. The
-        // emitted rows are environment documents, so the projection binds as
-        // `Env`. (`ORDER BY` over aggregate results is handled with `GROUP BY`.)
+        // Aggregation collapses rows into one per group; ORDER BY then sorts the
+        // group rows, and the projection (rewritten to read the `$keyN`/`$aggN`
+        // slots) shapes each. Both bind as `Env` over the aggregate output rows.
         node = Node::Aggregate {
             group_keys,
             aggregates,
             binding,
             source: Box::new(node),
         };
+        if !order_by.is_empty() {
+            node = Node::Sort {
+                keys: order_by,
+                binding: RowBinding::Env,
+                source: Box::new(node),
+            };
+        }
         node = Node::Project {
             expr: project_expr,
             binding: RowBinding::Env,
@@ -160,6 +178,116 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
 }
 
 // ── Aggregation ─────────────────────────────────────────────────
+
+/// A query the planner accepts syntactically but cannot plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanError {
+    pub message: String,
+}
+
+/// Enforce the `GROUP BY`/aggregate column rule (Cosmos): when a query groups or
+/// aggregates, every projected — and `ORDER BY` — expression must be built from
+/// the group keys, aggregates, and constants. A bare row reference (a column
+/// neither grouped nor inside an aggregate) is rejected, as is `SELECT *`.
+pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
+    let grouping = !query.group_by.is_empty()
+        || select_has_aggregate(&query.select)
+        || query.order_by.iter().any(|i| contains_aggregate(&i.expr));
+    if !grouping {
+        return Ok(());
+    }
+
+    let FromSource::ImplicitContainer { alias } = &query.from.source;
+    let mut bindings: Vec<&str> = vec![alias.as_str()];
+    for join in &query.from.joins {
+        bindings.push(join.alias.as_str());
+    }
+
+    match &query.select {
+        SelectClause::Star => {
+            return Err(PlanError {
+                message: "SELECT * is not allowed with GROUP BY or aggregates".into(),
+            });
+        }
+        SelectClause::Value(e) => check_grounded(e, &query.group_by, &bindings)?,
+        SelectClause::Projections(items) => {
+            for it in items {
+                check_grounded(&it.expr, &query.group_by, &bindings)?;
+            }
+        }
+    }
+    for item in &query.order_by {
+        check_grounded(&item.expr, &query.group_by, &bindings)?;
+    }
+    Ok(())
+}
+
+/// Whether the projection contains an aggregate call.
+fn select_has_aggregate(select: &SelectClause) -> bool {
+    match select {
+        SelectClause::Value(e) => contains_aggregate(e),
+        SelectClause::Projections(items) => items.iter().any(|it| contains_aggregate(&it.expr)),
+        SelectClause::Star => false,
+    }
+}
+
+/// Check one expression against the grouping rule: it's fine if it equals a
+/// group key, is an aggregate call (its arguments are evaluated per row, so we
+/// don't descend), or is built only from constants and such. A reference to a
+/// binding (the `FROM`/`JOIN` alias) that isn't a group key is the violation.
+fn check_grounded(
+    expr: &ScalarExpr,
+    group_keys: &[ScalarExpr],
+    bindings: &[&str],
+) -> Result<(), PlanError> {
+    if group_keys.iter().any(|k| k == expr) {
+        return Ok(());
+    }
+    match expr {
+        ScalarExpr::Function { name, .. } if is_aggregate_name(name) => Ok(()),
+        ScalarExpr::Identifier(name) if bindings.contains(&name.as_str()) => Err(PlanError {
+            message: format!("'{name}' must appear in GROUP BY or be used in an aggregate"),
+        }),
+        ScalarExpr::Identifier(_)
+        | ScalarExpr::Literal(_)
+        | ScalarExpr::Value(_)
+        | ScalarExpr::Parameter(_) => Ok(()),
+        ScalarExpr::Member { base, .. } | ScalarExpr::PathGet { base, .. } => {
+            check_grounded(base, group_keys, bindings)
+        }
+        ScalarExpr::Index { base, index } => {
+            check_grounded(base, group_keys, bindings)?;
+            check_grounded(index, group_keys, bindings)
+        }
+        ScalarExpr::Unary { expr, .. } => check_grounded(expr, group_keys, bindings),
+        ScalarExpr::Binary { lhs, rhs, .. } => {
+            check_grounded(lhs, group_keys, bindings)?;
+            check_grounded(rhs, group_keys, bindings)
+        }
+        ScalarExpr::MultikeyEq { base, value, .. } => {
+            check_grounded(base, group_keys, bindings)?;
+            check_grounded(value, group_keys, bindings)
+        }
+        ScalarExpr::Function { args, .. } => {
+            for a in args {
+                check_grounded(a, group_keys, bindings)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Object(fields) => {
+            for (_, v) in fields {
+                check_grounded(v, group_keys, bindings)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Array(items) => {
+            for i in items {
+                check_grounded(i, group_keys, bindings)?;
+            }
+            Ok(())
+        }
+    }
+}
 
 /// Whether `name` (case-insensitive) is an aggregate function.
 fn is_aggregate_name(name: &str) -> bool {
@@ -1079,6 +1207,44 @@ mod tests {
             }
             other => panic!("expected Aggregate, got {other:?}"),
         }
+    }
+
+    fn parse(sql: &str) -> slate_ast::Query {
+        slate_sql::parse(sql).unwrap()
+    }
+
+    #[test]
+    fn validate_grouping_allows_keys_and_aggregates() {
+        assert!(
+            validate_grouping(&parse("SELECT c.kind, COUNT(1) FROM c GROUP BY c.kind")).is_ok()
+        );
+        // Expressions built over a group key are fine.
+        assert!(validate_grouping(&parse("SELECT VALUE c.kind FROM c GROUP BY c.kind")).is_ok());
+    }
+
+    #[test]
+    fn validate_grouping_rejects_ungrouped_column() {
+        // `c.other` is neither a group key nor inside an aggregate.
+        assert!(
+            validate_grouping(&parse("SELECT c.kind, c.other FROM c GROUP BY c.kind")).is_err()
+        );
+    }
+
+    #[test]
+    fn validate_grouping_rejects_bare_column_with_aggregate() {
+        // An aggregate with a bare ungrouped column (and no GROUP BY) is invalid.
+        assert!(validate_grouping(&parse("SELECT c.name, COUNT(1) FROM c")).is_err());
+    }
+
+    #[test]
+    fn validate_grouping_rejects_select_star_with_group_by() {
+        assert!(validate_grouping(&parse("SELECT * FROM c GROUP BY c.kind")).is_err());
+    }
+
+    #[test]
+    fn validate_grouping_ignores_plain_queries() {
+        // No grouping or aggregates → nothing to validate.
+        assert!(validate_grouping(&parse("SELECT c.a, c.b FROM c")).is_ok());
     }
 
     #[test]

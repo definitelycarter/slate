@@ -432,6 +432,22 @@ mod end_to_end {
         let out = run("SELECT VALUE c.age >= 41 FROM c GROUP BY c.age >= 41");
         assert_eq!(out, vec![RawBson::Boolean(false), RawBson::Boolean(true)]);
     }
+
+    #[test]
+    fn group_by_with_order_by_sorts_the_groups() {
+        // Two groups: under-41 (ada → n=1) and 41+ (alan, grace → n=2). Ordering
+        // by the count descending puts the larger group first — the sort runs
+        // after aggregation, over the group rows.
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+             GROUP BY c.age >= 41 ORDER BY COUNT(1) DESC");
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 }),
+                RawBson::Document(rawdoc! { "senior": false, "n": 1_i64 }),
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

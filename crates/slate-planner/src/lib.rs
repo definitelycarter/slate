@@ -31,7 +31,7 @@
 pub mod lower;
 pub mod plan;
 
-pub use lower::{CollectionMeta, lower};
+pub use lower::{CollectionMeta, PlanError, lower, validate_grouping};
 pub use plan::{
     AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
     ScanDirection, UpsertMode,
