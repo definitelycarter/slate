@@ -193,6 +193,10 @@ fn plan_source(
     }
 
     // OR sub-groups that are fully indexable become IndexMerge(Or) inputs.
+    // The conjunct is NOT consumed: it stays as a residual recheck, because an
+    // index merge can over-return (e.g. a range bound against a field holding
+    // mixed numeric types). The index narrows the candidate set; the recheck
+    // keeps the result precise — matching how the top-level-OR path behaves.
     for (i, conjunct) in conjuncts.iter().enumerate() {
         if consumed.contains(&i) {
             continue;
@@ -204,7 +208,6 @@ fn plan_source(
             && let Some(ids) = index_source_for(conjunct, alias, container, meta)
         {
             sources.push(ids);
-            consumed.push(i);
         }
     }
 

@@ -131,6 +131,10 @@ fn translate_field(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
 
 /// Mongo `{field: value}` equality, which matches a scalar field *or* an array
 /// field containing the value — `c.field = value OR ARRAY_CONTAINS(c.field, value)`.
+///
+/// The `null` value is special: Mongo's `{field: null}` matches an explicit
+/// null, an array containing null, **and a missing field**, so it also tests
+/// `NOT IS_DEFINED(c.field)`.
 fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
     // `literal` is built twice rather than cloned (both are cheap leaf nodes).
     let eq = binary(BinOp::Eq, path(field), literal(value)?);
@@ -138,7 +142,20 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
         name: "ARRAY_CONTAINS".into(),
         args: vec![path(field), literal(value)?],
     };
-    Ok(binary(BinOp::Or, eq, contains))
+    let matches = binary(BinOp::Or, eq, contains);
+
+    if matches!(value, RawBsonRef::Null) {
+        let missing = ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(ScalarExpr::Function {
+                name: "IS_DEFINED".into(),
+                args: vec![path(field)],
+            }),
+        };
+        Ok(binary(BinOp::Or, missing, matches))
+    } else {
+        Ok(matches)
+    }
 }
 
 /// A `{field: {$op: v, ...}}` operator sub-document.
@@ -158,10 +175,6 @@ fn translate_operators(field: &str, doc: &RawDocument) -> Result<ScalarExpr> {
             "$gte" => binary(BinOp::Gte, path(field), literal(value)?),
             "$lt" => binary(BinOp::Lt, path(field), literal(value)?),
             "$lte" => binary(BinOp::Lte, path(field), literal(value)?),
-            "$ne" => ScalarExpr::Unary {
-                op: UnaryOp::Not,
-                expr: Box::new(eq_or_contains(field, value)?),
-            },
             "$exists" => translate_exists(field, value)?,
             other => {
                 return Err(TranslateError::Unsupported(format!(
@@ -388,27 +401,6 @@ mod tests {
             ScalarExpr::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(is_def)
-            }
-        );
-    }
-
-    #[test]
-    fn ne_is_negated_equality() {
-        let expr = tf(doc! { "name": { "$ne": "ada" } }).unwrap().unwrap();
-        let ada = ScalarExpr::Value(Bson::String("ada".into()));
-        let eq_or = binary(
-            BinOp::Or,
-            binary(BinOp::Eq, path("name"), ada.clone()),
-            ScalarExpr::Function {
-                name: "ARRAY_CONTAINS".into(),
-                args: vec![path("name"), ada],
-            },
-        );
-        assert_eq!(
-            expr,
-            ScalarExpr::Unary {
-                op: UnaryOp::Not,
-                expr: Box::new(eq_or)
             }
         );
     }
