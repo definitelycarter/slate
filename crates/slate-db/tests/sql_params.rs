@@ -294,18 +294,54 @@ fn count_with_params_via_drain() {
 // ── Edge cases ──────────────────────────────────────────────────
 
 #[test]
-fn missing_param_is_undefined() {
-    // `@missing` has no supplied value → undefined → `revenue > undefined` is
-    // undefined → every row drops.
+fn missing_param_is_an_error() {
+    // A referenced `@missing` with no supplied value is rejected (matching
+    // Cosmos) — it catches a misspelled or forgotten name rather than silently
+    // returning nothing.
     let (db, _dir) = temp_db();
     seed_records(&db);
-    assert_eq!(
-        names(
-            &db,
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query_with_params(
+            DEFAULT_CF,
+            COLLECTION,
             "SELECT VALUE c.name FROM c WHERE c.revenue > @missing",
             doc! {},
-        ),
-        Vec::<String>::new()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn partially_supplied_params_error_on_the_missing_one() {
+    // `@lo` is supplied but `@hi` is not → error.
+    let (db, _dir) = temp_db();
+    seed_records(&db);
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query_with_params(
+            DEFAULT_CF,
+            COLLECTION,
+            "SELECT VALUE c.name FROM c WHERE c.revenue > @lo AND c.revenue < @hi",
+            doc! { "lo": 1000.0 },
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn no_params_api_rejects_a_referenced_parameter() {
+    // The plain `query` API supplies no parameters, so any `@name` is unsupplied.
+    let (db, _dir) = temp_db();
+    seed_records(&db);
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query(
+            DEFAULT_CF,
+            COLLECTION,
+            "SELECT VALUE c.name FROM c WHERE c.revenue > @min",
+        )
+        .is_err()
     );
 }
 

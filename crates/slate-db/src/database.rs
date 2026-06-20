@@ -304,7 +304,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         sql: &str,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = self.lower_sql(cf, collection, sql)?;
+        let plan = self.lower_sql(cf, collection, sql, None)?;
         Ok(Cursor::new_v2(&self.txn, plan, self.pool))
     }
 
@@ -327,7 +327,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         params: P,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let params = bson::serialize_to_raw_document_buf(&params)?;
-        let plan = self.lower_sql(cf, collection, sql)?;
+        let plan = self.lower_sql(cf, collection, sql, Some(&params))?;
         Ok(Cursor::new_v2_with_params(
             &self.txn, plan, self.pool, params,
         ))
@@ -335,13 +335,36 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Parse and lower a SQL string into a v2 plan (shared by `query` and
     /// `query_with_params`).
+    ///
+    /// Validates that every `@parameter` the query references has a value in
+    /// `params` — an unsupplied parameter is a hard error rather than silently
+    /// undefined (matching Cosmos), which catches a misspelled or forgotten
+    /// name. `params` is `None` for the no-parameter `query` API, so any `@name`
+    /// there is unsupplied.
     fn lower_sql(
         &self,
         cf: &str,
         collection: &str,
         sql: &str,
+        params: Option<&bson::RawDocument>,
     ) -> Result<slate_planner::Plan, DbError> {
         let query = slate_sql::parse(sql)?;
+
+        let mut supplied: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(doc) = params {
+            for entry in doc.iter() {
+                let (name, _) = entry.map_err(|e| DbError::InvalidQuery(e.to_string()))?;
+                supplied.insert(name.to_string());
+            }
+        }
+        for name in query.parameter_names() {
+            if !supplied.contains(name) {
+                return Err(DbError::InvalidQuery(format!(
+                    "query references parameter @{name}, which was not supplied"
+                )));
+            }
+        }
+
         let meta = self.collection_meta(cf, collection)?;
         let container = slate_planner::CollectionRef {
             cf: cf.to_string(),

@@ -226,17 +226,19 @@ fn param_in_projection() {
 }
 
 #[test]
-fn missing_param_is_undefined() {
-    // `@missing` has no supplied value → undefined → `age > undefined` is
-    // undefined → every row is dropped.
+fn missing_param_is_an_error() {
+    // A referenced `@missing` with no supplied value is rejected (matching
+    // Cosmos), not silently undefined.
     let db = seeded();
-    assert_eq!(
-        param_strings(
-            &db,
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query_with_params(
+            DEFAULT_CF,
+            "people",
             "SELECT VALUE c.name FROM c WHERE c.age > @missing",
-            doc! {}
-        ),
-        Vec::<String>::new()
+            doc! {},
+        )
+        .is_err()
     );
 }
 

@@ -130,7 +130,7 @@ Need an `Aggregate` executor node (whole-result first, then per-group with
 - [x] **`@params` end-to-end** ⭐ — `query_with_params(cf, collection, sql, params)`
   threads a params document (keys are the bare names, no `@`) through the
   executor into expression evaluation; a referenced-but-unsupplied parameter is
-  undefined.
+  a hard error (matching Cosmos), not silently undefined.
 - [ ] **Numeric literal typing** — SQL integer literals are `Int64`; the index
   path now compares cross-type (correct), but selectivity is a known follow-up
   (canonical numeric index encoding).

@@ -11,6 +11,8 @@
 //! - [`FromSource`] will gain a `Collection { name, alias }` variant for the
 //!   cross-collection-join extension.
 
+use std::collections::BTreeSet;
+
 /// A literal scalar value as written in the source.
 ///
 /// Kept distinct from `bson::Bson` so the AST stays `PartialEq` and free of
@@ -93,6 +95,45 @@ pub enum ScalarExpr {
     },
 }
 
+impl ScalarExpr {
+    /// Add the names of every `@parameter` referenced in this expression
+    /// (recursively, without the leading `@`) to `out`.
+    pub fn collect_parameters<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
+        match self {
+            ScalarExpr::Parameter(name) => {
+                out.insert(name.as_str());
+            }
+            ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Identifier(_) => {}
+            ScalarExpr::Member { base, .. } | ScalarExpr::PathGet { base, .. } => {
+                base.collect_parameters(out)
+            }
+            ScalarExpr::Index { base, index } => {
+                base.collect_parameters(out);
+                index.collect_parameters(out);
+            }
+            ScalarExpr::Unary { expr, .. } => expr.collect_parameters(out),
+            ScalarExpr::Binary { lhs, rhs, .. } => {
+                lhs.collect_parameters(out);
+                rhs.collect_parameters(out);
+            }
+            ScalarExpr::MultikeyEq { base, value, .. } => {
+                base.collect_parameters(out);
+                value.collect_parameters(out);
+            }
+            ScalarExpr::Function { args, .. } | ScalarExpr::Array(args) => {
+                for e in args {
+                    e.collect_parameters(out);
+                }
+            }
+            ScalarExpr::Object(fields) => {
+                for (_, e) in fields {
+                    e.collect_parameters(out);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
@@ -131,6 +172,35 @@ pub struct Query {
     pub order_by: Vec<OrderByItem>,
     pub offset: Option<u64>,
     pub limit: Option<u64>,
+}
+
+impl Query {
+    /// The names of every `@parameter` referenced anywhere in the query — the
+    /// projection, `JOIN … IN` array expressions, `WHERE`, and `ORDER BY` — with
+    /// the leading `@` stripped, deduplicated and sorted. Used to validate that a
+    /// caller supplied a value for each referenced parameter.
+    pub fn parameter_names(&self) -> BTreeSet<&str> {
+        let mut out = BTreeSet::new();
+        match &self.select {
+            SelectClause::Value(e) => e.collect_parameters(&mut out),
+            SelectClause::Star => {}
+            SelectClause::Projections(items) => {
+                for it in items {
+                    it.expr.collect_parameters(&mut out);
+                }
+            }
+        }
+        for join in &self.from.joins {
+            join.array.collect_parameters(&mut out);
+        }
+        if let Some(filter) = &self.filter {
+            filter.collect_parameters(&mut out);
+        }
+        for item in &self.order_by {
+            item.expr.collect_parameters(&mut out);
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,4 +272,61 @@ pub struct Join {
 pub struct OrderByItem {
     pub expr: ScalarExpr,
     pub direction: SortDirection,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(n: &str) -> ScalarExpr {
+        ScalarExpr::Parameter(n.into())
+    }
+
+    #[test]
+    fn collect_parameters_walks_nested_expressions() {
+        // (@a + c.x) OR F(@b, [@c, @a]) — three distinct names, `a` repeated.
+        let expr = ScalarExpr::Binary {
+            op: BinOp::Or,
+            lhs: Box::new(ScalarExpr::Binary {
+                op: BinOp::Add,
+                lhs: Box::new(param("a")),
+                rhs: Box::new(ScalarExpr::Member {
+                    base: Box::new(ScalarExpr::Identifier("c".into())),
+                    field: "x".into(),
+                }),
+            }),
+            rhs: Box::new(ScalarExpr::Function {
+                name: "F".into(),
+                args: vec![param("b"), ScalarExpr::Array(vec![param("c"), param("a")])],
+            }),
+        };
+        let mut out = BTreeSet::new();
+        expr.collect_parameters(&mut out);
+        assert_eq!(out.into_iter().collect::<Vec<_>>(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parameter_names_covers_all_clauses() {
+        let q = Query {
+            select: SelectClause::Value(param("sel")),
+            from: FromClause {
+                source: FromSource::ImplicitContainer { alias: "c".into() },
+                joins: vec![Join {
+                    alias: "t".into(),
+                    array: param("arr"),
+                }],
+            },
+            filter: Some(param("flt")),
+            order_by: vec![OrderByItem {
+                expr: param("ord"),
+                direction: SortDirection::Asc,
+            }],
+            offset: None,
+            limit: None,
+        };
+        assert_eq!(
+            q.parameter_names().into_iter().collect::<Vec<_>>(),
+            vec!["arr", "flt", "ord", "sel"]
+        );
+    }
 }
