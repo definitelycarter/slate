@@ -51,6 +51,7 @@ pub fn find_to_query(filter: &RawDocument, options: &FindOptions) -> Result<Quer
             joins: Vec::new(),
         },
         filter,
+        group_by: Vec::new(),
         order_by,
         offset: options.skip.map(|n| n as u64),
         limit: options.take.map(|n| n as u64),

@@ -59,6 +59,7 @@ SELECT VALUE <expr>                         -- one value per row
 FROM <alias>
 [JOIN <alias> IN <array-expr>]*
 [WHERE <expr>]
+[GROUP BY <expr>, ...]
 [ORDER BY <expr> [ASC|DESC], ...]
 [OFFSET <n>] [LIMIT <n>]
 ```
@@ -92,7 +93,7 @@ Two deliberate differences from a Mongo `find` projection:
 - **No auto primary key.** `find(columns: [...])` prepends `_id`; SQL returns *exactly* the selected columns. Ask for the pk explicitly (`SELECT c._id, c.name`) or use `SELECT *`.
 - **Member values are not trimmed.** `SELECT c.address` yields `{ "address": <the whole sub-document> }`, whereas `find(columns: ["address.city"])` builds a trimmed, nested `{ address: { city } }`.
 
-**Aggregates.** `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` in a `SELECT` collapse the matching rows to a single result row — `SELECT VALUE COUNT(1) FROM c` → `[3]`, `SELECT MAX(c.age) AS oldest FROM c` → `[{ "oldest": 44 }]`. `COUNT` over an empty set is `0`; `SUM`/`AVG`/`MIN`/`MAX` over no values are undefined. Per-group aggregation (`GROUP BY`) is not yet supported.
+**Aggregates and `GROUP BY`.** `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX` in a `SELECT` collapse the matching rows to one result row — `SELECT VALUE COUNT(1) FROM c` → `[3]`, `SELECT MAX(c.age) AS oldest FROM c` → `[{ "oldest": 44 }]`. `COUNT` over an empty set is `0`; `SUM`/`AVG`/`MIN`/`MAX` over no values are undefined. With `GROUP BY <expr>, …` the rows collapse to one per distinct group instead — `SELECT c.kind, COUNT(c.tags) AS n FROM c GROUP BY c.kind` yields a row per `kind`, and `SELECT` may reference only the group-key expressions or aggregates. Two current limitations: `ORDER BY` together with `GROUP BY` is ignored, and an ungrouped non-aggregate column resolves to undefined rather than being rejected.
 
 ### Iterating results
 

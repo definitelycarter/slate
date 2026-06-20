@@ -23,6 +23,7 @@ pub enum Token {
     Between,
     Like,
     Escape,
+    Group,
     Order,
     By,
     Asc,

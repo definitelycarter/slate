@@ -409,6 +409,29 @@ mod end_to_end {
             vec![RawBson::Document(rawdoc! { "n": 3_i64 })]
         );
     }
+
+    // ── GROUP BY ────────────────────────────────────────────────
+
+    #[test]
+    fn group_by_produces_one_row_per_group() {
+        // Group by a boolean expression → two groups (ada is under 41; alan and
+        // grace are 41+). One row per group, in discovery order.
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c GROUP BY c.age >= 41");
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Document(rawdoc! { "senior": false, "n": 1_i64 }),
+                RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_by_without_aggregate_is_distinct_groups() {
+        // GROUP BY with no aggregate yields the distinct group values.
+        let out = run("SELECT VALUE c.age >= 41 FROM c GROUP BY c.age >= 41");
+        assert_eq!(out, vec![RawBson::Boolean(false), RawBson::Boolean(true)]);
+    }
 }
 
 #[cfg(test)]

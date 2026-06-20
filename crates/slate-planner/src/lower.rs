@@ -28,7 +28,8 @@ use bson::{Bson, RawBson};
 use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr};
 
 use crate::plan::{
-    AggregateExpr, CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
+    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
+    ScanDirection,
 };
 
 /// Index metadata for the queried collection, used to choose a scan source.
@@ -46,6 +47,7 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
         select,
         from,
         filter,
+        group_by,
         order_by,
         offset,
         limit,
@@ -53,21 +55,30 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
 
     let FromSource::ImplicitContainer { alias } = from.source;
 
-    // Resolve the projection up front, while the `FROM` alias is still in hand
-    // (`SELECT *` lowers to the row identity for that alias). Then pull any
-    // aggregate calls out of it: each `AGG(arg)` becomes a `$aggN` slot the
-    // aggregation node fills, and the projection is rewritten to read the slot.
-    // Only rebuild the projection when it actually contains an aggregate — the
+    // GROUP BY keys, each bound to a `$keyN` slot in the aggregation output.
+    let group_keys: Vec<GroupKey> = group_by
+        .into_iter()
+        .enumerate()
+        .map(|(i, expr)| GroupKey {
+            slot: format!("$key{i}"),
+            expr,
+        })
+        .collect();
+
+    // Resolve the projection while the `FROM` alias is in hand (`SELECT *` →
+    // the row identity). When grouping or aggregating, rewrite it: a whole
+    // sub-expression equal to a group key becomes its `$keyN` slot, and each
+    // `AGG(arg)` becomes a `$aggN` slot the aggregation node fills. The
     // read-only pre-check keeps `find` and non-aggregate SQL allocation-free.
     let value_expr = select.into_value_expr(&alias);
-    let (project_expr, aggregates) = if contains_aggregate(&value_expr) {
+    let aggregating = !group_keys.is_empty() || contains_aggregate(&value_expr);
+    let (project_expr, aggregates) = if aggregating {
         let mut aggregates = Vec::new();
-        let project_expr = extract_aggregates(value_expr, &mut aggregates);
+        let project_expr = rewrite_projection(value_expr, &group_keys, &mut aggregates);
         (project_expr, aggregates)
     } else {
         (value_expr, Vec::new())
     };
-    let aggregating = !aggregates.is_empty();
 
     // Choose a source (Scan or an index path), pushing sargable predicates in.
     let (source, residual) = plan_source(filter, &alias, &container, meta);
@@ -108,7 +119,7 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
         // emitted rows are environment documents, so the projection binds as
         // `Env`. (`ORDER BY` over aggregate results is handled with `GROUP BY`.)
         node = Node::Aggregate {
-            group_keys: Vec::new(),
+            group_keys,
             aggregates,
             binding,
             source: Box::new(node),
@@ -175,11 +186,20 @@ fn contains_aggregate(expr: &ScalarExpr) -> bool {
     }
 }
 
-/// Pull aggregate calls out of a projection expression: each `AGG(arg)` is
-/// replaced by a reference to a fresh `$aggN` slot and recorded in `out` (with
-/// its function name and argument), while every other sub-expression is rebuilt
-/// unchanged. Aggregate arguments aren't re-scanned — aggregates don't nest.
-fn extract_aggregates(expr: ScalarExpr, out: &mut Vec<AggregateExpr>) -> ScalarExpr {
+/// Rewrite a projection for aggregation: a whole sub-expression equal to a
+/// group key becomes a reference to its `$keyN` slot; each `AGG(arg)` becomes a
+/// `$aggN` slot recorded in `out`; every other sub-expression is rebuilt
+/// unchanged. Aggregate arguments aren't re-scanned — aggregates don't nest, and
+/// they're evaluated per-row inside the aggregation node, not per-group.
+fn rewrite_projection(
+    expr: ScalarExpr,
+    group_keys: &[GroupKey],
+    out: &mut Vec<AggregateExpr>,
+) -> ScalarExpr {
+    // A whole sub-expression that matches a group key reads from its slot.
+    if let Some(key) = group_keys.iter().find(|k| k.expr == expr) {
+        return ScalarExpr::Identifier(key.slot.clone());
+    }
     match expr {
         ScalarExpr::Function { name, args } if is_aggregate_name(&name) => {
             let arg = args
@@ -198,36 +218,36 @@ fn extract_aggregates(expr: ScalarExpr, out: &mut Vec<AggregateExpr>) -> ScalarE
             name,
             args: args
                 .into_iter()
-                .map(|a| extract_aggregates(a, out))
+                .map(|a| rewrite_projection(a, group_keys, out))
                 .collect(),
         },
         ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
             op,
-            lhs: Box::new(extract_aggregates(*lhs, out)),
-            rhs: Box::new(extract_aggregates(*rhs, out)),
+            lhs: Box::new(rewrite_projection(*lhs, group_keys, out)),
+            rhs: Box::new(rewrite_projection(*rhs, group_keys, out)),
         },
         ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
             op,
-            expr: Box::new(extract_aggregates(*expr, out)),
+            expr: Box::new(rewrite_projection(*expr, group_keys, out)),
         },
         ScalarExpr::Member { base, field } => ScalarExpr::Member {
-            base: Box::new(extract_aggregates(*base, out)),
+            base: Box::new(rewrite_projection(*base, group_keys, out)),
             field,
         },
         ScalarExpr::Index { base, index } => ScalarExpr::Index {
-            base: Box::new(extract_aggregates(*base, out)),
-            index: Box::new(extract_aggregates(*index, out)),
+            base: Box::new(rewrite_projection(*base, group_keys, out)),
+            index: Box::new(rewrite_projection(*index, group_keys, out)),
         },
         ScalarExpr::Object(fields) => ScalarExpr::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (k, extract_aggregates(v, out)))
+                .map(|(k, v)| (k, rewrite_projection(v, group_keys, out)))
                 .collect(),
         ),
         ScalarExpr::Array(items) => ScalarExpr::Array(
             items
                 .into_iter()
-                .map(|i| extract_aggregates(i, out))
+                .map(|i| rewrite_projection(i, group_keys, out))
                 .collect(),
         ),
         // Leaves and Mongo-only constructs — no SQL aggregates nested inside.
@@ -1040,6 +1060,45 @@ mod tests {
             unreachable!()
         };
         assert!(!matches!(*source, Node::Aggregate { .. }));
+    }
+
+    #[test]
+    fn group_by_lowers_to_aggregate_with_keys() {
+        let node = lower_sql("SELECT c.kind, COUNT(1) FROM c GROUP BY c.kind");
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project at the root, got {node:?}");
+        };
+        match *source {
+            Node::Aggregate {
+                group_keys,
+                aggregates,
+                ..
+            } => {
+                assert_eq!(group_keys.len(), 1);
+                assert_eq!(aggregates.len(), 1);
+            }
+            other => panic!("expected Aggregate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_by_without_aggregate_still_lowers_to_aggregate() {
+        // Distinct-groups query: a group key, no aggregate functions.
+        let node = lower_sql("SELECT VALUE c.kind FROM c GROUP BY c.kind");
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        match *source {
+            Node::Aggregate {
+                group_keys,
+                aggregates,
+                ..
+            } => {
+                assert_eq!(group_keys.len(), 1);
+                assert!(aggregates.is_empty());
+            }
+            other => panic!("expected Aggregate, got {other:?}"),
+        }
     }
 
     #[test]

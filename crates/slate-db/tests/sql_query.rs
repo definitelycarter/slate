@@ -630,3 +630,58 @@ fn aggregate_with_parameter_filter() {
         .collect();
     assert_eq!(n, vec![2]);
 }
+
+// ── GROUP BY ────────────────────────────────────────────────────
+
+#[test]
+fn group_by_counts_per_group() {
+    // The motivating example: one row per `kind`, with COUNT over a field that
+    // is sometimes missing. COUNT(c.tags) counts only rows where tags is defined.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    {
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "g".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "g",
+            vec![
+                doc! { "_id": "1", "kind": "a", "tags": ["x"] },
+                doc! { "_id": "2", "kind": "a", "tags": ["y", "z"] },
+                doc! { "_id": "3", "kind": "b", "tags": ["p"] },
+                doc! { "_id": "4", "kind": "b" }, // no tags → not counted
+                doc! { "_id": "5", "kind": "c", "tags": [] }, // empty but defined → counted
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let txn = db.begin(true).unwrap();
+    let mut out: Vec<Document> = txn
+        .query(
+            DEFAULT_CF,
+            "g",
+            "SELECT c.kind, COUNT(c.tags) AS n FROM c GROUP BY c.kind",
+        )
+        .unwrap()
+        .iter::<Document>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // GROUP BY output order is unspecified — sort by kind for a stable assertion.
+    out.sort_by(|a, b| a.get_str("kind").unwrap().cmp(b.get_str("kind").unwrap()));
+    assert_eq!(
+        out,
+        vec![
+            doc! { "kind": "a", "n": 2_i64 },
+            doc! { "kind": "b", "n": 1_i64 },
+            doc! { "kind": "c", "n": 1_i64 },
+        ]
+    );
+}

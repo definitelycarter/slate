@@ -169,6 +169,10 @@ pub struct Query {
     pub select: SelectClause,
     pub from: FromClause,
     pub filter: Option<ScalarExpr>,
+    /// `GROUP BY <expr>, …` — empty when absent. Rows are collapsed into one per
+    /// distinct tuple of these expressions, and the `SELECT` may then reference
+    /// only these expressions or aggregates.
+    pub group_by: Vec<ScalarExpr>,
     pub order_by: Vec<OrderByItem>,
     pub offset: Option<u64>,
     pub limit: Option<u64>,
@@ -195,6 +199,9 @@ impl Query {
         }
         if let Some(filter) = &self.filter {
             filter.collect_parameters(&mut out);
+        }
+        for key in &self.group_by {
+            key.collect_parameters(&mut out);
         }
         for item in &self.order_by {
             item.expr.collect_parameters(&mut out);
@@ -317,6 +324,7 @@ mod tests {
                 }],
             },
             filter: Some(param("flt")),
+            group_by: vec![param("grp")],
             order_by: vec![OrderByItem {
                 expr: param("ord"),
                 direction: SortDirection::Asc,
@@ -326,7 +334,7 @@ mod tests {
         };
         assert_eq!(
             q.parameter_names().into_iter().collect::<Vec<_>>(),
-            vec!["arr", "flt", "ord", "sel"]
+            vec!["arr", "flt", "grp", "ord", "sel"]
         );
     }
 }

@@ -22,12 +22,12 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 ## Current surface
 
 `SELECT VALUE <expr> | * | <expr> [AS k], …  FROM <alias>  [JOIN <a> IN <arr>]*
-[WHERE …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
+[WHERE …] [GROUP BY …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
 
 Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
 `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
 literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
-(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, no `GROUP BY` yet).
+(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`.
 
 ---
 
@@ -113,15 +113,18 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 ## Clauses
 
 - [x] `FROM`  [x] `WHERE`  [x] `ORDER BY`  [x] `OFFSET … LIMIT`  [x] `SELECT`
-- [ ] `GROUP BY` + aggregates  *(Tier 3 — new hash-aggregation node)*
+- [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` references
+  group keys and/or aggregates. *Limitations: `ORDER BY` together with `GROUP BY`
+  isn't supported yet (the `ORDER BY` is ignored), and an ungrouped non-aggregate
+  `SELECT` column resolves to undefined rather than being rejected (Cosmos errors).*
 - [ ] Subquery  *(Tier 4 — correlated array subqueries first)*
 
 ---
 
 ## Aggregation functions (Tier 2)
 
-Whole-result aggregation runs through a blocking `Aggregate` executor node;
-per-group (`GROUP BY`) is the next chunk (reuses the same node with group keys).
+Both whole-result and per-group (`GROUP BY`) aggregation run through the blocking
+`Aggregate` executor node.
 - [x] `COUNT`  [x] `SUM`  [x] `AVG`  [x] `MIN`  [x] `MAX`
 
 Semantics (Cosmos): `COUNT(expr)` counts defined values (`COUNT(1)` counts all),

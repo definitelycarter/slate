@@ -83,6 +83,7 @@ fn keyword_or_ident(word: String) -> Token {
         "between" => Token::Between,
         "like" => Token::Like,
         "escape" => Token::Escape,
+        "group" => Token::Group,
         "order" => Token::Order,
         "by" => Token::By,
         "asc" => Token::Asc,

@@ -108,6 +108,13 @@ impl Parser {
             None
         };
 
+        let group_by = if self.matches(&Token::Group) {
+            self.expect(&Token::By)?;
+            self.parse_group_by()?
+        } else {
+            Vec::new()
+        };
+
         let order_by = if self.matches(&Token::Order) {
             self.parse_order_by()?
         } else {
@@ -132,10 +139,23 @@ impl Parser {
             select,
             from,
             filter,
+            group_by,
             order_by,
             offset,
             limit,
         })
+    }
+
+    /// Parse the comma-separated expression list after `GROUP BY`.
+    fn parse_group_by(&mut self) -> Result<Vec<ScalarExpr>> {
+        let mut keys = Vec::new();
+        loop {
+            keys.push(self.parse_expr()?);
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(keys)
     }
 
     /// Parse the `SELECT` clause: `VALUE <expr>` | `*` | a projection list
@@ -950,5 +970,23 @@ mod tests {
             parse_err("SELECT VALUE c FROM c WHERE c.name LIKE 5"),
             SqlError::Parse { .. }
         ));
+    }
+
+    #[test]
+    fn group_by_clause_parses() {
+        let q = parse("SELECT c.kind, COUNT(c.tags) FROM c GROUP BY c.kind");
+        assert_eq!(q.group_by.len(), 1);
+        assert!(matches!(q.group_by[0], ScalarExpr::Member { ref field, .. } if field == "kind"));
+    }
+
+    #[test]
+    fn group_by_multiple_keys() {
+        let q = parse("SELECT VALUE c FROM c GROUP BY c.a, c.b");
+        assert_eq!(q.group_by.len(), 2);
+    }
+
+    #[test]
+    fn no_group_by_is_empty() {
+        assert!(parse("SELECT VALUE c FROM c").group_by.is_empty());
     }
 }
