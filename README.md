@@ -20,13 +20,22 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner (shared leaf)
   ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
+  ├── slate-ast              → Shared query AST — the IR both query surfaces target
+  ├── slate-query            → MongoDB find front-end: FindOptions/Sort + filter→AST translation
+  ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
+  ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy evaluators)
+  ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
+  ├── slate-executor         → Physical execution: streams a Plan against a transaction
+  ├── slate-mutation         → Field-level document mutation engine
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
-  ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
+  ├── slate-db               → Database layer: public API, query planning + execution
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
+
+The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the **v2** query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor. It is the default; the original in-crate engine remains selectable as `QueryEngine::V1` during a soak before removal.
 
 ## Quick Start
 

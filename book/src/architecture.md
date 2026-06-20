@@ -2,20 +2,29 @@
 
 ## Overview
 
-A layered system with a key-value storage backend, an engine layer for key encoding and index maintenance, and a database layer with query planning and execution.
+A layered system: a key-value storage backend, an engine layer for key encoding and index maintenance, and a query stack where two surfaces — a MongoDB-style `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor, all behind the user-facing database API.
 
 ## Crate Structure
 
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner (shared leaf, no deps but bson)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
+  ├── slate-ast              → Shared query AST — the single IR every query surface targets
+  ├── slate-query            → MongoDB find front-end: FindOptions/Sort DTOs + filter→AST translation
+  ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
+  ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy raw evaluators)
+  ├── slate-planner          → v2 logical planning: AST → Plan/Node IR (sargability, index choice)
+  ├── slate-executor         → v2 physical execution: streams a Plan against a transaction
+  ├── slate-mutation         → Field-level document mutation engine ($set/$inc/$unset → ops)
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
-  ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
+  ├── slate-db               → Database layer: public API + v2 wiring (and the legacy v1 planner/executor)
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
+
+The query stack (`slate-ast` … `slate-executor`, plus `slate-mutation`) is the **v2** engine, the default since reads were routed through it. The original in-crate planner/executor still lives in `slate-db` as `QueryEngine::V1` — a selectable fallback and the differential oracle during the soak before it is removed. See [Roadmap — Query Engine v2](roadmap.md).
 
 ## Tier 1: Storage Layer (`slate-store`)
 
@@ -149,13 +158,27 @@ The in-memory implementation (feature-gated behind `memory`) is designed for eph
 
 **Memory footprint:** ~1.2 KB per record on disk/in-store (960 bytes BSON data + keys + index entries for a 50-field document). At 500k records, ~0.7 GB; at 1M records, ~1.4 GB including BTreeMap overhead — fits comfortably in a 2-4 GB container.
 
-## Tier 2: Query Layer (`slate-query`)
+## Tier 2: Query Stack (v2)
 
 ### Overview
 
-Pure data structures representing queries and mutations. No dependencies on storage or execution — transport-agnostic. Can be constructed from query strings, JSON, GraphQL, or programmatically.
+Two query surfaces lower to **one** shared AST, planner, and executor, so they can't drift in semantics:
 
-### Query Model
+```
+Mongo find ─► slate-query ─┐
+                           ├─► slate-ast ─► slate-planner ─► slate-executor
+SQL text   ─► slate-sql  ──┘                  (slate-eval gives the AST meaning)
+```
+
+A "document" is just the case where the value flowing through execution happens to be a document. That single row model lets one executor — and crucially one `WHERE`/expression evaluator — serve both a traditional `find` and a CosmosDB-style `SELECT VALUE`. `find` is the degenerate case: a single binding `c`, an identity projection, no join/unwind.
+
+### Shared AST (`slate-ast`)
+
+A dependency-free leaf crate: the single intermediate representation every surface targets (`Query`, `ScalarExpr`, `Literal`, `BinOp`, …). `slate-sql` parses SQL text into it, `slate-query` translates a Mongo find into it, `slate-planner` lowers it, and `slate-eval` evaluates it — none of them depend on a sibling surface.
+
+### Front-ends (`slate-query`, `slate-sql`)
+
+**`slate-query`** — the MongoDB find front-end. Owns the find DTOs and translates a find request (a `$`-operator filter document plus options) into a `slate_ast::Query`. `translate_filter` is the *single* definition of what a Mongo filter means, reused by the write APIs that select documents with a filter.
 
 ```rust
 pub struct FindOptions {
@@ -170,22 +193,30 @@ pub struct DistinctOptions {
     pub skip: Option<usize>,
     pub take: Option<usize>,
 }
-```
 
-Filters are passed separately as `impl Serialize` at the database API layer (typically a `bson::doc!`, `rawdoc!`, or any `Serialize` struct) — `slate-query` only defines options for pagination, sorting, and projection. The filter document is serialized to a `RawDocumentBuf` and parsed into an `Expression` tree by `slate-db`'s parser at plan time.
-
-### Sort
-
-```rust
 pub struct Sort {
     pub field: String,
     pub direction: SortDirection,  // Asc | Desc
 }
 ```
 
-### Mutations
+Filters are passed as `impl Serialize` at the database API layer (typically a `bson::doc!`, `rawdoc!`, or any `Serialize` struct), serialized to a `RawDocumentBuf`, and translated to the AST by `translate_filter`. Mongo-only constructs that Cosmos SQL doesn't share (array-distributing path access, explicit `.[]` multikey equality) are dedicated AST variants (`PathGet`, `MultikeyEq`) rather than overloaded member access or magic functions — so SQL functions stay to the CosmosDB spec.
 
-`slate-query` exports the `Mutation` model: `parse_mutation` converts a BSON update document (with `$set`, `$inc`, `$unset`, etc.) into a `Vec<FieldMutation>` — a flat list of field-level operations. This is used by the executor's mutation pipeline.
+**`slate-sql`** — the CosmosDB-style SQL front-end. Lexes and parses SQL text into the same AST. Surface: `SELECT VALUE <expr> FROM <alias> [JOIN <alias> IN <array-expr>]* [WHERE <expr>] [ORDER BY ...] [OFFSET/LIMIT]`. It also ships a small in-memory `exec` engine (over a `&[bson::Bson]` source) for iterating on language semantics without touching storage.
+
+### Evaluation (`slate-eval`)
+
+The meaning of the AST: an `owned` evaluator (`eval`, walks `bson::Bson`) and a zero-copy `raweval` (walks raw bytes, borrowing from the input). Every leaf rule — comparison, numeric coercion, three-valued logic, function dispatch — is a single shared definition reused by both, pinned by a differential test so they can't drift. `raweval::compile` resolves an expression once per query (function dispatch, path segments, single-alias field reads, the `f = v OR ARRAY_CONTAINS(f, v)` idiom, borrowed constants) and `eval_compiled` runs the resolved form per row.
+
+### Planning + execution (`slate-planner`, `slate-executor`)
+
+**`slate-planner`** makes the *decisions*: it lowers `slate_ast::Query` to a `Plan`/`Node` IR, choosing a scan source via sargability (`c.<indexed-field> <cmp> <literal>` conjuncts push into an `IndexScan`; pk equality becomes a direct `KeyLookup`; everything else stays a residual `Filter`). It is fed the collection's index metadata (`CollectionMeta`) so it can choose an index.
+
+**`slate-executor`** runs the plan: pull-based streaming, one small per-node function per `Node`, mirroring the engine's `RawIter`. The stream item is `Result<Option<RawBson>, ExecError>` — the `Option` is the *undefined* channel (a `None` row is dropped at the output boundary), and carrying raw `RawBson` keeps `find` zero-copy.
+
+### Mutations (`slate-mutation`)
+
+`parse_mutation` converts a BSON update document (`$set`, `$inc`, `$unset`, …) into a `Mutation` — a flat `Vec<FieldMutation>` of field-level operations, applied to raw documents by the write pipeline (`raw_merge` for upsert merges).
 
 ## Tier 2.5: Scripting Engine (`slate-vm`)
 
@@ -362,7 +393,7 @@ column family, so the pair `(cf, name)` is the unique identity.
 
 ### Overview
 
-The database layer sits on top of `slate-engine` and `slate-query`. It provides query planning, execution, and the user-facing `Database`/`Transaction` API. Storage operations (record reads, writes, scans, index lookups) are delegated to `slate-engine`'s `EngineTransaction` trait.
+The database layer composes the query stack (Tier 2) over `slate-engine` and exposes the user-facing `Database`/`Transaction` API. It translates a request through a front-end, lowers it with `slate-planner`, and runs it with `slate-executor`; storage operations (record reads, writes, scans, index lookups) are delegated to `slate-engine`'s `EngineTransaction` trait. `DatabaseBuilder::query_engine` selects the engine — `QueryEngine::V2` (default) uses this stack; `QueryEngine::V1` is the legacy in-crate planner/executor, kept as a fallback for not-yet-translatable filters and as the differential oracle (see [Roadmap](roadmap.md)).
 
 ### Document Model
 
@@ -468,25 +499,26 @@ txn.commit()?;
 
 ### Query Execution
 
-Query execution uses a two-tier plan tree with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
+`slate-planner` lowers a request to a `Plan` (a tree of `Node`s); `slate-executor` streams it with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
 
-**Planning** builds a pipeline:
+**Planning** builds a pipeline (a join-free `find` reads bottom-to-top):
 
 ```
-Projection → Limit → Sort → Filter → ReadRecord → IndexScan / IndexMerge / Scan
+Scan / (IndexScan|IndexMerge → KeyLookup) → [Bind/Unwind] → Filter → Sort → Project → Limit
 ```
 
 **Two tiers:**
 
-1. **ID tier** — `Scan`, `IndexScan`, `IndexMerge` produce record IDs without touching document bytes.
-2. **Raw tier** — everything above `ReadRecord` operates on `Option<RawBson>`. Filter, Sort, and Limit construct `&RawDocument` views to access individual fields lazily. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization anywhere in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes into `T`, or `.iter_raw()` yields `RawDocumentBuf` with no deserialization.
+1. **ID tier** — `Scan` streams documents; `IndexScan` and `IndexMerge` produce document IDs without touching document bytes, and `KeyLookup` fetches the documents for an ID stream.
+2. **Value tier** — the binding-aware nodes (`Filter`, `Sort`, `Project`) operate on `Option<RawBson>` values via the `slate-eval` raw evaluator, borrowing individual fields out of the row's bytes (through the `slate-rawbson` scanner) with no `bson::Document` materialization. `Project` builds `RawDocumentBuf` output with `append()`, copying selected fields by reference. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes into `T`, or `.iter_raw()` yields `RawDocumentBuf` with no deserialization.
 
-For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed.
+For a join-free query the planner binds the whole row to a single alias (`RowBinding::Alias`) with no per-row environment wrapper; only joins materialize a multi-binding row environment via `Bind`/`Unwind`.
 
 **Key properties:**
 
-- **No deserialization** — the entire pipeline stays in raw bytes. Records that fail a filter are never cloned or materialized.
-- **Priority-based index selection** — the index order in a collection's `CollectionHandle` determines which index is preferred for AND groups.
+- **No deserialization** — the entire pipeline stays in raw bytes. Rows that fail a filter are never cloned or materialized.
+- **Compiled expressions** — `Filter`/`Project` compile their expression once per query (`raweval::compile`) and evaluate the resolved form per row, rather than re-walking the AST.
+- **Sargability** — equality/range conjuncts on indexed fields push into an `IndexScan`; primary-key equality becomes a direct `KeyLookup`; the rest stays a residual `Filter`.
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 - **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).

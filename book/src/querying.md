@@ -2,20 +2,22 @@
 
 ## Overview
 
-Queries are executed as a two-tier plan tree. The planner analyzes filter conditions and available indexes to build an optimal execution plan, then the executor runs it lazily — records that fail a filter are never fully deserialized.
+Queries are executed as a two-tier plan tree. `slate-planner` analyzes filter conditions and available indexes to build an execution plan (a tree of `Node`s); `slate-executor` runs it lazily — records that fail a filter are never fully deserialized. This is the **v2** engine, the default; `QueryEngine::V1` selects the legacy in-crate planner/executor (see [Architecture](architecture.md)).
 
 ```
-Raw tier:        Projection (selective field copying via RawDocumentBuf::append)
+Value tier:      Limit (skip/take on the result stream)
                    ↑
-                 Limit (skip/take on record stream or RawBson::Array)
+                 Project (SELECT VALUE — identity for find; builds RawDocumentBuf)
                    ↑
                  Sort (lazy field access on raw bytes)
                    ↑
-                 Filter (lazy field access on raw bytes)
+                 Filter (residual WHERE — lazy field access on raw bytes)
                    ↑
-                 ReadRecord (fetch raw BSON bytes)
+                 [Bind / Unwind]  (joins only; a join-free find binds one alias inline)
                    ↑
-ID tier:         Scan / IndexScan / IndexMerge (produce record IDs)
+                 KeyLookup (fetch raw BSON bytes for an ID stream)
+                   ↑
+ID tier:         Scan / IndexScan / IndexMerge  (Scan yields documents; index nodes yield IDs)
 ```
 
 For mutation plans, extra nodes wrap the pipeline:
@@ -28,8 +30,8 @@ Plan::Trigger { action: "inserted" }        ← after-trigger (sees NEW doc)
                     └── Node::Values([...docs])
 ```
 
-**ID tier** — produces record IDs without touching document bytes.
-**Raw tier** — everything above ReadRecord operates on `Option<RawBson>`. For documents, constructs `&RawDocument` views to access individual fields lazily. No full deserialization. For index-covered queries, the index value is carried directly as `RawBson` — no document fetch needed. Projection builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes each document into `T`, or `.iter_raw()` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
+**ID tier** — `Scan` streams documents; `IndexScan`/`IndexMerge` produce record IDs without touching document bytes, and `KeyLookup` fetches the documents for an ID stream.
+**Value tier** — everything above `KeyLookup` operates on `Option<RawBson>` values, constructing `&RawDocument` views to access individual fields lazily (via the `slate-rawbson` scanner) with no full deserialization. `Project` builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes each document into `T`, or `.iter_raw()` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
 ## Query Model
 
@@ -84,11 +86,13 @@ A unique index keeps its regular value-first `i` entry, so it serves index scans
 
 ## Plan Scenarios
 
-The following scenarios show how the planner builds execution plans for different filter combinations. All examples assume:
+The following scenarios show how the planner chooses a scan source (sargability and index selection) for different filter combinations. All examples assume:
 
 ```
 indexed_fields: ["user_id", "status"]
 ```
+
+> **Reading these trees.** Every `find` plan is wrapped in a top-level `Project(c)` (the identity projection) over a single inline-bound alias; both are omitted below to focus on source selection. `KeyLookup` fetches documents for an ID stream produced by an `IndexScan`/`IndexMerge`. v2 uses **every** applicable index — multiple indexed equalities intersect via `IndexMerge(And)` rather than the planner picking one — and a sargable equality that fully covers its index is *consumed* (no residual recheck).
 
 ---
 
@@ -97,138 +101,136 @@ indexed_fields: ["user_id", "status"]
 **Query:** `find({})`
 
 ```
-ReadRecord
-  └── Scan
+Scan
 ```
 
-Full scan — reads every record. No filter node needed.
+Full scan — reads every document. No filter node needed.
 
 ---
 
 ### 2. Single Indexed Eq
 
-**Query:** `find({ filter: status = "active" })`
+**Query:** `find({ status = "active" })`
 
 ```
-ReadRecord
+KeyLookup
   └── IndexScan(status = "active")
 ```
 
-The `Eq` condition on an indexed field becomes an `IndexScan`. Since it's the only condition, there's no residual filter — every record from the index matches.
+The `Eq` on an indexed field becomes an `IndexScan`; `KeyLookup` fetches the matched documents. The equality is *consumed* — a scalar index returns only documents whose `status` equals `"active"`, so no residual recheck is needed.
 
 ---
 
 ### 3. Single Non-Indexed Condition
 
-**Query:** `find({ filter: score > 50 })`
+**Query:** `find({ score > 50 })`
 
 ```
 Filter(score > 50)
-  └── ReadRecord
-        └── Scan
+  └── Scan
 ```
 
-No index available — full scan with a filter. Every record is fetched as raw bytes, and `score > 50` is evaluated lazily on the raw BSON. Records that fail are never deserialized.
+No index available — full scan with a filter. Each document is read as raw bytes and `score > 50` is evaluated lazily; documents that fail are never deserialized.
 
 ---
 
 ### 4. AND — Indexed + Non-Indexed
 
-**Query:** `find({ filter: status = "active" AND score > 50 })`
+**Query:** `find({ status = "active" AND score > 50 })`
 
 ```
 Filter(score > 50)
-  └── ReadRecord
+  └── KeyLookup
         └── IndexScan(status = "active")
 ```
 
-The `Eq` on `status` becomes an `IndexScan`. The `score > 50` condition can't use an index (not `Eq`, and `score` isn't indexed anyway), so it becomes a residual `Filter`. The index narrows the candidate set; the filter evaluates the rest lazily.
+The `Eq` on `status` becomes an `IndexScan` (consumed). `score > 50` can't use an index, so it stays a residual `Filter`. The index narrows the candidate set; the filter evaluates the rest lazily.
 
 ---
 
-### 5. AND — Priority Selection
+### 5. AND — Multiple Indexed Fields → IndexMerge(And)
 
-**Query:** `find({ filter: status = "active" AND user_id = "abc" })`
+**Query:** `find({ status = "active" AND user_id = "abc" })`
 
 ```
-Filter(status = "active")
-  └── ReadRecord
+KeyLookup
+  └── IndexMerge(And)
+        ├── IndexScan(status = "active")
         └── IndexScan(user_id = "abc")
 ```
 
-Both fields are indexed, but only one `IndexScan` is chosen. The planner iterates `indexed_fields` in order — `user_id` comes before `status`, so `user_id` wins regardless of the filter's ordering. `status = "active"` becomes a residual filter.
-
-This is priority-based selection: the `indexed_fields` order determines which index is preferred, giving you control over which index is used when multiple are available.
+Both fields are indexed, so v2 scans **both** indexes and intersects their ID sets with `IndexMerge(And)` — a smaller candidate set than either index alone. Both equalities are consumed, so there's no residual filter. (Unlike a pick-one-index strategy, v2 applies every index that helps.)
 
 ---
 
 ### 6. AND — Multiple Indexed + Non-Indexed
 
-**Query:** `find({ filter: user_id = "abc" AND status = "active" AND score > 50 AND name IContains "alice" })`
+**Query:** `find({ user_id = "abc" AND status = "active" AND score > 50 AND name ~ "alice" })`
 
 ```
-Filter(status = "active" AND score > 50 AND name IContains "alice")
-  └── ReadRecord
-        └── IndexScan(user_id = "abc")
+Filter(score > 50 AND REGEXMATCH(name, "alice"))
+  └── KeyLookup
+        └── IndexMerge(And)
+              ├── IndexScan(user_id = "abc")
+              └── IndexScan(status = "active")
 ```
 
-Only one index is used. `user_id` has the highest priority, so it becomes the `IndexScan`. Everything else — even the indexed `status = "active"` — becomes residual. The index narrows the set to records with `user_id = "abc"`, then the filter evaluates the remaining three conditions lazily on raw bytes.
+Both indexed equalities push into the `IndexMerge(And)` and are consumed. The non-indexable conditions — `score > 50` and the regex on `name` — remain as the residual filter, evaluated lazily on the intersected candidates.
 
 ---
 
 ### 7. OR — Both Branches Indexed
 
-**Query:** `find({ filter: user_id = "abc" OR status = "active" })`
+**Query:** `find({ user_id = "abc" OR status = "active" })`
 
 ```
 Filter(user_id = "abc" OR status = "active")
-  └── ReadRecord
+  └── KeyLookup
         └── IndexMerge(Or)
               ├── IndexScan(user_id = "abc")
               └── IndexScan(status = "active")
 ```
 
-Every OR branch has an indexed `Eq`, so the planner builds an `IndexMerge(Or)` — a union of ID sets from both index scans. The full OR is kept as a residual filter for rechecking, because each `IndexScan` may over-fetch (an index only guarantees the indexed field matches, not the full predicate of a nested group).
+Every OR branch is an indexed equality, so the planner builds an `IndexMerge(Or)` — a union of the two index scans' ID sets. The full OR is kept as a residual recheck (not consumed): an index union can over-return, so the filter re-confirms each candidate.
 
 ---
 
 ### 8. OR — One Branch Not Indexed
 
-**Query:** `find({ filter: status = "active" OR name = "test" })`
+**Query:** `find({ status = "active" OR name = "test" })`
 
 ```
 Filter(status = "active" OR name = "test")
-  └── ReadRecord
-        └── Scan
+  └── Scan
 ```
 
-`name` is not indexed. If **any** OR branch lacks an indexed `Eq` condition, the entire OR falls back to a full `Scan`. This is because an OR requires *all* branches to produce results — you can't skip a branch. A single unindexed branch means you need to scan everything anyway.
+`name` is not indexed. If **any** OR branch lacks an indexed equality, the whole OR falls back to a full `Scan` — a disjunction needs every branch to contribute, so one unindexed branch forces scanning everything.
 
 ---
 
 ### 9. OR — Same Field, Multiple Values (IN-style)
 
-**Query:** `find({ filter: user_id = 1 OR user_id = 2 })`
+**Query:** `find({ user_id = 1 OR user_id = 2 })`
 
 ```
 Filter(user_id = 1 OR user_id = 2)
-  └── ReadRecord
+  └── KeyLookup
         └── IndexMerge(Or)
               ├── IndexScan(user_id = 1)
               └── IndexScan(user_id = 2)
 ```
 
-This is effectively an `IN` query. Each value gets its own `IndexScan`, and the results are unioned via `IndexMerge(Or)`. This pattern is common for multi-tenant access control — e.g., "show records for user 1 or user 2."
+Effectively an `IN` query. Each value gets its own `IndexScan`, unioned via `IndexMerge(Or)`. Common for multi-tenant access control — "show records for user 1 or user 2." (Each `{user_id: v}` lowers to the implicit-equality idiom `user_id = v OR ARRAY_CONTAINS(user_id, v)`; the planner recognizes the whole idiom as one indexed equality, so the union still forms.)
 
 ---
 
 ### 10. OR — Three Values (Left-Associative Fold)
 
-**Query:** `find({ filter: user_id = 1 OR user_id = 2 OR user_id = 3 })`
+**Query:** `find({ user_id = 1 OR user_id = 2 OR user_id = 3 })`
 
 ```
 Filter(user_id = 1 OR user_id = 2 OR user_id = 3)
-  └── ReadRecord
+  └── KeyLookup
         └── IndexMerge(Or)
               ├── IndexMerge(Or)
               │     ├── IndexScan(user_id = 1)
@@ -236,112 +238,113 @@ Filter(user_id = 1 OR user_id = 2 OR user_id = 3)
               └── IndexScan(user_id = 3)
 ```
 
-Multiple OR branches fold into a left-associative binary tree: `((1 Or 2) Or 3)`. Each `IndexMerge(Or)` unions the ID sets from its children.
+Multiple OR branches fold into a left-associative tree: `((1 Or 2) Or 3)`. Each `IndexMerge(Or)` unions its children's ID sets.
 
 ---
 
-### 11. AND with Nested OR — Direct Eq Takes Priority
+### 11. AND with Nested OR — Intersect the Eq with the OR-Merge
 
-**Query:** `find({ filter: user_id = "abc" AND (status = "active" OR status = "archived") })`
+**Query:** `find({ user_id = "abc" AND (status = "active" OR status = "archived") })`
 
 ```
 Filter(status = "active" OR status = "archived")
-  └── ReadRecord
-        └── IndexScan(user_id = "abc")
+  └── KeyLookup
+        └── IndexMerge(And)
+              ├── IndexScan(user_id = "abc")
+              └── IndexMerge(Or)
+                    ├── IndexScan(status = "active")
+                    └── IndexScan(status = "archived")
 ```
 
-The planner's first pass looks for direct `Eq` conditions on indexed fields. `user_id = "abc"` is a direct `Eq` on the highest-priority indexed field, so it becomes the `IndexScan`. The OR sub-group, even though it's fully indexable, becomes a residual filter.
-
-This is the expected behavior — `user_id` is higher priority, so we use its index. The OR filter then evaluates cheaply on the smaller candidate set.
+Both halves are indexable: the `user_id` equality is consumed as an `IndexScan`, and the fully-indexable OR sub-group becomes an `IndexMerge(Or)`. v2 intersects them with `IndexMerge(And)`, narrowing to documents that satisfy both. The OR sub-group is kept as a residual recheck (an index union can over-return).
 
 ---
 
-### 12. AND with Nested OR — OR Becomes IndexMerge When No Direct Eq
+### 12. AND with Nested OR — No Other Indexed Conjunct
 
-**Query:** `find({ filter: (status = "active" OR status = "archived") AND score > 50 })`
+**Query:** `find({ (status = "active" OR status = "archived") AND score > 50 })`
 
-Indexed fields: `["status"]` (no `user_id` in this example)
+Indexed fields: `["status"]`
 
 ```
-Filter(score > 50)
-  └── ReadRecord
+Filter((status = "active" OR status = "archived") AND score > 50)
+  └── KeyLookup
         └── IndexMerge(Or)
               ├── IndexScan(status = "active")
               └── IndexScan(status = "archived")
 ```
 
-No direct `Eq` condition on an indexed field exists in the AND group. The planner's second pass checks OR sub-groups — `(status = "active" OR status = "archived")` is fully indexable, so it becomes an `IndexMerge(Or)`. The `score > 50` condition becomes the residual filter.
+The fully-indexable OR sub-group becomes an `IndexMerge(Or)` (kept as a recheck). `score > 50` isn't indexable, so the residual filter carries both the OR recheck and `score > 50`, evaluated lazily on the narrowed candidates.
 
 ---
 
-### 13. OR with Nested ANDs
+### 13. OR with Nested ANDs — Falls Back to Scan (known gap)
 
-**Query:** `find({ filter: (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "pending") })`
+**Query:** `find({ (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "pending") })`
 
 ```
 Filter((user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "pending"))
-  └── ReadRecord
-        └── IndexMerge(Or)
-              ├── IndexScan(user_id = "abc")
-              └── IndexScan(user_id = "xyz")
+  └── Scan
 ```
 
-Each AND branch is planned independently. Within each branch, `user_id` (highest priority) becomes the `IndexScan`. The two branches are combined with `IndexMerge(Or)`. The full OR predicate is the residual filter — it rechecks both the indexed and non-indexed conditions per branch.
+Each OR branch is itself a multi-field **AND**. The OR-branch planner recognizes indexed atoms and single-field equalities, but does not yet plan a conjunction branch (pick a branch's best index), so the disjunction can't be indexed and falls back to a `Scan`. **This is a known gap** — see [Roadmap](roadmap.md). The intended plan unions a per-branch `IndexScan` (e.g. on `user_id`) via `IndexMerge(Or)`.
 
 ---
 
-### 14. OR with Partial Index Per Branch
+### 14. OR with Partial Index Per Branch — Falls Back to Scan (known gap)
 
-**Query:** `find({ filter: (user_id = "abc" AND score > 50) OR status = "active" })`
+**Query:** `find({ (user_id = "abc" AND score > 50) OR status = "active" })`
 
 ```
 Filter((user_id = "abc" AND score > 50) OR status = "active")
-  └── ReadRecord
-        └── IndexMerge(Or)
-              ├── IndexScan(user_id = "abc")
-              └── IndexScan(status = "active")
+  └── Scan
 ```
 
-Each OR branch has at least one indexed `Eq`. The first branch picks `user_id` via AND priority selection; the second branch uses `status` directly. Both produce `IndexScan` nodes combined with `IndexMerge(Or)`. The full predicate is the residual recheck — `score > 50` is evaluated lazily for records from the `user_id` branch.
+The second branch (`status = "active"`) is indexable on its own, but the first branch is an AND (`user_id = "abc" AND score > 50`) — the same conjunction-branch gap as scenario 13 — so the whole OR scans. Once OR branches can be planned as conjunctions, this becomes an `IndexMerge(Or)` of the `user_id` and `status` scans.
 
 ---
 
 ### 15. OR with Unindexed Branch — Fallback to Scan
 
-**Query:** `find({ filter: (user_id = "abc" OR status = "active") OR (count > 5 OR name = "foo") })`
+**Query:** `find({ (user_id = "abc" OR status = "active") OR (count > 5 OR name = "foo") })`
 
 ```
 Filter((user_id = "abc" OR status = "active") OR (count > 5 OR name = "foo"))
-  └── ReadRecord
-        └── Scan
+  └── Scan
 ```
 
-The second OR branch `(count > 5 OR name = "foo")` has zero indexed `Eq` conditions. Since any unindexed OR branch poisons the entire OR, the whole query falls back to `Scan`. The complete predicate becomes a residual filter.
+The branch `(count > 5 OR name = "foo")` has no indexed equality. Any unindexed OR branch poisons the whole disjunction, so the query falls back to `Scan` with the full predicate as the residual filter.
 
 ---
 
 ### 16. Complex — Multi-Level Nesting
 
-**Query:** `find({ filter: (user_id = 1 OR user_id = 2 OR user_id = 3) AND status = "active" AND (count > 5 OR name = "foo") })`
+**Query:** `find({ (user_id = 1 OR user_id = 2 OR user_id = 3) AND status = "active" AND (count > 5 OR name = "foo") })`
 
 ```
 Filter((user_id = 1 OR user_id = 2 OR user_id = 3) AND (count > 5 OR name = "foo"))
-  └── ReadRecord
-        └── IndexScan(status = "active")
+  └── KeyLookup
+        └── IndexMerge(And)
+              ├── IndexScan(status = "active")
+              └── IndexMerge(Or)
+                    ├── IndexMerge(Or)
+                    │     ├── IndexScan(user_id = 1)
+                    │     └── IndexScan(user_id = 2)
+                    └── IndexScan(user_id = 3)
 ```
 
 The AND group has three children:
-1. `(user_id = 1 OR user_id = 2 OR user_id = 3)` — fully indexable OR sub-group
-2. `status = "active"` — direct `Eq` on an indexed field
-3. `(count > 5 OR name = "foo")` — not indexable
+1. `(user_id = 1 OR user_id = 2 OR user_id = 3)` — fully-indexable OR sub-group → `IndexMerge(Or)`
+2. `status = "active"` — indexed equality → `IndexScan` (consumed)
+3. `(count > 5 OR name = "foo")` — not indexable → residual
 
-The planner's first pass checks for **direct** `Eq` conditions in indexed field priority order. `user_id` is highest priority but isn't a direct condition — it's inside an OR group. `status = "active"` is a direct `Eq`, so it wins. The OR sub-group and the unindexable `(count > 5 OR name = "foo")` both become residual filters.
+v2 intersects every indexable source: the `status` scan and the `user_id` `IndexMerge(Or)` are combined with `IndexMerge(And)`. The unindexable `(count > 5 OR name = "foo")` and the `user_id` OR recheck remain the residual filter.
 
-The second pass (which checks for fully-indexable OR sub-groups) is only reached if no direct `Eq` is found. If `status` were not indexed, the second pass would pick the OR sub-group and produce:
+If `status` were **not** indexed, the `user_id` OR sub-group is the only indexable source, so it becomes the whole source and everything else is residual:
 
 ```
-Filter(status = "active" AND (count > 5 OR name = "foo"))
-  └── ReadRecord
+Filter((user_id = 1 OR ...) AND status = "active" AND (count > 5 OR name = "foo"))
+  └── KeyLookup
         └── IndexMerge(Or)
               ├── IndexMerge(Or)
               │     ├── IndexScan(user_id = 1)
@@ -353,83 +356,45 @@ Filter(status = "active" AND (count > 5 OR name = "foo"))
 
 ### 17. Fully Unindexed
 
-**Query:** `find({ filter: score > 50 AND name IContains "alice" })`
+**Query:** `find({ score > 50 AND name ~ "alice" })`
 
 ```
-Filter(score > 50 AND name IContains "alice")
-  └── ReadRecord
-        └── Scan
+Filter(score > 50 AND REGEXMATCH(name, "alice"))
+  └── Scan
 ```
 
-No indexed fields, no `Eq` operators — full scan. All conditions are evaluated lazily on raw bytes. Even without index acceleration, lazy materialization means rejected records are never fully deserialized.
+No indexed fields, no equality — full scan. Both conditions are evaluated lazily on raw bytes; rejected documents are never fully deserialized.
 
 ---
 
-### 18. Index-Covered Projection
+### 18. Projection Over an Index Scan
 
-**Query:** `find({ filter: status = "active", columns: ["status"] })`
-
-```
-Projection(status)
-  └── IndexScan(status = "active")
-```
-
-The projection only requests `status`, which is the indexed field used by the `IndexScan`. Since the `IndexScan` already carries the matched value (`"active"`) as `RawBson`, the planner skips `ReadRecord` entirely — no document bytes are fetched from storage. `Projection` constructs `{ _id, status: "active" }` directly from the index value.
-
-Each index entry stores the BSON element type byte in its value (e.g. `0x10` for Int32, `0x12` for Int64). When the query's value type differs from the stored type (e.g. query sends `Int64(100)` but the document stored `Int32(100)`), the executor coerces the emitted value to match the stored type. This ensures correct type round-tripping through index-covered projections.
-
-This optimization applies when **all** of these conditions are met:
-1. The ID tier is an `IndexScan` with an `Eq` value (not an ordered scan)
-2. No residual filter exists (the index fully satisfies the WHERE clause)
-3. No sort is requested
-4. Every projected column matches the indexed field
-
-When any condition isn't met, `ReadRecord` is included as normal:
-
-**Query:** `find({ filter: status = "active", columns: ["status", "name"] })`
+**Query:** `find({ status = "active", columns: ["status"] })`
 
 ```
-Projection(status, name)
-  └── ReadRecord
+Project([_id, status])
+  └── KeyLookup
         └── IndexScan(status = "active")
 ```
 
-Here `name` isn't available from the index, so the full document must be fetched.
+`IndexScan` yields document IDs, `KeyLookup` fetches the documents, and `Project` builds `{ _id, status }` from them.
 
-#### Limitation: Multi-Column Coverage
-
-The optimization is single-field only — the indexed column must be the *only* projected column (besides `_id`). Even if all projected columns are individually indexed, `ReadRecord` is still required:
-
-**Query:** `find({ filter: status = "active", columns: ["user_id", "status"] })` (both indexed)
-
-```
-Projection(user_id, status)
-  └── ReadRecord
-        └── IndexScan(status = "active")
-```
-
-The `IndexScan` on `status` carries the value `"active"`, but has no way to provide `user_id` — that lives in a separate index. To cover this case without `ReadRecord`, two possible future approaches:
-
-1. **Composite indexes** — a single index on `(status, user_id)` that stores both values per key
-2. **Secondary index lookups** — after getting IDs from the primary `IndexScan`, look up each ID in the `user_id` index to retrieve its value
+> **Covered-index projection is future work in v2.** Even when every projected column is the indexed field, v2 still fetches the document via `KeyLookup` — it does not yet serve a projection directly from the index entry's value. The deferred optimization (and the approaches to extend it to multiple columns — composite indexes, or secondary index lookups) is tracked in the [Roadmap](roadmap.md).
 
 ---
 
 ### 19. Array Element Matching
 
-**Query:** `find({ filter: tags = "renewal_due" })` (where `tags` is an array field like `["active", "renewal_due"]`)
+**Query:** `find({ tags = "renewal_due" })` (where `tags` is an array like `["active", "renewal_due"]`)
 
 ```
-Filter(tags = "renewal_due")
-  └── ReadRecord
-        └── Scan
+Filter(tags = "renewal_due" OR ARRAY_CONTAINS(tags, "renewal_due"))
+  └── Scan
 ```
 
-When a filter field resolves to a `RawBsonRef::Array`, the executor iterates the array elements and returns true if **any** element satisfies the operator. This is implicit — no special syntax needed, matching MongoDB's behavior without `$elemMatch`.
+The Mongo `{tags: v}` form lowers to the implicit-equality idiom `tags = v OR ARRAY_CONTAINS(tags, v)`: it matches when `tags` equals `v` *or* is an array containing `v`. The evaluator iterates array elements, delegating each to the shared scalar comparison (so cross-type coercion works within elements) — matching MongoDB's behavior without `$elemMatch`.
 
-Applies to all scalar comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Each element delegates to the existing scalar comparison functions, so cross-type coercion (String→Int, Double↔Int, etc.) works automatically within array elements.
-
-**Not supported:** sorting on array fields has no meaningful scalar ordering and is left unsupported. Filtering on nested array paths (e.g. `items.[].sku = "A1"`) is handled separately by the multi-key path resolution in `field_tree::walk`.
+For an **explicit** multikey path (`tags.[]`, `items.[].sku`), the front-end emits a `MultikeyEq` the planner can match to a `.[]` index. Sorting on array fields has no meaningful scalar ordering and is unsupported.
 
 ---
 
@@ -438,74 +403,72 @@ Applies to all scalar comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Each
 **Query:** `find({ filter: status = "active" AND score > 50, sort: score DESC, skip: 10, take: 5, columns: ["name", "score"] })`
 
 ```
-Projection(name, score)
-  └── Limit(skip: 10, take: 5)
+Limit(skip: 10, take: 5)
+  └── Project({_id, name, score})
         └── Sort(score DESC)
               └── Filter(score > 50)
-                    └── ReadRecord
+                    └── KeyLookup
                           └── IndexScan(status = "active")
 ```
 
-Execution flow:
+Execution flow (data flows bottom-to-top):
 
-1. **IndexScan** — iterates the `status = "active"` index, yields record IDs
-2. **ReadRecord** — batch-fetches raw BSON bytes via `multi_get`
-3. **Filter** — evaluates `score > 50` by accessing just the `score` field from raw bytes. Rejected records are skipped with zero deserialization cost
-4. **Sort** — collects surviving records, accesses `score` from raw bytes for comparison, sorts in memory
-5. **Limit** — skips the first 10 records, takes the next 5
-6. **Projection** — copies only `name` and `score` from raw bytes into a `RawDocumentBuf` via `append()`, inserts `_id`
+1. **IndexScan** — iterates the `status = "active"` index, yields document IDs (the equality is consumed — no `status` recheck)
+2. **KeyLookup** — batch-fetches raw BSON bytes via `multi_get`
+3. **Filter** — evaluates `score > 50` by reading just the `score` field from raw bytes; rejected documents are skipped with zero deserialization cost
+4. **Sort** — collects survivors, reads `score` from raw bytes, sorts in memory
+5. **Project** — copies `name` and `score` (plus `_id`) into a `RawDocumentBuf` via `append()`
+6. **Limit** — skips 10, takes 5
 
-Records that fail the filter at step 3 never reach steps 4-6. Only the final 5 records at step 6 pay the cost of selective field copying.
+`Project` sits below `Limit`, so v2 projects the sorted rows and then limits. Documents that fail the filter at step 3 never reach steps 4–6.
 
 ## Limit Placement
 
-Limit operates in the raw tier. For record streams (find queries), it's lazy `skip()` + `take()` on the iterator. For `RawBson::Array` values (distinct queries), it slices the array elements directly. Where it sits in the plan tree depends on whether Sort is present.
+For document streams (find queries), `Limit` is lazy `skip()` + `take()` on the iterator; for the `RawBson::Array` of a distinct query, it slices array elements directly. It always sits at the top of the pipeline (above `Project`); whether work is saved depends on whether a `Sort` is present.
 
 ### Scenario A: Limit with Sort
 
-**Query:** `find({ filter: status = "active", sort: score DESC, take: 200 })`
+**Query:** `find({ status = "active", sort: score DESC, take: 200 })`
 
 ```
-Projection
-  └── Limit(take: 200)
+Limit(take: 200)
+  └── Project(c)
         └── Sort(score DESC)
-              └── Filter(status = "active")
-                    └── ReadRecord
-                          └── IndexScan(status = "active")
+              └── KeyLookup
+                    └── IndexScan(status = "active")
 ```
 
-Limit must stay above Sort — you can't take before sorting. All ~50k matching records enter Sort. Limit takes 200 from the sorted result. Cost: O(n log n) sort on the full set.
+Limit can't take before Sort orders the rows, so all matching documents enter Sort and Limit takes 200 from the sorted result. Cost: O(n log n) on the full matched set. (`Project(c)` is the identity projection for `find`.)
 
 ### Scenario B: Limit without Sort
 
-**Query:** `find({ filter: status = "active", take: 200 })`
+**Query:** `find({ status = "active", take: 200 })`
 
 ```
-Projection
-  └── Limit(take: 200)
-        └── ReadRecord
+Limit(take: 200)
+  └── Project(c)
+        └── KeyLookup
               └── IndexScan(status = "active")
 ```
 
-No Sort means Limit sits directly above ReadRecord. The iterator stops after 200 records pass through. Remaining index entries and raw bytes are never touched. Much cheaper than Scenario A.
+No Sort: the stream stops after 200 documents pass through. Remaining index entries and raw bytes are never touched — much cheaper than Scenario A.
 
 ### Scenario C: Limit without Sort, with Filter
 
-**Query:** `find({ filter: score > 50, take: 200 })`
+**Query:** `find({ score > 50, take: 200 })`
 
 ```
-Projection
-  └── Limit(take: 200)
+Limit(take: 200)
+  └── Project(c)
         └── Filter(score > 50)
-              └── ReadRecord
-                    └── Scan
+              └── Scan
 ```
 
-Records stream through Filter one at a time. Limit stops after 200 pass. Records that fail the filter don't count toward the limit — the scan continues until 200 qualifying records are found (or the collection is exhausted).
+Documents stream through Filter one at a time; Limit stops after 200 pass. Failures don't count toward the limit — the scan continues until 200 qualify (or the collection is exhausted).
 
 ## Distinct Queries
 
-Distinct queries find unique values for a single field. The planner builds a plan tree that reuses the same filter/index infrastructure as `find()`, then adds `Projection` → `Distinct` to extract and deduplicate values.
+Distinct queries find the unique values of a single field. v2 builds a `Scan`-based pipeline and adds `Project` → `Distinct` to extract and deduplicate the values.
 
 ### Query Model
 
@@ -522,57 +485,51 @@ DistinctQuery {
 ### Pipeline
 
 ```
-ID tier:     Scan / IndexScan / IndexMerge
-               ↑
-Raw tier:    ReadRecord → Filter → Projection → Distinct → Sort → Limit
+Scan → [Filter] → Project(field) → Distinct → [Sort] → [Limit]
 ```
 
-Distinct receives projected documents from Projection, extracts the target field, deduplicates with a `HashSet<u64>` (hashing raw BSON bytes), and emits a single `RawBson::Array` containing all unique values. This is fundamentally different from `find()`, which emits one item per record — Distinct collapses the entire result set into one array value.
+`Project` extracts the target field (distributing over arrays when the path reaches into an array of sub-documents); `Distinct` deduplicates with a `HashSet` over the raw BSON bytes and emits a single `RawBson::Array` of the unique values. Unlike `find()` — one item per document — `Distinct` collapses the whole result set into one array value.
 
 ### Plan Trees
 
 **Distinct (no filter, no sort):**
 
 ```
-Distinct(status)
-  └── Projection([status])
-        └── ReadRecord
-              └── Scan
+Distinct
+  └── Project(status)
+        └── Scan
 ```
 
 **Distinct (with filter):**
 
 ```
-Distinct(status)
-  └── Projection([status])
+Distinct
+  └── Project(status)
         └── Filter(score > 50)
-              └── ReadRecord
-                    └── IndexScan(user_id = "abc")
+              └── Scan
 ```
 
-Filter planning is identical to `find()` — the same index priority rules, AND/OR handling, and residual filter logic apply.
+The filter is translated exactly as for `find()`, but distinct does **not** push it into an index — its source is always a full `Scan`.
 
 **Distinct (with sort):**
 
 ```
-Sort(status ASC)
-  └── Distinct(status)
-        └── Projection([status])
-              └── ReadRecord
-                    └── Scan
+Sort(value ASC)
+  └── Distinct
+        └── Project(status)
+              └── Scan
 ```
 
-Sort sits above Distinct. The planner passes the sort field and direction to `Sort`, which handles the `RawBson::Array` natively.
+Sort sits above Distinct and orders the distinct values themselves (the values are bound as the row, so the sort key is the bare value). It handles the `RawBson::Array` natively.
 
 **Distinct (with sort and limit):**
 
 ```
 Limit(skip: 1, take: 2)
-  └── Sort(status ASC)
-        └── Distinct(status)
-              └── Projection([status])
-                    └── ReadRecord
-                          └── Scan
+  └── Sort(value ASC)
+        └── Distinct
+              └── Project(status)
+                    └── Scan
 ```
 
 Limit sits above Sort. It detects the single `RawBson::Array` item and slices its elements with skip/take — no per-record iteration needed.
@@ -597,7 +554,7 @@ Both Sort and Limit are general-purpose nodes — they don't need to know whethe
 
 ### Deduplication
 
-Distinct uses a `HashSet` with a hash of the raw BSON bytes (`hash_raw`). This avoids materializing values for comparison — the raw byte representation is hashed directly. Null values are skipped. Nested fields are supported via `field_tree::walk`, which recursively walks dot-notation paths using a `FieldTree` and invokes a callback for each matching value (handling both scalar fields and array elements).
+Distinct hashes the raw BSON bytes of each value to deduplicate, avoiding materialization. Null values are skipped. A dotted path that reaches into an array of sub-documents distributes over the elements (the `Project` step emits each value the path resolves to), so distinct over an array field or a path like `items.sku` collects the element-level values.
 
 ## Dot-Notation Paths
 
@@ -609,9 +566,9 @@ sort: address.zip ASC
 columns: ["name", "address.city"]
 ```
 
-Path resolution works on raw BSON bytes — `RawDocument::get_document("address")` retrieves the nested document, then `.get("city")` retrieves the field. No full deserialization needed.
+Path resolution scans raw BSON bytes directly (via the `slate-rawbson` field scanner) — it walks `address` then `city` without deserializing the document.
 
-For projections with dot-notation, the top-level key is included in materialization (e.g., `address.city` includes the entire `address` object), then `apply_projection` trims nested documents to only the requested sub-paths.
+A dotted projection column rebuilds the nested shape: `columns: ["address.city"]` projects `{ address: { city } }`, not a flat `"address.city"` key. Columns sharing a prefix merge under one sub-object (matching Mongo).
 
 ## Mutation Pipeline — Triggers and Validators
 
@@ -657,7 +614,7 @@ Plan::Trigger { action: "updated", hooks }
   └── Plan::Update { collection, mutation }
         └── Node::Trigger { action: "updating", hooks }
               └── Node::Validate { validators }
-                    └── Filter → ReadRecord → IndexScan/Scan
+                    └── Filter → KeyLookup → IndexScan   (or Filter → Scan)
 ```
 
 **Delete (no validation — nothing being written):**
@@ -666,7 +623,7 @@ Plan::Trigger { action: "updated", hooks }
 Plan::Trigger { action: "deleted", hooks }
   └── Plan::Delete { collection }
         └── Node::Trigger { action: "deleting", hooks }
-              └── Filter → ReadRecord → Scan
+              └── Filter → Scan
 ```
 
 The delete node yields full documents (not `None`) so the after-trigger can see what was deleted.
