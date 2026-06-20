@@ -315,9 +315,22 @@ fn index_source_for(
     container: &CollectionRef,
     meta: &CollectionMeta,
 ) -> Option<Node> {
+    // The Mongo implicit-equality idiom (`field = lit OR ARRAY_CONTAINS(field,
+    // lit)`) is itself an `Or`. Recognize it as a single indexed Eq *before*
+    // treating a generic `Or` as a disjunction to merge — otherwise flattening
+    // would split it and expose the lone, un-indexable `ARRAY_CONTAINS` branch,
+    // poisoning the whole merge (so an OR/IN of `{field: value}` fell back to a
+    // full scan).
+    if let Some((field, value)) = as_mongo_eq(expr, alias) {
+        return meta
+            .indexes
+            .contains(&field)
+            .then(|| index_scan(container, &field, IndexScanRange::Eq(value)));
+    }
+
     if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. }) {
         let mut branches = Vec::new();
-        collect_or(expr, &mut branches);
+        collect_or(expr, alias, &mut branches);
         let mut sources = Vec::with_capacity(branches.len());
         for branch in branches {
             sources.push(index_source_for(branch, alias, container, meta)?);
@@ -369,15 +382,22 @@ fn merge_sources(
     }))
 }
 
-fn collect_or<'a>(expr: &'a ScalarExpr, out: &mut Vec<&'a ScalarExpr>) {
+/// Flatten an `Or` into its branches, but treat a Mongo implicit-equality idiom
+/// as one indivisible branch (its inner `Eq OR ARRAY_CONTAINS` must not be split
+/// — `index_source_for` recognizes the whole idiom as an indexed Eq).
+fn collect_or<'a>(expr: &'a ScalarExpr, alias: &str, out: &mut Vec<&'a ScalarExpr>) {
+    if as_mongo_eq(expr, alias).is_some() {
+        out.push(expr);
+        return;
+    }
     if let ScalarExpr::Binary {
         op: BinOp::Or,
         lhs,
         rhs,
     } = expr
     {
-        collect_or(lhs, out);
-        collect_or(rhs, out);
+        collect_or(lhs, alias, out);
+        collect_or(rhs, alias, out);
     } else {
         out.push(expr);
     }
@@ -791,6 +811,29 @@ mod tests {
     fn or_of_indexed_atoms_uses_index_merge_or() {
         let node = lower_with(
             "SELECT VALUE c FROM c WHERE c.age = 41 OR c.age = 44",
+            &age_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => assert!(matches!(
+                *source,
+                Node::IndexMerge {
+                    logical: LogicalOp::Or,
+                    ..
+                }
+            )),
+            other => panic!("expected KeyLookup(IndexMerge Or), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_of_implicit_equality_idioms_uses_index_merge_or() {
+        // The Mongo `{field: v}` form lowers to `field = v OR ARRAY_CONTAINS(
+        // field, v)`. An OR/IN of those must still merge indexes — the regression
+        // was that flattening the outer OR split each idiom and exposed the lone,
+        // un-indexable `ARRAY_CONTAINS` branch, forcing a full scan.
+        let node = lower_with(
+            "SELECT VALUE c FROM c WHERE (c.age = 41 OR ARRAY_CONTAINS(c.age, 41)) \
+             OR (c.age = 44 OR ARRAY_CONTAINS(c.age, 44))",
             &age_indexed(),
         );
         match source_under_bind(node) {
