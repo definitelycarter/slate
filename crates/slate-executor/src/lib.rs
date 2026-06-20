@@ -28,7 +28,9 @@
 mod error;
 mod nodes;
 
-use bson::RawBson;
+use std::rc::Rc;
+
+use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, EngineTransaction};
 use slate_planner::{Node, Plan};
 use slate_vm::pool::VmPool;
@@ -41,22 +43,43 @@ pub use error::ExecError;
 pub type ValueIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, ExecError>> + 'a>;
 
 /// Executes plans against a transaction, with an optional scripting pool for
-/// validators/triggers.
+/// validators/triggers and an optional `@`-parameter document for SQL queries.
 pub struct Executor<'a, T> {
     txn: &'a T,
     pool: Option<&'a VmPool>,
+    /// Query `@`-parameters, shared (by `Rc`) into each evaluating node so they
+    /// outlive this executor — the result stream borrows only the transaction.
+    params: Option<Rc<RawDocumentBuf>>,
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     /// Construct an executor with no scripting pool (validators/triggers are
     /// skipped if encountered).
     pub fn new(txn: &'a T) -> Self {
-        Self { txn, pool: None }
+        Self {
+            txn,
+            pool: None,
+            params: None,
+        }
     }
 
     /// Construct an executor with a scripting pool for validators/triggers.
     pub fn with_pool(txn: &'a T, pool: Option<&'a VmPool>) -> Self {
-        Self { txn, pool }
+        Self {
+            txn,
+            pool,
+            params: None,
+        }
+    }
+
+    /// Construct an executor with a scripting pool and a document of query
+    /// `@`-parameters visible to expression evaluation.
+    pub fn with_pool_and_params(
+        txn: &'a T,
+        pool: Option<&'a VmPool>,
+        params: Option<Rc<RawDocumentBuf>>,
+    ) -> Self {
+        Self { txn, pool, params }
     }
 
     /// Execute a plan into a streaming iterator. For write plans, the mutations
@@ -180,7 +203,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source)?;
-                nodes::unwind::execute(alias, array, source)
+                nodes::unwind::execute(alias, array, source, self.params.clone())
             }
 
             Node::Project {
@@ -189,7 +212,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source)?;
-                nodes::project::execute(expr, binding, source)
+                nodes::project::execute(expr, binding, source, self.params.clone())
             }
 
             Node::Filter {
@@ -198,7 +221,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source)?;
-                nodes::filter::execute(predicate, binding, source)
+                nodes::filter::execute(predicate, binding, source, self.params.clone())
             }
 
             Node::Sort {
@@ -207,7 +230,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source)?;
-                nodes::sort::execute(keys, binding, source)?
+                nodes::sort::execute(keys, binding, source, self.params.clone())?
             }
 
             Node::Limit { skip, take, source } => {

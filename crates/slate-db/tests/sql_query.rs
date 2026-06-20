@@ -46,6 +46,16 @@ fn strings(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
         .collect()
 }
 
+fn param_strings(db: &Database<MemoryStore>, sql: &str, params: Document) -> Vec<String> {
+    let txn = db.begin(true).unwrap();
+    txn.query_with_params(DEFAULT_CF, "people", sql, params)
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
 #[test]
 fn select_value_with_order_by() {
     let db = seeded();
@@ -171,6 +181,62 @@ fn iif_conditional_projection() {
             r#"SELECT VALUE IIF(c.age > 40, "old", "young") FROM c ORDER BY c.age ASC"#
         ),
         vec!["young", "old", "old"]
+    );
+}
+
+#[test]
+fn query_with_params_in_where() {
+    let db = seeded();
+    assert_eq!(
+        param_strings(
+            &db,
+            "SELECT VALUE c.name FROM c WHERE c.age > @minAge ORDER BY c.age ASC",
+            doc! { "minAge": 40 }
+        ),
+        vec!["alan", "grace"]
+    );
+}
+
+#[test]
+fn query_with_params_string_match() {
+    let db = seeded();
+    assert_eq!(
+        param_strings(
+            &db,
+            "SELECT VALUE c.name FROM c WHERE c.name = @who",
+            doc! { "who": "alan" }
+        ),
+        vec!["alan"]
+    );
+}
+
+#[test]
+fn param_in_projection() {
+    // A parameter in the projection (not just the filter) — exercises the
+    // Project node's param threading.
+    let db = seeded();
+    assert_eq!(
+        param_strings(
+            &db,
+            r#"SELECT VALUE IIF(c.age > @cut, "old", "young") FROM c ORDER BY c.age ASC"#,
+            doc! { "cut": 40 }
+        ),
+        vec!["young", "old", "old"]
+    );
+}
+
+#[test]
+fn missing_param_is_undefined() {
+    // `@missing` has no supplied value → undefined → `age > undefined` is
+    // undefined → every row is dropped.
+    let db = seeded();
+    assert_eq!(
+        param_strings(
+            &db,
+            "SELECT VALUE c.name FROM c WHERE c.age > @missing",
+            doc! {}
+        ),
+        Vec::<String>::new()
     );
 }
 

@@ -127,8 +127,10 @@ Need an `Aggregate` executor node (whole-result first, then per-group with
 
 ## Cross-cutting gaps
 
-- [ ] **`@params` end-to-end** ⭐ — the AST already has `Parameter`; thread a
-  params document through `slate-executor` and add a `query_with_params` API.
+- [x] **`@params` end-to-end** ⭐ — `query_with_params(cf, collection, sql, params)`
+  threads a params document (keys are the bare names, no `@`) through the
+  executor into expression evaluation; a referenced-but-unsupplied parameter is
+  undefined.
 - [ ] **Numeric literal typing** — SQL integer literals are `Int64`; the index
   path now compares cross-type (correct), but selectivity is a known follow-up
   (canonical numeric index encoding).

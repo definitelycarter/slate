@@ -7,13 +7,24 @@
 //! and evaluate expressions against them via the shared `slate-eval` raw
 //! evaluator.
 
+use std::rc::Rc;
+
 use bson::RawBson;
-use bson::raw::RawBsonRef;
+use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use slate_eval::EvalError;
 use slate_eval::raweval::RawEnv;
 use slate_planner::RowBinding;
 
 use crate::ExecError;
+
+/// The query's `@`-parameter values, shared (by `Rc`) across the evaluating
+/// nodes of one pipeline. `None` means the query had no parameters.
+pub(crate) type Params = Option<Rc<RawDocumentBuf>>;
+
+/// Borrow the parameter document for passing to the evaluator.
+pub(crate) fn params_doc(params: &Params) -> Option<&RawDocument> {
+    params.as_deref().map(|b| &**b)
+}
 
 /// Borrow the top-level `(alias, value)` bindings out of an environment row.
 ///
@@ -43,9 +54,13 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
     Ok(binds)
 }
 
-/// Build a raw evaluation environment over already-extracted bindings.
-pub(crate) fn raw_env<'a>(bindings: &'a [(&'a str, RawBsonRef<'a>)]) -> RawEnv<'a> {
-    RawEnv::new(bindings, None)
+/// Build a raw evaluation environment over already-extracted bindings, with the
+/// query's `@`-parameters (if any) visible to the expression.
+pub(crate) fn raw_env<'a>(
+    bindings: &'a [(&'a str, RawBsonRef<'a>)],
+    params: Option<&'a RawDocument>,
+) -> RawEnv<'a> {
+    RawEnv::new(bindings, params)
 }
 
 /// The sole `FROM` alias when the node reads bare rows ([`RowBinding::Alias`]),
@@ -67,16 +82,17 @@ pub(crate) fn sole_alias(binding: &RowBinding) -> Option<&str> {
 pub(crate) fn with_env<R>(
     row: &RawBson,
     binding: &RowBinding,
+    params: Option<&RawDocument>,
     f: impl FnOnce(&RawEnv) -> Result<R, ExecError>,
 ) -> Result<R, ExecError> {
     match binding {
         RowBinding::Alias(alias) => {
             let binds = [(alias.as_str(), row.as_raw_bson_ref())];
-            f(&RawEnv::new(&binds, None))
+            f(&RawEnv::new(&binds, params))
         }
         RowBinding::Env => {
             let binds = bindings_of(row)?;
-            f(&RawEnv::new(&binds, None))
+            f(&RawEnv::new(&binds, params))
         }
     }
 }

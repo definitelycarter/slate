@@ -18,17 +18,18 @@ pub(crate) fn execute<'a>(
     predicate: ScalarExpr,
     binding: RowBinding,
     source: ValueIter<'a>,
+    params: env::Params,
 ) -> ValueIter<'a> {
     // Compile the predicate once; the per-row closure evaluates the resolved
     // form (see `raweval::compile`).
     let program = raweval::compile(&predicate, env::sole_alias(&binding));
-    Box::new(
-        source.filter_map(move |item| match keep_row(item, &binding, &program) {
+    Box::new(source.filter_map(move |item| {
+        match keep_row(item, &binding, &program, env::params_doc(&params)) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept
             Ok(None) => None,                         // dropped
             Err(e) => Some(Err(e)),                   // surface the error
-        }),
-    )
+        }
+    }))
 }
 
 /// Returns `Ok(Some(row))` to keep the original row unchanged, `Ok(None)` to
@@ -37,6 +38,7 @@ fn keep_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
     program: &Compiled,
+    params: Option<&bson::RawDocument>,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -45,7 +47,7 @@ fn keep_row(
     // Evaluate the predicate against bindings that borrow from `row`; the
     // borrow ends before we move `row` through. Only `Some(true)` keeps the
     // row (3-valued rule: false *or* undefined drops it).
-    let keep = env::with_env(&row, binding, |renv| {
+    let keep = env::with_env(&row, binding, params, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.as_bool() == Some(true))
     })?;
 
@@ -75,7 +77,8 @@ mod tests {
         collect(project::execute(
             sv("c"),
             RowBinding::Env,
-            execute(pred(pred_src), RowBinding::Env, bind_c(docs)),
+            execute(pred(pred_src), RowBinding::Env, bind_c(docs), None),
+            None,
         ))
         .unwrap()
     }
@@ -115,7 +118,8 @@ mod tests {
         let projected = project::execute(
             sv("c.name"),
             RowBinding::Env,
-            execute(pred("c.age > 40"), RowBinding::Env, bind_c(people())),
+            execute(pred("c.age > 40"), RowBinding::Env, bind_c(people()), None),
+            None,
         );
         assert_eq!(
             collect(projected).unwrap(),

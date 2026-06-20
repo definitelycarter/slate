@@ -18,10 +18,11 @@ pub(crate) fn execute<'a>(
     alias: String,
     array: ScalarExpr,
     source: ValueIter<'a>,
+    params: env::Params,
 ) -> ValueIter<'a> {
     Box::new(source.flat_map(move |item| {
         let rows: Box<dyn Iterator<Item = Result<Option<RawBson>, ExecError>>> = match item {
-            Ok(Some(row)) => match expand(&row, &alias, &array) {
+            Ok(Some(row)) => match expand(&row, &alias, &array, env::params_doc(&params)) {
                 Ok(rows) => Box::new(rows.into_iter().map(|r| Ok(Some(r)))),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             },
@@ -33,9 +34,14 @@ pub(crate) fn execute<'a>(
 }
 
 /// Produce the extended environment rows for one input row.
-fn expand(row: &RawBson, alias: &str, array: &ScalarExpr) -> Result<Vec<RawBson>, ExecError> {
+fn expand(
+    row: &RawBson,
+    alias: &str,
+    array: &ScalarExpr,
+    params: Option<&bson::RawDocument>,
+) -> Result<Vec<RawBson>, ExecError> {
     let bindings = env::bindings_of(row)?;
-    let renv = env::raw_env(&bindings);
+    let renv = env::raw_env(&bindings, params);
 
     let mut out = Vec::new();
     // Each output row is `{<existing bindings>, alias: <element>}`, built by
@@ -110,11 +116,12 @@ mod tests {
     /// `SELECT VALUE { "who": c.name, "tag": t } FROM c JOIN t IN c.tags`
     fn join_project(docs: Vec<RawBson>) -> Vec<RawBson> {
         let bound = bind::execute("c".into(), values::execute(docs));
-        let unwound = execute("t".into(), sv("c.tags"), bound);
+        let unwound = execute("t".into(), sv("c.tags"), bound, None);
         let projected = project::execute(
             sv(r#"{ "who": c.name, "tag": t }"#),
             RowBinding::Env,
             unwound,
+            None,
         );
         collect(projected).unwrap()
     }

@@ -28,6 +28,9 @@ pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
     plan: Prepared<<KvTxn<'db, S> as EngineTransaction>::Cf>,
     pool: Option<&'txn VmPool>,
+    /// SQL `@`-parameter values, supplied by `query_with_params`. Owned here and
+    /// shared into the executor (by `Rc`) at execution time.
+    params: Option<RawDocumentBuf>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
@@ -40,6 +43,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
             txn,
             plan: Prepared::V1(plan),
             pool,
+            params: None,
         }
     }
 
@@ -52,6 +56,21 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
             txn,
             plan: Prepared::V2(plan),
             pool,
+            params: None,
+        }
+    }
+
+    pub(crate) fn new_v2_with_params(
+        txn: &'txn KvTxn<'db, S>,
+        plan: slate_planner::Plan,
+        pool: Option<&'txn VmPool>,
+        params: RawDocumentBuf,
+    ) -> Self {
+        Self {
+            txn,
+            plan: Prepared::V2(plan),
+            pool,
+            params: Some(params),
         }
     }
 
@@ -61,8 +80,10 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         match self.plan {
             Prepared::V1(plan) => Executor::new(self.txn, self.pool).execute(plan),
             Prepared::V2(plan) => {
+                let params = self.params.map(std::rc::Rc::new);
                 let iter =
-                    slate_executor::Executor::with_pool(self.txn, self.pool).execute(plan)?;
+                    slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
+                        .execute(plan)?;
                 Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
             }
         }

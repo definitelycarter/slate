@@ -304,14 +304,48 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         sql: &str,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let plan = self.lower_sql(cf, collection, sql)?;
+        Ok(Cursor::new_v2(&self.txn, plan, self.pool))
+    }
+
+    /// Execute a SQL query with values for its `@name` parameters.
+    ///
+    /// `params` serializes to a document whose keys are the bare parameter names
+    /// (no leading `@`) — e.g. `doc! { "minAge": 21 }` binds `@minAge`. A
+    /// referenced parameter with no supplied value evaluates to undefined.
+    ///
+    /// ```ignore
+    /// let cursor = txn.query_with_params(DEFAULT_CF, "users",
+    ///     "SELECT VALUE c.name FROM c WHERE c.age > @minAge",
+    ///     doc! { "minAge": 21 })?;
+    /// ```
+    pub fn query_with_params<P: Serialize>(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql: &str,
+        params: P,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let params = bson::serialize_to_raw_document_buf(&params)?;
+        let plan = self.lower_sql(cf, collection, sql)?;
+        Ok(Cursor::new_v2_with_params(&self.txn, plan, self.pool, params))
+    }
+
+    /// Parse and lower a SQL string into a v2 plan (shared by `query` and
+    /// `query_with_params`).
+    fn lower_sql(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql: &str,
+    ) -> Result<slate_planner::Plan, DbError> {
         let query = slate_sql::parse(sql)?;
         let meta = self.collection_meta(cf, collection)?;
         let container = slate_planner::CollectionRef {
             cf: cf.to_string(),
             collection: collection.to_string(),
         };
-        let plan = slate_planner::lower(query, container, &meta);
-        Ok(Cursor::new_v2(&self.txn, plan, self.pool))
+        Ok(slate_planner::lower(query, container, &meta))
     }
 
     /// The v2 read path: Mongo find → shared AST → lower → a v2 plan run by

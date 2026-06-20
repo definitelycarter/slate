@@ -18,6 +18,7 @@ pub(crate) fn execute<'a>(
     expr: ScalarExpr,
     binding: RowBinding,
     source: ValueIter<'a>,
+    params: env::Params,
 ) -> ValueIter<'a> {
     // Identity fast path: `SELECT VALUE c` in single-binding mode projects the
     // whole bound row, so pass it straight through — no eval, no copy. This is
@@ -32,13 +33,16 @@ pub(crate) fn execute<'a>(
     // Otherwise compile the projection once; the per-row closure evaluates the
     // resolved form (see `raweval::compile`).
     let program = raweval::compile(&expr, env::sole_alias(&binding));
-    Box::new(source.map(move |item| project_row(item, &binding, &program)))
+    Box::new(
+        source.map(move |item| project_row(item, &binding, &program, env::params_doc(&params))),
+    )
 }
 
 fn project_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
     program: &Compiled,
+    params: Option<&bson::RawDocument>,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -47,7 +51,7 @@ fn project_row(
     // Evaluate against bindings borrowing from `row`. `into_raw` copies the
     // result out (a `Ref` is a single byte copy, not a decode + re-encode), so
     // the row's borrow can end here.
-    env::with_env(&row, binding, |renv| {
+    env::with_env(&row, binding, params, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.into_raw()?)
     })
 }
@@ -63,7 +67,7 @@ mod tests {
 
     /// Project `expr_src` over a bound (`{c: doc}`) source of `docs`.
     fn project(expr_src: &str, docs: Vec<RawBson>) -> Vec<RawBson> {
-        collect(execute(sv(expr_src), RowBinding::Env, bind_c(docs))).unwrap()
+        collect(execute(sv(expr_src), RowBinding::Env, bind_c(docs), None)).unwrap()
     }
 
     fn people() -> Vec<RawBson> {
@@ -112,6 +116,7 @@ mod tests {
             sv("c"),
             RowBinding::Alias("c".into()),
             values::execute(people()),
+            None,
         ))
         .unwrap();
         assert_eq!(out, people());
@@ -124,6 +129,7 @@ mod tests {
             sv("c.name"),
             RowBinding::Alias("c".into()),
             values::execute(people()),
+            None,
         ))
         .unwrap();
         assert_eq!(
