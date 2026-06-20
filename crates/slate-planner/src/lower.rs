@@ -49,6 +49,19 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     Plan::Query(lower_query(query, container, meta, &[]))
 }
 
+/// A subquery used directly as a FROM/JOIN iteration source is *multi-value*:
+/// it yields the set of rows to unwind, so it must reduce as an array regardless
+/// of the parser's default (a parenthesized `(SELECT …)` is tagged scalar).
+fn as_iteration_source(expr: ScalarExpr) -> ScalarExpr {
+    match expr {
+        ScalarExpr::Subquery { query, .. } => ScalarExpr::Subquery {
+            query,
+            kind: SubqueryKind::Array,
+        },
+        other => other,
+    }
+}
+
 /// A subquery pulled out of an expression: its result binds to `slot`, computed
 /// by running `subplan` per outer row and reducing by `kind`.
 struct SubquerySpec {
@@ -109,11 +122,18 @@ fn lower_query(
                 (alias, source, residual, false, joins)
             }
             FromSource::Array { alias, array } => {
-                // The array expression may itself contain a subquery (a nested
-                // `FROM x IN (SELECT …)`); extract them over the correlated row.
+                // The array expression may itself be a subquery (a nested
+                // `FROM x IN (SELECT …)`), multi-value here; extract it over the
+                // correlated row.
                 let mut subs = Vec::new();
-                let array =
-                    extract_subqueries(array, &container, meta, &mut subs, outer, &mut next_slot);
+                let array = extract_subqueries(
+                    as_iteration_source(array),
+                    &container,
+                    meta,
+                    &mut subs,
+                    outer,
+                    &mut next_slot,
+                );
                 let mut src = Node::CurrentRow;
                 for spec in subs {
                     src = Node::Subquery {
@@ -215,7 +235,7 @@ fn lower_query(
             let scope_refs: Vec<&str> = jscope.iter().map(String::as_str).collect();
             let mut subs = Vec::new();
             let array = extract_subqueries(
-                join.array,
+                as_iteration_source(join.array),
                 &container,
                 meta,
                 &mut subs,
