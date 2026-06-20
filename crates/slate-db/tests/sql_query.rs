@@ -125,6 +125,56 @@ fn where_between_is_inclusive() {
 }
 
 #[test]
+fn where_like_wildcards() {
+    let db = seeded();
+    // `%` = any run, `_` = any single char.
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE c.name LIKE "a%" ORDER BY c.age ASC"#
+        ),
+        vec!["ada", "alan"]
+    );
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE c.name LIKE "gr_ce""#
+        ),
+        vec!["grace"]
+    );
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name FROM c WHERE c.name NOT LIKE "a%" ORDER BY c.age ASC"#
+        ),
+        vec!["grace"]
+    );
+}
+
+#[test]
+fn where_like_treats_regex_metacharacters_as_literal() {
+    // The `.` in the pattern is literal, so it does NOT match "ada" the way the
+    // regex `a.a` would — the translator escapes it. No name is literally "a.a".
+    let db = seeded();
+    assert_eq!(
+        strings(&db, r#"SELECT VALUE c.name FROM c WHERE c.name LIKE "a.a""#),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn iif_conditional_projection() {
+    let db = seeded();
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE IIF(c.age > 40, "old", "young") FROM c ORDER BY c.age ASC"#
+        ),
+        vec!["young", "old", "old"]
+    );
+}
+
+#[test]
 fn offset_limit() {
     let db = seeded();
     assert_eq!(

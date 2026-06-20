@@ -263,9 +263,14 @@ impl Parser {
                 let expr = self.parse_between(lhs)?;
                 return Ok(maybe_not(negated, expr));
             }
+            Token::Like => {
+                self.advance();
+                let expr = self.parse_like(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
             other if negated => {
                 return Err(SqlError::Parse {
-                    message: format!("expected IN or BETWEEN after NOT, found {other:?}"),
+                    message: format!("expected IN, BETWEEN, or LIKE after NOT, found {other:?}"),
                 });
             }
             _ => {}
@@ -325,6 +330,50 @@ impl Parser {
         let ge = binary(BinOp::Gte, lhs.clone(), lower);
         let le = binary(BinOp::Lte, lhs, upper);
         Ok(binary(BinOp::And, ge, le))
+    }
+
+    /// Desugar `lhs LIKE '<pattern>' [ESCAPE '<c>']` into
+    /// `REGEXMATCH(lhs, '<anchored regex>')`. The pattern is translated rather
+    /// than passed through: only the SQL wildcards (`%`, `_`, `[…]`, `[^…]`)
+    /// become regex constructs, and every other character — including regex
+    /// metacharacters — is escaped, so a literal `.` or `(` in the pattern stays
+    /// literal. The pattern (and `ESCAPE`) must be string literals.
+    fn parse_like(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        let pattern = match self.take() {
+            Token::Str(s) => s,
+            other => {
+                return Err(SqlError::Parse {
+                    message: format!("LIKE pattern must be a string literal, found {other:?}"),
+                });
+            }
+        };
+        let escape = if self.matches(&Token::Escape) {
+            match self.take() {
+                Token::Str(s) => {
+                    let mut chars = s.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => Some(c),
+                        _ => {
+                            return Err(SqlError::Parse {
+                                message: "ESCAPE expects a single-character string".into(),
+                            });
+                        }
+                    }
+                }
+                other => {
+                    return Err(SqlError::Parse {
+                        message: format!("ESCAPE expects a string literal, found {other:?}"),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        let regex = like_to_regex(&pattern, escape);
+        Ok(ScalarExpr::Function {
+            name: "REGEXMATCH".into(),
+            args: vec![lhs, ScalarExpr::Literal(Literal::Str(regex))],
+        })
     }
 
     fn parse_additive(&mut self) -> Result<ScalarExpr> {
@@ -504,6 +553,77 @@ fn maybe_not(negated: bool, expr: ScalarExpr) -> ScalarExpr {
     } else {
         expr
     }
+}
+
+/// Translate a SQL `LIKE` pattern into an anchored regular expression.
+///
+/// Only the SQL wildcards are given meaning — `%` → `.*`, `_` → `.`, and a
+/// `[…]`/`[^…]` set maps onto a regex character class. Every other character is
+/// treated as a literal: regex metacharacters are backslash-escaped so a pattern
+/// like `"a.b("` matches only the literal text `a.b(`. An `escape` character, if
+/// supplied, makes the character that follows it literal (so `%` can be matched
+/// as itself). The result is wrapped in `^…$` because `LIKE` matches the whole
+/// string.
+fn like_to_regex(pattern: &str, escape: Option<char>) -> String {
+    let mut out = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if Some(c) == escape {
+            // The next character is a literal, whatever it is.
+            match chars.next() {
+                Some(next) => push_regex_literal(&mut out, next),
+                None => push_regex_literal(&mut out, c),
+            }
+            continue;
+        }
+        match c {
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            '[' => {
+                // Collect the bracket body up to the closing `]`. A `[…]` set
+                // maps directly onto a regex class (`[a-f]`, `[^abc]`, `[%]`),
+                // so wildcard characters inside it are already literal.
+                let mut inner = String::new();
+                let mut closed = false;
+                for nc in chars.by_ref() {
+                    if nc == ']' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(nc);
+                }
+                if closed {
+                    out.push('[');
+                    for ch in inner.chars() {
+                        if ch == '\\' {
+                            out.push_str("\\\\");
+                        } else {
+                            out.push(ch);
+                        }
+                    }
+                    out.push(']');
+                } else {
+                    // Unterminated `[` — treat it and the rest as literals.
+                    push_regex_literal(&mut out, '[');
+                    for ch in inner.chars() {
+                        push_regex_literal(&mut out, ch);
+                    }
+                }
+            }
+            _ => push_regex_literal(&mut out, c),
+        }
+    }
+    out.push('$');
+    out
+}
+
+/// Append `c` to a regex, backslash-escaping it when it is a metacharacter so it
+/// matches only itself.
+fn push_regex_literal(out: &mut String, c: char) {
+    if r"\.^$*+?()[]{}|".contains(c) {
+        out.push('\\');
+    }
+    out.push(c);
 }
 
 #[cfg(test)]
@@ -768,6 +888,67 @@ mod tests {
         assert!(matches!(
             q.filter,
             Some(ScalarExpr::Binary { op: BinOp::Or, .. })
+        ));
+    }
+
+    #[test]
+    fn like_translates_wildcards_and_escapes_metacharacters() {
+        // The documented wildcards, plus regex metacharacters that must stay
+        // literal. https://learn.microsoft.com/en-us/cosmos-db/query/like
+        assert_eq!(like_to_regex("%driver%", None), "^.*driver.*$");
+        assert_eq!(like_to_regex("fruit%", None), "^fruit.*$");
+        assert_eq!(like_to_regex("%Road", None), "^.*Road$");
+        assert_eq!(like_to_regex("a.b(", None), r"^a\.b\($");
+        assert_eq!(like_to_regex("%SO[t-z]PS%", None), "^.*SO[t-z]PS.*$");
+        assert_eq!(like_to_regex("%SO[^abc]PS%", None), "^.*SO[^abc]PS.*$");
+        // Bracket-literal forms.
+        assert_eq!(like_to_regex("20-30[%]", None), "^20-30[%]$");
+        assert_eq!(like_to_regex("[_]n", None), "^[_]n$");
+        assert_eq!(like_to_regex("[[]", None), "^[[]$");
+        assert_eq!(like_to_regex("]", None), r"^\]$");
+        // ESCAPE makes the following `%` a literal.
+        assert_eq!(like_to_regex("%20^%%", Some('^')), "^.*20%.*$");
+    }
+
+    #[test]
+    fn like_desugars_to_regexmatch() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.name LIKE "a%""#);
+        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+            panic!("expected a REGEXMATCH call");
+        };
+        assert_eq!(name, "REGEXMATCH");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^a.*$"));
+    }
+
+    #[test]
+    fn like_with_escape_clause() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.x LIKE "%20^%%" ESCAPE "^""#);
+        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+            panic!("expected a REGEXMATCH call");
+        };
+        assert_eq!(name, "REGEXMATCH");
+        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^.*20%.*$"));
+    }
+
+    #[test]
+    fn not_like_wraps_in_not() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.name NOT LIKE "a%""#);
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared LIKE");
+        };
+        assert!(matches!(*expr, ScalarExpr::Function { ref name, .. } if name == "REGEXMATCH"));
+    }
+
+    #[test]
+    fn like_requires_string_literal_pattern() {
+        assert!(matches!(
+            parse_err("SELECT VALUE c FROM c WHERE c.name LIKE 5"),
+            SqlError::Parse { .. }
         ));
     }
 }

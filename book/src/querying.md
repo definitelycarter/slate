@@ -65,7 +65,7 @@ FROM <alias>
 
 The `FROM` clause names only the row alias; the container is the `(cf, collection)` passed to `query()` (matching Cosmos, where the container is external to the query text). SQL is read-only and always runs on the v2 engine.
 
-The `WHERE` expression is the full scalar grammar plus two predicate forms: `<expr> IN (a, b, …)` and `<expr> BETWEEN <lo> AND <hi>` (each negatable with `NOT`). They are pure sugar — `IN` desugars to an OR of equalities and `BETWEEN` to an inclusive `>= lo AND <= hi` — so they reuse the planner's sargable paths unchanged: an `IN` over an indexed field becomes an `IndexMerge(Or)` and a `BETWEEN` becomes a range `IndexScan` (see [Plan Scenarios](#plan-scenarios)).
+The `WHERE` expression is the full scalar grammar plus three predicate forms: `<expr> IN (a, b, …)`, `<expr> BETWEEN <lo> AND <hi>`, and `<expr> LIKE '<pattern>' [ESCAPE '<c>']` (each negatable with `NOT`). They are pure sugar — `IN` desugars to an OR of equalities and `BETWEEN` to an inclusive `>= lo AND <= hi`, so both reuse the planner's sargable paths unchanged (an `IN` over an indexed field becomes an `IndexMerge(Or)` and a `BETWEEN` a range `IndexScan`; see [Plan Scenarios](#plan-scenarios)). `LIKE` desugars to an anchored `RegexMatch`: the SQL wildcards `%` (any run) and `_` (any single character) and `[…]`/`[^…]` sets become regex constructs, while every other character — including regex metacharacters — is escaped to a literal, so a pattern is never a regex-injection vector.
 
 There are three projection forms, all matching Cosmos semantics:
 

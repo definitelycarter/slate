@@ -84,7 +84,7 @@ optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
 
 ### Conditional (Tier 1)
 
-- [ ] `IIF(cond, a, b)`  ⭐ *(also expose `??` coalesce operator)*
+- [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [ ] `??` coalesce operator
 
 ### Date & time (Tier 0–1, own batch)
 
@@ -103,7 +103,7 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 
 - [x] `IN (a, b, …)`  ⭐ *(desugars to OR-of-equalities → sargable `IndexMerge(Or)`; `NOT IN` supported)*
 - [x] `BETWEEN x AND y`  ⭐ *(desugars to `>= x AND <= y`, inclusive → sargable range; `NOT BETWEEN` supported)*
-- [ ] `LIKE <pattern>` *(lower to regex)*
+- [x] `LIKE <pattern> [ESCAPE c]` *(desugars to a safely-escaped, anchored `REGEXMATCH`; `NOT LIKE` supported)*
 - [ ] `DISTINCT` (`SELECT DISTINCT …`) *(maps onto the existing `Distinct` node — Tier 2)*
 - [ ] `TOP N` *(Cosmos alias for `LIMIT`)*
 

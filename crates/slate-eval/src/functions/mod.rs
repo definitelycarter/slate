@@ -44,6 +44,7 @@ mod contains;
 mod endswith;
 mod exp;
 mod floor;
+mod iif;
 mod index_of;
 mod is_array;
 mod is_bool;
@@ -124,6 +125,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "SETUNION" => setunion::eval(name, args),
         "OBJECTTOARRAY" => objecttoarray::eval(name, args),
         "CONTAINS" => contains::eval(name, args),
+        "IIF" => iif::eval(name, args),
         "STARTSWITH" => starts_with::eval(name, args),
         "ENDSWITH" => endswith::eval(name, args),
         "STRINGEQUALS" => stringequals::eval(name, args),

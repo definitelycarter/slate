@@ -21,6 +21,8 @@ pub enum Token {
     Join,
     In,
     Between,
+    Like,
+    Escape,
     Order,
     By,
     Asc,
