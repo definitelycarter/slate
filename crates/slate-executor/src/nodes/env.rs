@@ -48,6 +48,16 @@ pub(crate) fn raw_env<'a>(bindings: &'a [(&'a str, RawBsonRef<'a>)]) -> RawEnv<'
     RawEnv::new(bindings, None)
 }
 
+/// The sole `FROM` alias when the node reads bare rows ([`RowBinding::Alias`]),
+/// for compiling the single-binding fast path; `None` for the multi-binding
+/// environment shape. Mirrors the binding used by [`with_env`].
+pub(crate) fn sole_alias(binding: &RowBinding) -> Option<&str> {
+    match binding {
+        RowBinding::Alias(alias) => Some(alias.as_str()),
+        RowBinding::Env => None,
+    }
+}
+
 /// Run `f` with a raw evaluation environment for `row` under `binding`.
 ///
 /// In [`RowBinding::Alias`] mode the whole row is bound to one alias with **no

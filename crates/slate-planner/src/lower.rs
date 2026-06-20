@@ -180,15 +180,26 @@ fn plan_source(
         }
     }
 
-    // Mongo implicit-equality on an indexed field → an index Eq lookup. Kept as
-    // a residual recheck (NOT consumed): a plain index Eq alone could miss
-    // array-containing documents if the index isn't multikey, so the original
-    // `OR` still runs over the narrowed candidates.
-    for conjunct in &conjuncts {
+    // Mongo implicit-equality on a scalar-indexed field → an index Eq lookup,
+    // and the conjunct is *consumed* (no residual recheck). A scalar index holds
+    // only scalar entries — an array-valued field produces none (see
+    // `index_record::extract_all`) — so every candidate the `Eq` returns already
+    // has `field == value`; the idiom's recheck (`field = v OR ARRAY_CONTAINS`)
+    // is therefore always true over the candidate set and is pure per-row
+    // overhead. (Array-valued documents are absent from a scalar index whether
+    // or not the recheck runs, so consuming it changes no results — pinned by
+    // the v1↔v2 differential `diff_fuzz`/`parity_audit`.)
+    //
+    // Multikey (`.[]`) equality is handled separately below and stays a recheck.
+    for (i, conjunct) in conjuncts.iter().enumerate() {
+        if consumed.contains(&i) {
+            continue;
+        }
         if let Some((field, value)) = as_mongo_eq(conjunct, alias)
             && meta.indexes.contains(&field)
         {
             sources.push(index_scan(container, &field, IndexScanRange::Eq(value)));
+            consumed.push(i);
         }
     }
 
@@ -864,18 +875,17 @@ mod tests {
     }
 
     #[test]
-    fn mongo_eq_on_indexed_field_uses_index_with_recheck() {
-        // `{age: 41}` on an indexed field → index Eq, with the OR kept as a
-        // residual recheck (array safety).
+    fn mongo_eq_on_indexed_field_uses_index_and_consumes_recheck() {
+        // `{age: 41}` on a scalar-indexed field → index Eq, with the idiom
+        // *consumed* (no residual Filter): a scalar index returns only docs
+        // whose `age` already equals 41, so the `OR ARRAY_CONTAINS` recheck is
+        // always true over the candidates and is dropped.
         let node = lower_with(
             "SELECT VALUE c FROM c WHERE c.age = 41 OR ARRAY_CONTAINS(c.age, 41)",
             &age_indexed(),
         );
         let Node::Project { source, .. } = node else {
             panic!("expected Project");
-        };
-        let Node::Filter { source, .. } = *source else {
-            panic!("expected residual Filter recheck");
         };
         match *source {
             Node::KeyLookup { source, .. } => assert!(matches!(
@@ -885,7 +895,7 @@ mod tests {
                     ..
                 }
             )),
-            other => panic!("expected KeyLookup(IndexScan), got {other:?}"),
+            other => panic!("expected KeyLookup(IndexScan) with no residual Filter, got {other:?}"),
         }
     }
 

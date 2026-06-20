@@ -16,7 +16,7 @@
 
 use std::cmp::Ordering;
 
-use bson::raw::{CString, RawArrayBuf, RawBsonRef, RawDocument, RawDocumentBuf};
+use bson::raw::{BindRawBsonRef, CString, RawArrayBuf, RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::{Bson, RawBson};
 
 use crate::error::{EvalError, Result};
@@ -25,6 +25,7 @@ use crate::eval::{
 };
 use crate::value::Value;
 use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
+use slate_rawbson::RawField;
 
 /// The result of evaluating a [`ScalarExpr`] over raw bytes.
 ///
@@ -117,6 +118,15 @@ impl<'a> RawEnv<'a> {
         RawValue::Undefined
     }
 
+    /// The first (in single-binding mode, only) bound value, without a name
+    /// lookup. Used by the compiled fast path for the sole `FROM` alias.
+    fn sole_row(&self) -> RawValue<'a> {
+        match self.bindings.first() {
+            Some((_, v)) => RawValue::Ref(*v),
+            None => RawValue::Undefined,
+        }
+    }
+
     fn param(&self, name: &str) -> Result<RawValue<'a>> {
         match self.params {
             Some(p) => match get_field(p, name)? {
@@ -155,10 +165,7 @@ pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
         ScalarExpr::Object(fields) => build_object(fields, env),
         ScalarExpr::Array(items) => build_array(items, env),
 
-        ScalarExpr::PathGet { base, path } => {
-            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
-            get_path(eval(base, env)?, &segments)
-        }
+        ScalarExpr::PathGet { base, path } => get_path(eval(base, env)?, path),
         ScalarExpr::MultikeyEq {
             base,
             index_path,
@@ -243,7 +250,7 @@ fn array_contains<'a>(arr: &RawValue, needle: &RawValue) -> RawValue<'a> {
 /// consumes the next segment; an array applies the *same* remaining segments to
 /// each element and flattens the results one level. Returns a scalar for a
 /// plain path, or an array when an array was traversed.
-fn get_path<'a>(base: RawValue<'a>, segments: &[&str]) -> Result<RawValue<'a>> {
+fn get_path<'a, S: AsRef<str>>(base: RawValue<'a>, segments: &[S]) -> Result<RawValue<'a>> {
     let Some((head, rest)) = segments.split_first() else {
         return Ok(base);
     };
@@ -257,7 +264,7 @@ fn get_path<'a>(base: RawValue<'a>, segments: &[&str]) -> Result<RawValue<'a>> {
             }
             Ok(RawValue::OwnedRaw(RawBson::Array(out)))
         }
-        RawValue::Ref(RawBsonRef::Document(d)) => match get_field(d, head)? {
+        RawValue::Ref(RawBsonRef::Document(d)) => match get_field(d, head.as_ref())? {
             Some(v) => get_path(RawValue::Ref(v), rest),
             None => Ok(RawValue::Undefined),
         },
@@ -363,9 +370,14 @@ fn index_access<'a>(base: RawValue<'a>, index: RawValue<'a>) -> Result<RawValue<
 }
 
 fn get_field<'a>(d: &'a RawDocument, field: &str) -> Result<Option<RawBsonRef<'a>>> {
-    d.get(field).map_err(|e| EvalError {
-        message: format!("could not read field '{field}': {e}"),
-    })
+    // Scan the raw bytes directly (slate-rawbson) rather than the bson crate's
+    // validating `RawDocument::get`, which UTF-8-checks every key it skips. This
+    // is the hot per-row field lookup behind `Member`/path access. `RawField::get`
+    // resolves one flat segment (callers descend dot-paths a hop at a time) and
+    // `.value()` preserves an explicit `Null` (unlike `get_value`), so
+    // `IS_NULL`/`c.field == null` still see it. Malformed bytes read as missing,
+    // matching v1's filter path; stored documents are validated on write.
+    Ok(RawField::get(d.as_bytes(), field).and_then(|f| f.value()))
 }
 
 // ── Unary ───────────────────────────────────────────────────────
@@ -538,6 +550,393 @@ fn decode_err(e: bson::error::Error) -> EvalError {
     }
 }
 
+// ── Compiled expressions ────────────────────────────────────────
+//
+// [`eval`] tree-walks the AST for **every row**, and each pass redoes work that
+// depends only on the expression, not the data: resolving a function name by a
+// chain of case-insensitive string compares, splitting a dotted path into a
+// fresh `Vec`, and looking up the `FROM` alias by name. [`compile`] does that
+// resolution once; [`eval_compiled`] then runs the pre-resolved form per row.
+//
+// It mirrors [`eval`] exactly — the `compiled_matches_eval` test pins the two
+// together over the same expression corpus as `raw_matches_owned`. Only the
+// redundant per-row work is hoisted out; every leaf rule is still the shared
+// definition reused by `eval`.
+
+/// A scalar expression with all data-independent work resolved ahead of time.
+/// Built once per query by [`compile`]; evaluated per row by [`eval_compiled`].
+pub enum Compiled {
+    Literal(Literal),
+    /// A query constant pre-converted to raw bytes, so each row borrows it as a
+    /// `Ref` instead of cloning a fresh `Bson` (the per-row cost in `eval`).
+    Value(RawBson),
+    /// Fallback for the rare constant that doesn't convert to `RawBson`; cloned
+    /// per row as in `eval`.
+    ValueBson(Bson),
+    /// The sole `FROM` binding, resolved without a name lookup (single-binding
+    /// mode only — see [`compile`]'s `sole` argument).
+    Row,
+    /// `<sole-alias>.<field>` collapsed to a direct field read on [`Row`].
+    RowField(String),
+    Identifier(String),
+    Parameter(String),
+    Member {
+        base: Box<Compiled>,
+        field: String,
+    },
+    Index {
+        base: Box<Compiled>,
+        index: Box<Compiled>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Compiled>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Compiled>,
+        rhs: Box<Compiled>,
+    },
+    Object(Vec<(ObjKey, Compiled)>),
+    Array(Vec<Compiled>),
+    /// `path` is pre-split into owned segments (no per-row `Vec`).
+    PathGet {
+        base: Box<Compiled>,
+        path: Vec<String>,
+    },
+    /// `path` is pre-split with the `[]` markers already dropped.
+    MultikeyEq {
+        base: Box<Compiled>,
+        path: Vec<String>,
+        value: Box<Compiled>,
+    },
+    // Function dispatch resolved once: the hot predicates become dedicated
+    // variants, everything else a generic call retaining the resolved name.
+    IsDefined(Box<Compiled>),
+    IsNull(Box<Compiled>),
+    ArrayContains {
+        arr: Box<Compiled>,
+        needle: Box<Compiled>,
+    },
+    /// The Mongo implicit-equality idiom `base = value OR ARRAY_CONTAINS(base,
+    /// value)`, fused so `base` is fetched **once** per row instead of twice
+    /// (the interpreter walks the `Eq` and `ARRAY_CONTAINS` subtrees separately,
+    /// re-fetching the field). Semantically identical to the source `Or`.
+    MongoEq {
+        base: Box<Compiled>,
+        value: Box<Compiled>,
+    },
+    Call {
+        name: String,
+        args: Vec<Compiled>,
+    },
+}
+
+/// A precompiled object-projection key. `build_object` (in `eval`) revalidates
+/// the key as a `CString` on every row; here it is validated once at compile
+/// time and appended by reference, so the hot projection path allocates nothing
+/// for keys.
+pub enum ObjKey {
+    /// A valid key, ready to append by reference.
+    Ready(CString),
+    /// A key the `bson` `CString` rejects (an interior NUL — vanishingly rare);
+    /// revalidated per row so the same error surfaces as in `eval`.
+    Lazy(String),
+}
+
+/// Compile `expr` for repeated evaluation. `sole` is the single `FROM` alias
+/// when the node reads bare rows ([`RowBinding::Alias`] mode); pass `None` for
+/// the multi-binding environment shape so identifiers fall back to name lookup.
+pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
+    match expr {
+        ScalarExpr::Literal(l) => Compiled::Literal(l.clone()),
+        // Pre-convert the constant to raw bytes once. The common scalar/array
+        // constants convert; anything that doesn't falls back to a per-row clone.
+        ScalarExpr::Value(b) => match RawBson::try_from(b.clone()) {
+            Ok(raw) => Compiled::Value(raw),
+            Err(_) => Compiled::ValueBson(b.clone()),
+        },
+        ScalarExpr::Identifier(n) => {
+            if sole == Some(n.as_str()) {
+                Compiled::Row
+            } else {
+                Compiled::Identifier(n.clone())
+            }
+        }
+        ScalarExpr::Parameter(n) => Compiled::Parameter(n.clone()),
+        ScalarExpr::Member { base, field } => {
+            // Collapse `<sole-alias>.<field>` to a direct field read on the row,
+            // dropping the identifier lookup and its intermediate value.
+            match compile(base, sole) {
+                Compiled::Row => Compiled::RowField(field.clone()),
+                base => Compiled::Member {
+                    base: Box::new(base),
+                    field: field.clone(),
+                },
+            }
+        }
+        ScalarExpr::Index { base, index } => Compiled::Index {
+            base: Box::new(compile(base, sole)),
+            index: Box::new(compile(index, sole)),
+        },
+        ScalarExpr::Unary { op, expr } => Compiled::Unary {
+            op: *op,
+            expr: Box::new(compile(expr, sole)),
+        },
+        ScalarExpr::Binary { op, lhs, rhs } => {
+            // Fuse the Mongo implicit-equality idiom so the field is read once.
+            if *op == BinOp::Or
+                && let Some((base, value)) = as_eq_or_contains(lhs, rhs)
+            {
+                return Compiled::MongoEq {
+                    base: Box::new(compile(base, sole)),
+                    value: Box::new(compile(value, sole)),
+                };
+            }
+            Compiled::Binary {
+                op: *op,
+                lhs: Box::new(compile(lhs, sole)),
+                rhs: Box::new(compile(rhs, sole)),
+            }
+        }
+        ScalarExpr::Function { name, args } => compile_function(name, args, sole),
+        ScalarExpr::Object(fields) => Compiled::Object(
+            fields
+                .iter()
+                .map(|(k, v)| {
+                    // Validate the key once; per-row append then borrows it.
+                    let key = match CString::try_from(k.as_str()) {
+                        Ok(c) => ObjKey::Ready(c),
+                        Err(_) => ObjKey::Lazy(k.clone()),
+                    };
+                    (key, compile(v, sole))
+                })
+                .collect(),
+        ),
+        ScalarExpr::Array(items) => {
+            Compiled::Array(items.iter().map(|e| compile(e, sole)).collect())
+        }
+        ScalarExpr::PathGet { base, path } => Compiled::PathGet {
+            base: Box::new(compile(base, sole)),
+            path: path.clone(),
+        },
+        ScalarExpr::MultikeyEq {
+            base,
+            index_path,
+            value,
+        } => Compiled::MultikeyEq {
+            base: Box::new(compile(base, sole)),
+            // `.[]` markers only mean "an array is here"; drop them once. The
+            // verbatim path was for the planner.
+            path: index_path
+                .split('.')
+                .filter(|s| *s != "[]")
+                .map(str::to_string)
+                .collect(),
+            value: Box::new(compile(value, sole)),
+        },
+    }
+}
+
+/// Recognize the Mongo implicit-equality idiom `base = value OR
+/// ARRAY_CONTAINS(base, value)` (what `slate-query` emits for `{field: value}`),
+/// returning its shared `(base, value)` when both sides reference the same
+/// operands. Used by [`compile`] to fuse the redundant double field read.
+fn as_eq_or_contains<'a>(
+    lhs: &'a ScalarExpr,
+    rhs: &'a ScalarExpr,
+) -> Option<(&'a ScalarExpr, &'a ScalarExpr)> {
+    let ScalarExpr::Binary {
+        op: BinOp::Eq,
+        lhs: eq_base,
+        rhs: eq_value,
+    } = lhs
+    else {
+        return None;
+    };
+    let ScalarExpr::Function { name, args } = rhs else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("ARRAY_CONTAINS") || args.len() != 2 {
+        return None;
+    }
+    // The Eq and ARRAY_CONTAINS must be over the *same* field and value, or the
+    // fusion would change meaning.
+    if eq_base.as_ref() == &args[0] && eq_value.as_ref() == &args[1] {
+        Some((eq_base, eq_value))
+    } else {
+        None
+    }
+}
+
+/// Resolve a function call to its compiled form, mirroring the dispatch in
+/// [`eval_function`] but doing the name match once.
+fn compile_function(name: &str, args: &[ScalarExpr], sole: Option<&str>) -> Compiled {
+    let c = |e| Box::new(compile(e, sole));
+    if args.len() == 1 {
+        if name.eq_ignore_ascii_case("IS_DEFINED") {
+            return Compiled::IsDefined(c(&args[0]));
+        }
+        if name.eq_ignore_ascii_case("IS_NULL") {
+            return Compiled::IsNull(c(&args[0]));
+        }
+    }
+    if args.len() == 2 && name.eq_ignore_ascii_case("ARRAY_CONTAINS") {
+        return Compiled::ArrayContains {
+            arr: c(&args[0]),
+            needle: c(&args[1]),
+        };
+    }
+    Compiled::Call {
+        name: name.to_string(),
+        args: args.iter().map(|a| compile(a, sole)).collect(),
+    }
+}
+
+/// Evaluate a [`Compiled`] expression in `env`. Semantically identical to
+/// [`eval`] over the source [`ScalarExpr`].
+pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+    match c {
+        Compiled::Literal(l) => Ok(literal_value(l)),
+        // Borrow the pre-converted constant — no per-row allocation.
+        Compiled::Value(raw) => Ok(RawValue::Ref(raw.as_raw_bson_ref())),
+        Compiled::ValueBson(b) => Ok(RawValue::Owned(b.clone())),
+        Compiled::Row => Ok(env.sole_row()),
+        Compiled::RowField(field) => member_access(env.sole_row(), field),
+        Compiled::Identifier(n) => Ok(env.lookup(n)),
+        Compiled::Parameter(n) => env.param(n),
+
+        Compiled::Member { base, field } => member_access(eval_compiled(base, env)?, field),
+        Compiled::Index { base, index } => {
+            let b = eval_compiled(base, env)?;
+            let i = eval_compiled(index, env)?;
+            index_access(b, i)
+        }
+
+        Compiled::Unary { op, expr } => Ok(eval_unary(*op, eval_compiled(expr, env)?)),
+        Compiled::Binary { op, lhs, rhs } => eval_compiled_binary(*op, lhs, rhs, env),
+
+        Compiled::Object(fields) => {
+            let mut doc = RawDocumentBuf::new();
+            for (k, v) in fields {
+                // Append the field value borrowing where possible: a `Ref` (a
+                // selected document field — the common projection case) and an
+                // `OwnedRaw` go straight in, skipping the owned `RawBson` that
+                // `into_raw` would allocate per string/document/array value.
+                match eval_compiled(v, env)? {
+                    RawValue::Undefined => {} // omit (Cosmos behavior)
+                    RawValue::Ref(r) => append_field(&mut doc, k, r)?,
+                    RawValue::OwnedRaw(rb) => append_field(&mut doc, k, rb.as_raw_bson_ref())?,
+                    RawValue::Owned(b) => {
+                        let raw = RawBson::try_from(b).map_err(|e| EvalError {
+                            message: format!("could not encode projected value: {e}"),
+                        })?;
+                        append_field(&mut doc, k, raw)?;
+                    }
+                }
+            }
+            Ok(RawValue::OwnedRaw(RawBson::Document(doc)))
+        }
+        Compiled::Array(items) => {
+            let mut arr = RawArrayBuf::new();
+            for it in items {
+                if let Some(raw) = eval_compiled(it, env)?.into_raw()? {
+                    arr.push(raw);
+                }
+            }
+            Ok(RawValue::OwnedRaw(RawBson::Array(arr)))
+        }
+
+        Compiled::PathGet { base, path } => get_path(eval_compiled(base, env)?, path),
+        Compiled::MultikeyEq { base, path, value } => {
+            let resolved = get_path(eval_compiled(base, env)?, path)?;
+            let needle = eval_compiled(value, env)?;
+            Ok(array_contains(&resolved, &needle))
+        }
+
+        Compiled::IsDefined(e) => Ok(bool_value(!eval_compiled(e, env)?.is_undefined())),
+        Compiled::IsNull(e) => Ok(bool_value(is_null(&eval_compiled(e, env)?))),
+        Compiled::ArrayContains { arr, needle } => {
+            let a = eval_compiled(arr, env)?;
+            let n = eval_compiled(needle, env)?;
+            Ok(array_contains(&a, &n))
+        }
+        Compiled::MongoEq { base, value } => {
+            // `base = needle OR ARRAY_CONTAINS(base, needle)`, reusing the single
+            // `base` read for both arms. Mirrors `eval_binary`'s `Or`
+            // short-circuit exactly (deterministic eval → identical result).
+            let b = eval_compiled(base, env)?;
+            let needle = eval_compiled(value, env)?;
+            // `base = needle` as a 3-valued bool, matching `eval_binop(Eq)`:
+            // undefined if either side is undefined, else scalar equality.
+            let eq = if b.is_undefined() || needle.is_undefined() {
+                None
+            } else {
+                Some(compare(&b, &needle) == Some(Ordering::Equal))
+            };
+            if eq == Some(true) {
+                return Ok(bool_value(true));
+            }
+            let contains = array_contains(&b, &needle).as_bool();
+            Ok(RawValue::from_value(or3(eq, contains)))
+        }
+        Compiled::Call { name, args } => {
+            let mut vals = Vec::with_capacity(args.len());
+            for a in args {
+                vals.push(eval_compiled(a, env)?.into_value()?);
+            }
+            crate::functions::call(name, vals).map(RawValue::from_value)
+        }
+    }
+}
+
+/// Append one projection field, using the key pre-validated at compile time
+/// (borrowed by reference — no per-row key allocation; see [`ObjKey`]).
+fn append_field(doc: &mut RawDocumentBuf, key: &ObjKey, value: impl BindRawBsonRef) -> Result<()> {
+    match key {
+        ObjKey::Ready(c) => doc.append(c, value),
+        ObjKey::Lazy(s) => {
+            let c = CString::try_from(s.as_str()).map_err(|e| EvalError {
+                message: format!("invalid object key '{s}': {e}"),
+            })?;
+            doc.append(c, value);
+        }
+    }
+    Ok(())
+}
+
+/// `And`/`Or` short-circuit, mirroring [`eval_binary`] over compiled operands.
+fn eval_compiled_binary<'a>(
+    op: BinOp,
+    lhs: &'a Compiled,
+    rhs: &'a Compiled,
+    env: &RawEnv<'a>,
+) -> Result<RawValue<'a>> {
+    match op {
+        BinOp::And => {
+            let l = eval_compiled(lhs, env)?.as_bool();
+            if l == Some(false) {
+                return Ok(bool_value(false));
+            }
+            let r = eval_compiled(rhs, env)?.as_bool();
+            Ok(RawValue::from_value(and3(l, r)))
+        }
+        BinOp::Or => {
+            let l = eval_compiled(lhs, env)?.as_bool();
+            if l == Some(true) {
+                return Ok(bool_value(true));
+            }
+            let r = eval_compiled(rhs, env)?.as_bool();
+            Ok(RawValue::from_value(or3(l, r)))
+        }
+        _ => Ok(eval_binop(
+            op,
+            eval_compiled(lhs, env)?,
+            eval_compiled(rhs, env)?,
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +969,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(owned, raw, "raw/owned disagree on `{src}`");
+
+        // The compiled form must match the interpreter exactly, in both the
+        // single-binding fast path (`sole = Some("c")`, exercising `Row`/
+        // `RowField`) and the generic name-lookup path (`sole = None`).
+        for sole in [Some("c"), None] {
+            let prog = compile(&expr, sole);
+            let compiled = eval_compiled(&prog, &RawEnv::new(&rbinds, None))
+                .unwrap()
+                .into_value()
+                .unwrap();
+            assert_eq!(
+                owned, compiled,
+                "compiled/owned disagree on `{src}` (sole={sole:?})"
+            );
+        }
     }
 
     #[test]
@@ -631,6 +1045,14 @@ mod tests {
             "ARRAY_CONTAINS(c.tags, \"y\")",
             "ARRAY_CONTAINS(c.tags, \"q\")",
             "IS_DEFINED(c.nope)",
+            // Mongo implicit-equality idiom (fused to `MongoEq` when compiled):
+            // array membership, scalar match, no-match (undefined), and a
+            // non-idiom OR with mismatched operands that must NOT fuse.
+            "c.tags = \"y\" OR ARRAY_CONTAINS(c.tags, \"y\")",
+            "c.tags = \"q\" OR ARRAY_CONTAINS(c.tags, \"q\")",
+            "c.name = \"ada\" OR ARRAY_CONTAINS(c.name, \"ada\")",
+            "c.name = \"zzz\" OR ARRAY_CONTAINS(c.name, \"zzz\")",
+            "c.age = 30 OR ARRAY_CONTAINS(c.tags, \"y\")",
         ] {
             assert_agree(src, &doc);
         }

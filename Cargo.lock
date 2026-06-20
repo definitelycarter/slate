@@ -1390,6 +1390,7 @@ dependencies = [
  "bson",
  "criterion",
  "serde",
+ "slate-rawbson",
  "slate-store",
 ]
 
@@ -1400,6 +1401,7 @@ dependencies = [
  "bson",
  "regex",
  "slate-ast",
+ "slate-rawbson",
  "slate-sql",
 ]
 
@@ -1444,6 +1446,13 @@ dependencies = [
  "bson",
  "serde",
  "slate-ast",
+]
+
+[[package]]
+name = "slate-rawbson"
+version = "0.1.0"
+dependencies = [
+ "bson",
 ]
 
 [[package]]

@@ -7,7 +7,7 @@
 
 use bson::RawBson;
 use slate_ast::ScalarExpr;
-use slate_eval::raweval;
+use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
 use super::env;
@@ -19,8 +19,11 @@ pub(crate) fn execute<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> ValueIter<'a> {
+    // Compile the predicate once; the per-row closure evaluates the resolved
+    // form (see `raweval::compile`).
+    let program = raweval::compile(&predicate, env::sole_alias(&binding));
     Box::new(
-        source.filter_map(move |item| match keep_row(item, &binding, &predicate) {
+        source.filter_map(move |item| match keep_row(item, &binding, &program) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept
             Ok(None) => None,                         // dropped
             Err(e) => Some(Err(e)),                   // surface the error
@@ -33,7 +36,7 @@ pub(crate) fn execute<'a>(
 fn keep_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
-    predicate: &ScalarExpr,
+    program: &Compiled,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -43,7 +46,7 @@ fn keep_row(
     // borrow ends before we move `row` through. Only `Some(true)` keeps the
     // row (3-valued rule: false *or* undefined drops it).
     let keep = env::with_env(&row, binding, |renv| {
-        Ok(raweval::eval(predicate, renv)?.as_bool() == Some(true))
+        Ok(raweval::eval_compiled(program, renv)?.as_bool() == Some(true))
     })?;
 
     if keep { Ok(Some(row)) } else { Ok(None) }

@@ -7,7 +7,7 @@
 
 use bson::RawBson;
 use slate_ast::ScalarExpr;
-use slate_eval::raweval;
+use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
 use super::env;
@@ -19,32 +19,36 @@ pub(crate) fn execute<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> ValueIter<'a> {
-    Box::new(source.map(move |item| project_row(item, &binding, &expr)))
+    // Identity fast path: `SELECT VALUE c` in single-binding mode projects the
+    // whole bound row, so pass it straight through — no eval, no copy. This is
+    // the `find` shape, and what brings the scan path to v1 parity. Detect it
+    // once here rather than per row.
+    if let (RowBinding::Alias(alias), ScalarExpr::Identifier(name)) = (&binding, &expr)
+        && alias == name
+    {
+        return Box::new(source);
+    }
+
+    // Otherwise compile the projection once; the per-row closure evaluates the
+    // resolved form (see `raweval::compile`).
+    let program = raweval::compile(&expr, env::sole_alias(&binding));
+    Box::new(source.map(move |item| project_row(item, &binding, &program)))
 }
 
 fn project_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
-    expr: &ScalarExpr,
+    program: &Compiled,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
     };
 
-    // Identity fast path: `SELECT VALUE c` in single-binding mode projects the
-    // whole bound row, so pass it straight through — no eval, no copy. This is
-    // the `find` shape, and what brings the scan path to v1 parity.
-    if let (RowBinding::Alias(alias), ScalarExpr::Identifier(name)) = (binding, expr)
-        && alias == name
-    {
-        return Ok(Some(row));
-    }
-
-    // Otherwise evaluate against bindings borrowing from `row`. `into_raw`
-    // copies the result out (a `Ref` is a single byte copy, not a decode +
-    // re-encode), so the row's borrow can end here.
+    // Evaluate against bindings borrowing from `row`. `into_raw` copies the
+    // result out (a `Ref` is a single byte copy, not a decode + re-encode), so
+    // the row's borrow can end here.
     env::with_env(&row, binding, |renv| {
-        Ok(raweval::eval(expr, renv)?.into_raw()?)
+        Ok(raweval::eval_compiled(program, renv)?.into_raw()?)
     })
 }
 
