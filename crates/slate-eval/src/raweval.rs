@@ -204,7 +204,7 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
     if args.len() == 2 && name.eq_ignore_ascii_case("ARRAY_CONTAINS") {
         let arr = eval(&args[0], env)?;
         let needle = eval(&args[1], env)?;
-        return Ok(array_contains(&arr, &needle));
+        return array_contains_value(arr, needle);
     }
 
     let mut vals = Vec::with_capacity(args.len());
@@ -248,6 +248,20 @@ fn array_contains<'a>(arr: &RawValue, needle: &RawValue) -> RawValue<'a> {
         _ => return RawValue::Undefined,
     };
     bool_value(found)
+}
+
+/// `ARRAY_CONTAINS(array, needle)` dispatch: a scalar (or undefined) needle uses
+/// the zero-alloc raw fast path above; an object/array needle needs structural
+/// (deep) equality, so it defers to the owned [`crate::functions`] implementation.
+fn array_contains_value<'a>(arr: RawValue<'a>, needle: RawValue<'a>) -> Result<RawValue<'a>> {
+    if needle.is_undefined() || value_scalar(&needle).is_some() {
+        return Ok(array_contains(&arr, &needle));
+    }
+    crate::functions::call(
+        "ARRAY_CONTAINS",
+        vec![arr.into_value()?, needle.into_value()?],
+    )
+    .map(RawValue::from_value)
 }
 
 /// Resolve a dotted path against `base`, distributing over arrays. A document
@@ -872,7 +886,7 @@ pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'
         Compiled::ArrayContains { arr, needle } => {
             let a = eval_compiled(arr, env)?;
             let n = eval_compiled(needle, env)?;
-            Ok(array_contains(&a, &n))
+            array_contains_value(a, n)
         }
         Compiled::MongoEq { base, value } => {
             // `base = needle OR ARRAY_CONTAINS(base, needle)`, reusing the single

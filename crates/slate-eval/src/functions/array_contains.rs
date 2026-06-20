@@ -27,7 +27,7 @@ pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
                 if partial {
                     contains_subset(e, needle)
                 } else {
-                    crate::eval::compare_values(e, needle) == Some(Ordering::Equal)
+                    deep_equal(e, needle)
                 }
             });
             Value::Defined(Bson::Boolean(found))
@@ -44,6 +44,22 @@ fn contains_subset(elem: &Bson, needle: &Bson) -> bool {
             .iter()
             .all(|(k, v)| e.get(k).is_some_and(|ev| contains_subset(ev, v))),
         _ => crate::eval::compare_values(elem, needle) == Some(Ordering::Equal),
+    }
+}
+
+/// Full (exact) match. The shared comparator doesn't order documents, so compare
+/// objects/arrays structurally and fall back to it for scalars (numeric coercion).
+fn deep_equal(a: &Bson, b: &Bson) -> bool {
+    match (a, b) {
+        (Bson::Document(x), Bson::Document(y)) => {
+            x.len() == y.len()
+                && y.iter()
+                    .all(|(k, v)| x.get(k).is_some_and(|xv| deep_equal(xv, v)))
+        }
+        (Bson::Array(x), Bson::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| deep_equal(p, q))
+        }
+        _ => crate::eval::compare_values(a, b) == Some(Ordering::Equal),
     }
 }
 
