@@ -10,7 +10,7 @@
 
 use bson::{Bson, Document, doc};
 use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, QueryEngine};
-use slate_query::FindOptions;
+use slate_query::{FindOptions, Sort, SortDirection};
 use slate_store::MemoryStore;
 
 const COLL: &str = "people";
@@ -299,6 +299,111 @@ fn explicit_multikey_index_query() {
     let v1n = q(QueryEngine::V1, doc! { "items.[].sku": "A1" });
     assert_eq!(v1n, q(QueryEngine::V2, doc! { "items.[].sku": "A1" }));
     assert_eq!(v1n, vec!["a", "b"]);
+}
+
+// ── Cases where v2 is MORE correct than v1 (v1 bugs, found by the fuzzer) ──
+
+#[test]
+fn sort_take_on_missing_field_v2_keeps_doc() {
+    // v1's index-ordered `sort + take` reads from the (indexed) sort field's
+    // index, which has NO entry for a doc missing that field — so v1 silently
+    // drops it. v2 full-sorts and keeps it (missing sorts first, Mongo-style).
+    // v2 is correct; this documents the intentional divergence.
+    fn run(engine: QueryEngine) -> Vec<String> {
+        let db = DatabaseBuilder::new()
+            .query_engine(engine)
+            .open(MemoryStore::new())
+            .unwrap();
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "s".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.create_index(DEFAULT_CF, "s", "name").unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "s",
+            vec![
+                doc! { "_id": "1", "name": "b" },
+                doc! { "_id": "2", "name": "a" },
+                doc! { "_id": "3" }, // no name
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.commit().unwrap();
+        let opts = FindOptions {
+            sort: vec![Sort {
+                field: "name".into(),
+                direction: SortDirection::Asc,
+            }],
+            take: Some(2),
+            ..Default::default()
+        };
+        let txn = db.begin(true).unwrap();
+        txn.find(DEFAULT_CF, "s", doc! {}, opts)
+            .unwrap()
+            .iter::<Document>()
+            .unwrap()
+            .map(|d| d.unwrap().get_str("_id").unwrap().to_string())
+            .collect()
+    }
+    // v1 drops the missing-name doc (3); v2 keeps it, sorted first.
+    assert_eq!(run(QueryEngine::V1), vec!["2", "1"]);
+    assert_eq!(run(QueryEngine::V2), vec!["3", "2"]);
+}
+
+#[test]
+fn multikey_inside_logical_v2_evaluates_it() {
+    // A `.[]` predicate inside `$or`/`$and` is *evaluated*, not index-looked-up.
+    // v1's RawField resolver can't resolve a `.[]` path, so it's always-false
+    // there (v1's `.[]` only works as a standalone indexed equality). v2
+    // evaluates it correctly. v2 is correct.
+    fn run(engine: QueryEngine) -> Vec<String> {
+        let db = DatabaseBuilder::new()
+            .query_engine(engine)
+            .open(MemoryStore::new())
+            .unwrap();
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "m".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.create_index(DEFAULT_CF, "m", "tags.[]").unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "m",
+            vec![
+                doc! { "_id": "1", "tags": ["z"] },
+                doc! { "_id": "2", "tags": ["q"] },
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.commit().unwrap();
+        let txn = db.begin(true).unwrap();
+        let mut out: Vec<String> = txn
+            .find(
+                DEFAULT_CF,
+                "m",
+                doc! { "$or": [ { "tags.[]": "z" }, { "_id": "2" } ] },
+                FindOptions::default(),
+            )
+            .unwrap()
+            .iter::<Document>()
+            .unwrap()
+            .map(|d| d.unwrap().get_str("_id").unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    }
+    // v1 only matches via `_id` (the `.[]` branch is always-false); v2 matches both.
+    assert_eq!(run(QueryEngine::V1), vec!["2"]);
+    assert_eq!(run(QueryEngine::V2), vec!["1", "2"]);
 }
 
 #[test]
