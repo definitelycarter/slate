@@ -604,6 +604,102 @@ Both Sort and Limit are general-purpose nodes — they don't need to know whethe
 
 Distinct hashes the raw BSON bytes of each value to deduplicate, avoiding materialization. Null values are skipped. A dotted path that reaches into an array of sub-documents distributes over the elements (the `Project` step emits each value the path resolves to), so distinct over an array field or a path like `items.sku` collects the element-level values.
 
+## Subqueries
+
+A subquery ranges over an **in-document array** (`FROM x IN <array>`) — never another container — so it isn't a second `Scan`. It's a *per-outer-row sub-pipeline*, modeled by two plan nodes that keep the single execution engine:
+
+- **`Subquery { slot, kind, subplan, source }`** — a *correlated apply*. It has one real input (`source`) and a `subplan` it runs as a subroutine. For each row from `source` it runs `subplan`, reduces the subplan's rows by `kind` (`Scalar` → first value or undefined; `Exists` → a bool; `Array` → the values collected into an array), and emits the row extended with `{slot: value}`. So `subplan` is **not** a second input streaming tuples up — it's a function the node calls per row.
+- **`CurrentRow`** — the subplan's leaf, in place of `Scan`. It yields the single outer row the apply is currently processing (carrying the accumulated environment), which the subplan's `Unwind` reads to resolve correlated fields.
+
+The planner extracts each subquery out of the surrounding expression into a `$subN` slot (the same mechanism `Aggregate` uses for `$aggN`), so the surrounding `Project`/`Filter` just reads a slot and the evaluators never see a raw subquery.
+
+### Runtime — yes, we pass the row in
+
+For each outer row, the `Subquery` node:
+
+1. **feeds the row in** as `CurrentRow` (this is the correlation — the subplan's array source like `c.tags` resolves against it),
+2. runs `subplan` to completion (its own pull pipeline),
+3. **reduces** the result rows by `kind` to a single value,
+4. **attaches** that value to the row under `slot` and yields it up.
+
+It runs eagerly (a blocking node) so the result stream borrows only the transaction. Mentally: the subplan is a compiled `fn(row) -> value`; **correlated** subqueries read the fed-in row, **uncorrelated** ones ignore it (and so could be hoisted — computed once). Data flows *down* (the row, into `CurrentRow`) then *up* (the reduced value, out to the slot); never sideways between siblings.
+
+### Plan Trees
+
+**Scalar — `SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c`** (count each doc's tags):
+
+```
+Project($sub0)
+  └── Subquery(slot=$sub0, kind=Scalar)
+        ├── subplan:
+        │     Project($agg0)
+        │       └── Aggregate(COUNT(1) → $agg0)
+        │             └── Unwind(t, c.tags)
+        │                   └── CurrentRow          ← the outer row {c}
+        └── source:
+              Bind(c)
+                └── Scan
+```
+
+The aggregate `COUNT(1)` lives *inside* the subplan as an ordinary `Aggregate` node — empty `c.tags` yields no `Unwind` rows, which the aggregate turns into `0`.
+
+**EXISTS — `… WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t.key = "fabric")`** (the result is just a bool the `Filter` tests):
+
+```
+Project(c.name)
+  └── Filter($sub0)
+        └── Subquery(slot=$sub0, kind=Exists)
+              ├── subplan:
+              │     Project(t)
+              │       └── Filter(t.key = "fabric")
+              │             └── Unwind(t, c.tags)
+              │                   └── CurrentRow
+              └── source:
+                    Bind(c)
+                      └── Scan
+```
+
+**ARRAY — `SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c`** (collect the rows into an array):
+
+```
+Project($sub0)
+  └── Subquery(slot=$sub0, kind=Array)
+        ├── subplan:
+        │     Project(t)
+        │       └── Unwind(t, c.tags)
+        │             └── CurrentRow
+        └── source:
+              Bind(c)
+                └── Scan
+```
+
+**Uncorrelated — `… (SELECT VALUE COUNT(1) FROM x IN [10, 20, 30]) …`**: identical shape, but the subplan's `Unwind` source is a literal array rather than `c.tags`, so it ignores `CurrentRow` and produces the same value (`3`) for every outer row.
+
+**Nested** — a subquery's `subplan` is a full `Node` tree, so it can contain another `Subquery`, and `CurrentRow` carries the accumulated environment (`{c, g}`) down. `… (SELECT VALUE COUNT(1) FROM g IN c.groups WHERE EXISTS (SELECT VALUE i FROM i IN g.items WHERE i = "x"))`:
+
+```
+Project($sub0)
+  └── Subquery(slot=$sub0, kind=Scalar)              ← outer apply: feeds {c}
+        ├── subplan:
+        │     Project($agg0)
+        │       └── Aggregate(COUNT(1) → $agg0)
+        │             └── Filter($sub0)              ← inner subplan's own slot
+        │                   └── Subquery(slot=$sub0, kind=Exists)  ← inner apply: feeds {c, g}
+        │                         ├── subplan:
+        │                         │     Project(i)
+        │                         │       └── Filter(i = "x")
+        │                         │             └── Unwind(i, g.items)
+        │                         │                   └── CurrentRow   ← {c, g}
+        │                         └── source:
+        │                               Unwind(g, c.groups)
+        │                                 └── CurrentRow               ← {c}
+        └── source:
+              Bind(c)
+                └── Scan
+```
+
+Nothing here is subquery-specific except the two new nodes — `Filter`, `Aggregate`, and `Unwind` are the same nodes used everywhere else, which is what lets subqueries nest to any depth.
+
 ## Dot-Notation Paths
 
 Filters, sorts, and projections support nested field access via dot notation:
