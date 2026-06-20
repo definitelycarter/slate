@@ -245,6 +245,63 @@ fn distinct_traverses_array_path() {
 }
 
 #[test]
+fn explicit_multikey_index_query() {
+    // `create_index("tags.[]")` + `{tags.[]: x}` — explicit multikey array
+    // indexing. v1 only works *via* the index; v2 works with or without it.
+    // Compare v1 and v2 over a freshly-seeded indexed collection.
+    fn seed(engine: QueryEngine) -> (Database<MemoryStore>, &'static str) {
+        let db = DatabaseBuilder::new()
+            .query_engine(engine)
+            .open(MemoryStore::new())
+            .unwrap();
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "posts".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.create_index(DEFAULT_CF, "posts", "tags.[]").unwrap();
+        txn.create_index(DEFAULT_CF, "posts", "items.[].sku")
+            .unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "posts",
+            vec![
+                doc! { "_id": "a", "tags": ["rust", "db"], "items": [{ "sku": "A1" }] },
+                doc! { "_id": "b", "tags": ["go", "api"],  "items": [{ "sku": "B2" }, { "sku": "A1" }] },
+                doc! { "_id": "c", "tags": ["rust", "api"], "items": [{ "sku": "C3" }] },
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.commit().unwrap();
+        (db, "posts")
+    }
+    let q = |engine, filter: Document| -> Vec<String> {
+        let (db, coll) = seed(engine);
+        let txn = db.begin(true).unwrap();
+        let mut out: Vec<String> = txn
+            .find(DEFAULT_CF, coll, filter, FindOptions::default())
+            .unwrap()
+            .iter::<Document>()
+            .unwrap()
+            .map(|d| d.unwrap().get_str("_id").unwrap().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    // scalar array element
+    let v1 = q(QueryEngine::V1, doc! { "tags.[]": "rust" });
+    assert_eq!(v1, q(QueryEngine::V2, doc! { "tags.[]": "rust" }));
+    assert_eq!(v1, vec!["a", "c"]);
+    // nested path into array of subdocs
+    let v1n = q(QueryEngine::V1, doc! { "items.[].sku": "A1" });
+    assert_eq!(v1n, q(QueryEngine::V2, doc! { "items.[].sku": "A1" }));
+    assert_eq!(v1n, vec!["a", "b"]);
+}
+
+#[test]
 fn dotted_path_into_array_filter_matches() {
     // For FILTERS, neither engine traverses a dotted path into an array of
     // subdocuments — `{"events.kind": "click"}` matches nothing in v1 OR v2, so

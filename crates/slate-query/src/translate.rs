@@ -182,6 +182,11 @@ fn translate_field(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
 /// null, an array containing null, **and a missing field**, so it also tests
 /// `NOT IS_DEFINED(c.field)`.
 fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
+    // An explicit multikey path (`tags.[]`, `items.[].sku`) is array-membership,
+    // tested via MULTIKEY_EQ (which the planner can match to a `.[]` index).
+    if field.contains("[]") {
+        return Ok(multikey_eq(field, value)?);
+    }
     // `literal` is built twice rather than cloned (both are cheap leaf nodes).
     let eq = binary(BinOp::Eq, path(field), literal(value)?);
     let contains = ScalarExpr::Function {
@@ -204,6 +209,20 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
     }
 }
 
+/// Explicit multikey equality `{field.[]: value}` → `MULTIKEY_EQ(c, "field.[]",
+/// value)`. The verbatim `.[]` path is carried as a literal so the planner can
+/// match it to a `.[]` index by name.
+fn multikey_eq(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
+    Ok(ScalarExpr::Function {
+        name: "MULTIKEY_EQ".into(),
+        args: vec![
+            ScalarExpr::Identifier(ALIAS.into()),
+            ScalarExpr::Value(bson::Bson::String(field.to_string())),
+            literal(value)?,
+        ],
+    })
+}
+
 /// A `{field: {$op: v, ...}}` operator sub-document.
 fn translate_operators(field: &str, doc: &RawDocument) -> Result<ScalarExpr> {
     // `$regex` (with optional `$options`) is special: it maps to REGEXMATCH and
@@ -215,13 +234,16 @@ fn translate_operators(field: &str, doc: &RawDocument) -> Result<ScalarExpr> {
     let mut conds = Vec::new();
     for entry in doc.iter() {
         let (op, value) = entry.map_err(malformed)?;
+        // Only equality is supported on an explicit multikey path; range/exists
+        // over `.[]` falls back to v1.
+        let multikey = field.contains("[]");
         let cond = match op.as_str() {
             "$eq" => eq_or_contains(field, value)?,
-            "$gt" => binary(BinOp::Gt, path(field), literal(value)?),
-            "$gte" => binary(BinOp::Gte, path(field), literal(value)?),
-            "$lt" => binary(BinOp::Lt, path(field), literal(value)?),
-            "$lte" => binary(BinOp::Lte, path(field), literal(value)?),
-            "$exists" => translate_exists(field, value)?,
+            "$gt" if !multikey => binary(BinOp::Gt, path(field), literal(value)?),
+            "$gte" if !multikey => binary(BinOp::Gte, path(field), literal(value)?),
+            "$lt" if !multikey => binary(BinOp::Lt, path(field), literal(value)?),
+            "$lte" if !multikey => binary(BinOp::Lte, path(field), literal(value)?),
+            "$exists" if !multikey => translate_exists(field, value)?,
             other => {
                 return Err(TranslateError::Unsupported(format!(
                     "operator {other} on field '{field}'"

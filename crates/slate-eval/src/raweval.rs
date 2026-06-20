@@ -191,6 +191,22 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
         let segments: Vec<&str> = path_str.split('.').collect();
         return get_path(base, &segments);
     }
+    // MULTIKEY_EQ(value, "tags.[]", needle) — explicit multikey equality. The
+    // `.[]` markers in the path mean "distribute over the array at this point";
+    // they're dropped for traversal (GET_PATH distributes over any array), and
+    // membership is tested with ARRAY_CONTAINS. The verbatim `.[]` path is
+    // preserved in the AST so the planner can match it to a `.[]` index.
+    if args.len() == 3 && name.eq_ignore_ascii_case("MULTIKEY_EQ") {
+        let base = eval(&args[0], env)?;
+        let needle = eval(&args[2], env)?;
+        let path = eval(&args[1], env)?;
+        let Some(path_str) = value_as_str(&path) else {
+            return Ok(RawValue::Undefined);
+        };
+        let segments: Vec<&str> = path_str.split('.').filter(|s| *s != "[]").collect();
+        let resolved = get_path(base, &segments)?;
+        return Ok(array_contains(&resolved, &needle));
+    }
 
     let mut vals = Vec::with_capacity(args.len());
     for a in args {
@@ -221,6 +237,11 @@ fn array_contains<'a>(arr: &RawValue, needle: &RawValue) -> RawValue<'a> {
     };
     let found = match arr {
         RawValue::Ref(RawBsonRef::Array(a)) => a.into_iter().any(|e| match e {
+            Ok(elem) => eq(scalar_of_raw(elem)),
+            Err(_) => false,
+        }),
+        // A computed raw array, e.g. from GET_PATH distributing over subdocs.
+        RawValue::OwnedRaw(RawBson::Array(a)) => a.into_iter().any(|e| match e {
             Ok(elem) => eq(scalar_of_raw(elem)),
             Err(_) => false,
         }),

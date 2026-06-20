@@ -192,6 +192,17 @@ fn plan_source(
         }
     }
 
+    // Explicit multikey equality on an indexed `.[]` path → index Eq lookup
+    // (kept as a residual recheck, like the Mongo idiom above). The index name
+    // is the verbatim `.[]` path the predicate carries.
+    for conjunct in &conjuncts {
+        if let Some((field, value)) = as_multikey_eq(conjunct, alias)
+            && meta.indexes.contains(&field)
+        {
+            sources.push(index_scan(container, &field, IndexScanRange::Eq(value)));
+        }
+    }
+
     // OR sub-groups that are fully indexable become IndexMerge(Or) inputs.
     // The conjunct is NOT consumed: it stays as a residual recheck, because an
     // index merge can over-return (e.g. a range bound against a field holding
@@ -441,6 +452,27 @@ fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
         return None;
     }
     Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
+}
+
+/// Recognize `MULTIKEY_EQ(alias, "field.[]", lit)` — explicit multikey equality
+/// the find front-end emits for a `.[]` path. Returns the verbatim `.[]` path
+/// (which is also the index name) and the literal value, so it can be matched
+/// to a multikey index.
+fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
+    let ScalarExpr::Function { name, args } = expr else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("MULTIKEY_EQ") || args.len() != 3 {
+        return None;
+    }
+    if !matches!(&args[0], ScalarExpr::Identifier(a) if a == alias) {
+        return None;
+    }
+    let path = match as_literal(&args[1])? {
+        Bson::String(s) => s,
+        _ => return None,
+    };
+    Some((path, as_literal(&args[2])?))
 }
 
 /// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo
