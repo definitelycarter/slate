@@ -609,7 +609,7 @@ fn update_plan_with_limit() {
     let planner = Planner::new(&txn);
 
     let mutation =
-        crate::mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }, "_id")
+        slate_mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }, "_id")
             .unwrap();
 
     let plan = planner

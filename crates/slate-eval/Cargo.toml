@@ -1,0 +1,15 @@
+[package]
+name = "slate-eval"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bson = { workspace = true }
+regex = "1"
+slate-ast = { path = "../slate-ast" }
+slate-rawbson = { path = "../slate-rawbson" }
+
+[dev-dependencies]
+# Cycle through a dev-dependency only: the evaluator's behavioural tests parse
+# SQL to build expressions. Permitted because the edge is dev-only.
+slate-sql = { path = "../slate-sql" }

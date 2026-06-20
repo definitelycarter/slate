@@ -1,0 +1,1087 @@
+//! Recursive-descent parser with precedence climbing for scalar expressions.
+//!
+//! Precedence, lowest to highest:
+//! `OR` < `AND` < `NOT` < comparison < `+`/`-` < `*`/`/`/`%` < unary `-` <
+//! postfix (`.field`, `[index]`) < primary.
+//!
+//! Comparison is non-associative (a single `a <op> b`), matching SQL.
+
+use crate::error::{Result, SqlError};
+use crate::token::Token;
+use slate_ast::*;
+
+pub struct Parser {
+    tokens: Vec<Token>,
+    pos: usize,
+}
+
+/// The output key for an unaliased projection column (Cosmos rule): the last
+/// path segment of a member access (or a bare identifier's name), else a
+/// positional `$N` for an unnamed computed column.
+fn infer_key(expr: &ScalarExpr, positional: &mut u32) -> String {
+    match expr {
+        ScalarExpr::Member { field, .. } => field.clone(),
+        ScalarExpr::Identifier(name) => name.clone(),
+        _ => {
+            *positional += 1;
+            format!("${positional}")
+        }
+    }
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Self { tokens, pos: 0 }
+    }
+
+    // ── Cursor helpers ──────────────────────────────────────────
+
+    fn peek(&self) -> &Token {
+        // `tokenize` always appends Eof, so indexing is in-bounds.
+        &self.tokens[self.pos]
+    }
+
+    fn advance(&mut self) {
+        if self.pos + 1 < self.tokens.len() {
+            self.pos += 1;
+        }
+    }
+
+    /// Take the current token by value (leaving Eof behind) and advance.
+    /// Avoids cloning the token's owned `String` payloads.
+    fn take(&mut self) -> Token {
+        let tok = std::mem::replace(&mut self.tokens[self.pos], Token::Eof);
+        self.advance();
+        tok
+    }
+
+    fn matches(&mut self, t: &Token) -> bool {
+        if self.peek() == t {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, t: &Token) -> Result<()> {
+        if self.peek() == t {
+            self.advance();
+            Ok(())
+        } else {
+            Err(SqlError::Parse {
+                message: format!("expected {:?}, found {:?}", t, self.peek()),
+            })
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String> {
+        match self.take() {
+            Token::Ident(s) => Ok(s),
+            other => Err(SqlError::Parse {
+                message: format!("expected identifier, found {other:?}"),
+            }),
+        }
+    }
+
+    fn parse_u64(&mut self) -> Result<u64> {
+        match self.take() {
+            Token::Int(i) if i >= 0 => Ok(i as u64),
+            other => Err(SqlError::Parse {
+                message: format!("expected a non-negative integer, found {other:?}"),
+            }),
+        }
+    }
+
+    // ── Top-level query ─────────────────────────────────────────
+
+    pub fn parse_query(&mut self) -> Result<Query> {
+        let query = self.parse_query_body()?;
+        self.expect(&Token::Eof)?;
+        Ok(query)
+    }
+
+    /// Parse a query body without the trailing end-of-input check — shared by the
+    /// top-level [`parse_query`](Self::parse_query) and by subqueries, which end
+    /// at `)` rather than at end-of-input.
+    fn parse_query_body(&mut self) -> Result<Query> {
+        self.expect(&Token::Select)?;
+        let select = self.parse_select()?;
+
+        self.expect(&Token::From)?;
+        let from = self.parse_from()?;
+
+        let filter = if self.matches(&Token::Where) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let group_by = if self.matches(&Token::Group) {
+            self.expect(&Token::By)?;
+            self.parse_group_by()?
+        } else {
+            Vec::new()
+        };
+
+        let order_by = if self.matches(&Token::Order) {
+            self.parse_order_by()?
+        } else {
+            Vec::new()
+        };
+
+        let offset = if self.matches(&Token::Offset) {
+            Some(self.parse_u64()?)
+        } else {
+            None
+        };
+
+        let limit = if self.matches(&Token::Limit) {
+            Some(self.parse_u64()?)
+        } else {
+            None
+        };
+
+        Ok(Query {
+            select,
+            from,
+            filter,
+            group_by,
+            order_by,
+            offset,
+            limit,
+        })
+    }
+
+    /// Parse the comma-separated expression list after `GROUP BY`.
+    fn parse_group_by(&mut self) -> Result<Vec<ScalarExpr>> {
+        let mut keys = Vec::new();
+        loop {
+            keys.push(self.parse_expr()?);
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Parse the `SELECT` clause: `VALUE <expr>` | `*` | a projection list
+    /// `<expr> [AS <key>], ...`.
+    fn parse_select(&mut self) -> Result<SelectClause> {
+        if self.matches(&Token::Value) {
+            return Ok(SelectClause::Value(self.parse_expr()?));
+        }
+        if self.matches(&Token::Star) {
+            return Ok(SelectClause::Star);
+        }
+
+        let mut items: Vec<SelectItem> = Vec::new();
+        let mut positional = 0u32; // counter for unnamed computed columns ($N)
+        loop {
+            let expr = self.parse_expr()?;
+            let key = if self.matches(&Token::As) {
+                self.parse_ident()?
+            } else {
+                infer_key(&expr, &mut positional)
+            };
+            if items.iter().any(|it| it.key == key) {
+                return Err(SqlError::Parse {
+                    message: format!("duplicate projected key '{key}'; use AS to disambiguate"),
+                });
+            }
+            items.push(SelectItem { key, expr });
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(SelectClause::Projections(items))
+    }
+
+    fn parse_from(&mut self) -> Result<FromClause> {
+        let alias = self.parse_ident()?;
+        // `FROM x IN <array>` (a subquery's array source) vs `FROM <alias>` (the
+        // container). The `IN` form binds the alias to each array element.
+        let source = if self.matches(&Token::In) {
+            FromSource::Array {
+                alias,
+                array: self.parse_expr()?,
+            }
+        } else {
+            FromSource::ImplicitContainer { alias }
+        };
+
+        let mut joins = Vec::new();
+        while self.matches(&Token::Join) {
+            let alias = self.parse_ident()?;
+            self.expect(&Token::In)?;
+            let array = self.parse_expr()?;
+            joins.push(Join { alias, array });
+        }
+
+        Ok(FromClause { source, joins })
+    }
+
+    fn parse_order_by(&mut self) -> Result<Vec<OrderByItem>> {
+        self.expect(&Token::By)?;
+        let mut items = Vec::new();
+        loop {
+            let expr = self.parse_expr()?;
+            let direction = if self.matches(&Token::Desc) {
+                SortDirection::Desc
+            } else {
+                self.matches(&Token::Asc); // optional, default ASC
+                SortDirection::Asc
+            };
+            items.push(OrderByItem { expr, direction });
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    // ── Expressions (precedence climbing) ───────────────────────
+
+    fn parse_expr(&mut self) -> Result<ScalarExpr> {
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<ScalarExpr> {
+        let mut lhs = self.parse_and()?;
+        while self.matches(&Token::Or) {
+            let rhs = self.parse_and()?;
+            lhs = binary(BinOp::Or, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_and(&mut self) -> Result<ScalarExpr> {
+        let mut lhs = self.parse_not()?;
+        while self.matches(&Token::And) {
+            let rhs = self.parse_not()?;
+            lhs = binary(BinOp::And, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_not(&mut self) -> Result<ScalarExpr> {
+        if self.matches(&Token::Not) {
+            let expr = self.parse_not()?;
+            Ok(ScalarExpr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            })
+        } else {
+            self.parse_comparison()
+        }
+    }
+
+    fn parse_comparison(&mut self) -> Result<ScalarExpr> {
+        let lhs = self.parse_additive()?;
+
+        // `IN (…)` and `BETWEEN … AND …`, each optionally negated with `NOT`.
+        // An infix `NOT` at this position can only introduce one of these two,
+        // so it is safe to consume speculatively.
+        let negated = if self.peek() == &Token::Not {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        match self.peek() {
+            Token::In => {
+                self.advance();
+                let expr = self.parse_in_list(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
+            Token::Between => {
+                self.advance();
+                let expr = self.parse_between(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
+            Token::Like => {
+                self.advance();
+                let expr = self.parse_like(lhs)?;
+                return Ok(maybe_not(negated, expr));
+            }
+            other if negated => {
+                return Err(SqlError::Parse {
+                    message: format!("expected IN, BETWEEN, or LIKE after NOT, found {other:?}"),
+                });
+            }
+            _ => {}
+        }
+
+        let op = match self.peek() {
+            Token::Eq => BinOp::Eq,
+            Token::Neq => BinOp::Neq,
+            Token::Lt => BinOp::Lt,
+            Token::Lte => BinOp::Lte,
+            Token::Gt => BinOp::Gt,
+            Token::Gte => BinOp::Gte,
+            _ => return Ok(lhs),
+        };
+        self.advance();
+        let rhs = self.parse_additive()?;
+        Ok(binary(op, lhs, rhs))
+    }
+
+    /// Desugar `lhs IN (a, b, …)` into `lhs = a OR lhs = b OR …`. Reusing the
+    /// equality path means the planner indexes it as an `IndexMerge(Or)` for
+    /// free. The LHS is cloned into each disjunct because the OR-of-equalities
+    /// encoding inherently repeats it; the operands are small AST nodes.
+    fn parse_in_list(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        self.expect(&Token::LParen)?;
+        if self.peek() == &Token::RParen {
+            return Err(SqlError::Parse {
+                message: "IN requires at least one value".into(),
+            });
+        }
+        let mut disjunction: Option<ScalarExpr> = None;
+        loop {
+            let item = self.parse_expr()?;
+            let eq = binary(BinOp::Eq, lhs.clone(), item);
+            disjunction = Some(match disjunction {
+                Some(prev) => binary(BinOp::Or, prev, eq),
+                None => eq,
+            });
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        disjunction.ok_or_else(|| SqlError::Parse {
+            message: "IN requires at least one value".into(),
+        })
+    }
+
+    /// Desugar `lhs BETWEEN lo AND hi` into `lhs >= lo AND lhs <= hi` —
+    /// inclusive on both ends, as in Cosmos. The bounds parse at additive
+    /// precedence (the same level as the operands of `=`/`<`), so the middle
+    /// `AND` is the BETWEEN separator rather than boolean conjunction.
+    fn parse_between(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        let lower = self.parse_additive()?;
+        self.expect(&Token::And)?;
+        let upper = self.parse_additive()?;
+        let ge = binary(BinOp::Gte, lhs.clone(), lower);
+        let le = binary(BinOp::Lte, lhs, upper);
+        Ok(binary(BinOp::And, ge, le))
+    }
+
+    /// Desugar `lhs LIKE '<pattern>' [ESCAPE '<c>']` into
+    /// `REGEXMATCH(lhs, '<anchored regex>')`. The pattern is translated rather
+    /// than passed through: only the SQL wildcards (`%`, `_`, `[…]`, `[^…]`)
+    /// become regex constructs, and every other character — including regex
+    /// metacharacters — is escaped, so a literal `.` or `(` in the pattern stays
+    /// literal. The pattern (and `ESCAPE`) must be string literals.
+    fn parse_like(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+        let pattern = match self.take() {
+            Token::Str(s) => s,
+            other => {
+                return Err(SqlError::Parse {
+                    message: format!("LIKE pattern must be a string literal, found {other:?}"),
+                });
+            }
+        };
+        let escape = if self.matches(&Token::Escape) {
+            match self.take() {
+                Token::Str(s) => {
+                    let mut chars = s.chars();
+                    match (chars.next(), chars.next()) {
+                        (Some(c), None) => Some(c),
+                        _ => {
+                            return Err(SqlError::Parse {
+                                message: "ESCAPE expects a single-character string".into(),
+                            });
+                        }
+                    }
+                }
+                other => {
+                    return Err(SqlError::Parse {
+                        message: format!("ESCAPE expects a string literal, found {other:?}"),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        let regex = like_to_regex(&pattern, escape);
+        Ok(ScalarExpr::Function {
+            name: "REGEXMATCH".into(),
+            args: vec![lhs, ScalarExpr::Literal(Literal::Str(regex))],
+        })
+    }
+
+    fn parse_additive(&mut self) -> Result<ScalarExpr> {
+        let mut lhs = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek() {
+                Token::Plus => BinOp::Add,
+                Token::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let rhs = self.parse_multiplicative()?;
+            lhs = binary(op, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<ScalarExpr> {
+        let mut lhs = self.parse_unary()?;
+        loop {
+            let op = match self.peek() {
+                Token::Star => BinOp::Mul,
+                Token::Slash => BinOp::Div,
+                Token::Percent => BinOp::Mod,
+                _ => break,
+            };
+            self.advance();
+            let rhs = self.parse_unary()?;
+            lhs = binary(op, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_unary(&mut self) -> Result<ScalarExpr> {
+        if self.peek() == &Token::Minus {
+            self.advance();
+            let expr = self.parse_unary()?;
+            Ok(ScalarExpr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(expr),
+            })
+        } else {
+            self.parse_postfix()
+        }
+    }
+
+    fn parse_postfix(&mut self) -> Result<ScalarExpr> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            match self.peek() {
+                Token::Dot => {
+                    self.advance();
+                    let field = self.parse_ident()?;
+                    expr = ScalarExpr::Member {
+                        base: Box::new(expr),
+                        field,
+                    };
+                }
+                Token::LBracket => {
+                    self.advance();
+                    let index = self.parse_expr()?;
+                    self.expect(&Token::RBracket)?;
+                    expr = ScalarExpr::Index {
+                        base: Box::new(expr),
+                        index: Box::new(index),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_primary(&mut self) -> Result<ScalarExpr> {
+        match self.take() {
+            Token::Int(i) => Ok(ScalarExpr::Literal(Literal::Int(i))),
+            Token::Float(f) => Ok(ScalarExpr::Literal(Literal::Float(f))),
+            Token::Str(s) => Ok(ScalarExpr::Literal(Literal::Str(s))),
+            Token::True => Ok(ScalarExpr::Literal(Literal::Bool(true))),
+            Token::False => Ok(ScalarExpr::Literal(Literal::Bool(false))),
+            Token::Null => Ok(ScalarExpr::Literal(Literal::Null)),
+            Token::Param(p) => Ok(ScalarExpr::Parameter(p)),
+            Token::LParen => {
+                // `(SELECT …)` is a scalar subquery; otherwise a grouped expr.
+                if self.peek() == &Token::Select {
+                    let query = self.parse_query_body()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(ScalarExpr::Subquery {
+                        query: Box::new(query),
+                        kind: SubqueryKind::Scalar,
+                    })
+                } else {
+                    let expr = self.parse_expr()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(expr)
+                }
+            }
+            Token::LBrace => self.parse_object(),
+            Token::LBracket => self.parse_array(),
+            Token::Ident(name) => {
+                // `EXISTS (SELECT …)` / `ARRAY (SELECT …)` are subquery forms;
+                // otherwise these are ordinary identifiers/function calls.
+                let upper = name.to_ascii_uppercase();
+                if (upper == "EXISTS" || upper == "ARRAY") && self.peek() == &Token::LParen {
+                    self.advance(); // consume `(`
+                    if self.peek() == &Token::Select {
+                        let query = self.parse_query_body()?;
+                        self.expect(&Token::RParen)?;
+                        let kind = if upper == "EXISTS" {
+                            SubqueryKind::Exists
+                        } else {
+                            SubqueryKind::Array
+                        };
+                        return Ok(ScalarExpr::Subquery {
+                            query: Box::new(query),
+                            kind,
+                        });
+                    }
+                    // Not a subquery — a normal call (`(` already consumed).
+                    let args = self.parse_call_args()?;
+                    return Ok(ScalarExpr::Function { name, args });
+                }
+                if self.peek() == &Token::LParen {
+                    self.advance();
+                    let args = self.parse_call_args()?;
+                    Ok(ScalarExpr::Function { name, args })
+                } else {
+                    Ok(ScalarExpr::Identifier(name))
+                }
+            }
+            other => Err(SqlError::Parse {
+                message: format!("unexpected token in expression: {other:?}"),
+            }),
+        }
+    }
+
+    /// Parse the argument list after a consumed `(`.
+    fn parse_call_args(&mut self) -> Result<Vec<ScalarExpr>> {
+        let mut args = Vec::new();
+        if self.peek() != &Token::RParen {
+            loop {
+                args.push(self.parse_expr()?);
+                if !self.matches(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(args)
+    }
+
+    /// Parse the body after a consumed `{`.
+    fn parse_object(&mut self) -> Result<ScalarExpr> {
+        let mut fields = Vec::new();
+        if self.peek() != &Token::RBrace {
+            loop {
+                let key = match self.take() {
+                    Token::Str(s) => s,
+                    Token::Ident(s) => s,
+                    other => {
+                        return Err(SqlError::Parse {
+                            message: format!("expected object key, found {other:?}"),
+                        });
+                    }
+                };
+                self.expect(&Token::Colon)?;
+                let value = self.parse_expr()?;
+                fields.push((key, value));
+                if !self.matches(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBrace)?;
+        Ok(ScalarExpr::Object(fields))
+    }
+
+    /// Parse the body after a consumed `[`.
+    fn parse_array(&mut self) -> Result<ScalarExpr> {
+        let mut items = Vec::new();
+        if self.peek() != &Token::RBracket {
+            loop {
+                items.push(self.parse_expr()?);
+                if !self.matches(&Token::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(ScalarExpr::Array(items))
+    }
+}
+
+fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
+    ScalarExpr::Binary {
+        op,
+        lhs: Box::new(lhs),
+        rhs: Box::new(rhs),
+    }
+}
+
+/// Wrap `expr` in a logical `NOT` when `negated`, else return it unchanged.
+fn maybe_not(negated: bool, expr: ScalarExpr) -> ScalarExpr {
+    if negated {
+        ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(expr),
+        }
+    } else {
+        expr
+    }
+}
+
+/// Translate a SQL `LIKE` pattern into an anchored regular expression.
+///
+/// Only the SQL wildcards are given meaning — `%` → `.*`, `_` → `.`, and a
+/// `[…]`/`[^…]` set maps onto a regex character class. Every other character is
+/// treated as a literal: regex metacharacters are backslash-escaped so a pattern
+/// like `"a.b("` matches only the literal text `a.b(`. An `escape` character, if
+/// supplied, makes the character that follows it literal (so `%` can be matched
+/// as itself). The result is wrapped in `^…$` because `LIKE` matches the whole
+/// string.
+fn like_to_regex(pattern: &str, escape: Option<char>) -> String {
+    let mut out = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if Some(c) == escape {
+            // The next character is a literal, whatever it is.
+            match chars.next() {
+                Some(next) => push_regex_literal(&mut out, next),
+                None => push_regex_literal(&mut out, c),
+            }
+            continue;
+        }
+        match c {
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            '[' => {
+                // Collect the bracket body up to the closing `]`. A `[…]` set
+                // maps directly onto a regex class (`[a-f]`, `[^abc]`, `[%]`),
+                // so wildcard characters inside it are already literal.
+                let mut inner = String::new();
+                let mut closed = false;
+                for nc in chars.by_ref() {
+                    if nc == ']' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(nc);
+                }
+                if closed {
+                    out.push('[');
+                    for ch in inner.chars() {
+                        if ch == '\\' {
+                            out.push_str("\\\\");
+                        } else {
+                            out.push(ch);
+                        }
+                    }
+                    out.push(']');
+                } else {
+                    // Unterminated `[` — treat it and the rest as literals.
+                    push_regex_literal(&mut out, '[');
+                    for ch in inner.chars() {
+                        push_regex_literal(&mut out, ch);
+                    }
+                }
+            }
+            _ => push_regex_literal(&mut out, c),
+        }
+    }
+    out.push('$');
+    out
+}
+
+/// Append `c` to a regex, backslash-escaping it when it is a metacharacter so it
+/// matches only itself.
+fn push_regex_literal(out: &mut String, c: char) {
+    if r"\.^$*+?()[]{}|".contains(c) {
+        out.push('\\');
+    }
+    out.push(c);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+
+    fn parse(src: &str) -> Query {
+        let mut p = Parser::new(tokenize(src).unwrap());
+        p.parse_query().unwrap()
+    }
+
+    fn parse_err(src: &str) -> SqlError {
+        let mut p = Parser::new(tokenize(src).unwrap());
+        p.parse_query().unwrap_err()
+    }
+
+    #[test]
+    fn minimal_select_value() {
+        let q = parse("SELECT VALUE c FROM c");
+        assert!(matches!(q.select, SelectClause::Value(ScalarExpr::Identifier(ref a)) if a == "c"));
+        assert!(matches!(
+            q.from.source,
+            FromSource::ImplicitContainer { ref alias } if alias == "c"
+        ));
+        assert!(q.from.joins.is_empty());
+        assert!(q.filter.is_none());
+    }
+
+    #[test]
+    fn member_and_index_paths() {
+        let q = parse("SELECT VALUE c.tags[0].name FROM c");
+        // ((c.tags)[0]).name
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        match expr {
+            ScalarExpr::Member { base, field } => {
+                assert_eq!(field, "name");
+                assert!(matches!(*base, ScalarExpr::Index { .. }));
+            }
+            other => panic!("expected Member, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arithmetic_precedence() {
+        // 1 + 2 * 3  =>  Add(1, Mul(2,3))
+        let q = parse("SELECT VALUE 1 + 2 * 3 FROM c");
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        match expr {
+            ScalarExpr::Binary {
+                op: BinOp::Add,
+                rhs,
+                ..
+            } => assert!(matches!(*rhs, ScalarExpr::Binary { op: BinOp::Mul, .. })),
+            other => panic!("expected Add at root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boolean_precedence() {
+        // a OR b AND c => Or(a, And(b,c))
+        let q = parse("SELECT VALUE c FROM c WHERE a OR b AND c");
+        match q.filter {
+            Some(ScalarExpr::Binary {
+                op: BinOp::Or, rhs, ..
+            }) => assert!(matches!(*rhs, ScalarExpr::Binary { op: BinOp::And, .. })),
+            other => panic!("expected Or at root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_call() {
+        let q = parse("SELECT VALUE UPPER(c.name) FROM c");
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        match expr {
+            ScalarExpr::Function { name, args } => {
+                assert_eq!(name, "UPPER");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected Function, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn object_literal_projection() {
+        let q = parse(r#"SELECT VALUE { "n": c.name, tag: t } FROM c JOIN t IN c.tags"#);
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        assert!(matches!(expr, ScalarExpr::Object(ref f) if f.len() == 2));
+        assert_eq!(q.from.joins.len(), 1);
+        assert_eq!(q.from.joins[0].alias, "t");
+    }
+
+    #[test]
+    fn array_unwind_join() {
+        let q = parse("SELECT VALUE t FROM c JOIN t IN c.tags");
+        assert_eq!(q.from.joins.len(), 1);
+        assert!(
+            matches!(&q.from.joins[0].array, ScalarExpr::Member { field, .. } if field == "tags")
+        );
+    }
+
+    #[test]
+    fn order_offset_limit() {
+        let q = parse("SELECT VALUE c FROM c ORDER BY c.a DESC, c.b OFFSET 5 LIMIT 10");
+        assert_eq!(q.order_by.len(), 2);
+        assert_eq!(q.order_by[0].direction, SortDirection::Desc);
+        assert_eq!(q.order_by[1].direction, SortDirection::Asc);
+        assert_eq!(q.offset, Some(5));
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn parameter_in_predicate() {
+        let q = parse("SELECT VALUE c FROM c WHERE c.age > @minAge");
+        match q.filter {
+            Some(ScalarExpr::Binary { rhs, .. }) => {
+                assert!(matches!(*rhs, ScalarExpr::Parameter(ref p) if p == "minAge"))
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_star() {
+        assert!(matches!(
+            parse("SELECT * FROM c").select,
+            SelectClause::Star
+        ));
+    }
+
+    #[test]
+    fn tabular_projection_infers_keys() {
+        // last path segment for member access; AS overrides; `$N` for computed.
+        let SelectClause::Projections(items) =
+            parse("SELECT c.name, c.address.city, c.age + 1, c.x AS y FROM c").select
+        else {
+            panic!("expected tabular projections");
+        };
+        let keys: Vec<&str> = items.iter().map(|it| it.key.as_str()).collect();
+        assert_eq!(keys, vec!["name", "city", "$1", "y"]);
+    }
+
+    #[test]
+    fn duplicate_projected_key_errors() {
+        // `c.address.city` and `c.work.city` both infer the key "city".
+        assert!(matches!(
+            parse_err("SELECT c.address.city, c.work.city FROM c"),
+            SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn trailing_garbage_errors() {
+        assert!(matches!(
+            parse_err("SELECT VALUE c FROM c garbage"),
+            SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn in_list_desugars_to_or_of_equalities() {
+        // c.status IN (1, 2, 3)  =>  (status = 1 OR status = 2) OR status = 3
+        let q = parse("SELECT VALUE c FROM c WHERE c.status IN (1, 2, 3)");
+        let Some(ScalarExpr::Binary {
+            op: BinOp::Or,
+            lhs,
+            rhs,
+        }) = q.filter
+        else {
+            panic!("expected a top-level OR");
+        };
+        // The last disjunct is `status = 3`.
+        let ScalarExpr::Binary {
+            op: BinOp::Eq,
+            rhs: eq_rhs,
+            ..
+        } = *rhs
+        else {
+            panic!("expected equality as the last disjunct");
+        };
+        assert!(matches!(*eq_rhs, ScalarExpr::Literal(Literal::Int(3))));
+        // The earlier values fold left into another OR.
+        assert!(matches!(*lhs, ScalarExpr::Binary { op: BinOp::Or, .. }));
+    }
+
+    #[test]
+    fn between_desugars_to_inclusive_range() {
+        // c.age BETWEEN 18 AND 65  =>  age >= 18 AND age <= 65
+        let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 18 AND 65");
+        let Some(ScalarExpr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        }) = q.filter
+        else {
+            panic!("expected a top-level AND");
+        };
+        let ScalarExpr::Binary {
+            op: BinOp::Gte,
+            rhs: lo,
+            ..
+        } = *lhs
+        else {
+            panic!("expected >= as the lower bound");
+        };
+        let ScalarExpr::Binary {
+            op: BinOp::Lte,
+            rhs: hi,
+            ..
+        } = *rhs
+        else {
+            panic!("expected <= as the upper bound");
+        };
+        assert!(matches!(*lo, ScalarExpr::Literal(Literal::Int(18))));
+        assert!(matches!(*hi, ScalarExpr::Literal(Literal::Int(65))));
+    }
+
+    #[test]
+    fn not_in_and_not_between_wrap_in_not() {
+        let q = parse("SELECT VALUE c FROM c WHERE c.status NOT IN (1, 2)");
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared IN");
+        };
+        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::Or, .. }));
+
+        let q = parse("SELECT VALUE c FROM c WHERE c.age NOT BETWEEN 1 AND 2");
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared BETWEEN");
+        };
+        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::And, .. }));
+    }
+
+    #[test]
+    fn empty_in_list_errors() {
+        assert!(matches!(
+            parse_err("SELECT VALUE c FROM c WHERE c.status IN ()"),
+            SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn between_respects_outer_boolean_precedence() {
+        // `age BETWEEN 1 AND 2 OR c.x = 9` is `(age>=1 AND age<=2) OR x=9` — the
+        // trailing OR is boolean, not the BETWEEN separator.
+        let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 1 AND 2 OR c.x = 9");
+        assert!(matches!(
+            q.filter,
+            Some(ScalarExpr::Binary { op: BinOp::Or, .. })
+        ));
+    }
+
+    #[test]
+    fn like_translates_wildcards_and_escapes_metacharacters() {
+        // The documented wildcards, plus regex metacharacters that must stay
+        // literal. https://learn.microsoft.com/en-us/cosmos-db/query/like
+        assert_eq!(like_to_regex("%driver%", None), "^.*driver.*$");
+        assert_eq!(like_to_regex("fruit%", None), "^fruit.*$");
+        assert_eq!(like_to_regex("%Road", None), "^.*Road$");
+        assert_eq!(like_to_regex("a.b(", None), r"^a\.b\($");
+        assert_eq!(like_to_regex("%SO[t-z]PS%", None), "^.*SO[t-z]PS.*$");
+        assert_eq!(like_to_regex("%SO[^abc]PS%", None), "^.*SO[^abc]PS.*$");
+        // Bracket-literal forms.
+        assert_eq!(like_to_regex("20-30[%]", None), "^20-30[%]$");
+        assert_eq!(like_to_regex("[_]n", None), "^[_]n$");
+        assert_eq!(like_to_regex("[[]", None), "^[[]$");
+        assert_eq!(like_to_regex("]", None), r"^\]$");
+        // ESCAPE makes the following `%` a literal.
+        assert_eq!(like_to_regex("%20^%%", Some('^')), "^.*20%.*$");
+    }
+
+    #[test]
+    fn like_desugars_to_regexmatch() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.name LIKE "a%""#);
+        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+            panic!("expected a REGEXMATCH call");
+        };
+        assert_eq!(name, "REGEXMATCH");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^a.*$"));
+    }
+
+    #[test]
+    fn like_with_escape_clause() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.x LIKE "%20^%%" ESCAPE "^""#);
+        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+            panic!("expected a REGEXMATCH call");
+        };
+        assert_eq!(name, "REGEXMATCH");
+        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^.*20%.*$"));
+    }
+
+    #[test]
+    fn not_like_wraps_in_not() {
+        let q = parse(r#"SELECT VALUE c FROM c WHERE c.name NOT LIKE "a%""#);
+        let Some(ScalarExpr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        }) = q.filter
+        else {
+            panic!("expected NOT around the desugared LIKE");
+        };
+        assert!(matches!(*expr, ScalarExpr::Function { ref name, .. } if name == "REGEXMATCH"));
+    }
+
+    #[test]
+    fn like_requires_string_literal_pattern() {
+        assert!(matches!(
+            parse_err("SELECT VALUE c FROM c WHERE c.name LIKE 5"),
+            SqlError::Parse { .. }
+        ));
+    }
+
+    #[test]
+    fn group_by_clause_parses() {
+        let q = parse("SELECT c.kind, COUNT(c.tags) FROM c GROUP BY c.kind");
+        assert_eq!(q.group_by.len(), 1);
+        assert!(matches!(q.group_by[0], ScalarExpr::Member { ref field, .. } if field == "kind"));
+    }
+
+    #[test]
+    fn group_by_multiple_keys() {
+        let q = parse("SELECT VALUE c FROM c GROUP BY c.a, c.b");
+        assert_eq!(q.group_by.len(), 2);
+    }
+
+    #[test]
+    fn no_group_by_is_empty() {
+        assert!(parse("SELECT VALUE c FROM c").group_by.is_empty());
+    }
+
+    #[test]
+    fn scalar_subquery_parses() {
+        let q = parse("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c");
+        let SelectClause::Value(ScalarExpr::Subquery { kind, query }) = q.select else {
+            panic!("expected a scalar subquery");
+        };
+        assert_eq!(kind, SubqueryKind::Scalar);
+        // The inner query's FROM is an array source.
+        assert!(matches!(query.from.source, FromSource::Array { ref alias, .. } if alias == "t"));
+    }
+
+    #[test]
+    fn exists_and_array_subqueries_parse() {
+        let q = parse("SELECT VALUE c FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags)");
+        assert!(matches!(
+            q.filter,
+            Some(ScalarExpr::Subquery {
+                kind: SubqueryKind::Exists,
+                ..
+            })
+        ));
+        let q = parse("SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Subquery {
+                kind: SubqueryKind::Array,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn from_array_source_parses() {
+        let q = parse("SELECT VALUE x FROM x IN [1, 2, 3]");
+        assert!(matches!(q.from.source, FromSource::Array { ref alias, .. } if alias == "x"));
+    }
+
+    #[test]
+    fn exists_without_subquery_is_a_normal_function() {
+        // `EXISTS(...)` not followed by SELECT stays an ordinary function call.
+        let q = parse("SELECT VALUE EXISTS(c.x) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
+        ));
+    }
+}

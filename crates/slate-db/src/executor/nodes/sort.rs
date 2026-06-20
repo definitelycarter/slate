@@ -6,7 +6,7 @@ use slate_query::{Sort, SortDirection};
 use crate::error::DbError;
 use crate::executor::RawIter;
 use crate::executor::exec;
-use crate::executor::raw_bson::RawField;
+use slate_engine::RawField;
 
 fn as_document(val: &RawBson) -> Option<&bson::RawDocument> {
     match val {

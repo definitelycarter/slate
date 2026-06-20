@@ -3,7 +3,7 @@ use slate_engine::CollectionHandle;
 use slate_query::Sort;
 
 use crate::hooks::ResolvedHook;
-use crate::mutation::Mutation;
+use slate_mutation::Mutation;
 
 use crate::expression::{Expression, LogicalOp};
 

@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::spec::ElementType;
@@ -18,6 +20,14 @@ use crate::validate::validate_raw_document;
 pub struct KvTransaction<'a, S: Store + 'a> {
     pub(crate) txn: S::Txn<'a>,
     pub(crate) now_millis: i64,
+    /// Per-transaction memoization of resolved collection handles, keyed by
+    /// `(cf, name)`. Resolving a handle costs a sys-CF get + index prefix scan
+    /// + deserialize; a single query resolves it twice (find meta + executor
+    /// node), and a `find_one` loop repeats that per call. Cached handles are
+    /// invalidated by the DDL methods that change a collection's shape
+    /// (`drop_collection`, `create_index_with_options`, `drop_index`).
+    pub(crate) catalog_cache:
+        RefCell<HashMap<(String, String), CollectionHandle<<S::Txn<'a> as Transaction>::Cf>>>,
 }
 
 // ── Private helpers ─────────────────────────────────────────────

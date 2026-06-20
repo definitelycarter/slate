@@ -1,3 +1,7 @@
+// Shared across integration-test binaries; each uses a different subset, so
+// items unused by one binary are not dead.
+#![allow(dead_code)]
+
 use bson::raw::RawDocument;
 use bson::{Bson, doc};
 use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};

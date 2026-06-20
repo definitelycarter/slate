@@ -4,33 +4,9 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use slate_engine::{Catalog, EngineError, FunctionKind};
-use slate_vm::RuntimeKind;
 
-/// Map a stored runtime tag byte to a [`RuntimeKind`].
-pub fn runtime_kind(tag: u8) -> RuntimeKind {
-    #[cfg(feature = "lua")]
-    if tag == 0x01 {
-        return RuntimeKind::Lua;
-    }
-
-    #[cfg(feature = "js")]
-    if tag == 0x03 {
-        return RuntimeKind::Js;
-    }
-
-    panic!("unsupported runtime tag: {tag:#x}")
-}
-
-// ── ResolvedHook ────────────────────────────────────────────
-
-/// A pre-resolved hook definition with everything needed to fire it.
-#[derive(Debug, Clone)]
-pub struct ResolvedHook {
-    pub name: String,
-    pub runtime: u8,
-    pub source: Vec<u8>,
-    pub source_hash: u64,
-}
+// `ResolvedHook` and `runtime_kind` now live in `slate-vm` (shared with v2).
+pub use slate_vm::{ResolvedHook, runtime_kind};
 
 fn hash_source(source: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

@@ -92,16 +92,36 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         }
         (indexes, unique_indexes)
     }
+
+    /// Drop any cached handle for `(cf, name)` so the next `collection()` call
+    /// rebuilds it. Must be called by every DDL op that changes a collection's
+    /// shape (indexes, pk, ttl) so a stale handle can't outlive the change
+    /// within the same transaction.
+    fn invalidate_collection(&self, cf: &str, name: &str) {
+        self.catalog_cache
+            .borrow_mut()
+            .remove(&(cf.to_string(), name.to_string()));
+    }
 }
 
 // ── Catalog impl ───────────────────────────────────────────────
 
 impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
     fn collection(&self, cf: &str, name: &str) -> Result<CollectionHandle<Self::Cf>, EngineError> {
+        // Handles are immutable for a given collection shape, so a hit returns a
+        // cheap Arc-bump clone. Invalidated by DDL on this collection within the
+        // same txn (see `invalidate_collection`).
+        if let Some(handle) = self
+            .catalog_cache
+            .borrow()
+            .get(&(cf.to_string(), name.to_string()))
+        {
+            return Ok(handle.clone());
+        }
         let meta = self.load_collection_meta(cf, name)?;
         let (indexes, unique_indexes) = Self::split_index_specs(self.load_indexes(cf, name)?);
         let cf_handle = self.txn.cf(cf)?;
-        Ok(CollectionHandle::new(
+        let handle = CollectionHandle::new(
             name.to_string(),
             cf.to_string(),
             cf_handle,
@@ -109,7 +129,11 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             unique_indexes,
             meta.pk,
             meta.ttl,
-        ))
+        );
+        self.catalog_cache
+            .borrow_mut()
+            .insert((cf.to_string(), name.to_string()), handle.clone());
+        Ok(handle)
     }
 
     fn list_collections(
@@ -229,6 +253,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let meta_key = Key::Collection(Cow::Borrowed(cf), Cow::Borrowed(name)).encode();
         self.txn.delete(&sys, &meta_key)?;
 
+        self.invalidate_collection(cf, name);
         Ok(())
     }
 
@@ -316,6 +341,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             }
         }
 
+        self.invalidate_collection(cf, collection);
         Ok(())
     }
 
@@ -340,6 +366,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         .encode();
         self.txn.delete(&sys, &key)?;
 
+        self.invalidate_collection(cf, collection);
         Ok(())
     }
 

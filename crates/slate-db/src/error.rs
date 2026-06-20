@@ -62,15 +62,36 @@ impl From<bson::error::Error> for DbError {
     }
 }
 
-impl From<crate::mutation::ParseError> for DbError {
-    fn from(e: crate::mutation::ParseError) -> Self {
+impl From<slate_mutation::ParseError> for DbError {
+    fn from(e: slate_mutation::ParseError) -> Self {
         DbError::InvalidQuery(e.to_string())
+    }
+}
+
+impl From<slate_mutation::MutationError> for DbError {
+    fn from(e: slate_mutation::MutationError) -> Self {
+        match e {
+            slate_mutation::MutationError::Invalid(m) => DbError::InvalidQuery(m),
+            slate_mutation::MutationError::Serialization(m) => DbError::Serialization(m),
+        }
     }
 }
 
 impl From<crate::parser::FilterParseError> for DbError {
     fn from(e: crate::parser::FilterParseError) -> Self {
         DbError::InvalidQuery(e.to_string())
+    }
+}
+
+impl From<slate_sql::SqlError> for DbError {
+    fn from(e: slate_sql::SqlError) -> Self {
+        DbError::InvalidQuery(e.to_string())
+    }
+}
+
+impl From<slate_planner::PlanError> for DbError {
+    fn from(e: slate_planner::PlanError) -> Self {
+        DbError::InvalidQuery(e.message)
     }
 }
 
@@ -101,6 +122,19 @@ impl From<slate_engine::EngineError> for DbError {
                 existing_id,
             },
             other => DbError::InvalidQuery(other.to_string()),
+        }
+    }
+}
+
+impl From<slate_executor::ExecError> for DbError {
+    fn from(e: slate_executor::ExecError) -> Self {
+        use slate_executor::ExecError as E;
+        match e {
+            E::Eval(ev) => DbError::InvalidQuery(ev.to_string()),
+            E::Engine(en) => en.into(),
+            E::Mutation(m) => m.into(),
+            E::Vm(v) => DbError::Vm(v),
+            E::Validation(msg) => DbError::InvalidDocument(msg),
         }
     }
 }

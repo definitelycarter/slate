@@ -620,3 +620,67 @@ fn many_docs_overwrite_all_exact_count() {
     assert_eq!(count_index(&txn, &handle, "v"), 50);
     txn.rollback().unwrap();
 }
+
+// ── Catalog handle cache invalidation (same-txn DDL) ────────
+
+/// A handle resolved before `create_index` must not mask the new index:
+/// the per-txn handle cache has to be invalidated by the DDL op.
+#[test]
+fn cached_handle_sees_index_created_after_resolution() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+
+    // Resolve once to populate the cache, before the index exists.
+    let before = txn.collection(DEFAULT_CF, "c").unwrap();
+    assert!(before.indexes().is_empty());
+
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+
+    // A fresh resolution must reflect the new index, not the cached handle.
+    let after = txn.collection(DEFAULT_CF, "c").unwrap();
+    assert_eq!(after.indexes(), &["name".to_string()]);
+
+    // And puts through the fresh handle maintain the new index.
+    let doc = bson::rawdoc! { "_id": "a", "name": "Alice" };
+    txn.put_nx(&after, &doc).unwrap();
+    assert_eq!(count_index(&txn, &after, "name"), 1);
+    txn.rollback().unwrap();
+}
+
+/// Dropping an index in the same txn must evict the cached handle so a later
+/// resolution no longer reports the dropped index.
+#[test]
+fn cached_handle_drops_index_after_drop_index() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "c", "name").unwrap();
+
+    let before = txn.collection(DEFAULT_CF, "c").unwrap();
+    assert_eq!(before.indexes(), &["name".to_string()]);
+
+    txn.drop_index(DEFAULT_CF, "c", "name").unwrap();
+
+    let after = txn.collection(DEFAULT_CF, "c").unwrap();
+    assert!(after.indexes().is_empty());
+    txn.rollback().unwrap();
+}
+
+/// Dropping the collection must evict its cached handle so a subsequent
+/// resolution errors with `CollectionNotFound` rather than serving a stale hit.
+#[test]
+fn cached_handle_gone_after_drop_collection() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+    let _ = txn.collection(DEFAULT_CF, "c").unwrap();
+
+    txn.drop_collection(DEFAULT_CF, "c").unwrap();
+
+    assert!(txn.collection(DEFAULT_CF, "c").is_err());
+    txn.rollback().unwrap();
+}

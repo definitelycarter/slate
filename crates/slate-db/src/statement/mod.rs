@@ -1,7 +1,7 @@
 use bson::RawDocumentBuf;
 use slate_query::{Sort, SortDirection};
 
-use crate::mutation::Mutation;
+use slate_mutation::Mutation;
 
 use crate::expression::Expression;
 

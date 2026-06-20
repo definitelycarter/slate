@@ -12,8 +12,13 @@ js = ["slate-vm/js"]
 
 [dependencies]
 slate-engine = { path = "../slate-engine" }
+slate-mutation = { path = "../slate-mutation" }
 slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
+slate-ast = { path = "../slate-ast" }
+slate-planner = { path = "../slate-planner" }
+slate-executor = { path = "../slate-executor" }
+slate-sql = { path = "../slate-sql" }
 slate-vm = { path = "../slate-vm" }
 serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
@@ -44,5 +49,10 @@ required-features = ["bench-internals"]
 
 [[bench]]
 name = "query"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "pipeline"
 harness = false
 required-features = ["bench-internals"]

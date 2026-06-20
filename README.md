@@ -7,7 +7,8 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **BSON document storage** — schema-flexible documents with zero-copy reads and no deserialization in the query pipeline
 - **Atomic mutations** — `$set`, `$inc`, `$unset`, `$rename`, `$push`, `$pop`, `$lpush` with dot-path support — no read-modify-write required
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
-- **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, covered projections)
+- **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
+- **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
@@ -20,13 +21,22 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner (shared leaf)
   ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
-  ├── slate-query            → Query model: FindOptions, DistinctOptions, Sort, Mutation (pure data structures)
+  ├── slate-ast              → Shared query AST — the IR both query surfaces target
+  ├── slate-query            → MongoDB find front-end: FindOptions/Sort + filter→AST translation
+  ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
+  ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy evaluators)
+  ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
+  ├── slate-executor         → Physical execution: streams a Plan against a transaction
+  ├── slate-mutation         → Field-level document mutation engine
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
-  ├── slate-db               → Database layer: filter parser, expression tree, query planner + executor
+  ├── slate-db               → Database layer: public API, query planning + execution
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
+
+The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the **v2** query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor. It is the default; the original in-crate engine remains selectable as `QueryEngine::V1` during a soak before removal.
 
 ## Quick Start
 

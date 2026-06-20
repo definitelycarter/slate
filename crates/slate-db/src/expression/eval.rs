@@ -6,7 +6,7 @@ use bson::raw::RawBsonRef;
 
 use super::Expression;
 use crate::error::DbError;
-use crate::executor::raw_bson::RawField;
+use slate_engine::RawField;
 
 /// Evaluate whether a raw document matches the given expression.
 pub(crate) fn matches(raw: &RawDocument, expr: &Expression) -> Result<bool, DbError> {

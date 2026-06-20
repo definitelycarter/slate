@@ -73,6 +73,10 @@ impl<S: Store> crate::traits::Engine for KvEngine<S> {
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, EngineError> {
         let now_millis = (self.clock)();
         let txn = self.store.begin(read_only)?;
-        Ok(KvTransaction { txn, now_millis })
+        Ok(KvTransaction {
+            txn,
+            now_millis,
+            catalog_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        })
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "slate-executor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bson = { workspace = true }
+slate-ast = { path = "../slate-ast" }
+slate-eval = { path = "../slate-eval" }
+slate-planner = { path = "../slate-planner" }
+slate-engine = { path = "../slate-engine" }
+slate-mutation = { path = "../slate-mutation" }
+slate-vm = { path = "../slate-vm", features = ["lua"] }
+
+[dev-dependencies]
+slate-sql = { path = "../slate-sql" }
+slate-store = { path = "../slate-store", features = ["memory"] }

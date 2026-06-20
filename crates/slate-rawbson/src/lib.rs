@@ -1,16 +1,58 @@
-//! Shared raw byte-level BSON primitives.
+//! Fast raw byte-level BSON field access.
 //!
-//! Provides fast field lookup by scanning raw `&[u8]` BSON bytes directly,
-//! avoiding the overhead of the `bson` crate's `RawDocument::get()` iterator
-//! (which constructs `RawElement` objects, wraps every step in `Result`, and
-//! calls `try_into()` to build `RawBsonRef`).
-//!
-//! Used by the mutation engine (`raw_mutation.rs`), filter evaluation, sort
-//! key extraction, and projection.
+//! Locates a field within raw `&[u8]` BSON bytes by scanning directly, avoiding
+//! the overhead of the `bson` crate's `RawDocument::get()` iterator (which
+//! constructs `RawElement` objects, wraps every step in `Result`, and validates
+//! each key it skips as UTF-8). A tiny leaf crate so every layer that reads raw
+//! documents — the storage engine, mutation, and expression evaluation — can
+//! share one scanner without pulling in the engine.
 
 use bson::raw::{RawArray, RawBsonRef, RawDocument};
 use bson::spec::ElementType;
-use slate_engine::skip_bson_value;
+
+// ── skip_bson_value ─────────────────────────────────────────────
+
+/// Given a BSON type byte and the position where value bytes begin, return the
+/// position immediately after the value. Returns `None` if bytes are truncated
+/// or the type is unrecognised.
+pub fn skip_bson_value(type_byte: u8, bytes: &[u8], pos: usize) -> Option<usize> {
+    match type_byte {
+        0x01 => Some(pos + 8), // Double
+        0x02 => {
+            // String: i32(len) + utf8 + nul
+            if pos + 4 > bytes.len() {
+                return None;
+            }
+            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            Some(pos + 4 + len)
+        }
+        0x03 | 0x04 => {
+            // Document / Array (self-contained)
+            if pos + 4 > bytes.len() {
+                return None;
+            }
+            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            Some(pos + len)
+        }
+        0x05 => {
+            // Binary: i32(len) + subtype + data
+            if pos + 4 > bytes.len() {
+                return None;
+            }
+            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            Some(pos + 5 + len)
+        }
+        0x07 => Some(pos + 12), // ObjectId
+        0x08 => Some(pos + 1),  // Boolean
+        0x09 => Some(pos + 8),  // DateTime (i64)
+        0x0A => Some(pos),      // Null (0 bytes)
+        0x10 => Some(pos + 4),  // Int32
+        0x11 => Some(pos + 8),  // Timestamp
+        0x12 => Some(pos + 8),  // Int64
+        0x13 => Some(pos + 16), // Decimal128
+        _ => None,
+    }
+}
 
 // ── RawField ────────────────────────────────────────────────────
 
@@ -18,7 +60,7 @@ use slate_engine::skip_bson_value;
 ///
 /// Holds a reference to the document bytes and the field's position
 /// metadata. Value parsing is deferred until `.value()` is called.
-pub(crate) struct RawField<'a> {
+pub struct RawField<'a> {
     bytes: &'a [u8],
     element_type: ElementType,
     element_start: usize,
@@ -53,7 +95,6 @@ impl<'a> RawField<'a> {
     // ── Accessors ───────────────────────────────────────────────
 
     /// The BSON element type.
-    #[cfg(test)]
     pub fn element_type(&self) -> ElementType {
         self.element_type
     }
@@ -140,19 +181,16 @@ impl<'a> RawField<'a> {
     // ── Byte-level access (for tests) ──────────────────────────
 
     /// The raw value bytes (`value_start..element_end`).
-    #[cfg(test)]
     pub fn value_bytes(&self) -> &'a [u8] {
         &self.bytes[self.value_start..self.element_end]
     }
 
     /// Byte offset where the value bytes begin.
-    #[cfg(test)]
     pub fn value_start(&self) -> usize {
         self.value_start
     }
 
     /// Byte offset immediately after the value bytes.
-    #[cfg(test)]
     pub fn element_end(&self) -> usize {
         self.element_end
     }
@@ -178,7 +216,7 @@ impl<'a> RawField<'a> {
 /// holding a reference to the document bytes. Used by the mutation engine
 /// to capture a field's location then mutate the buffer.
 #[derive(Clone, Copy)]
-pub(crate) struct RawFieldLoc {
+pub struct RawFieldLoc {
     element_type: ElementType,
     element_start: usize,
     value_start: usize,

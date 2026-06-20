@@ -580,7 +580,7 @@ fn update_plan_with_limit() {
     let planner = Planner::new(|cf, name| Ok(txn.collection(cf, name)?));
 
     let mutation =
-        crate::mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }, "_id").unwrap();
+        slate_mutation::parse_mutation(&bson::rawdoc! { "$set": { "status": "updated" } }, "_id").unwrap();
 
     let plan = planner
         .plan(Statement::Update {

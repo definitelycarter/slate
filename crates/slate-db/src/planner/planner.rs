@@ -405,7 +405,7 @@ where
         cf: &str,
         collection: &str,
         predicate: &Expression,
-        mutation: crate::mutation::Mutation,
+        mutation: slate_mutation::Mutation,
         limit: Option<usize>,
     ) -> Result<Plan<T::Cf>, DbError> {
         let handle = self.catalog.collection(cf, collection)?;
