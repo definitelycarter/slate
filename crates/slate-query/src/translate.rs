@@ -80,20 +80,66 @@ pub fn translate_filter(doc: &RawDocument) -> Result<Option<ScalarExpr>> {
 }
 
 /// `SELECT VALUE` clause: identity (whole document) when no projection,
-/// otherwise an object built from the pk plus the selected columns.
+/// otherwise a nested object built from the pk plus the selected columns. A
+/// dotted column nests — `"address.city"` projects `{address: {city: ...}}`,
+/// and columns sharing a prefix merge under it — matching v1/Mongo, not a flat
+/// `{"address.city": ...}` key.
 fn projection(columns: Option<&[String]>) -> SelectClause {
     let Some(cols) = columns else {
         return SelectClause::Value(ScalarExpr::Identifier(ALIAS.into()));
     };
-    // The pk is always included, mirroring v1; dedup keeps first occurrence.
-    let mut fields = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    // The pk is always included, mirroring v1.
+    let mut tree = PathTree::default();
     for col in std::iter::once("_id").chain(cols.iter().map(|s| s.as_str())) {
-        if seen.insert(col) {
-            fields.push((col.to_string(), path(col)));
+        tree.insert(&col.split('.').collect::<Vec<_>>());
+    }
+    SelectClause::Value(tree.to_object(""))
+}
+
+/// An ordered tree of projected field paths, built by splitting columns on `.`.
+#[derive(Default)]
+struct PathTree {
+    order: Vec<String>,
+    children: std::collections::HashMap<String, PathTree>,
+}
+
+impl PathTree {
+    fn insert(&mut self, segments: &[&str]) {
+        let Some((head, rest)) = segments.split_first() else {
+            return;
+        };
+        if !self.children.contains_key(*head) {
+            self.order.push((*head).to_string());
+            self.children
+                .insert((*head).to_string(), PathTree::default());
+        }
+        if let Some(child) = self.children.get_mut(*head) {
+            child.insert(rest);
         }
     }
-    SelectClause::Value(ScalarExpr::Object(fields))
+
+    /// Convert to an object expression. `prefix` is the accumulated dotted path
+    /// from the root; a leaf (no children) projects `c.<prefix>`, a branch
+    /// projects a nested object over its children.
+    fn to_object(&self, prefix: &str) -> ScalarExpr {
+        if self.children.is_empty() {
+            return path(prefix);
+        }
+        let fields = self
+            .order
+            .iter()
+            .filter_map(|seg| {
+                let child = self.children.get(seg)?;
+                let child_prefix = if prefix.is_empty() {
+                    seg.clone()
+                } else {
+                    format!("{prefix}.{seg}")
+                };
+                Some((seg.clone(), child.to_object(&child_prefix)))
+            })
+            .collect();
+        ScalarExpr::Object(fields)
+    }
 }
 
 /// `$and` / `$or`: fold a list of sub-filters. Empty list contributes nothing.

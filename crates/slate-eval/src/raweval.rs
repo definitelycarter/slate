@@ -176,6 +176,21 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
         let needle = eval(&args[1], env)?;
         return Ok(array_contains(&arr, &needle));
     }
+    // GET_PATH(value, "a.b.c") — Mongo-style dotted-path resolution that
+    // *distributes over arrays*: hitting an array applies the remaining path to
+    // each element and flattens one level. Internal to the Mongo `distinct`
+    // surface (filters/SQL use plain member access, which does not traverse
+    // arrays). Path segments are split on `.`, which is unambiguous: a property
+    // name containing a literal `.` is not addressable this way (Cosmos/Mongo).
+    if args.len() == 2 && name.eq_ignore_ascii_case("GET_PATH") {
+        let base = eval(&args[0], env)?;
+        let path = eval(&args[1], env)?;
+        let Some(path_str) = value_as_str(&path) else {
+            return Ok(RawValue::Undefined);
+        };
+        let segments: Vec<&str> = path_str.split('.').collect();
+        return get_path(base, &segments);
+    }
 
     let mut vals = Vec::with_capacity(args.len());
     for a in args {
@@ -213,6 +228,51 @@ fn array_contains<'a>(arr: &RawValue, needle: &RawValue) -> RawValue<'a> {
         _ => return RawValue::Undefined,
     };
     bool_value(found)
+}
+
+/// Resolve a dotted path against `base`, distributing over arrays. A document
+/// consumes the next segment; an array applies the *same* remaining segments to
+/// each element and flattens the results one level. Returns a scalar for a
+/// plain path, or an array when an array was traversed.
+fn get_path<'a>(base: RawValue<'a>, segments: &[&str]) -> Result<RawValue<'a>> {
+    let Some((head, rest)) = segments.split_first() else {
+        return Ok(base);
+    };
+    match base {
+        RawValue::Ref(RawBsonRef::Array(a)) => {
+            let mut out = RawArrayBuf::new();
+            for elem in a {
+                let elem = elem.map_err(decode_err)?;
+                // The array itself doesn't consume a segment — distribute.
+                append_flatten(&mut out, get_path(RawValue::Ref(elem), segments)?)?;
+            }
+            Ok(RawValue::OwnedRaw(RawBson::Array(out)))
+        }
+        RawValue::Ref(RawBsonRef::Document(d)) => match get_field(d, head)? {
+            Some(v) => get_path(RawValue::Ref(v), rest),
+            None => Ok(RawValue::Undefined),
+        },
+        _ => Ok(RawValue::Undefined),
+    }
+}
+
+/// Append a path-resolution result to `out`, flattening one array level and
+/// dropping undefined (Mongo array-path semantics).
+fn append_flatten(out: &mut RawArrayBuf, value: RawValue) -> Result<()> {
+    match value {
+        RawValue::Undefined => {}
+        RawValue::OwnedRaw(RawBson::Array(inner)) => {
+            for e in &inner {
+                out.push(RawBson::from(e.map_err(decode_err)?));
+            }
+        }
+        v => {
+            if let Some(raw) = v.into_raw()? {
+                out.push(raw);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn literal_value(lit: &Literal) -> RawValue<'_> {

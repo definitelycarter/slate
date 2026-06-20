@@ -170,6 +170,81 @@ fn string_coerced_numeric_query() {
 }
 
 #[test]
+fn dotted_column_projection_nests() {
+    // Projecting `addr.city` must NEST — `{addr: {city: ...}}` with only the
+    // requested subfield — not a flat `{"addr.city": ...}` key. Scoped to docs
+    // that HAVE `addr`: when the parent is missing, v1 omits the key while v2
+    // emits an empty `{addr: {}}` (a minor Mongo-vs-Cosmos object-construction
+    // difference, tracked in the v1-removal blockers).
+    let opts = FindOptions {
+        columns: Some(vec!["addr.city".into()]),
+        ..Default::default()
+    };
+    let canon = |engine| -> Vec<std::collections::BTreeMap<String, Bson>> {
+        let d = db(engine);
+        let txn = d.begin(true).unwrap();
+        let mut out: Vec<_> = txn
+            .find(
+                DEFAULT_CF,
+                COLL,
+                doc! { "addr": { "$exists": true } },
+                opts.clone(),
+            )
+            .unwrap()
+            .iter::<Document>()
+            .unwrap()
+            .map(|r| {
+                r.unwrap()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .collect();
+        out.sort_by_key(|m: &std::collections::BTreeMap<String, Bson>| {
+            m.get("_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        });
+        out
+    };
+    assert_eq!(canon(QueryEngine::V1), canon(QueryEngine::V2));
+}
+
+#[test]
+fn distinct_traverses_array_path() {
+    // distinct over `events.kind` (an array of subdocs) traverses into the
+    // array and collects each element's `kind` — like v1.
+    let vals = |engine| -> Vec<Bson> {
+        let d = db(engine);
+        let txn = d.begin(true).unwrap();
+        let raw = txn
+            .distinct(
+                DEFAULT_CF,
+                COLL,
+                "events.kind",
+                doc! {},
+                slate_query::DistinctOptions::default(),
+            )
+            .unwrap();
+        let mut v: Vec<Bson> = match raw {
+            bson::RawBson::Array(a) => a
+                .into_iter()
+                .map(|r| Bson::try_from(r.unwrap()).unwrap())
+                .collect(),
+            other => panic!("not an array: {other:?}"),
+        };
+        v.sort_by_key(|b| format!("{b:?}"));
+        v
+    };
+    let v1 = vals(QueryEngine::V1);
+    assert_eq!(v1, vals(QueryEngine::V2));
+    // sanity: it actually found the nested values (not empty)
+    assert!(v1.contains(&Bson::String("click".into())));
+    assert!(v1.contains(&Bson::String("view".into())));
+}
+
+#[test]
 fn dotted_path_into_array_filter_matches() {
     // For FILTERS, neither engine traverses a dotted path into an array of
     // subdocuments — `{"events.kind": "click"}` matches nothing in v1 OR v2, so

@@ -18,17 +18,18 @@ use crate::parser;
 use crate::planner::planner::Planner;
 use crate::statement::Statement;
 
-/// Build the member-access expression `c.a.b.c` for a dotted field path, bound
-/// to the synthetic alias `c` (used by v2 distinct's field projection).
-fn member_path(field: &str) -> slate_ast::ScalarExpr {
-    let mut expr = slate_ast::ScalarExpr::Identifier("c".into());
-    for part in field.split('.') {
-        expr = slate_ast::ScalarExpr::Member {
-            base: Box::new(expr),
-            field: part.into(),
-        };
+/// Build the distinct field projection: `GET_PATH(c, "field")`. Unlike plain
+/// member access, `GET_PATH` resolves the dotted path with Mongo array-path
+/// traversal (distributing over arrays of subdocuments), which v1's `distinct`
+/// does. Filters/SQL use member access, which does not traverse arrays.
+fn distinct_field_expr(field: &str) -> slate_ast::ScalarExpr {
+    slate_ast::ScalarExpr::Function {
+        name: "GET_PATH".into(),
+        args: vec![
+            slate_ast::ScalarExpr::Identifier("c".into()),
+            slate_ast::ScalarExpr::Value(bson::Bson::String(field.into())),
+        ],
     }
-    expr
 }
 
 // ── DatabaseBuilder ────────────────────────────────────────
@@ -556,7 +557,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             Err(_) => return Ok(None),
         }
         node = slate_planner::Node::Project {
-            expr: member_path(field),
+            expr: distinct_field_expr(field),
             binding: binding.clone(),
             source: Box::new(node),
         };
