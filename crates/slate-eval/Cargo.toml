@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 bson = { workspace = true }
 regex = "1"
+# `preserve_order` keeps object key order through STRINGTOOBJECT (matching Cosmos).
+serde_json = { version = "1", features = ["preserve_order"] }
 slate-ast = { path = "../slate-ast" }
 slate-rawbson = { path = "../slate-rawbson" }
 

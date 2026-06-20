@@ -99,6 +99,11 @@ mod sqrt;
 mod square;
 mod starts_with;
 mod stringequals;
+mod stringtoarray;
+mod stringtoboolean;
+mod stringtonull;
+mod stringtonumber;
+mod stringtoobject;
 mod substring;
 mod tan;
 mod trim;
@@ -171,6 +176,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "STARTSWITH" => starts_with::eval(name, args),
         "ENDSWITH" => endswith::eval(name, args),
         "STRINGEQUALS" => stringequals::eval(name, args),
+        "STRINGTONUMBER" => stringtonumber::eval(name, args),
+        "STRINGTOBOOLEAN" => stringtoboolean::eval(name, args),
+        "STRINGTONULL" => stringtonull::eval(name, args),
+        "STRINGTOARRAY" => stringtoarray::eval(name, args),
+        "STRINGTOOBJECT" => stringtoobject::eval(name, args),
         "INDEX_OF" => index_of::eval(name, args),
         "SUBSTRING" => substring::eval(name, args),
         "LEFT" => left::eval(name, args),
@@ -237,6 +247,31 @@ fn f64_arg(v: &Value) -> Option<f64> {
         Value::Defined(Bson::Int64(i)) => Some(*i as f64),
         Value::Defined(Bson::Double(f)) => Some(*f),
         _ => None,
+    }
+}
+
+/// Convert a parsed JSON value into BSON — the shared backbone of the
+/// `STRINGTOARRAY` / `STRINGTOOBJECT` parsers. Integers become `Int64`, reals
+/// `Double`; object key order is preserved (serde_json's `preserve_order`).
+fn json_to_bson(v: serde_json::Value) -> Bson {
+    use serde_json::Value as J;
+    match v {
+        J::Null => Bson::Null,
+        J::Bool(b) => Bson::Boolean(b),
+        J::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Bson::Int64(i),
+            (None, Some(f)) => Bson::Double(f),
+            _ => Bson::Null,
+        },
+        J::String(s) => Bson::String(s),
+        J::Array(a) => Bson::Array(a.into_iter().map(json_to_bson).collect()),
+        J::Object(o) => {
+            let mut doc = bson::Document::new();
+            for (k, val) in o {
+                doc.insert(k, json_to_bson(val));
+            }
+            Bson::Document(doc)
+        }
     }
 }
 
