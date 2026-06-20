@@ -926,6 +926,27 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn subquery_from_outer_alias_is_item_scoped() {
+    // A subquery whose FROM names a JOIN alias is item-scoped: it counts the
+    // single bound element (1), not the whole collection (the bug was a re-scan).
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE (SELECT VALUE COUNT(1) FROM t) FROM c JOIN t IN c.tags",
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // ada has 2 tags, alan 2, grace 0 → 4 join rows, each subquery counts 1.
+    assert_eq!(out, vec![1, 1, 1, 1]);
+}
+
+#[test]
 fn is_null_recognizes_a_null_object_field() {
     // Accessing a null field of a computed object yields a raw null; IS_NULL
     // must recognize it (regression for the OwnedRaw(Null) case).
