@@ -97,5 +97,7 @@ fn limit_offset() {
 
 #[test]
 fn parse_error_surfaces() {
-    assert!(query("SELECT c FROM c", &catalog()).is_err());
+    // `SELECT c FROM c` is now a valid tabular projection; a genuinely
+    // malformed query still surfaces a parse error.
+    assert!(query("SELECT FROM c", &catalog()).is_err());
 }

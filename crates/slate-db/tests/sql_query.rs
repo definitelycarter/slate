@@ -22,9 +22,9 @@ fn seeded() -> Database<MemoryStore> {
         DEFAULT_CF,
         "people",
         vec![
-            doc! { "_id": "1", "name": "ada", "age": 36, "tags": ["x", "y"] },
-            doc! { "_id": "2", "name": "alan", "age": 41, "tags": ["y", "z"] },
-            doc! { "_id": "3", "name": "grace", "age": 44, "tags": [] },
+            doc! { "_id": "1", "name": "ada", "age": 36, "tags": ["x", "y"], "address": { "city": "austin", "zip": "78701" } },
+            doc! { "_id": "2", "name": "alan", "age": 41, "tags": ["y", "z"], "address": { "city": "denver", "zip": "80202" } },
+            doc! { "_id": "3", "name": "grace", "age": 44, "tags": [], "address": { "city": "miami", "zip": "33101" } },
         ],
     )
     .unwrap()
@@ -152,6 +152,80 @@ fn sql_agrees_with_find() {
         .collect();
     assert_eq!(via_sql, via_find);
     assert_eq!(via_sql.len(), 1);
+}
+
+fn docs(db: &Database<MemoryStore>, sql: &str) -> Vec<Document> {
+    let txn = db.begin(true).unwrap();
+    txn.query(DEFAULT_CF, "people", sql)
+        .unwrap()
+        .iter::<Document>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn select_star_returns_whole_documents() {
+    let db = seeded();
+    let out = docs(&db, r#"SELECT * FROM c WHERE c.name = "ada""#);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].get_str("name").unwrap(), "ada");
+    assert!(out[0].get("_id").is_some()); // whole document, pk included
+}
+
+#[test]
+fn tabular_projection_has_no_auto_pk() {
+    // SELECT c.name, c.age -> { name, age } ONLY — no auto `_id` (Cosmos
+    // semantics, unlike Mongo find which auto-includes the pk).
+    let db = seeded();
+    let out = docs(&db, r#"SELECT c.name, c.age FROM c WHERE c.name = "alan""#);
+    assert_eq!(out, vec![doc! { "name": "alan", "age": 41 }]);
+}
+
+#[test]
+fn select_member_returns_whole_subdocument() {
+    // SELECT c.address -> { "address": <whole sub-doc> }, keyed by last segment,
+    // untrimmed.
+    let db = seeded();
+    let out = docs(&db, r#"SELECT c.address FROM c WHERE c.name = "ada""#);
+    assert_eq!(
+        out,
+        vec![doc! { "address": { "city": "austin", "zip": "78701" } }]
+    );
+}
+
+#[test]
+fn select_dotted_member_flattens_to_last_segment() {
+    // SELECT c.address.city -> { "city": <scalar> } (flat key, not nested).
+    let db = seeded();
+    let out = docs(&db, r#"SELECT c.address.city FROM c WHERE c.name = "ada""#);
+    assert_eq!(out, vec![doc! { "city": "austin" }]);
+}
+
+#[test]
+fn as_alias_renames_key() {
+    let db = seeded();
+    let out = docs(&db, r#"SELECT c.name AS who FROM c WHERE c.name = "grace""#);
+    assert_eq!(out, vec![doc! { "who": "grace" }]);
+}
+
+#[test]
+fn select_explicit_pk_is_included() {
+    // The consumer opts into the pk by selecting it.
+    let db = seeded();
+    let out = docs(&db, r#"SELECT c._id, c.name FROM c WHERE c.name = "ada""#);
+    assert_eq!(out, vec![doc! { "_id": "1", "name": "ada" }]);
+}
+
+#[test]
+fn duplicate_projected_key_is_an_error() {
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    // `c.name` and `c.age AS name` both want key "name".
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT c.name, c.age AS name FROM c")
+            .is_err()
+    );
 }
 
 #[test]

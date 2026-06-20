@@ -458,7 +458,9 @@ mod tests {
     fn parse_expr(src: &str) -> ScalarExpr {
         // Reuse the full query parser to get a scalar expression.
         let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
-        let slate_ast::SelectClause::Value(e) = q.select;
+        let slate_ast::SelectClause::Value(e) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
         e
     }
 

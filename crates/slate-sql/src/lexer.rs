@@ -75,6 +75,7 @@ fn keyword_or_ident(word: String) -> Token {
     match word.to_ascii_lowercase().as_str() {
         "select" => Token::Select,
         "value" => Token::Value,
+        "as" => Token::As,
         "from" => Token::From,
         "where" => Token::Where,
         "join" => Token::Join,

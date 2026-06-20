@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use bson::{Bson, Document};
 
 use crate::error::Result;
-use slate_ast::{FromSource, OrderByItem, Query, SelectClause, SortDirection};
+use slate_ast::{FromSource, OrderByItem, Query, SortDirection};
 use slate_eval::Value;
 use slate_eval::eval::{self, Env};
 
@@ -71,7 +71,9 @@ pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> R
     }
 
     // Filter + project, carrying ORDER BY keys alongside each output value.
-    let SelectClause::Value(projection) = &query.select;
+    // Resolve the projection to one value expression (cheap, once per query in
+    // this in-memory convenience engine; the storage path lowers it directly).
+    let projection = query.select.clone().into_value_expr(base_alias);
     let mut projected: Vec<(Vec<Value>, Bson)> = Vec::new();
     for row in &rows {
         let binds = bindings(row);
@@ -85,7 +87,7 @@ pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> R
             }
         }
 
-        let value = match eval::eval(projection, &env)? {
+        let value = match eval::eval(&projection, &env)? {
             Value::Defined(b) => b,
             // `SELECT VALUE <undefined>` omits the row entirely.
             Value::Undefined => continue,

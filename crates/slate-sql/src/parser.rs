@@ -15,6 +15,20 @@ pub struct Parser {
     pos: usize,
 }
 
+/// The output key for an unaliased projection column (Cosmos rule): the last
+/// path segment of a member access (or a bare identifier's name), else a
+/// positional `$N` for an unnamed computed column.
+fn infer_key(expr: &ScalarExpr, positional: &mut u32) -> String {
+    match expr {
+        ScalarExpr::Member { field, .. } => field.clone(),
+        ScalarExpr::Identifier(name) => name.clone(),
+        _ => {
+            *positional += 1;
+            format!("${positional}")
+        }
+    }
+}
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, pos: 0 }
@@ -83,8 +97,7 @@ impl Parser {
 
     pub fn parse_query(&mut self) -> Result<Query> {
         self.expect(&Token::Select)?;
-        self.expect(&Token::Value)?; // v1: only `SELECT VALUE`
-        let select = SelectClause::Value(self.parse_expr()?);
+        let select = self.parse_select()?;
 
         self.expect(&Token::From)?;
         let from = self.parse_from()?;
@@ -123,6 +136,38 @@ impl Parser {
             offset,
             limit,
         })
+    }
+
+    /// Parse the `SELECT` clause: `VALUE <expr>` | `*` | a projection list
+    /// `<expr> [AS <key>], ...`.
+    fn parse_select(&mut self) -> Result<SelectClause> {
+        if self.matches(&Token::Value) {
+            return Ok(SelectClause::Value(self.parse_expr()?));
+        }
+        if self.matches(&Token::Star) {
+            return Ok(SelectClause::Star);
+        }
+
+        let mut items: Vec<SelectItem> = Vec::new();
+        let mut positional = 0u32; // counter for unnamed computed columns ($N)
+        loop {
+            let expr = self.parse_expr()?;
+            let key = if self.matches(&Token::As) {
+                self.parse_ident()?
+            } else {
+                infer_key(&expr, &mut positional)
+            };
+            if items.iter().any(|it| it.key == key) {
+                return Err(SqlError::Parse {
+                    message: format!("duplicate projected key '{key}'; use AS to disambiguate"),
+                });
+            }
+            items.push(SelectItem { key, expr });
+            if !self.matches(&Token::Comma) {
+                break;
+            }
+        }
+        Ok(SelectClause::Projections(items))
     }
 
     fn parse_from(&mut self) -> Result<FromClause> {
@@ -409,7 +454,9 @@ mod tests {
     fn member_and_index_paths() {
         let q = parse("SELECT VALUE c.tags[0].name FROM c");
         // ((c.tags)[0]).name
-        let SelectClause::Value(expr) = q.select;
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
         match expr {
             ScalarExpr::Member { base, field } => {
                 assert_eq!(field, "name");
@@ -423,7 +470,9 @@ mod tests {
     fn arithmetic_precedence() {
         // 1 + 2 * 3  =>  Add(1, Mul(2,3))
         let q = parse("SELECT VALUE 1 + 2 * 3 FROM c");
-        let SelectClause::Value(expr) = q.select;
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
         match expr {
             ScalarExpr::Binary {
                 op: BinOp::Add,
@@ -449,7 +498,9 @@ mod tests {
     #[test]
     fn function_call() {
         let q = parse("SELECT VALUE UPPER(c.name) FROM c");
-        let SelectClause::Value(expr) = q.select;
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
         match expr {
             ScalarExpr::Function { name, args } => {
                 assert_eq!(name, "UPPER");
@@ -462,7 +513,9 @@ mod tests {
     #[test]
     fn object_literal_projection() {
         let q = parse(r#"SELECT VALUE { "n": c.name, tag: t } FROM c JOIN t IN c.tags"#);
-        let SelectClause::Value(expr) = q.select;
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
         assert!(matches!(expr, ScalarExpr::Object(ref f) if f.len() == 2));
         assert_eq!(q.from.joins.len(), 1);
         assert_eq!(q.from.joins[0].alias, "t");
@@ -499,10 +552,30 @@ mod tests {
     }
 
     #[test]
-    fn missing_value_keyword_errors() {
-        // v1 only supports SELECT VALUE.
+    fn select_star() {
         assert!(matches!(
-            parse_err("SELECT c FROM c"),
+            parse("SELECT * FROM c").select,
+            SelectClause::Star
+        ));
+    }
+
+    #[test]
+    fn tabular_projection_infers_keys() {
+        // last path segment for member access; AS overrides; `$N` for computed.
+        let SelectClause::Projections(items) =
+            parse("SELECT c.name, c.address.city, c.age + 1, c.x AS y FROM c").select
+        else {
+            panic!("expected tabular projections");
+        };
+        let keys: Vec<&str> = items.iter().map(|it| it.key.as_str()).collect();
+        assert_eq!(keys, vec!["name", "city", "$1", "y"]);
+    }
+
+    #[test]
+    fn duplicate_projected_key_errors() {
+        // `c.address.city` and `c.work.city` both infer the key "city".
+        assert!(matches!(
+            parse_err("SELECT c.address.city, c.work.city FROM c"),
             SqlError::Parse { .. }
         ));
     }

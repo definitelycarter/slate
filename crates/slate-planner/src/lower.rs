@@ -25,7 +25,7 @@
 //! falls through to the residual.
 
 use bson::{Bson, RawBson};
-use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr, SelectClause};
+use slate_ast::{BinOp, FromSource, Literal, Query, ScalarExpr};
 
 use crate::plan::{
     CollectionRef, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
@@ -52,6 +52,10 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
     } = query;
 
     let FromSource::ImplicitContainer { alias } = from.source;
+
+    // Resolve the projection up front, while the `FROM` alias is still in hand
+    // (`SELECT *` lowers to the row identity for that alias).
+    let project_expr = select.into_value_expr(&alias);
 
     // Choose a source (Scan or an index path), pushing sargable predicates in.
     let (source, residual) = plan_source(filter, &alias, &container, meta);
@@ -95,10 +99,9 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
         };
     }
 
-    // SELECT VALUE  →  Project
-    let SelectClause::Value(expr) = select;
+    // SELECT ...  →  Project (resolved above)
     node = Node::Project {
-        expr,
+        expr: project_expr,
         binding,
         source: Box::new(node),
     };

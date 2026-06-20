@@ -15,6 +15,7 @@ pub enum Token {
     // ── Keywords ────────────────────────────────────────────────
     Select,
     Value,
+    As,
     From,
     Where,
     Join,

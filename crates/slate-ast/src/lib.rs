@@ -8,7 +8,6 @@
 //!
 //! The shapes here intentionally leave room to grow (see the `Future:` notes)
 //! without reshaping existing variants:
-//! - [`SelectClause`] will gain a tabular `Projections` variant.
 //! - [`FromSource`] will gain a `Collection { name, alias }` variant for the
 //!   cross-collection-join extension.
 
@@ -138,7 +137,39 @@ pub struct Query {
 pub enum SelectClause {
     /// `SELECT VALUE <expr>` — yields exactly one value per surviving row.
     Value(ScalarExpr),
-    // Future: `Projections(Vec<SelectItem>)` for `SELECT a, b AS c`.
+    /// `SELECT *` — yields the whole bound row (the identity projection).
+    Star,
+    /// `SELECT <expr> [AS <key>], ...` — yields a document of the projected
+    /// fields. Each key is resolved by the front-end (the last path segment of
+    /// a member access, an explicit `AS`, or a positional `$N` for an unnamed
+    /// computed column). Unlike a Mongo find projection, nothing is auto-added
+    /// (no primary key) and member values are not trimmed — `SELECT c.address`
+    /// yields `{ "address": <the whole sub-document> }`.
+    Projections(Vec<SelectItem>),
+}
+
+/// One column of a tabular `SELECT` projection: a resolved output `key` and the
+/// expression producing its value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectItem {
+    pub key: String,
+    pub expr: ScalarExpr,
+}
+
+impl SelectClause {
+    /// Resolve the projection to the single value expression each surviving row
+    /// produces: `VALUE e` → `e`; `*` → the row identity (`alias`); a tabular
+    /// list → an object literal `{ key: expr, ... }`. `alias` is the `FROM`
+    /// alias, used only by `*`.
+    pub fn into_value_expr(self, alias: &str) -> ScalarExpr {
+        match self {
+            SelectClause::Value(expr) => expr,
+            SelectClause::Star => ScalarExpr::Identifier(alias.to_string()),
+            SelectClause::Projections(items) => {
+                ScalarExpr::Object(items.into_iter().map(|it| (it.key, it.expr)).collect())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -53,7 +53,9 @@ The filter is a Mongo-style `$`-operator document — `$and`, `$or`, `$eq`/`$gt`
 `Transaction::query(cf, collection, sql)` runs a CosmosDB-style SQL query and returns a [`Cursor`]:
 
 ```
-SELECT VALUE <expr>
+SELECT VALUE <expr>                         -- one value per row
+  | *                                       -- the whole document
+  | <expr> [AS <key>], ...                  -- a document of projected fields
 FROM <alias>
 [JOIN <alias> IN <array-expr>]*
 [WHERE <expr>]
@@ -63,19 +65,28 @@ FROM <alias>
 
 The `FROM` clause names only the row alias; the container is the `(cf, collection)` passed to `query()` (matching Cosmos, where the container is external to the query text). SQL is read-only and always runs on the v2 engine.
 
-Only the `VALUE` projection is implemented, so every query yields one **value** per row (a scalar, document, or array) — exactly Cosmos's `SELECT VALUE` semantics:
+There are three projection forms, all matching Cosmos semantics:
 
 ```rust
-// bare scalars:  SELECT VALUE c.name  ->  "ada", "alan", ...
+// VALUE — one bare value per row (scalar, document, or array):
+//   SELECT VALUE c.name  ->  "ada", "alan", ...
 for name in txn.query(cf, "people", "SELECT VALUE c.name FROM c")?
     .iter_values::<String>()? { /* ... */ }
 
-// documents:     SELECT VALUE { "n": c.name }   (or SELECT VALUE c)
-for doc in txn.query(cf, "people", r#"SELECT VALUE { "n": c.name } FROM c"#)?
+// *  — the whole document:
+for doc in txn.query(cf, "people", "SELECT * FROM c")?.iter::<Document>()? { /* ... */ }
+
+// tabular — a document of the selected columns:
+//   SELECT c.name, c.age  ->  { "name": "ada", "age": 36 }
+for doc in txn.query(cf, "people", "SELECT c.name, c.age FROM c")?
     .iter::<Document>()? { /* ... */ }
 ```
 
-The tabular `SELECT a, b` form (which would return documents like Cosmos) is future work; today a document result is written explicitly as `SELECT VALUE { ... }`.
+**Tabular projection keys** follow Cosmos: the last path segment of a member access (`c.address.city` → `"city"`), an explicit `AS <key>`, or a positional `$1`, `$2`, … for an unnamed computed column (`c.age + 1` → `"$1"`). Two columns that resolve to the **same key** are a parse error (use `AS` to disambiguate) — slate rejects the collision rather than silently dropping a value.
+
+Two deliberate differences from a Mongo `find` projection:
+- **No auto primary key.** `find(columns: [...])` prepends `_id`; SQL returns *exactly* the selected columns. Ask for the pk explicitly (`SELECT c._id, c.name`) or use `SELECT *`.
+- **Member values are not trimmed.** `SELECT c.address` yields `{ "address": <the whole sub-document> }`, whereas `find(columns: ["address.city"])` builds a trimmed, nested `{ address: { city } }`.
 
 ### Iterating results
 
@@ -83,7 +94,7 @@ A `Cursor` — from `find` or `query` — exposes:
 
 | Accessor | Yields | Use for |
 |---|---|---|
-| `iter::<T>()` | `T` per **document** | `find`, and document-shaped `SELECT VALUE` |
+| `iter::<T>()` | `T` per **document** | `find`; `SELECT *`; tabular `SELECT a, b`; document-shaped `SELECT VALUE` |
 | `iter_raw()` | `RawDocumentBuf` per document | zero-copy document access |
 | `iter_values::<T>()` | `T` per **value** | SQL scalar projections (`SELECT VALUE c.name`) |
 | `iter_raw_values()` | `RawBson` per value | zero-copy scalar / document / array access |

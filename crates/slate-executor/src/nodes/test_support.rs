@@ -43,7 +43,9 @@ pub(crate) fn people_ref() -> CollectionRef {
 /// Parse `SELECT VALUE <src> FROM c` and return the projection expression.
 pub(crate) fn sv(src: &str) -> ScalarExpr {
     let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
-    let slate_ast::SelectClause::Value(e) = q.select;
+    let slate_ast::SelectClause::Value(e) = q.select else {
+        panic!("expected SELECT VALUE")
+    };
     e
 }
 

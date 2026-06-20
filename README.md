@@ -7,7 +7,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **BSON document storage** — schema-flexible documents with zero-copy reads and no deserialization in the query pipeline
 - **Atomic mutations** — `$set`, `$inc`, `$unset`, `$rename`, `$push`, `$pop`, `$lpush` with dot-path support — no read-modify-write required
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
-- **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT VALUE <expr> FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
+- **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
 - **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
