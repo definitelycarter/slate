@@ -154,6 +154,25 @@ pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
 
         ScalarExpr::Object(fields) => build_object(fields, env),
         ScalarExpr::Array(items) => build_array(items, env),
+
+        ScalarExpr::PathGet { base, path } => {
+            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+            get_path(eval(base, env)?, &segments)
+        }
+        ScalarExpr::MultikeyEq {
+            base,
+            index_path,
+            value,
+        } => {
+            let resolved = {
+                // `.[]` markers only say "an array is here" — drop them; GET_PATH
+                // distributes over any array. The verbatim path is for the planner.
+                let segments: Vec<&str> = index_path.split('.').filter(|s| *s != "[]").collect();
+                get_path(eval(base, env)?, &segments)?
+            };
+            let needle = eval(value, env)?;
+            Ok(array_contains(&resolved, &needle))
+        }
     }
 }
 
@@ -175,37 +194,6 @@ fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Re
         let arr = eval(&args[0], env)?;
         let needle = eval(&args[1], env)?;
         return Ok(array_contains(&arr, &needle));
-    }
-    // GET_PATH(value, "a.b.c") — Mongo-style dotted-path resolution that
-    // *distributes over arrays*: hitting an array applies the remaining path to
-    // each element and flattens one level. Internal to the Mongo `distinct`
-    // surface (filters/SQL use plain member access, which does not traverse
-    // arrays). Path segments are split on `.`, which is unambiguous: a property
-    // name containing a literal `.` is not addressable this way (Cosmos/Mongo).
-    if args.len() == 2 && name.eq_ignore_ascii_case("GET_PATH") {
-        let base = eval(&args[0], env)?;
-        let path = eval(&args[1], env)?;
-        let Some(path_str) = value_as_str(&path) else {
-            return Ok(RawValue::Undefined);
-        };
-        let segments: Vec<&str> = path_str.split('.').collect();
-        return get_path(base, &segments);
-    }
-    // MULTIKEY_EQ(value, "tags.[]", needle) — explicit multikey equality. The
-    // `.[]` markers in the path mean "distribute over the array at this point";
-    // they're dropped for traversal (GET_PATH distributes over any array), and
-    // membership is tested with ARRAY_CONTAINS. The verbatim `.[]` path is
-    // preserved in the AST so the planner can match it to a `.[]` index.
-    if args.len() == 3 && name.eq_ignore_ascii_case("MULTIKEY_EQ") {
-        let base = eval(&args[0], env)?;
-        let needle = eval(&args[2], env)?;
-        let path = eval(&args[1], env)?;
-        let Some(path_str) = value_as_str(&path) else {
-            return Ok(RawValue::Undefined);
-        };
-        let segments: Vec<&str> = path_str.split('.').filter(|s| *s != "[]").collect();
-        let resolved = get_path(base, &segments)?;
-        return Ok(array_contains(&resolved, &needle));
     }
 
     let mut vals = Vec::with_capacity(args.len());

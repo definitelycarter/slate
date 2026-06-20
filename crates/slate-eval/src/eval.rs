@@ -111,6 +111,23 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
             }
             Ok(Value::Defined(Bson::Array(arr)))
         }
+
+        // Mongo-only constructs (the storage path uses `raweval`; these owned
+        // implementations keep the variants' meaning consistent across both
+        // evaluators). See [`crate::raweval`].
+        ScalarExpr::PathGet { base, path } => {
+            let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+            Ok(path_get(eval(base, env)?, &segments))
+        }
+        ScalarExpr::MultikeyEq {
+            base,
+            index_path,
+            value,
+        } => {
+            let segments: Vec<&str> = index_path.split('.').filter(|s| *s != "[]").collect();
+            let resolved = path_get(eval(base, env)?, &segments);
+            Ok(array_membership(resolved, eval(value, env)?))
+        }
     }
 }
 
@@ -132,6 +149,50 @@ fn member_access(base: Value, field: &str) -> Value {
             Some(b) => Value::Defined(b),
             None => Value::Undefined,
         },
+        _ => Value::Undefined,
+    }
+}
+
+/// Mongo array-distributing path resolution (owned twin of
+/// [`crate::raweval`]'s `get_path`): a document consumes the next segment; an
+/// array applies the *same* remaining path to each element, flattening one
+/// level.
+fn path_get(base: Value, segments: &[&str]) -> Value {
+    let Some((head, rest)) = segments.split_first() else {
+        return base;
+    };
+    match base {
+        Value::Defined(Bson::Array(items)) => {
+            let mut out = Vec::new();
+            for elem in items {
+                match path_get(Value::Defined(elem), segments) {
+                    Value::Defined(Bson::Array(inner)) => out.extend(inner),
+                    Value::Defined(v) => out.push(v),
+                    Value::Undefined => {}
+                }
+            }
+            Value::Defined(Bson::Array(out))
+        }
+        Value::Defined(Bson::Document(mut doc)) => match doc.remove(*head) {
+            Some(v) => path_get(Value::Defined(v), rest),
+            None => Value::Undefined,
+        },
+        _ => Value::Undefined,
+    }
+}
+
+/// Array membership (owned twin of `raweval`'s `array_contains`): true when the
+/// defined array contains `needle` via the shared comparator. Non-array → undefined.
+fn array_membership(arr: Value, needle: Value) -> Value {
+    let Value::Defined(needle) = needle else {
+        return Value::Undefined;
+    };
+    match arr {
+        Value::Defined(Bson::Array(items)) => Value::Defined(Bson::Boolean(
+            items
+                .iter()
+                .any(|e| compare_values(e, &needle) == Some(Ordering::Equal)),
+        )),
         _ => Value::Undefined,
     }
 }

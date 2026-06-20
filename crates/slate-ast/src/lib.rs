@@ -70,6 +70,28 @@ pub enum ScalarExpr {
     Object(Vec<(String, ScalarExpr)>),
     /// `[ expr, ... ]` array literal.
     Array(Vec<ScalarExpr>),
+
+    // ── Mongo-only constructs ───────────────────────────────────
+    //
+    // These have no SQL syntax — only the Mongo front-end constructs them, to
+    // express semantics Cosmos SQL doesn't share (array-distributing paths,
+    // multikey matching). Member access / SQL never traverse arrays, so these
+    // are kept distinct rather than overloading `Member`/`Function`.
+    /// Resolve a dotted `path` against `base`, **distributing over arrays**: an
+    /// array applies the remaining path to each element and flattens one level.
+    /// Mongo path semantics, used by `distinct` over array paths.
+    PathGet {
+        base: Box<ScalarExpr>,
+        path: Vec<String>,
+    },
+    /// Explicit multikey-array equality: true when an array reachable at the
+    /// `.[]` path `index_path` contains `value`. `index_path` is kept verbatim
+    /// (e.g. `"tags.[]"`) so the planner can match it to a multikey index.
+    MultikeyEq {
+        base: Box<ScalarExpr>,
+        index_path: String,
+        value: Box<ScalarExpr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

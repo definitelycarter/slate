@@ -209,17 +209,14 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
     }
 }
 
-/// Explicit multikey equality `{field.[]: value}` → `MULTIKEY_EQ(c, "field.[]",
-/// value)`. The verbatim `.[]` path is carried as a literal so the planner can
-/// match it to a `.[]` index by name.
+/// Explicit multikey equality `{field.[]: value}` → a [`ScalarExpr::MultikeyEq`]
+/// carrying the verbatim `.[]` path (so the planner can match it to a `.[]`
+/// index by name).
 fn multikey_eq(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
-    Ok(ScalarExpr::Function {
-        name: "MULTIKEY_EQ".into(),
-        args: vec![
-            ScalarExpr::Identifier(ALIAS.into()),
-            ScalarExpr::Value(bson::Bson::String(field.to_string())),
-            literal(value)?,
-        ],
+    Ok(ScalarExpr::MultikeyEq {
+        base: Box::new(ScalarExpr::Identifier(ALIAS.into())),
+        index_path: field.to_string(),
+        value: Box::new(literal(value)?),
     })
 }
 

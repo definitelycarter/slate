@@ -454,25 +454,23 @@ fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
     Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
 }
 
-/// Recognize `MULTIKEY_EQ(alias, "field.[]", lit)` — explicit multikey equality
-/// the find front-end emits for a `.[]` path. Returns the verbatim `.[]` path
-/// (which is also the index name) and the literal value, so it can be matched
-/// to a multikey index.
+/// Recognize a [`ScalarExpr::MultikeyEq`] on `alias` — explicit multikey
+/// equality the find front-end emits for a `.[]` path. Returns the verbatim
+/// `.[]` path (which is also the index name) and the literal value, so it can
+/// be matched to a multikey index.
 fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::Function { name, args } = expr else {
+    let ScalarExpr::MultikeyEq {
+        base,
+        index_path,
+        value,
+    } = expr
+    else {
         return None;
     };
-    if !name.eq_ignore_ascii_case("MULTIKEY_EQ") || args.len() != 3 {
+    if !matches!(base.as_ref(), ScalarExpr::Identifier(a) if a == alias) {
         return None;
     }
-    if !matches!(&args[0], ScalarExpr::Identifier(a) if a == alias) {
-        return None;
-    }
-    let path = match as_literal(&args[1])? {
-        Bson::String(s) => s,
-        _ => return None,
-    };
-    Some((path, as_literal(&args[2])?))
+    Some((index_path.clone(), as_literal(value)?))
 }
 
 /// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo

@@ -18,17 +18,14 @@ use crate::parser;
 use crate::planner::planner::Planner;
 use crate::statement::Statement;
 
-/// Build the distinct field projection: `GET_PATH(c, "field")`. Unlike plain
-/// member access, `GET_PATH` resolves the dotted path with Mongo array-path
-/// traversal (distributing over arrays of subdocuments), which v1's `distinct`
-/// does. Filters/SQL use member access, which does not traverse arrays.
+/// Build the distinct field projection as a [`slate_ast::ScalarExpr::PathGet`].
+/// Unlike plain member access, `PathGet` resolves the dotted path with Mongo
+/// array-path traversal (distributing over arrays of subdocuments), which v1's
+/// `distinct` does. Filters/SQL use member access, which does not traverse.
 fn distinct_field_expr(field: &str) -> slate_ast::ScalarExpr {
-    slate_ast::ScalarExpr::Function {
-        name: "GET_PATH".into(),
-        args: vec![
-            slate_ast::ScalarExpr::Identifier("c".into()),
-            slate_ast::ScalarExpr::Value(bson::Bson::String(field.into())),
-        ],
+    slate_ast::ScalarExpr::PathGet {
+        base: Box::new(slate_ast::ScalarExpr::Identifier("c".into())),
+        path: field.split('.').map(|s| s.to_string()).collect(),
     }
 }
 
