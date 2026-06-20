@@ -926,6 +926,28 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn join_source_subquery() {
+    // A multi-value subquery as a JOIN source: `JOIN t IN (SELECT …)` unwinds the
+    // correlated subquery's result.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let mut out: Vec<String> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE t FROM c JOIN t IN (SELECT VALUE s FROM s IN c.tags WHERE s != 'zzz')",
+        )
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    out.sort();
+    // ada: x,y  alan: y,z  grace: (none)
+    assert_eq!(out, vec!["x", "y", "y", "z"]);
+}
+
+#[test]
 fn subquery_from_outer_alias_is_item_scoped() {
     // A subquery whose FROM names a JOIN alias is item-scoped: it counts the
     // single bound element (1), not the whole collection (the bug was a re-scan).

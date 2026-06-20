@@ -77,6 +77,10 @@ fn lower_query(
         limit,
     } = query;
 
+    // Query-wide counter for subquery slot names (`$subN`), shared across the
+    // FROM/JOIN sources and the projection so every slot is unique.
+    let mut next_slot = 0usize;
+
     // The base source: a container scan/index path, or — for a subquery — an
     // `Unwind` of the correlated array over the outer row (`CurrentRow`), or —
     // for a FROM-less query — a single empty environment row evaluated once. The
@@ -105,10 +109,24 @@ fn lower_query(
                 (alias, source, residual, false, joins)
             }
             FromSource::Array { alias, array } => {
+                // The array expression may itself contain a subquery (a nested
+                // `FROM x IN (SELECT …)`); extract them over the correlated row.
+                let mut subs = Vec::new();
+                let array =
+                    extract_subqueries(array, &container, meta, &mut subs, outer, &mut next_slot);
+                let mut src = Node::CurrentRow;
+                for spec in subs {
+                    src = Node::Subquery {
+                        slot: spec.slot,
+                        kind: spec.kind,
+                        subplan: Box::new(spec.subplan),
+                        source: Box::new(src),
+                    };
+                }
                 let source = Node::Unwind {
                     alias: alias.clone(),
                     array,
-                    source: Box::new(Node::CurrentRow),
+                    source: Box::new(src),
                 };
                 (alias, source, filter, true, joins)
             }
@@ -141,9 +159,16 @@ fn lower_query(
     for j in &joins {
         scope.push(&j.alias);
     }
-    let value_expr = extract_subqueries(value_expr, &container, meta, &mut subqueries, &scope);
-    let residual =
-        residual.map(|p| extract_subqueries(p, &container, meta, &mut subqueries, &scope));
+    let value_expr = extract_subqueries(
+        value_expr,
+        &container,
+        meta,
+        &mut subqueries,
+        &scope,
+        &mut next_slot,
+    );
+    let residual = residual
+        .map(|p| extract_subqueries(p, &container, meta, &mut subqueries, &scope, &mut next_slot));
 
     // Resolve the projection: a whole sub-expression equal to a group key
     // becomes its `$keyN` slot, and each `AGG(arg)` becomes a `$aggN` slot. The
@@ -179,12 +204,38 @@ fn lower_query(
             };
             is_env = true;
         }
+        // A join's array can be a subquery (`JOIN j IN (SELECT …)`) and can
+        // reference the FROM alias and earlier join aliases, so the visible scope
+        // grows as we go. Any subquery is applied just before this join's unwind.
+        let mut jscope: Vec<String> = outer.iter().map(|s| s.to_string()).collect();
+        if !alias.is_empty() {
+            jscope.push(alias.clone());
+        }
         for join in joins {
+            let scope_refs: Vec<&str> = jscope.iter().map(String::as_str).collect();
+            let mut subs = Vec::new();
+            let array = extract_subqueries(
+                join.array,
+                &container,
+                meta,
+                &mut subs,
+                &scope_refs,
+                &mut next_slot,
+            );
+            for spec in subs {
+                node = Node::Subquery {
+                    slot: spec.slot,
+                    kind: spec.kind,
+                    subplan: Box::new(spec.subplan),
+                    source: Box::new(node),
+                };
+            }
             node = Node::Unwind {
-                alias: join.alias,
-                array: join.array,
+                alias: join.alias.clone(),
+                array,
                 source: Box::new(node),
             };
+            jscope.push(join.alias);
         }
     }
 
@@ -284,11 +335,16 @@ fn extract_subqueries(
     meta: &CollectionMeta,
     out: &mut Vec<SubquerySpec>,
     outer: &[&str],
+    next: &mut usize,
 ) -> ScalarExpr {
     match expr {
         ScalarExpr::Subquery { query, kind } => {
             let subplan = lower_query(*query, container.clone(), meta, outer);
-            let slot = format!("$sub{}", out.len());
+            // A query-wide counter keeps slot names unique across every position
+            // (projection, WHERE, JOIN sources), so a later subquery can't shadow
+            // an earlier slot in the row environment.
+            let slot = format!("$sub{next}");
+            *next += 1;
             out.push(SubquerySpec {
                 slot: slot.clone(),
                 kind,
@@ -298,38 +354,40 @@ fn extract_subqueries(
         }
         ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
             op,
-            lhs: Box::new(extract_subqueries(*lhs, container, meta, out, outer)),
-            rhs: Box::new(extract_subqueries(*rhs, container, meta, out, outer)),
+            lhs: Box::new(extract_subqueries(*lhs, container, meta, out, outer, next)),
+            rhs: Box::new(extract_subqueries(*rhs, container, meta, out, outer, next)),
         },
         ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
             op,
-            expr: Box::new(extract_subqueries(*expr, container, meta, out, outer)),
+            expr: Box::new(extract_subqueries(*expr, container, meta, out, outer, next)),
         },
         ScalarExpr::Member { base, field } => ScalarExpr::Member {
-            base: Box::new(extract_subqueries(*base, container, meta, out, outer)),
+            base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
             field,
         },
         ScalarExpr::Index { base, index } => ScalarExpr::Index {
-            base: Box::new(extract_subqueries(*base, container, meta, out, outer)),
-            index: Box::new(extract_subqueries(*index, container, meta, out, outer)),
+            base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
+            index: Box::new(extract_subqueries(
+                *index, container, meta, out, outer, next,
+            )),
         },
         ScalarExpr::Function { name, args } => ScalarExpr::Function {
             name,
             args: args
                 .into_iter()
-                .map(|a| extract_subqueries(a, container, meta, out, outer))
+                .map(|a| extract_subqueries(a, container, meta, out, outer, next))
                 .collect(),
         },
         ScalarExpr::Object(fields) => ScalarExpr::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (k, extract_subqueries(v, container, meta, out, outer)))
+                .map(|(k, v)| (k, extract_subqueries(v, container, meta, out, outer, next)))
                 .collect(),
         ),
         ScalarExpr::Array(items) => ScalarExpr::Array(
             items
                 .into_iter()
-                .map(|i| extract_subqueries(i, container, meta, out, outer))
+                .map(|i| extract_subqueries(i, container, meta, out, outer, next))
                 .collect(),
         ),
         // Leaves and Mongo-only constructs hold no SQL subqueries.

@@ -123,11 +123,13 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
   reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
   aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,
   matching Cosmos.
-- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)` over an
-  in-document array (`FROM x IN <array>`), correlated or uncorrelated, nesting
-  to any depth. Each lowers to a correlated-apply (`Subquery`) node over a
-  `CurrentRow` leaf, reusing the full node set inside the subplan. *Not yet: a
-  multi-value subquery as a `JOIN` source (`JOIN t IN (SELECT …)`).*
+- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)`, in any
+  position: projection, `WHERE`, a multi-value subquery as a `JOIN` source
+  (`JOIN t IN (SELECT …)`), or a nested `FROM` source. Correlated or
+  uncorrelated, nesting to any depth. Each lowers to a correlated-apply
+  (`Subquery`) node over a `CurrentRow` leaf, reusing the full node set inside the
+  subplan. A subquery whose `FROM` names an outer alias is item-scoped (iterates
+  that single bound value), matching Cosmos.
 
 ---
 
