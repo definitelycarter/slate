@@ -280,6 +280,40 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         self.prepare_cursor(stmt)
     }
 
+    /// Execute a CosmosDB-style SQL query (`SELECT VALUE <expr> FROM <alias>
+    /// [JOIN ...] [WHERE ...] [ORDER BY ...] [OFFSET/LIMIT]`) and return a
+    /// [`Cursor`] over the resulting values.
+    ///
+    /// SQL is read-only and shares the v2 stack with `find` — it parses to the
+    /// same AST (`slate-sql`), lowers with the same planner, and runs on the
+    /// same executor, so the two surfaces can't drift. The `FROM` clause names
+    /// only the row alias; the container is `(cf, collection)`, chosen here
+    /// (matching Cosmos, where the container is external to the query text).
+    ///
+    /// ```ignore
+    /// let cursor = txn.query(DEFAULT_CF, "users",
+    ///     "SELECT VALUE c.name FROM c WHERE c.age > 21 ORDER BY c.age DESC")?;
+    /// for name in cursor.iter::<String>()? { /* ... */ }
+    /// ```
+    ///
+    /// Always uses [`QueryEngine::V2`] regardless of the builder setting — the
+    /// legacy v1 engine has no SQL surface.
+    pub fn query(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql: &str,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let query = slate_sql::parse(sql)?;
+        let meta = self.collection_meta(cf, collection)?;
+        let container = slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        };
+        let plan = slate_planner::lower(query, container, &meta);
+        Ok(Cursor::new_v2(&self.txn, plan, self.pool))
+    }
+
     /// The v2 read path: Mongo find → shared AST → lower → a v2 plan run by
     /// `slate-executor`. Falls back to v1 if the filter isn't yet translatable.
     fn find_v2(

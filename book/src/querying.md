@@ -33,35 +33,63 @@ Plan::Trigger { action: "inserted" }        ← after-trigger (sees NEW doc)
 **ID tier** — `Scan` streams documents; `IndexScan`/`IndexMerge` produce record IDs without touching document bytes, and `KeyLookup` fetches the documents for an ID stream.
 **Value tier** — everything above `KeyLookup` operates on `Option<RawBson>` values, constructing `&RawDocument` views to access individual fields lazily (via the `slate-rawbson` scanner) with no full deserialization. `Project` builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes each document into `T`, or `.iter_raw()` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
-## Query Model
+## Query Model (find)
+
+A `find` is a BSON filter document plus options:
 
 ```rust
-Query {
-    filter: Option<RawDocumentBuf>,   // BSON filter document
-    sort: Vec<Sort>,                   // ORDER BY
-    skip: Option<usize>,              // OFFSET
-    take: Option<usize>,              // LIMIT
-    columns: Option<Vec<String>>,     // SELECT columns (projection)
+FindOptions {
+    sort: Vec<Sort>,              // ORDER BY
+    skip: Option<usize>,          // OFFSET
+    take: Option<usize>,          // LIMIT
+    columns: Option<Vec<String>>, // projected columns
 }
 ```
 
-Filters are raw BSON documents at the query layer. At plan time, `slate-db`'s parser converts the BSON filter into a recursive `Expression` tree:
+The filter is a Mongo-style `$`-operator document — `$and`, `$or`, `$eq`/`$gt`/`$gte`/`$lt`/`$lte`, `$regex`, `$exists`, and the implicit `{field: value}` equality (which matches a scalar *or* an array containing the value). `slate-query` translates it into the shared AST (`slate_ast::ScalarExpr`), which the planner lowers — the *same* AST a SQL query produces, so both surfaces share one planner, executor, and evaluator.
 
-```rust
-enum Expression {
-    And(Vec<Expression>),
-    Or(Vec<Expression>),
-    Eq(String, Bson),
-    Gt(String, Bson),
-    Gte(String, Bson),
-    Lt(String, Bson),
-    Lte(String, Bson),
-    Regex(String, Regex),
-    Exists(String, bool),
-}
+## SQL Queries
+
+`Transaction::query(cf, collection, sql)` runs a CosmosDB-style SQL query and returns a [`Cursor`]:
+
+```
+SELECT VALUE <expr>
+FROM <alias>
+[JOIN <alias> IN <array-expr>]*
+[WHERE <expr>]
+[ORDER BY <expr> [ASC|DESC], ...]
+[OFFSET <n>] [LIMIT <n>]
 ```
 
-Comparison operators: `Eq`, `Gt`, `Gte`, `Lt`, `Lte`. Pattern matching: `Regex`. Existence: `Exists`.
+The `FROM` clause names only the row alias; the container is the `(cf, collection)` passed to `query()` (matching Cosmos, where the container is external to the query text). SQL is read-only and always runs on the v2 engine.
+
+Only the `VALUE` projection is implemented, so every query yields one **value** per row (a scalar, document, or array) — exactly Cosmos's `SELECT VALUE` semantics:
+
+```rust
+// bare scalars:  SELECT VALUE c.name  ->  "ada", "alan", ...
+for name in txn.query(cf, "people", "SELECT VALUE c.name FROM c")?
+    .iter_values::<String>()? { /* ... */ }
+
+// documents:     SELECT VALUE { "n": c.name }   (or SELECT VALUE c)
+for doc in txn.query(cf, "people", r#"SELECT VALUE { "n": c.name } FROM c"#)?
+    .iter::<Document>()? { /* ... */ }
+```
+
+The tabular `SELECT a, b` form (which would return documents like Cosmos) is future work; today a document result is written explicitly as `SELECT VALUE { ... }`.
+
+### Iterating results
+
+A `Cursor` — from `find` or `query` — exposes:
+
+| Accessor | Yields | Use for |
+|---|---|---|
+| `iter::<T>()` | `T` per **document** | `find`, and document-shaped `SELECT VALUE` |
+| `iter_raw()` | `RawDocumentBuf` per document | zero-copy document access |
+| `iter_values::<T>()` | `T` per **value** | SQL scalar projections (`SELECT VALUE c.name`) |
+| `iter_raw_values()` | `RawBson` per value | zero-copy scalar / document / array access |
+| `drain()` | row count | counting without materializing |
+
+`iter`/`iter_raw` error on a non-document value; `iter_values`/`iter_raw_values` accept any value.
 
 ## Index Configuration
 

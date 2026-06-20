@@ -482,6 +482,29 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
     group.finish();
 }
 
+/// End-to-end CosmosDB-style SQL (`Transaction::query`): lex + parse + lower +
+/// execute + value iteration, over an indexed `WHERE`. The find-equivalent is
+/// `query_indexed_eq`; the delta is mostly the SQL front-end (lex/parse) vs the
+/// Mongo translation.
+fn bench_query_sql(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_sql");
+    for n in [1_000, 10_000] {
+        let engine = realistic_seeded_engine(n);
+        let sql = r#"SELECT VALUE c.name FROM c WHERE c.status = "active""#;
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw_values()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 /// IN-style disjunction on an indexed field (`$or` of several `{field: value}`
 /// equalities). Should plan to `IndexMerge(Or)` over the indexed candidates, not
 /// a full scan.
@@ -519,6 +542,7 @@ criterion_group!(
     bench_query_indexed_eq_projection,
     bench_query_multi_field_and,
     bench_query_or_indexed,
+    bench_query_sql,
     bench_query_null_filter,
     bench_query_sort_indexed,
     bench_query_sort_indexed_take,

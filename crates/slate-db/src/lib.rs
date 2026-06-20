@@ -13,7 +13,7 @@ mod statement;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::CollectionConfig;
-pub use cursor::{Cursor, CursorIter, RawCursorIter};
+pub use cursor::{Cursor, CursorIter, RawCursorIter, RawValuesIter, ValuesIter};
 pub use database::{Database, DatabaseBuilder, QueryEngine, Transaction as DatabaseTransaction};
 pub use error::DbError;
 pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};

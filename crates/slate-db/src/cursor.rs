@@ -85,6 +85,26 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         })
     }
 
+    /// Iterate the result *values*, deserializing each into `T`.
+    ///
+    /// Unlike [`iter`](Self::iter), this accepts non-document values — e.g. a
+    /// SQL `SELECT VALUE c.name` yields strings — so it is the accessor for SQL
+    /// scalar projections. For `find` (always documents) prefer [`iter`](Self::iter).
+    pub fn iter_values<T: DeserializeOwned>(self) -> Result<ValuesIter<'txn, T>, DbError> {
+        Ok(ValuesIter {
+            inner: self.iter_raw_values()?,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Iterate the raw result values (scalars, documents, or arrays) with no
+    /// deserialization. The value-level counterpart of [`iter_raw`](Self::iter_raw).
+    pub fn iter_raw_values(self) -> Result<RawValuesIter<'txn>, DbError> {
+        Ok(RawValuesIter {
+            inner: self.execute()?,
+        })
+    }
+
     /// Consume the cursor, drain all rows, and return the count of affected rows.
     pub fn drain(self) -> Result<u64, DbError> {
         let iter = self.execute()?;
@@ -135,5 +155,43 @@ impl Iterator for RawCursorIter<'_> {
                 }
             }
         }
+    }
+}
+
+/// A streaming iterator over raw result *values* — any `RawBson` (scalar,
+/// document, or array), not just documents. Undefined rows are skipped.
+pub struct RawValuesIter<'a> {
+    inner: RawIter<'a>,
+}
+
+impl Iterator for RawValuesIter<'_> {
+    type Item = Result<bson::RawBson, DbError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.inner.next()? {
+                Err(e) => return Some(Err(e)),
+                Ok(None) => continue, // undefined — dropped at the output boundary
+                Ok(Some(value)) => return Some(Ok(value)),
+            }
+        }
+    }
+}
+
+/// A streaming iterator that deserializes each result *value* into `T`.
+pub struct ValuesIter<'a, T> {
+    inner: RawValuesIter<'a>,
+    _marker: PhantomData<T>,
+}
+
+impl<T: DeserializeOwned> Iterator for ValuesIter<'_, T> {
+    type Item = Result<T, DbError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let raw = self.inner.next()?;
+        Some(raw.and_then(|value| {
+            let bson = bson::Bson::try_from(value.as_raw_bson_ref()).map_err(DbError::from)?;
+            bson::deserialize_from_bson(bson).map_err(DbError::from)
+        }))
     }
 }

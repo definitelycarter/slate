@@ -83,6 +83,12 @@ impl From<crate::parser::FilterParseError> for DbError {
     }
 }
 
+impl From<slate_sql::SqlError> for DbError {
+    fn from(e: slate_sql::SqlError) -> Self {
+        DbError::InvalidQuery(e.to_string())
+    }
+}
+
 impl From<slate_vm::VmError> for DbError {
     fn from(e: slate_vm::VmError) -> Self {
         DbError::Vm(e)
