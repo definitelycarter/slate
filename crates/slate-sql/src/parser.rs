@@ -209,16 +209,30 @@ impl Parser {
     }
 
     fn parse_from(&mut self) -> Result<FromClause> {
-        let alias = self.parse_ident()?;
-        // `FROM x IN <array>` (a subquery's array source) vs `FROM <alias>` (the
-        // container). The `IN` form binds the alias to each array element.
+        let first = self.parse_ident()?;
+        // Forms:
+        //   FROM x IN <array>          — array source (a subquery's source)
+        //   FROM <container> AS <a>    — container with an explicit alias
+        //   FROM <container> <a>       — container with an alias (no AS)
+        //   FROM <alias>               — bare alias bound to the container
+        // The container is chosen out-of-band (matching Cosmos, where the FROM
+        // container name need not match the queried container), so when a name
+        // and an alias are both present we keep only the alias.
         let source = if self.matches(&Token::In) {
             FromSource::Array {
-                alias,
+                alias: first,
                 array: self.parse_expr()?,
             }
+        } else if self.matches(&Token::As) {
+            FromSource::ImplicitContainer {
+                alias: self.parse_ident()?,
+            }
+        } else if matches!(self.peek(), Token::Ident(_)) {
+            FromSource::ImplicitContainer {
+                alias: self.parse_ident()?,
+            }
         } else {
-            FromSource::ImplicitContainer { alias }
+            FromSource::ImplicitContainer { alias: first }
         };
 
         let mut joins = Vec::new();
@@ -734,6 +748,28 @@ mod tests {
     }
 
     #[test]
+    fn from_container_with_alias() {
+        // `FROM <container> <alias>` and `FROM <container> AS <alias>` keep the
+        // alias (the container name is external and only a label).
+        for sql in [
+            "SELECT VALUE e.name FROM employees e",
+            "SELECT VALUE e.name FROM employees AS e",
+        ] {
+            let q = parse(sql);
+            assert!(
+                matches!(q.from.as_ref().unwrap().source,
+                    FromSource::ImplicitContainer { ref alias } if alias == "e"),
+                "{sql}"
+            );
+        }
+        // Bare alias still works.
+        assert!(matches!(
+            parse("SELECT VALUE c.x FROM c").from.as_ref().unwrap().source,
+            FromSource::ImplicitContainer { ref alias } if alias == "c"
+        ));
+    }
+
+    #[test]
     fn from_is_optional() {
         // `SELECT VALUE <expr>` with no FROM (Cosmos evaluates it once).
         let q = parse("SELECT VALUE 1 + 1");
@@ -888,8 +924,10 @@ mod tests {
 
     #[test]
     fn trailing_garbage_errors() {
+        // `FROM c garbage` is now a valid container+alias; use trailing tokens
+        // after an otherwise-complete query instead.
         assert!(matches!(
-            parse_err("SELECT VALUE c FROM c garbage"),
+            parse_err("SELECT VALUE c FROM c LIMIT 5 garbage"),
             SqlError::Parse { .. }
         ));
     }

@@ -924,3 +924,18 @@ fn select_star_without_from_is_rejected() {
     let txn = db.begin(true).unwrap();
     assert!(txn.query(DEFAULT_CF, "x", "SELECT *").is_err());
 }
+
+#[test]
+fn from_container_alias_form() {
+    // CosmosDB's `FROM <container> [AS] <alias>` — the container name is just a
+    // label (the container is chosen out-of-band), so the alias binds to it.
+    let db = seeded();
+    assert_eq!(
+        strings(&db, "SELECT VALUE p.name FROM people p ORDER BY p.name"),
+        vec!["ada", "alan", "grace"]
+    );
+    assert_eq!(
+        strings(&db, "SELECT VALUE p.name FROM people AS p WHERE p.age > 40"),
+        vec!["alan", "grace"]
+    );
+}
