@@ -10,6 +10,10 @@
 //!   integer, so `IS_INTEGER` is the odd one out — it is a *value/range* test,
 //!   matching Cosmos). Comparison still coerces numerics by value (`5 = 5.0`);
 //!   that is a separate concern from a type test.
+//! - **Math** functions follow Cosmos's numeric model — every number is an
+//!   IEEE-754 double — so they widen integer inputs via [`f64_arg`] and return a
+//!   `Double` (`CEILING(0)` → `0.0`). `ABS` is the exception: it preserves the
+//!   input's integer type.
 //! - Each function's tests mirror the worked example on its Cosmos doc page
 //!   (`learn.microsoft.com/en-us/cosmos-db/query/<name>`), cited in the test, so
 //!   we track the spec rather than our own guesses.
@@ -27,8 +31,11 @@ use crate::value::Value;
 mod abs;
 mod array_contains;
 mod array_length;
+mod ceiling;
 mod concat;
 mod contains;
+mod exp;
+mod floor;
 mod is_array;
 mod is_bool;
 mod is_defined;
@@ -40,9 +47,18 @@ mod is_object;
 mod is_primitive;
 mod is_string;
 mod length;
+mod log;
+mod log10;
 mod lower;
+mod pi;
+mod power;
 mod regexmatch;
+mod round;
+mod sign;
+mod sqrt;
+mod square;
 mod starts_with;
+mod trunc;
 mod upper;
 
 /// Call a scalar function by name with already-evaluated arguments.
@@ -63,6 +79,18 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "LENGTH" => length::eval(name, args),
         "CONCAT" => concat::eval(name, args),
         "ABS" => abs::eval(name, args),
+        "CEILING" => ceiling::eval(name, args),
+        "FLOOR" => floor::eval(name, args),
+        "ROUND" => round::eval(name, args),
+        "TRUNC" => trunc::eval(name, args),
+        "SIGN" => sign::eval(name, args),
+        "SQRT" => sqrt::eval(name, args),
+        "SQUARE" => square::eval(name, args),
+        "POWER" => power::eval(name, args),
+        "EXP" => exp::eval(name, args),
+        "LOG" => log::eval(name, args),
+        "LOG10" => log10::eval(name, args),
+        "PI" => pi::eval(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "CONTAINS" => contains::eval(name, args),
@@ -114,6 +142,18 @@ fn num_arg(v: &Value) -> Option<Bson> {
     }
 }
 
+/// Extract a numeric argument as `f64`. The math functions follow Cosmos's
+/// numeric model — every number is an IEEE-754 double — so they widen any
+/// integer input through here and return a `Double` (e.g. `CEILING(0)` → `0.0`).
+fn f64_arg(v: &Value) -> Option<f64> {
+    match v {
+        Value::Defined(Bson::Int32(i)) => Some(*i as f64),
+        Value::Defined(Bson::Int64(i)) => Some(*i as f64),
+        Value::Defined(Bson::Double(f)) => Some(*f),
+        _ => None,
+    }
+}
+
 fn str2_bool(a: &Value, b: &Value, f: impl Fn(&str, &str) -> bool) -> Value {
     match (str_arg(a), str_arg(b)) {
         (Some(s), Some(t)) => Value::Defined(Bson::Boolean(f(s, t))),
@@ -125,6 +165,20 @@ fn str2_bool(a: &Value, b: &Value, f: impl Fn(&str, &str) -> bool) -> Value {
 #[cfg(test)]
 fn def(b: impl Into<Bson>) -> Value {
     Value::Defined(b.into())
+}
+
+/// Assert a function returned a `Double` close to `expected`. The transcendental
+/// math functions (`EXP`, `LOG`, `LOG10`) can differ from the doc's value in the
+/// last ULP depending on the platform's libm, so they compare with a tolerance.
+#[cfg(test)]
+fn approx(got: Value, expected: f64) {
+    match got {
+        Value::Defined(Bson::Double(f)) => {
+            let tol = 1e-9 * expected.abs().max(1.0);
+            assert!((f - expected).abs() <= tol, "got {f}, want ~{expected}");
+        }
+        _ => panic!("expected a Double result"),
+    }
 }
 
 #[cfg(test)]

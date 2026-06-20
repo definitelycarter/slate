@@ -15,7 +15,9 @@ our own guesses. Keywords/clauses touch the parser → AST → planner.
 
 **Type semantics:** type-identity tests (`IS_STRING`, …) are strict by BSON
 type; `IS_INTEGER` is a value/range test (Cosmos); comparison coerces numerics
-by value. See `slate-eval/functions/mod.rs`.
+by value. Math functions follow Cosmos's all-`double` numeric model, so they
+return a `Double` (`CEILING(0)` → `0.0`) — `ABS` is the exception, preserving
+the input's integer type. See `slate-eval/functions/mod.rs`.
 
 ## Current surface
 
@@ -48,9 +50,9 @@ literals.
 ### Math (Tier 0)
 
 - [x] `ABS`
-- [ ] `CEILING`  [ ] `FLOOR`  [ ] `ROUND`  [ ] `TRUNC`  [ ] `SIGN`
-- [ ] `SQRT`  [ ] `SQUARE`  [ ] `POWER`  [ ] `EXP`  [ ] `LOG`  [ ] `LOG10`
-- [ ] `PI`  [ ] `RAND` *(non-deterministic — needs the txn's RNG/clock)*
+- [x] `CEILING`  [x] `FLOOR`  [x] `ROUND`  [x] `TRUNC`  [x] `SIGN`
+- [x] `SQRT`  [x] `SQUARE`  [x] `POWER`  [x] `EXP`  [x] `LOG`  [x] `LOG10`
+- [x] `PI`  [ ] `RAND` *(non-deterministic — needs the txn's RNG/clock)*
 - [ ] `NUMBERBIN` *(round to a multiple)*
 - [ ] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
 - [ ] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(i64-typed)*
