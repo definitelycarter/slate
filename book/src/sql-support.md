@@ -21,13 +21,13 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 
 ## Current surface
 
-`SELECT VALUE <expr> | * | <expr> [AS k], …  FROM <alias>  [JOIN <a> IN <arr>]*
+`SELECT VALUE <expr> | * | <expr> [AS k], …  [FROM <alias>  [JOIN <a> IN <arr>]*]
 [WHERE …] [GROUP BY …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
 
-Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
-`SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
-literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
-(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
+Done: `FROM` (optional — see below), `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`,
+`JOIN … IN`, `SELECT VALUE`, `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar
+expressions, object/array literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`,
+aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
 (scalar / `EXISTS` / `ARRAY` over `FROM x IN <array>`).
 
 ---
@@ -114,6 +114,11 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 ## Clauses
 
 - [x] `FROM`  [x] `WHERE`  [x] `ORDER BY`  [x] `OFFSET … LIMIT`  [x] `SELECT`
+- [x] `FROM` is **optional** (matching Cosmos): a FROM-less query (`SELECT VALUE 1`,
+  `SELECT 1 AS a, 2 AS b`) evaluates the `SELECT` exactly once over a single
+  implicit row. Lowers to a one-row `Values` source feeding the projection. Only
+  `SELECT *` requires a `FROM` (rejected without one); subqueries may be FROM-less
+  too (`(SELECT VALUE 1)`).
 - [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` and `ORDER BY`
   reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
   aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,

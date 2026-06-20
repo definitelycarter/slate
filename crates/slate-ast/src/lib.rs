@@ -190,7 +190,10 @@ pub enum SortDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub select: SelectClause,
-    pub from: FromClause,
+    /// `FROM …` — `None` for a FROM-less query (`SELECT VALUE 1`), which Cosmos
+    /// evaluates exactly once over a single implicit row. `SELECT *` is invalid
+    /// without a `FROM` (rejected by the front-end).
+    pub from: Option<FromClause>,
     pub filter: Option<ScalarExpr>,
     /// `GROUP BY <expr>, …` — empty when absent. Rows are collapsed into one per
     /// distinct tuple of these expressions, and the `SELECT` may then reference
@@ -226,11 +229,13 @@ impl Query {
                 }
             }
         }
-        if let FromSource::Array { array, .. } = &self.from.source {
-            array.collect_parameters(out);
-        }
-        for join in &self.from.joins {
-            join.array.collect_parameters(out);
+        if let Some(from) = &self.from {
+            if let FromSource::Array { array, .. } = &from.source {
+                array.collect_parameters(out);
+            }
+            for join in &from.joins {
+                join.array.collect_parameters(out);
+            }
         }
         if let Some(filter) = &self.filter {
             filter.collect_parameters(out);
@@ -354,13 +359,13 @@ mod tests {
     fn parameter_names_covers_all_clauses() {
         let q = Query {
             select: SelectClause::Value(param("sel")),
-            from: FromClause {
+            from: Some(FromClause {
                 source: FromSource::ImplicitContainer { alias: "c".into() },
                 joins: vec![Join {
                     alias: "t".into(),
                     array: param("arr"),
                 }],
-            },
+            }),
             filter: Some(param("flt")),
             group_by: vec![param("grp")],
             order_by: vec![OrderByItem {

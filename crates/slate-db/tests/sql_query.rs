@@ -854,3 +854,73 @@ fn group_by_rejects_ungrouped_column() {
         .is_err()
     );
 }
+
+// ── FROM-less queries (Cosmos: the FROM clause is optional) ──────────
+
+#[test]
+fn from_less_value_evaluates_once() {
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "people", "SELECT VALUE 1 + 1")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![2]);
+}
+
+#[test]
+fn from_less_needs_no_collection() {
+    // A FROM-less query reads no container, so the named collection need not
+    // even exist — this is what lets the REPL run `SELECT VALUE 1` with nothing
+    // selected.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "does_not_exist", "SELECT VALUE 7 * 6")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![42]);
+}
+
+#[test]
+fn from_less_projection_wraps_in_object() {
+    // No VALUE → the projection list wraps into a single object row.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<Document> = txn
+        .query(DEFAULT_CF, "x", "SELECT 1 AS a, 2 AS b")
+        .unwrap()
+        .iter_values::<Document>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![doc! { "a": 1_i64, "b": 2_i64 }]);
+}
+
+#[test]
+fn from_less_scalar_subquery() {
+    // A FROM-less subquery is valid too, and reduces to its single value.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE (SELECT VALUE 1)")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![1]);
+}
+
+#[test]
+fn select_star_without_from_is_rejected() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    assert!(txn.query(DEFAULT_CF, "x", "SELECT *").is_err());
+}

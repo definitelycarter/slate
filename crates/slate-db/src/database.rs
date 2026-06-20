@@ -369,7 +369,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         // query (Cosmos errors rather than returning undefined).
         slate_planner::validate_grouping(&query)?;
 
-        let meta = self.collection_meta(cf, collection)?;
+        // A FROM-less query (`SELECT VALUE 1`) reads no container, so it neither
+        // needs nor requires the collection to exist — skip the metadata fetch.
+        let meta = if query.from.is_some() {
+            self.collection_meta(cf, collection)?
+        } else {
+            slate_planner::CollectionMeta {
+                indexes: Vec::new(),
+                pk_path: "_id".to_string(),
+            }
+        };
         let container = slate_planner::CollectionRef {
             cf: cf.to_string(),
             collection: collection.to_string(),

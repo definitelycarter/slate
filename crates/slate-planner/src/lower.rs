@@ -24,9 +24,10 @@
 //! in a computation (`UPPER(c.x) = ...`, `c.x + 1 = ...`) is not sargable and
 //! falls through to the residual.
 
-use bson::{Bson, RawBson};
+use bson::{Bson, RawBson, RawDocumentBuf};
 use slate_ast::{
-    BinOp, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause, SubqueryKind,
+    BinOp, FromClause, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause,
+    SubqueryKind,
 };
 
 use crate::plan::{
@@ -72,22 +73,34 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
     } = query;
 
     // The base source: a container scan/index path, or — for a subquery — an
-    // `Unwind` of the correlated array over the outer row (`CurrentRow`). The
-    // array source already yields an environment row; the container source
-    // doesn't until a `Bind`.
-    let (alias, mut node, residual, mut is_env) = match from.source {
-        FromSource::ImplicitContainer { alias } => {
-            let (source, residual) = plan_source(filter, &alias, &container, meta);
-            (alias, source, residual, false)
-        }
-        FromSource::Array { alias, array } => {
-            let source = Node::Unwind {
-                alias: alias.clone(),
-                array,
-                source: Box::new(Node::CurrentRow),
-            };
-            (alias, source, filter, true)
-        }
+    // `Unwind` of the correlated array over the outer row (`CurrentRow`), or —
+    // for a FROM-less query — a single empty environment row evaluated once. The
+    // array and FROM-less sources already yield an environment row; the container
+    // source doesn't until a `Bind`.
+    let (alias, mut node, residual, mut is_env, joins) = match from {
+        // FROM-less (`SELECT VALUE 1`): one empty row, no bindings. `WHERE` (if
+        // any) filters that single row; `SELECT *` is rejected by the front-end.
+        None => (
+            String::new(),
+            Node::Values(vec![RawBson::Document(RawDocumentBuf::new())]),
+            filter,
+            true,
+            Vec::new(),
+        ),
+        Some(FromClause { source, joins }) => match source {
+            FromSource::ImplicitContainer { alias } => {
+                let (source, residual) = plan_source(filter, &alias, &container, meta);
+                (alias, source, residual, false, joins)
+            }
+            FromSource::Array { alias, array } => {
+                let source = Node::Unwind {
+                    alias: alias.clone(),
+                    array,
+                    source: Box::new(Node::CurrentRow),
+                };
+                (alias, source, filter, true, joins)
+            }
+        },
     };
 
     // GROUP BY keys, each bound to a `$keyN` slot in the aggregation output.
@@ -135,7 +148,7 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
 
     // JOIN ... IN — each `Unwind` extends the environment. The first join (or a
     // subquery below) forces the environment shape via `Bind`.
-    if !from.joins.is_empty() {
+    if !joins.is_empty() {
         if !is_env {
             node = Node::Bind {
                 alias: alias.clone(),
@@ -143,7 +156,7 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
             };
             is_env = true;
         }
-        for join in from.joins {
+        for join in joins {
             node = Node::Unwind {
                 alias: join.alias,
                 array: join.array,
@@ -320,12 +333,17 @@ pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
         return Ok(());
     }
 
-    let alias = match &query.from.source {
-        FromSource::ImplicitContainer { alias } | FromSource::Array { alias, .. } => alias,
-    };
-    let mut bindings: Vec<&str> = vec![alias.as_str()];
-    for join in &query.from.joins {
-        bindings.push(join.alias.as_str());
+    // FROM-less aggregate (e.g. `SELECT COUNT(1)`) has no row bindings.
+    let mut bindings: Vec<&str> = Vec::new();
+    if let Some(from) = &query.from {
+        match &from.source {
+            FromSource::ImplicitContainer { alias } | FromSource::Array { alias, .. } => {
+                bindings.push(alias.as_str())
+            }
+        }
+        for join in &from.joins {
+            bindings.push(join.alias.as_str());
+        }
     }
 
     match &query.select {
