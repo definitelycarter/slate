@@ -31,16 +31,23 @@ use crate::error::{EvalError, Result};
 use crate::value::Value;
 
 mod abs;
+mod acos;
 mod array_concat;
 mod array_contains;
 mod array_contains_all;
 mod array_contains_any;
 mod array_length;
 mod array_slice;
+mod asin;
+mod atan;
+mod atn2;
 mod ceiling;
 mod choose;
 mod concat;
 mod contains;
+mod cos;
+mod cot;
+mod degrees;
 mod endswith;
 mod exp;
 mod floor;
@@ -65,6 +72,7 @@ mod ltrim;
 mod objecttoarray;
 mod pi;
 mod power;
+mod radians;
 mod regexmatch;
 mod replace;
 mod replicate;
@@ -75,11 +83,13 @@ mod rtrim;
 mod setintersect;
 mod setunion;
 mod sign;
+mod sin;
 mod sqrt;
 mod square;
 mod starts_with;
 mod stringequals;
 mod substring;
+mod tan;
 mod trim;
 mod trunc;
 mod upper;
@@ -114,6 +124,16 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "LOG" => log::eval(name, args),
         "LOG10" => log10::eval(name, args),
         "PI" => pi::eval(name, args),
+        "SIN" => sin::eval(name, args),
+        "COS" => cos::eval(name, args),
+        "TAN" => tan::eval(name, args),
+        "COT" => cot::eval(name, args),
+        "ASIN" => asin::eval(name, args),
+        "ACOS" => acos::eval(name, args),
+        "ATAN" => atan::eval(name, args),
+        "ATN2" => atn2::eval(name, args),
+        "DEGREES" => degrees::eval(name, args),
+        "RADIANS" => radians::eval(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),
