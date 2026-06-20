@@ -15,7 +15,7 @@
 #![allow(dead_code)]
 
 use bson::{Document, RawDocumentBuf, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, QueryEngine};
 use slate_engine::{Catalog, Engine, EngineTransaction, KvEngine};
 use slate_query::FindOptions;
 use slate_store::MemoryStore;
@@ -42,7 +42,12 @@ fn indexes() -> &'static [&'static str] {
 // ── Engines ─────────────────────────────────────────────────────
 
 pub fn v1_db() -> Database<MemoryStore> {
-    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    // Pinned to V1: this is the reference side of the differential, so it must
+    // stay v1 even when the crate default flips to v2.
+    let db = DatabaseBuilder::new()
+        .query_engine(QueryEngine::V1)
+        .open(MemoryStore::new())
+        .unwrap();
     let txn = db.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: COLL.into(),

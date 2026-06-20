@@ -19,8 +19,8 @@ const COLL: &str = "people";
 /// nested docs, and arrays with several elements.
 fn dataset() -> Vec<Document> {
     vec![
-        doc! { "_id": "1", "n": "ada",   "age": 30_i32, "tags": ["x", "y"],  "addr": { "city": "nyc" }, "maybe": Bson::Null },
-        doc! { "_id": "2", "n": "alan",  "age": 40_i64, "tags": ["y", "z"],  "addr": { "city": "ldn" } },
+        doc! { "_id": "1", "n": "ada",   "age": 30_i32, "tags": ["x", "y"],  "addr": { "city": "nyc" }, "maybe": Bson::Null, "events": [{ "kind": "click" }, { "kind": "view" }] },
+        doc! { "_id": "2", "n": "alan",  "age": 40_i64, "tags": ["y", "z"],  "addr": { "city": "ldn" }, "events": [{ "kind": "view" }] },
         doc! { "_id": "3", "n": "grace", "age": 50.0,   "tags": ["z"] /* no addr, no maybe */ },
         doc! { "_id": "4", "n": "kurt",  "age": 30_i64, "tags": [],          "maybe": "set" },
     ]
@@ -167,4 +167,14 @@ fn multikey_range_on_array_is_a_known_gap() {
 fn string_coerced_numeric_query() {
     // v1 and v2 agree here (a string operand does not match a numeric field).
     assert_parity(doc! { "age": "30" });
+}
+
+#[test]
+fn dotted_path_into_array_filter_matches() {
+    // For FILTERS, neither engine traverses a dotted path into an array of
+    // subdocuments — `{"events.kind": "click"}` matches nothing in v1 OR v2, so
+    // they agree. (Distinct differs: v1's distinct DOES traverse array paths and
+    // v2's doesn't yet — tracked in the v1-removal blockers, exercised by
+    // `tests/distinct.rs::distinct_array_of_sub_documents` under v1.)
+    assert_parity(doc! { "events.kind": "click" });
 }

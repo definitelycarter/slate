@@ -4,29 +4,66 @@
 //! later duplicates. Dedup is hash-based (matching v1). Because v2 has
 //! expression `Project`, this needs no field argument — `Project(c.city) →
 //! Distinct` yields distinct cities; over documents it dedups whole documents.
+//!
+//! **Multikey:** an array input is flattened one level — its elements are the
+//! distinct values, not the array as a whole. This matches v1's `distinct`
+//! (the node's only caller today): `distinct("tags")` over `["a","b"]` and
+//! `["b","c"]` yields `a, b, c`.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
+use bson::RawBson;
 use bson::raw::RawBsonRef;
 
-use crate::ValueIter;
+use slate_eval::EvalError;
 
-/// Wrap `source`, emitting each distinct value once.
+use crate::{ExecError, ValueIter};
+
+/// Wrap `source`, emitting each distinct value once (flattening arrays).
 pub(crate) fn execute<'a>(source: ValueIter<'a>) -> ValueIter<'a> {
     let mut seen = HashSet::new();
-    Box::new(source.filter_map(move |item| match item {
-        Ok(Some(value)) => {
-            let h = hash_value(value.as_raw_bson_ref());
-            if seen.insert(h) {
-                Some(Ok(Some(value)))
+    Box::new(source.flat_map(move |item| {
+        let emitted: Vec<Result<Option<RawBson>, ExecError>> = match item {
+            Ok(Some(value)) => emit_distinct(value, &mut seen),
+            Ok(None) => Vec::new(),
+            Err(e) => vec![Err(e)],
+        };
+        emitted.into_iter()
+    }))
+}
+
+/// Emit the not-yet-seen values from `value`: an array contributes each of its
+/// elements (multikey), any other value contributes itself.
+fn emit_distinct(
+    value: RawBson,
+    seen: &mut HashSet<u64>,
+) -> Vec<Result<Option<RawBson>, ExecError>> {
+    match value {
+        RawBson::Array(arr) => {
+            let mut out = Vec::new();
+            for entry in &arr {
+                match entry {
+                    Ok(elem) => {
+                        if seen.insert(hash_value(elem)) {
+                            out.push(Ok(Some(RawBson::from(elem))));
+                        }
+                    }
+                    Err(e) => out.push(Err(ExecError::Eval(EvalError {
+                        message: format!("could not read array element: {e}"),
+                    }))),
+                }
+            }
+            out
+        }
+        other => {
+            if seen.insert(hash_value(other.as_raw_bson_ref())) {
+                vec![Ok(Some(other))]
             } else {
-                None
+                Vec::new()
             }
         }
-        Ok(None) => None,
-        Err(e) => Some(Err(e)),
-    }))
+    }
 }
 
 fn hash_value(r: RawBsonRef) -> u64 {

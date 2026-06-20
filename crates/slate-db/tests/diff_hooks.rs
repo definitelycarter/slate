@@ -39,6 +39,7 @@ fn lua_pool() -> VmPool {
 fn validator_rejects(doc: Document) -> (bool, bool) {
     let v1 = {
         let db = DatabaseBuilder::new()
+            .query_engine(slate_db::QueryEngine::V1)
             .with_scripting(lua_pool())
             .open(MemoryStore::new())
             .unwrap();
