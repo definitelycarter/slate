@@ -13,7 +13,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
-- **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required)
+- **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required), powering an in-browser [query playground](book/src/playground.md) in the docs
 - **Interactive shell** — `slate`, a REPL to create collections, insert documents, and run SQL against a live (in-memory or persistent) database
 - **Sub-millisecond indexed queries** at 10k records across all backends
 
@@ -173,5 +173,20 @@ See [benchmarks](book/src/benchmarks.md) for full results including MemoryStore 
 Architecture docs are in the `book/` directory, built with [mdBook](https://rust-lang.github.io/mdBook/):
 
 ```bash
-cd book && mdbook serve
+mdbook serve book   # local preview at http://localhost:3000
+mdbook build book   # render to book/book (what CI verifies)
+```
+
+The book includes an in-browser **[Playground](book/src/playground.md)** —
+runnable SQL cells that execute real slate queries client-side via the
+`slate-wasm` build, with no backend. The playground fetches its WebAssembly
+module over HTTP, so it only activates under `mdbook serve` (not when opening an
+`.html` file from disk); blocks degrade to static examples otherwise.
+
+The playground ships a prebuilt wasm bundle (`book/src/playground/pkg`, checked
+in) so `mdbook build` needs no Rust/wasm toolchain. Rebuild it after changing
+`crates/slate-wasm`:
+
+```bash
+./book/build-playground.sh   # requires wasm-pack + the wasm32 target
 ```

@@ -60,5 +60,32 @@ jobs:
       # feature into the query stack, this job fails. This checks that the
       # target compiles, not lint-cleanliness (the `check` job already enforces
       # clippy `-D warnings` on the host build), so plain `cargo build` is used.
+      #
+      # This is also the guard that the book's committed playground bundle
+      # (book/src/playground/pkg) can still be rebuilt from source — the `book`
+      # job below only consumes the prebuilt artifact.
       - name: Build slate-wasm for wasm32
         run: cargo build -p slate-wasm --target wasm32-unknown-unknown
+
+  book:
+    name: mdbook build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The book embeds a prebuilt slate-wasm bundle (book/src/playground/pkg),
+      # so building it needs only mdbook — no Rust/wasm toolchain. Install the
+      # prebuilt mdbook binary rather than `cargo install` (which would compile
+      # it) to keep this job fast.
+      - name: Install mdbook
+        env:
+          MDBOOK_VERSION: "0.5.2"
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Verifies the book — including the committed playground bundle — builds.
+      - name: Build the book
+        run: mdbook build book
