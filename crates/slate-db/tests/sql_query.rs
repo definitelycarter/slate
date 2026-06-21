@@ -954,6 +954,61 @@ fn stringsplit_and_stringjoin_round_trip() {
 }
 
 #[test]
+fn from_subroot_path_scopes_iteration() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "emps".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "emps",
+        vec![
+            doc! { "_id": "1", "employment": { "team": "Retail", "hours": 40 } },
+            doc! { "_id": "2", "employment": { "team": "Retail" } },
+            doc! { "_id": "3", "employment": { "team": "Eng" } },
+            doc! { "_id": "4", "name": "no employment" },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    // `e` binds to each document's `employment` sub-object; doc 4 (no path) drops.
+    let txn = db.begin(true).unwrap();
+    let teams: Vec<String> = txn
+        .query(
+            DEFAULT_CF,
+            "emps",
+            "SELECT VALUE e.team FROM c.employment e ORDER BY e.team ASC",
+        )
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(teams, vec!["Eng", "Retail", "Retail"]);
+
+    // WHERE over the rebound alias; SELECT * returns the whole sub-object.
+    let txn = db.begin(true).unwrap();
+    let docs: Vec<Document> = txn
+        .query(
+            DEFAULT_CF,
+            "emps",
+            r#"SELECT * FROM c.employment e WHERE e.team = "Retail" AND IS_DEFINED(e.hours)"#,
+        )
+        .unwrap()
+        .iter_values::<Document>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(docs, vec![doc! { "team": "Retail", "hours": 40 }]);
+}
+
+#[test]
 fn coalesce_operator_falls_back_on_undefined() {
     let db = seeded();
     // Missing field → fall back to the right operand.

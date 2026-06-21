@@ -54,6 +54,16 @@ pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> R
                     .map(|d| vec![(alias.as_str(), Bound::Borrowed(d))])
                     .collect(),
             ),
+            // `FROM base.path alias` — bind `alias` to each document's sub-value
+            // at `path`, dropping documents where the path is undefined.
+            FromSource::Subroot { path, alias, .. } => (
+                alias.as_str(),
+                docs.iter()
+                    .filter_map(|d| {
+                        navigate(d, path).map(|v| vec![(alias.as_str(), Bound::Borrowed(v))])
+                    })
+                    .collect(),
+            ),
             // An array source only appears inside a subquery, which this standalone
             // in-memory executor doesn't run (the planner/executor path does).
             FromSource::Array { .. } => {
@@ -145,6 +155,19 @@ pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> R
 
 fn bindings<'a>(row: &'a Row<'a>) -> Vec<(&'a str, &'a Bson)> {
     row.iter().map(|(n, b)| (*n, b.as_ref())).collect()
+}
+
+/// Follow a dotted `path` into a document, returning the borrowed sub-value or
+/// `None` if any segment is missing or a non-document is traversed (undefined).
+fn navigate<'a>(doc: &'a Bson, path: &[String]) -> Option<&'a Bson> {
+    let mut cur = doc;
+    for seg in path {
+        match cur {
+            Bson::Document(d) => cur = d.get(seg)?,
+            _ => return None,
+        }
+    }
+    Some(cur)
 }
 
 /// Duplicate a row for the join cross product. Borrowed bindings stay borrows;

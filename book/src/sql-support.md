@@ -135,6 +135,10 @@ are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
   (`Subquery`) node over a `CurrentRow` leaf, reusing the full node set inside the
   subplan. A subquery whose `FROM` names an outer alias is item-scoped (iterates
   that single bound value), matching Cosmos.
+- [x] Subroot `FROM <base>.<path> [AS] <alias>` — scope iteration to a sub-path
+  of each document; `alias` binds to the whole sub-value (object or array, no
+  unwinding), one row per document, dropping documents where the path is
+  undefined. The alias is optional (defaults to the last path segment).
 
 ---
 

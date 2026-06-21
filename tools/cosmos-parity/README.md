@@ -107,7 +107,6 @@ Real slate gaps:
   against hosted Cosmos — but a clear behavioral divergence to track.)
 - **Not-yet-implemented functions** — spatial (`ST_*`) and `VECTORDISTANCE`
   (the corpus's remaining slate-errors).
-- **Subroot FROM** (`FROM a.b e`) — the one remaining corpus parse error.
 
 Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Cosmos):
 - **Multi-value subquery as a JOIN source** (`JOIN j IN (SELECT …)`) returns `[]`

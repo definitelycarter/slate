@@ -122,6 +122,22 @@ fn lower_query(
                 let (source, residual) = plan_source(filter, &alias, &container, meta);
                 (alias, source, residual, false, joins)
             }
+            // `FROM base.path alias` — scan the container bound to `base`, then
+            // navigate to `base.path` (a Project, which drops rows where the path
+            // is undefined) and rebind that bare sub-value to `alias`. The WHERE
+            // references `alias`, not container fields, so nothing is pushed into
+            // the scan — the full filter stays residual.
+            FromSource::Subroot { base, path, alias } => {
+                let navigated = Node::Project {
+                    expr: member_chain(&base, &path),
+                    binding: RowBinding::Env,
+                    source: Box::new(Node::Bind {
+                        alias: base,
+                        source: Box::new(scan(&container)),
+                    }),
+                };
+                (alias, navigated, filter, false, joins)
+            }
             FromSource::Array { alias, array } => {
                 // The array expression may itself be a subquery (a nested
                 // `FROM x IN (SELECT …)`), multi-value here; extract it over the
@@ -457,6 +473,9 @@ fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
                 check_expr(array, &scope)?;
                 scope.push(alias);
             }
+            // `base` names the container root (valid by construction); only the
+            // bound `alias` enters scope for the rest of the query.
+            FromSource::Subroot { alias, .. } => scope.push(alias),
         }
         for join in &from.joins {
             check_expr(&join.array, &scope)?;
@@ -553,9 +572,9 @@ pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
     let mut bindings: Vec<&str> = Vec::new();
     if let Some(from) = &query.from {
         match &from.source {
-            FromSource::ImplicitContainer { alias } | FromSource::Array { alias, .. } => {
-                bindings.push(alias.as_str())
-            }
+            FromSource::ImplicitContainer { alias }
+            | FromSource::Array { alias, .. }
+            | FromSource::Subroot { alias, .. } => bindings.push(alias.as_str()),
         }
         for join in &from.joins {
             bindings.push(join.alias.as_str());
@@ -1037,6 +1056,19 @@ fn scan(container: &CollectionRef) -> Node {
     Node::Scan {
         collection: container.clone(),
     }
+}
+
+/// Build the member-access chain `base.seg0.seg1…` as a scalar expression — the
+/// path a subroot `FROM base.path alias` navigates on each document.
+fn member_chain(base: &str, path: &[String]) -> ScalarExpr {
+    let mut expr = ScalarExpr::Identifier(base.to_string());
+    for seg in path {
+        expr = ScalarExpr::Member {
+            base: Box::new(expr),
+            field: seg.clone(),
+        };
+    }
+    expr
 }
 
 fn index_scan(container: &CollectionRef, field: &str, range: IndexScanRange) -> Node {

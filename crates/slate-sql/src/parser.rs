@@ -242,13 +242,35 @@ impl Parser {
         let first = self.parse_ident()?;
         // Forms:
         //   FROM x IN <array>          — array source (a subquery's source)
+        //   FROM <base>.<path> <a>     — subroot: iterate a sub-path of each doc
         //   FROM <container> AS <a>    — container with an explicit alias
         //   FROM <container> <a>       — container with an alias (no AS)
         //   FROM <alias>               — bare alias bound to the container
         // The container is chosen out-of-band (matching Cosmos, where the FROM
         // container name need not match the queried container), so when a name
         // and an alias are both present we keep only the alias.
-        let source = if self.matches(&Token::In) {
+        let source = if self.peek() == &Token::Dot {
+            // Subroot path source: `FROM base.p1.p2 [AS] alias`. The alias is
+            // optional; without one Cosmos still iterates the sub-path, so we
+            // default the binding to the last path segment.
+            let mut path = Vec::new();
+            while self.matches(&Token::Dot) {
+                path.push(self.parse_ident()?);
+            }
+            let alias = if self.matches(&Token::As) {
+                self.parse_ident()?
+            } else if matches!(self.peek(), Token::Ident(_)) {
+                self.parse_ident()?
+            } else {
+                // `path` is non-empty (we consumed at least one `.segment`).
+                path.last().cloned().unwrap_or_else(|| first.clone())
+            };
+            FromSource::Subroot {
+                base: first,
+                path,
+                alias,
+            }
+        } else if self.matches(&Token::In) {
             FromSource::Array {
                 alias: first,
                 array: self.parse_expr()?,
@@ -1224,6 +1246,31 @@ mod tests {
         assert!(matches!(
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
+        ));
+    }
+
+    #[test]
+    fn from_subroot_path_source() {
+        let q = parse("SELECT * FROM employees.employment e");
+        match &q.from.as_ref().unwrap().source {
+            FromSource::Subroot { base, path, alias } => {
+                assert_eq!(base, "employees");
+                assert_eq!(path, &vec!["employment".to_string()]);
+                assert_eq!(alias, "e");
+            }
+            other => panic!("expected Subroot, got {other:?}"),
+        }
+        // Multi-segment path, AS alias.
+        let q = parse("SELECT VALUE x FROM c.a.b AS x");
+        assert!(matches!(
+            &q.from.as_ref().unwrap().source,
+            FromSource::Subroot { path, alias, .. } if path == &["a", "b"] && alias == "x"
+        ));
+        // No alias → defaults to the last path segment.
+        let q = parse("SELECT * FROM c.emp");
+        assert!(matches!(
+            &q.from.as_ref().unwrap().source,
+            FromSource::Subroot { alias, .. } if alias == "emp"
         ));
     }
 

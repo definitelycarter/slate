@@ -307,6 +307,15 @@ pub enum FromSource {
     /// expression, with no container scan. Used by subqueries, whose source is
     /// an in-document array (correlated) or a literal (uncorrelated).
     Array { alias: String, array: ScalarExpr },
+    /// `FROM <base>.<path> <alias>` — scope iteration to a sub-path of each
+    /// container document: `alias` binds to `base.path` (the whole sub-value,
+    /// object or array — no unwinding), one row per document, dropping documents
+    /// where the path is undefined. `base` names the container root.
+    Subroot {
+        base: String,
+        path: Vec<String>,
+        alias: String,
+    },
     // Future: `Collection { name: String, alias: String }` for cross-collection joins.
 }
 
