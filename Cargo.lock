@@ -1536,6 +1536,7 @@ name = "slate-executor"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "criterion",
  "slate-ast",
  "slate-engine",
  "slate-eval",

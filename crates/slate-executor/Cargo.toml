@@ -3,6 +3,14 @@ name = "slate-executor"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Exposes `slate_executor::bench` (thin `pub` wrappers over the `pub(crate)`
+# node executors + a seeded-engine fixture) so `benches/nodes.rs` can drive each
+# node in isolation. The fixture builds a `KvEngine<MemoryStore>` in library
+# code, and dev-deps aren't visible there, so the memory store is an optional
+# normal dependency activated by this feature rather than `[]`.
+bench-internals = ["dep:slate-store"]
+
 [dependencies]
 bson = { workspace = true }
 slate-ast = { path = "../slate-ast" }
@@ -11,7 +19,19 @@ slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
 slate-rawbson = { path = "../slate-rawbson" }
 slate-vm = { path = "../slate-vm", features = ["lua"] }
+slate-store = { path = "../slate-store", features = ["memory"], optional = true }
 
 [dev-dependencies]
 slate-sql = { path = "../slate-sql" }
 slate-store = { path = "../slate-store", features = ["memory"] }
+# Also listed as dev-deps so the external `nodes` bench target can name them
+# directly (they are regular deps too; Cargo dedups).
+slate-engine = { path = "../slate-engine" }
+slate-planner = { path = "../slate-planner" }
+slate-eval = { path = "../slate-eval" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "nodes"
+harness = false
+required-features = ["bench-internals"]

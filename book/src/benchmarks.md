@@ -6,6 +6,25 @@ All benchmarks use the **embedded MemoryStore** backend — no persistence layer
 
 Storage model: records are stored as `d:{_id}` → raw BSON bytes via `bson::to_vec`. Queries use a two-tier plan tree: the **ID tier** (Scan, IndexScan, IndexMerge) produces record IDs without touching document bytes. `ReadRecord` streams IDs directly into per-record fetches — no intermediate collection — enabled by explicit CF handles that separate mutation (`&mut self`) from reads (`&self`). The **raw tier** (Filter, Sort, Limit, Distinct) operates on `RawValue<'a>` — a Cow-like enum over `RawBsonRef<'a>` (borrowed, zero-copy from MemoryStore snapshots) and `RawBson` (owned). Filter and Sort construct `&RawDocument` views on demand to access individual fields without allocation. Records that fail a filter are never cloned or deserialized. **Projection** builds `RawDocumentBuf` output using `append()` — selective field copying without full materialization. `find()` returns `Vec<RawDocumentBuf>` directly. For index-covered queries (where all projected columns are available from the index), `ReadRecord` is skipped entirely — `Projection` constructs documents directly from `RawValue` scalars carried by `IndexScan`. For full scans without a filter, `ReadRecord` optimizes the `Scan` input into a single-pass iteration.
 
+## Per-node isolation (`slate-executor`)
+
+A separate suite benchmarks each `slate-executor` node executor **in isolation** — off the full `find`/SQL pipeline — so per-node perf work has a stable signal. Run it with:
+
+```bash
+cargo bench -p slate-executor --features bench-internals --bench nodes
+# single scenario, e.g. just the sorts:
+cargo bench -p slate-executor --features bench-internals --bench nodes -- sort
+```
+
+It lives behind the `bench-internals` feature, which exposes `slate_executor::bench` — thin `pub` wrappers over the otherwise `pub(crate)` per-node `execute(...)` functions, plus a seeded `KvEngine<MemoryStore>` fixture. The bench file (`crates/slate-executor/benches/nodes.rs`) follows the `slate-eval/benches/apply.rs` template: one `nodes` Criterion group, scenarios named `node_variant/<size>`, sweeping 100 / 1k / 10k rows.
+
+Coverage is one scenario per node:
+
+- **Source / storage:** `scan`, `index_scan` (`eq`, `range_lower`/`range_upper`/`range_both`, `full`), `key_lookup`, `index_merge` (`or`, `and`). These read a seeded MemoryStore engine (collection `people`, indexed on `age` and `status`); the engine + read transaction are built once outside the timed loop (the `txn` must outlive the iterator), and only opening the iterator and draining it is timed.
+- **In-memory transforms:** `bind`, `filter` (`cheap`/`expensive`), `project` (`identity`/`computed`), `sort` (`single`/`multi`), `limit_skip_take`, `distinct` (`flatten_false`/`flatten_true`), `unwind`, `aggregate` (`count`/`sum`). A transform consumes its source `ValueIter`, so the source is rebuilt each iteration from a once-built `Vec<RawBson>` via the `values` (or `bind`) wrapper. A `values_passthrough/<size>` baseline is included at each size so a transform's *marginal* cost is `transform − passthrough`.
+
+Node iterators are lazy, so every scenario constructs the iterator **and** fully drains it (via `collect`) inside the timed closure. Machine-specific numbers aren't quoted here — run the suite locally and compare before/after on the same host.
+
 ## Record Schema
 
 | Field | Type | Indexed | Notes |

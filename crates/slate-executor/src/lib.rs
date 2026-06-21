@@ -28,6 +28,9 @@
 mod error;
 mod nodes;
 
+#[cfg(feature = "bench-internals")]
+pub mod bench;
+
 use std::rc::Rc;
 
 use bson::{RawBson, RawDocumentBuf};
