@@ -57,12 +57,15 @@ against the folder's authoritative `result.json`. The slate-matrix replay
 (`cosmos_golden.rs`) does the same against the committed `goldens/` we captured from
 the emulator (§7–§8).
 
-**Current baselines:** corpus replay `111/117 match` — the 6 remaining are all
-spatial functions (`ST_AREA`, `ST_DISTANCE`, `ST_INTERSECTS`, `ST_ISVALID`,
-`ST_ISVALIDDETAILED`, `ST_WITHIN`), not yet implemented in slate, tracked as a real
-gap. Slate-matrix replay `214/216 match` (2 known gaps: `1/0`, `5%0`). If a change
-drops either count, you introduced a regression; if it raises one, note the new
-number here and in `tools/cosmos-parity/README.md`.
+**Current baselines:** corpus replay `115/117 match` — the 2 remaining are the
+spatial *metric* functions (`ST_DISTANCE`, `ST_AREA`), which compute correct WGS84
+values (geodesic distance within ~cm, ellipsoidal area within ~1 ppm) that don't
+bit-reproduce Cosmos's proprietary spatial library to the 10-decimal comparison —
+a numeric gap, not a slate bug. The other four spatial functions (`ST_ISVALID`,
+`ST_ISVALIDDETAILED`, `ST_WITHIN`, `ST_INTERSECTS`) match exactly. Slate-matrix
+replay `214/216 match` (2 known gaps: `1/0`, `5%0`). If a change drops either
+count, you introduced a regression; if it raises one, note the new number here and
+in `tools/cosmos-parity/README.md`.
 
 ## 3. Run the live emulator differential (when Docker is available)
 
@@ -103,8 +106,9 @@ When the harness flags a divergence, classify it:
 
 - **Real slate gap** (slate errors or returns the wrong value, Cosmos is right):
   this is the actionable case — fix slate, or record it as a known gap (the spatial
-  `ST_*` functions are the current example). Reproduce in isolation with the
-  in-process example:
+  metric functions `ST_DISTANCE` / `ST_AREA`, which can't bit-match Cosmos's
+  proprietary spatial math, are the current example). Reproduce in isolation with
+  the in-process example:
   ```bash
   cargo run -q -p slate-cli --example parity_samples -- tools/cosmos-parity/.samples/scripts
   ```

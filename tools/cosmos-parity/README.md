@@ -11,8 +11,12 @@ Three replays — two hermetic (no Docker), one live:
   at replay; see "Slate-matrix golden suite" below). **214 / 216 match**; the 2
   remaining are the divide/modulo-by-zero gap, reported as known gaps.
 - **`run_samples.py`** — the **Azure-Samples corpus** vs its authoritative
-  `result.json` (no emulator needed). Currently **111 / 117 match**; the 6
-  remaining are all spatial functions (`ST_*`), not yet implemented in slate.
+  `result.json` (no emulator needed). Currently **115 / 117 match**; the 2
+  remaining are the spatial *metric* functions (`ST_DISTANCE`, `ST_AREA`), whose
+  values land very close to Cosmos but don't bit-reproduce its proprietary
+  spatial library (see "Remaining divergences"). The four boolean/validity
+  spatial functions (`ST_ISVALID`, `ST_ISVALIDDETAILED`, `ST_WITHIN`,
+  `ST_INTERSECTS`) match exactly.
 - **`run.py`** — our own matrices (positive + negative + edge + generated) vs the
   **live emulator**. ~456/507 of these match; nearly all the rest are the emulator
   being wrong (see "Remaining divergences" below), plus divide/modulo-by-zero. This
@@ -99,12 +103,18 @@ python3 tools/cosmos-parity/run_samples.py
 ```
 
 `samples_fetch.sh` pins a specific upstream commit and drops git history (a single
-shallow snapshot), so the 111/117 baseline is reproducible — upstream can't drift
+shallow snapshot), so the 115/117 baseline is reproducible — upstream can't drift
 it. Bump the `COMMIT` in that script to update the corpus.
 
-What the 6 non-matches map to (a concrete to-do list):
-- **Spatial functions** — `ST_AREA`, `ST_DISTANCE`, `ST_INTERSECTS`, `ST_ISVALID`,
-  `ST_ISVALIDDETAILED`, `ST_WITHIN` (not yet implemented in slate).
+What the 2 non-matches map to:
+- **Spatial metric precision** — `ST_DISTANCE` and `ST_AREA` compute correct
+  WGS84 values (geodesic distance, ellipsoidal area) that land within ~cm / ~1 ppm
+  of Cosmos, but Cosmos's proprietary spatial library produces values differing in
+  the ~5th–8th significant figure, below the corpus's 10-decimal comparison. Not a
+  slate bug; recorded as a numeric gap rather than forced (matching it would mean
+  reverse-engineering or overfitting an unpublished algorithm to two data points).
+  The other four spatial functions (`ST_ISVALID`, `ST_ISVALIDDETAILED`,
+  `ST_WITHIN`, `ST_INTERSECTS`) match exactly.
 
 The earlier backlog — missing scalar functions (trig / integer / string
 conversion), the `FROM <container> [AS] <alias>` grammar gap, the arity gaps,
@@ -156,8 +166,12 @@ Real slate gaps:
 - **Divide / modulo by zero** (`SELECT VALUE 1 / 0`, `5 % 0`) — the emulator
   raises `400 BadRequest`; slate returns undefined (drops the row). (Confirm
   against hosted Cosmos — but a clear behavioral divergence to track.)
-- **Not-yet-implemented functions** — spatial (`ST_*`) and `VECTORDISTANCE`
-  (the corpus's remaining slate-errors).
+- **Spatial metric precision** — `ST_DISTANCE` and `ST_AREA` return correct WGS84
+  values (geodesic distance within ~cm, ellipsoidal area within ~1 ppm) that don't
+  bit-reproduce Cosmos's proprietary spatial library to the corpus's 10-decimal
+  comparison. The boolean spatial functions (`ST_ISVALID`, `ST_ISVALIDDETAILED`,
+  `ST_WITHIN`, `ST_INTERSECTS`) match exactly.
+- **Not-yet-implemented functions** — `VECTORDISTANCE` (needs a vector index).
 
 Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Cosmos):
 - **Multi-value subquery as a JOIN source** (`JOIN j IN (SELECT …)`) returns `[]`
@@ -192,4 +206,7 @@ Fixed (kept here as the trail): unqualified identifiers now rejected; FROM
 `<container> [AS] alias`; item-scoped `FROM <outer-alias>` subqueries; subqueries
 in JOIN/nested-FROM sources; `IS_NULL` of a computed null; oversized integer
 literals; trig / integer / bitwise / string-conversion functions; the
-3-arg `ARRAY_CONTAINS`/`REGEXMATCH` and 2-arg `ObjectToArray` forms.
+3-arg `ARRAY_CONTAINS`/`REGEXMATCH` and 2-arg `ObjectToArray` forms; the spatial
+`ST_*` functions (`ST_ISVALID`/`ST_ISVALIDDETAILED`/`ST_WITHIN`/`ST_INTERSECTS`
+match exactly; `ST_DISTANCE`/`ST_AREA` compute correct WGS84 values but stay
+numeric-precision gaps — see "Remaining divergences").

@@ -104,6 +104,23 @@ are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
 
 - [ ] `DOCUMENTID` *(returns the configured pk value — slate pk path is dynamic)*
 
+### Spatial (Tier 2)
+
+GeoJSON geometries are ordinary documents (`{ "type": "Point", "coordinates":
+[lng, lat] }`, plus `LineString`/`Polygon`/`Multi*`), so no new BSON type is
+needed — they reach eval as a `Document`. Metric results are computed on the
+WGS84 ellipsoid (a mean-radius sphere is ~0.3% off).
+
+- [x] `ST_ISVALID`  [x] `ST_ISVALIDDETAILED` *(GeoJSON validity: coordinate ranges, ring closure, min ring size)*
+- [x] `ST_WITHIN`  [x] `ST_INTERSECTS` *(planar lng/lat predicates — boolean results match Cosmos exactly)*
+- [x] `ST_DISTANCE` *(Vincenty geodesic, meters)*  [x] `ST_AREA` *(authalic-sphere area, m²)*
+
+The two **metric** functions land very close to the Cosmos oracle (`ST_DISTANCE`
+within ~cm, `ST_AREA` within ~1 ppm) but do not bit-reproduce Cosmos's
+proprietary spatial library, so they stay value-mismatches in the corpus replay
+(see the cosmos-parity notes). There is no spatial *index* yet — these are
+eval-only scalar functions.
+
 ---
 
 ## Keywords (Tier 1 unless noted)
@@ -177,6 +194,8 @@ These require subsystems slate doesn't have yet; out of scope for the SQL pass.
 
 - **Full-text search**: `FULLTEXTCONTAINS` / `…ALL` / `…ANY`, `FULLTEXTSCORE`,
   `RRF`, `ORDER BY RANK` — need a full-text index + BM25 scoring.
-- **Spatial**: `ST_AREA` `ST_DISTANCE` `ST_INTERSECTS` `ST_ISVALID`
-  `ST_ISVALIDDETAILED` `ST_WITHIN` — need GeoJSON + a spatial index.
 - **Vector**: `VECTORDISTANCE` — needs a vector index.
+
+(The spatial `ST_*` functions, formerly listed here, are now implemented as
+eval-only scalar functions — see [Spatial](#spatial-tier-2). A spatial *index*
+is still future work.)

@@ -12,7 +12,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)/.samples"
 REPO="https://github.com/Azure-Samples/cosmos-db-nosql-query-samples"
-COMMIT="117c70bacdaadf40f17b72259d57a086dac3a96e"  # 2024-10-24; baseline 111/117
+COMMIT="117c70bacdaadf40f17b72259d57a086dac3a96e"  # 2024-10-24; baseline 115/117
 
 # Idempotent: skip the network round-trip if already at the pinned commit.
 if [ -f "$DIR/.pinned-commit" ] && [ "$(cat "$DIR/.pinned-commit")" = "$COMMIT" ]; then
