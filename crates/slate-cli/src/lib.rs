@@ -11,10 +11,12 @@
 //! threads input through these three.
 
 pub mod command;
+pub mod completion;
 pub mod format;
 pub mod input;
 pub mod session;
 
 pub use command::Command;
+pub use completion::{CompletionState, SlateCompleter};
 pub use input::{Feed, InputBuffer};
 pub use session::{Output, Session};

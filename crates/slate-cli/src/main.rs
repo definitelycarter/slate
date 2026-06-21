@@ -5,17 +5,20 @@
 //! Lines starting with `.` are meta-commands (`.help` lists them); everything
 //! else is run as CosmosDB-style SQL against the current collection.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use rustyline::DefaultEditor;
+use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
 use slate_db::{Database, DatabaseBuilder};
 use slate_store::{BackupStore, Store};
 
 use slate_cli::format::fmt_duration;
-use slate_cli::{Command, Feed, InputBuffer, Output, Session};
+use slate_cli::{Command, CompletionState, Feed, InputBuffer, Output, Session, SlateCompleter};
 
 const USAGE: &str = "\
 slate — interactive Slate shell
@@ -159,7 +162,13 @@ fn run_redb(_path: String) -> Result<(), String> {
 
 fn run<S: Store + BackupStore>(db: Database<S>) -> Result<(), String> {
     let mut session = Session::new(db);
-    let mut rl = DefaultEditor::new().map_err(|e| e.to_string())?;
+    let mut rl: Editor<SlateCompleter, DefaultHistory> =
+        Editor::new().map_err(|e| e.to_string())?;
+
+    // The completer reads a snapshot the loop refreshes between prompts, so a
+    // keypress never runs a transaction.
+    let completions = Rc::new(RefCell::new(CompletionState::default()));
+    rl.set_helper(Some(SlateCompleter::new(Rc::clone(&completions))));
 
     let history = history_path();
     if let Some(path) = &history {
@@ -170,6 +179,14 @@ fn run<S: Store + BackupStore>(db: Database<S>) -> Result<(), String> {
 
     let mut buffer = InputBuffer::new();
     loop {
+        // Refresh completion data at the primary prompt (best-effort — stale or
+        // missing suggestions must never break the shell).
+        if !buffer.is_pending() {
+            let mut state = completions.borrow_mut();
+            state.collections = session.collection_names().unwrap_or_default();
+            state.fields = session.active_index_fields().unwrap_or_default();
+        }
+
         // A statement-in-progress gets the continuation prompt; otherwise the
         // primary prompt reflects the active collection.
         let prompt = if buffer.is_pending() {

@@ -87,6 +87,29 @@ impl<S: BackupStore> Session<S> {
         self.current.as_deref()
     }
 
+    /// Every collection name, for tab-completion.
+    pub fn collection_names(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .db
+            .list_collections()
+            .map_err(es)?
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect())
+    }
+
+    /// Indexed field paths of the active collection, for tab-completion. Empty
+    /// when no collection is selected.
+    pub fn active_index_fields(&self) -> Result<Vec<String>, String> {
+        let Some(collection) = self.current.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let txn = self.db.begin(true).map_err(es)?;
+        let fields = txn.list_indexes(DEFAULT_CF, collection).map_err(es)?;
+        txn.rollback().map_err(es)?;
+        Ok(fields)
+    }
+
     /// Run one command.
     pub fn execute(&mut self, cmd: Command) -> Result<Output, String> {
         match cmd {
