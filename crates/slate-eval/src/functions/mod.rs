@@ -52,6 +52,7 @@ mod degrees;
 mod endswith;
 mod exp;
 mod floor;
+mod geo;
 mod iif;
 mod index_of;
 mod intadd;
@@ -104,6 +105,8 @@ mod sign;
 mod sin;
 mod sqrt;
 mod square;
+mod st_isvalid;
+mod st_isvaliddetailed;
 mod starts_with;
 mod stringequals;
 mod stringjoin;
@@ -220,6 +223,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "REPLICATE" => replicate::eval(name, args),
         "REVERSE" => reverse::eval(name, args),
         "REGEXMATCH" => regexmatch::eval(name, args),
+        // Spatial (GeoJSON ST_*) functions.
+        "ST_ISVALID" => st_isvalid::eval(name, args),
+        "ST_ISVALIDDETAILED" => st_isvaliddetailed::eval(name, args),
         other => Err(EvalError {
             message: format!("unknown function: {other}"),
         }),
