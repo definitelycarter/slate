@@ -2,6 +2,7 @@
 
 - [Architecture](./architecture.md)
 - [Querying](./querying.md)
+- [Mongo Operators](./mongo-operators.md)
 - [SQL Support](./sql-support.md)
 - [Function Reference](./functions.md)
 - [Playground](./playground.md)
