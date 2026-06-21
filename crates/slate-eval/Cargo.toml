@@ -16,3 +16,8 @@ slate-rawbson = { path = "../slate-rawbson" }
 # Cycle through a dev-dependency only: the evaluator's behavioural tests parse
 # SQL to build expressions. Permitted because the edge is dev-only.
 slate-sql = { path = "../slate-sql" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "apply"
+harness = false

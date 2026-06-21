@@ -15,6 +15,7 @@ We benchmark **targeted before/after** by default: capture the affected benches 
 | `slate-db`      | `planner`     | Plan building cost                          |
 | `slate-db`      | `query`       | End-to-end query (parse → plan → execute)   |
 | `slate-db`      | `mutation`    | Insert/update/delete paths                  |
+| `slate-eval`    | `apply`       | UPDATE apply step (in-place byte edit vs rebuild) |
 | `slate-engine`  | `engine`      | KV layer: record encoding, index sync, scan |
 | `slate-store`   | `memory`      | Memory backend write/scan                   |
 | `slate-store`   | `rocks`       | RocksDB backend write/scan                  |
@@ -36,6 +37,7 @@ Use this to pick which benches to run. **Widen when uncertain** — running an e
 | `slate-db/src/planner/`                                    | `planner`, `query`                   |
 | `slate-db/src/executor/`                                   | `executor`, `query`                  |
 | `slate-db/src/mutation/`                                   | `mutation`                           |
+| `slate-eval/src/apply/`                                    | `apply`                              |
 | `slate-db/src/parser/`, `expression/`, `statement/`        | `query` (parse is in the hot path)   |
 | `slate-db/src/cursor.rs`, `collection.rs`, `database.rs`   | `executor`, `mutation`, `query`      |
 | `slate-engine/src/encoding/`                               | `engine`, `executor`, `mutation`, all `slate-store` |
