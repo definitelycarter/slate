@@ -2,6 +2,9 @@
 
 - [Getting Started](./getting-started.md)
 - [Architecture](./architecture.md)
+  - [Storage Layer](./architecture-storage.md)
+  - [Query Stack, Engine & Scripting](./architecture-engine.md)
+  - [Database & Bindings](./architecture-database.md)
 - [Querying](./querying.md)
   - [Plan Scenarios](./plan-scenarios.md)
 - [Mongo Operators](./mongo-operators.md)
