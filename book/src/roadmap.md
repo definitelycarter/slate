@@ -416,7 +416,11 @@ meta-commands (`.create`, `.use`, `.insert`, `.update`, `.replace`, `.delete`,
 `.schema`, `.backup`, `.collections`, `.drop`, `.seed`); anything else runs as
 SQL against the active collection. `.backup <dir>` takes an online physical
 backup on the persistent backends (rocksdb/redb); it is rejected with a clear
-message on the in-memory backend. It opens an in-memory database by default, or
+message on the in-memory backend. `.seed` with no argument loads a small
+built-in sample; `.seed <path>` bulk-loads a dataset file — a JSON array or
+JSONL/NDJSON (`mongoexport`'s default), auto-detected from the first byte — into
+a collection named after the file stem, streaming large JSONL files line by line.
+It opens an in-memory database by default, or
 a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
 Input history persists to `~/.slate_history` across sessions, and every query or
 command result is annotated with its execution time. SQL statements are

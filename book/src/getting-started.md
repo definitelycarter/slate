@@ -177,6 +177,55 @@ slate(sample)> .schema sample
 slate(sample)> .backup /tmp/snapshot      # rocksdb/redb only
 ```
 
+## Loading data
+
+`.seed` with no argument loads the tiny built-in sample. To explore against
+realistic data, point `.seed` at a file:
+
+```
+slate> .seed movies.jsonl          # JSONL: one JSON document per line
+slate(movies)> .seed cities.json   # or a single [ … ] array of documents
+```
+
+The format is auto-detected: a leading `[` is read as one JSON array of
+documents, anything else is treated as **JSONL/NDJSON** (one document per line —
+`mongoexport`'s default output). The collection name defaults to the file's stem
+(`movies.jsonl` → `movies`) and becomes the active collection, so you can query
+it right away:
+
+```
+slate(movies)> SELECT VALUE COUNT(1) FROM c;
+```
+
+Documents are coerced exactly as `.insert` does, so MongoDB **extended JSON**
+(`{"$oid": …}`, `{"$date": …}`) is understood and a missing `_id` is filled in
+with a generated ObjectId. JSONL is streamed line by line, so a large export
+loads without being read fully into memory; a malformed line stops the import
+(naming the line number) rather than loading half a file.
+
+### Datasets worth trying
+
+The [MongoDB Atlas sample datasets](https://www.mongodb.com/docs/atlas/sample-data/)
+are rich, deeply-nested documents — ideal for exercising functions, `JOIN` over
+arrays, and `GROUP BY`. Export a collection to JSONL with `mongoexport`, then
+seed it:
+
+```bash
+mongoexport --uri "<atlas-uri>" --db sample_mflix \
+  --collection movies --out movies.jsonl
+mongoexport --uri "<atlas-uri>" --db sample_restaurants \
+  --collection restaurants --out restaurants.jsonl
+```
+
+```
+slate> .seed movies.jsonl
+slate(movies)> SELECT c.title, c.year FROM c WHERE c.year > 2000 ORDER BY c.year;
+```
+
+To keep the loaded data, open a persistent backend first
+(`cargo run -p slate-cli -- --rocksdb /tmp/slate`); the import survives across
+sessions.
+
 ## Where next
 
 - [Querying](./querying.md) — the query model, plan scenarios, distinct, subqueries.
