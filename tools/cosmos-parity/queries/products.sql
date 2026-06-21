@@ -45,6 +45,12 @@ SELECT VALUE MAX(c.price) FROM c
 SELECT c.category AS category, COUNT(1) AS n FROM c GROUP BY c.category
 SELECT c.category AS category, MAX(c.price) AS maxPrice FROM c GROUP BY c.category
 
+# ── DISTINCT ──────────────────────────────────────────────────────
+SELECT DISTINCT VALUE c.category FROM c
+SELECT DISTINCT c.category FROM c
+SELECT DISTINCT VALUE c.inStock FROM c
+SELECT DISTINCT VALUE c.tags FROM c
+
 # ── Subqueries ────────────────────────────────────────────────────
 SELECT c.name, (SELECT VALUE COUNT(1) FROM t IN c.tags) AS tagCount FROM c
 SELECT VALUE c.name FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t = 'office')

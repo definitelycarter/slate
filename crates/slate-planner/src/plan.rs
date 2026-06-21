@@ -247,7 +247,12 @@ pub enum Node {
     /// `DISTINCT` — deduplicate the input stream by value identity, emitting the
     /// first occurrence of each distinct value. Composes with `Project`
     /// (`Project(c.city) → Distinct` yields distinct cities).
-    Distinct { source: Box<Node> },
+    ///
+    /// `flatten` selects the array semantics: Mongo's `distinct("tags")`
+    /// flattens an array row one level (its elements are the distinct values),
+    /// whereas SQL `SELECT DISTINCT` dedups whole rows — an array value is one
+    /// value, matching Cosmos.
+    Distinct { source: Box<Node>, flatten: bool },
 
     /// Aggregation — `GROUP BY` and/or aggregate functions in `SELECT`. A
     /// *blocking* transform: it buffers the source, groups rows by `group_keys`

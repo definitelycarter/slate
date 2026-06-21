@@ -14,6 +14,7 @@ pub enum Token {
 
     // ── Keywords ────────────────────────────────────────────────
     Select,
+    Distinct,
     Value,
     As,
     From,

@@ -74,6 +74,7 @@ fn lex_ident_str(cur: &mut Cursor) -> String {
 fn keyword_or_ident(word: String) -> Token {
     match word.to_ascii_lowercase().as_str() {
         "select" => Token::Select,
+        "distinct" => Token::Distinct,
         "value" => Token::Value,
         "as" => Token::As,
         "from" => Token::From,

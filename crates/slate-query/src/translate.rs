@@ -44,6 +44,8 @@ pub fn find_to_query(filter: &RawDocument, options: &FindOptions) -> Result<Quer
 
     Ok(Query {
         select: projection(options.columns.as_deref()),
+        // `find` has no DISTINCT; Mongo `distinct` takes the dedicated path.
+        distinct: false,
         from: Some(FromClause {
             source: FromSource::ImplicitContainer {
                 alias: ALIAS.into(),

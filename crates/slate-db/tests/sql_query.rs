@@ -954,6 +954,53 @@ fn stringsplit_and_stringjoin_round_trip() {
 }
 
 #[test]
+fn select_distinct_dedups_rows() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "d".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "d",
+        vec![
+            doc! { "_id": "1", "cat": "A", "tags": ["x", "y"] },
+            doc! { "_id": "2", "cat": "B", "tags": ["x", "y"] },
+            doc! { "_id": "3", "cat": "A", "tags": ["y", "z"] },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+
+    // Scalar VALUE dedup, in first-occurrence order.
+    let txn = db.begin(true).unwrap();
+    let cats: Vec<String> = txn
+        .query(DEFAULT_CF, "d", "SELECT DISTINCT VALUE c.cat FROM c")
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(cats, vec!["A", "B"]);
+
+    // Arrays dedup as whole values — no Mongo-style flattening — so the
+    // repeated ["x","y"] collapses to one, matching Cosmos.
+    let txn = db.begin(true).unwrap();
+    let tags: Vec<Vec<String>> = txn
+        .query(DEFAULT_CF, "d", "SELECT DISTINCT VALUE c.tags FROM c")
+        .unwrap()
+        .iter_values::<Vec<String>>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(tags, vec![vec!["x", "y"], vec!["y", "z"]]);
+}
+
+#[test]
 fn getcurrent_uses_the_injected_clock() {
     // GETCURRENT* read the engine's injectable clock (the wasm hook) — no
     // syscall — so a fixed clock makes them deterministic.

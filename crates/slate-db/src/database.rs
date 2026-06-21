@@ -669,6 +669,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         };
         node = slate_planner::Node::Distinct {
             source: Box::new(node),
+            // Mongo `distinct` flattens array values one level (multikey).
+            flatten: true,
         };
         if let Some(dir) = options.sort {
             let direction = match dir {

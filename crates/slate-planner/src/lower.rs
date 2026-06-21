@@ -82,6 +82,7 @@ fn lower_query(
 ) -> Node {
     let Query {
         select,
+        distinct,
         from,
         filter,
         group_by,
@@ -331,6 +332,15 @@ fn lower_query(
             expr: project_expr,
             binding,
             source: Box::new(node),
+        };
+    }
+
+    // SELECT DISTINCT  →  dedup the projected rows (whole-value, no array
+    // flattening — that's Mongo `distinct`'s multikey behaviour, not SQL's).
+    if distinct {
+        node = Node::Distinct {
+            source: Box::new(node),
+            flatten: false,
         };
     }
 

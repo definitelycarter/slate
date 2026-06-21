@@ -247,9 +247,9 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::limit::execute(skip, take, source)
             }
 
-            Node::Distinct { source } => {
+            Node::Distinct { source, flatten } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::distinct::execute(source)
+                nodes::distinct::execute(source, flatten)
             }
 
             Node::Aggregate {

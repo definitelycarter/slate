@@ -106,6 +106,7 @@ impl Parser {
     /// at `)` rather than at end-of-input.
     fn parse_query_body(&mut self) -> Result<Query> {
         self.expect(&Token::Select)?;
+        let distinct = self.matches(&Token::Distinct);
         let select = self.parse_select()?;
 
         // The `FROM` clause is optional (Cosmos): a FROM-less query evaluates the
@@ -155,6 +156,7 @@ impl Parser {
 
         Ok(Query {
             select,
+            distinct,
             from,
             filter,
             group_by,
@@ -1167,6 +1169,13 @@ mod tests {
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
         ));
+    }
+
+    #[test]
+    fn select_distinct_sets_the_flag() {
+        assert!(parse("SELECT DISTINCT VALUE c.x FROM c").distinct);
+        assert!(parse("SELECT DISTINCT c.x, c.y FROM c").distinct);
+        assert!(!parse("SELECT VALUE c.x FROM c").distinct);
     }
 
     #[test]

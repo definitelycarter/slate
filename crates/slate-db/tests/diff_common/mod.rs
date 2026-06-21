@@ -376,6 +376,8 @@ pub fn assert_same_distinct(field: &str, filter: Document) {
     };
     node = Node::Distinct {
         source: Box::new(node),
+        // Mirrors Mongo `distinct`: flatten array values one level (multikey).
+        flatten: true,
     };
 
     let engine = v2_engine();

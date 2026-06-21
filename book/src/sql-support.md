@@ -21,7 +21,7 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 
 ## Current surface
 
-`SELECT VALUE <expr> | * | <expr> [AS k], …  [FROM <alias>  [JOIN <a> IN <arr>]*]
+`SELECT [DISTINCT] VALUE <expr> | * | <expr> [AS k], …  [FROM <alias>  [JOIN <a> IN <arr>]*]
 [WHERE …] [GROUP BY …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
 
 Done: `FROM` (optional — see below), `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`,
@@ -111,7 +111,7 @@ are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
 - [x] `IN (a, b, …)`  ⭐ *(desugars to OR-of-equalities → sargable `IndexMerge(Or)`; `NOT IN` supported)*
 - [x] `BETWEEN x AND y`  ⭐ *(desugars to `>= x AND <= y`, inclusive → sargable range; `NOT BETWEEN` supported)*
 - [x] `LIKE <pattern> [ESCAPE c]` *(desugars to a safely-escaped, anchored `REGEXMATCH`; `NOT LIKE` supported)*
-- [ ] `DISTINCT` (`SELECT DISTINCT …`) *(maps onto the existing `Distinct` node — Tier 2)*
+- [x] `DISTINCT` (`SELECT DISTINCT …`) *(dedups whole projected rows; an array value counts as one value — no Mongo-style flattening)*
 - [ ] `TOP N` *(Cosmos alias for `LIMIT`)*
 
 ---

@@ -20,12 +20,14 @@ use slate_eval::EvalError;
 
 use crate::{ExecError, ValueIter};
 
-/// Wrap `source`, emitting each distinct value once (flattening arrays).
-pub(crate) fn execute<'a>(source: ValueIter<'a>) -> ValueIter<'a> {
+/// Wrap `source`, emitting each distinct value once. When `flatten` is set an
+/// array row is flattened one level (Mongo `distinct` multikey); otherwise the
+/// whole array is one value (SQL `SELECT DISTINCT`, matching Cosmos).
+pub(crate) fn execute<'a>(source: ValueIter<'a>, flatten: bool) -> ValueIter<'a> {
     let mut seen = HashSet::new();
     Box::new(source.flat_map(move |item| {
         let emitted: Vec<Result<Option<RawBson>, ExecError>> = match item {
-            Ok(Some(value)) => emit_distinct(value, &mut seen),
+            Ok(Some(value)) => emit_distinct(value, flatten, &mut seen),
             Ok(None) => Vec::new(),
             Err(e) => vec![Err(e)],
         };
@@ -33,14 +35,16 @@ pub(crate) fn execute<'a>(source: ValueIter<'a>) -> ValueIter<'a> {
     }))
 }
 
-/// Emit the not-yet-seen values from `value`: an array contributes each of its
-/// elements (multikey), any other value contributes itself.
+/// Emit the not-yet-seen values from `value`. With `flatten`, an array
+/// contributes each of its elements (multikey); otherwise — and for any other
+/// value — the value contributes itself.
 fn emit_distinct(
     value: RawBson,
+    flatten: bool,
     seen: &mut HashSet<u64>,
 ) -> Vec<Result<Option<RawBson>, ExecError>> {
     match value {
-        RawBson::Array(arr) => {
+        RawBson::Array(arr) if flatten => {
             let mut out = Vec::new();
             for entry in &arr {
                 match entry {
@@ -126,13 +130,16 @@ mod tests {
 
     #[test]
     fn dedups_scalars_first_occurrence_order() {
-        let out = collect(execute(values::execute(vec![
-            RawBson::Int32(1),
-            RawBson::Int32(2),
-            RawBson::Int32(1),
-            RawBson::Int32(3),
-            RawBson::Int32(2),
-        ])))
+        let out = collect(execute(
+            values::execute(vec![
+                RawBson::Int32(1),
+                RawBson::Int32(2),
+                RawBson::Int32(1),
+                RawBson::Int32(3),
+                RawBson::Int32(2),
+            ]),
+            true,
+        ))
         .unwrap();
         assert_eq!(
             out,
@@ -143,7 +150,11 @@ mod tests {
     #[test]
     fn dedups_identical_documents() {
         let doc = RawBson::Document(rawdoc! { "a": 1 });
-        let out = collect(execute(values::execute(vec![doc.clone(), doc.clone()]))).unwrap();
+        let out = collect(execute(
+            values::execute(vec![doc.clone(), doc.clone()]),
+            true,
+        ))
+        .unwrap();
         assert_eq!(out, vec![doc]);
     }
 
@@ -156,10 +167,36 @@ mod tests {
             RawBson::Document(rawdoc! { "team": "a" }),
         ];
         let projected = project::execute(sv("c.team"), RowBinding::Env, bind_c(docs), None);
-        let out = collect(execute(projected)).unwrap();
+        let out = collect(execute(projected, true)).unwrap();
         assert_eq!(
             out,
             vec![RawBson::String("a".into()), RawBson::String("b".into())]
         );
+    }
+
+    #[test]
+    fn flatten_true_unwraps_arrays_one_level() {
+        // Mongo `distinct("tags")`: [a,b] and [b,c] → a, b, c.
+        let rows = vec![bson::rawbson!(["a", "b"]), bson::rawbson!(["b", "c"])];
+        let out = collect(execute(values::execute(rows), true)).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                RawBson::String("a".into()),
+                RawBson::String("b".into()),
+                RawBson::String("c".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_false_keeps_whole_arrays() {
+        // SQL `SELECT DISTINCT VALUE c.tags`: arrays are dedup'd whole, matching
+        // Cosmos — [a,b] (×2) collapses to one, [b,c] stays.
+        let ab = bson::rawbson!(["a", "b"]);
+        let bc = bson::rawbson!(["b", "c"]);
+        let rows = vec![ab.clone(), ab.clone(), bc.clone()];
+        let out = collect(execute(values::execute(rows), false)).unwrap();
+        assert_eq!(out, vec![ab, bc]);
     }
 }

@@ -190,6 +190,9 @@ pub enum SortDirection {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
     pub select: SelectClause,
+    /// `SELECT DISTINCT …` — deduplicate the projected result rows by value
+    /// (an array value counts as one whole value, matching Cosmos).
+    pub distinct: bool,
     /// `FROM …` — `None` for a FROM-less query (`SELECT VALUE 1`), which Cosmos
     /// evaluates exactly once over a single implicit row. `SELECT *` is invalid
     /// without a `FROM` (rejected by the front-end).
@@ -359,6 +362,7 @@ mod tests {
     fn parameter_names_covers_all_clauses() {
         let q = Query {
             select: SelectClause::Value(param("sel")),
+            distinct: false,
             from: Some(FromClause {
                 source: FromSource::ImplicitContainer { alias: "c".into() },
                 joins: vec![Join {

@@ -119,6 +119,19 @@ pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> R
         projected.sort_by(|a, b| order_cmp(&a.0, &b.0, &directions));
     }
 
+    // SELECT DISTINCT — dedup the projected values, keeping first occurrence.
+    // Whole-value equality (an array is one value); O(n²) is fine for this
+    // in-memory convenience engine. Built by moving rows, so no clone.
+    if query.distinct {
+        let mut deduped: Vec<(Vec<Value>, Bson)> = Vec::new();
+        for item in projected {
+            if !deduped.iter().any(|(_, v)| *v == item.1) {
+                deduped.push(item);
+            }
+        }
+        projected = deduped;
+    }
+
     // OFFSET / LIMIT.
     let start = query.offset.unwrap_or(0) as usize;
     let mut out: Vec<Bson> = projected.into_iter().skip(start).map(|(_, v)| v).collect();
