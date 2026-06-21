@@ -30,9 +30,16 @@
 
 pub mod lower;
 pub mod plan;
+pub mod planner;
+pub mod sargable;
+pub mod validate;
 
-pub use lower::{CollectionMeta, PlanError, lower, validate_bindings, validate_grouping};
+pub use lower::lower;
 pub use plan::{
     AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
     ScanDirection, UpsertMode,
 };
+pub use planner::{PlanContext, plan};
+pub use sargable::CollectionMeta;
+pub use slate_ast::Statement;
+pub use validate::{PlanError, validate_bindings, validate_grouping};

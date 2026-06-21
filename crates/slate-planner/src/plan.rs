@@ -88,14 +88,7 @@ pub enum RowBinding {
     Env,
 }
 
-/// How an [`Plan::Upsert`] writes over an existing document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpsertMode {
-    /// Overwrite the existing document entirely (preserving its primary key).
-    Replace,
-    /// Field-merge the new document into the existing one.
-    Merge,
-}
+pub use slate_ast::UpsertMode;
 
 /// Identifies a collection by its `(cf, name)` pair — the canonical identity in
 /// the engine catalog. Carried by value (two `String`s) so the IR stays free of

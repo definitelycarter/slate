@@ -22,13 +22,6 @@ use crate::statement::Statement;
 /// Unlike plain member access, `PathGet` resolves the dotted path with Mongo
 /// array-path traversal (distributing over arrays of subdocuments), which v1's
 /// `distinct` does. Filters/SQL use member access, which does not traverse.
-fn distinct_field_expr(field: &str) -> slate_ast::ScalarExpr {
-    slate_ast::ScalarExpr::PathGet {
-        base: Box::new(slate_ast::ScalarExpr::Identifier("c".into())),
-        path: field.split('.').map(|s| s.to_string()).collect(),
-    }
-}
-
 // ── DatabaseBuilder ────────────────────────────────────────
 
 /// Which query engine backs reads.
@@ -236,8 +229,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         if self.query_engine == QueryEngine::V2 {
-            let values = raw_docs.into_iter().map(RawBson::Document).collect();
-            return Ok(self.insert_v2(cf, collection, values));
+            let docs = raw_docs.into_iter().map(RawBson::Document).collect();
+            let ctx = self.write_context(cf, collection, slate_planner::CollectionMeta::default());
+            return self.run_v2(slate_planner::Statement::Insert { docs }, ctx);
         }
 
         let stmt = Statement::Insert {
@@ -365,14 +359,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             }
         }
 
-        // Reject unqualified identifiers (Cosmos requires bound paths like `c.x`)
-        // and an ungrouped non-aggregate column in a GROUP BY / aggregate query —
-        // both are errors in Cosmos rather than silently undefined.
-        slate_planner::validate_bindings(&query)?;
-        slate_planner::validate_grouping(&query)?;
-
         // A FROM-less query (`SELECT VALUE 1`) reads no container, so it neither
         // needs nor requires the collection to exist — skip the metadata fetch.
+        // `plan` validates bindings and grouping (rejecting unqualified
+        // identifiers and ungrouped columns); the param check above is the one
+        // validation it can't do, since it needs the supplied parameter set.
         let meta = if query.from.is_some() {
             self.collection_meta(cf, collection)?
         } else {
@@ -381,11 +372,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
                 pk_path: "_id".to_string(),
             }
         };
-        let container = slate_planner::CollectionRef {
-            cf: cf.to_string(),
-            collection: collection.to_string(),
+        let ctx = slate_planner::PlanContext {
+            container: self.v2_container(cf, collection),
+            meta,
+            validators: Vec::new(),
+            triggers: Vec::new(),
         };
-        Ok(slate_planner::lower(query, container, &meta))
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Query(query),
+            &ctx,
+        )?)
     }
 
     /// The v2 read path: Mongo find → shared AST → lower → a v2 plan run by
@@ -415,12 +411,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
                 return self.prepare_cursor(stmt);
             }
         };
-        let meta = self.collection_meta(cf, collection)?;
-        let container = slate_planner::CollectionRef {
-            cf: cf.to_string(),
-            collection: collection.to_string(),
+        let ctx = slate_planner::PlanContext {
+            container: self.v2_container(cf, collection),
+            meta: self.collection_meta(cf, collection)?,
+            validators: Vec::new(),
+            triggers: Vec::new(),
         };
-        let plan = slate_planner::lower(query, container, &meta);
+        let plan = slate_planner::plan(slate_planner::Statement::Query(query), &ctx)?;
         Ok(Cursor::new_v2(&self.txn, plan, self.pool))
     }
 
@@ -439,11 +436,12 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     // ── v2 write planning ───────────────────────────────────────
     //
-    // These mirror v1's `Planner` write methods (`wrap_before`/`wrap_after`,
-    // `plan_read_source`) but build the handle-free `slate-planner` IR and route
-    // the matched-document source through the Mongo front-end + `lower`, so the
-    // filter is translated exactly as `find` translates it. Each returns `None`
-    // when the filter isn't translatable yet, so the caller falls back to v1.
+    // The Mongo front-end translates the request's filter into a `slate_ast`
+    // query (the same path `find` uses), the caller assembles a
+    // `slate_planner::Statement`, and `slate_planner::plan` does all plan
+    // shaping — validator/trigger wrapping included. These helpers only gather
+    // catalog state and run the result; a filter the front-end can't translate
+    // yet yields `None`, so the caller falls back to v1.
 
     fn v2_container(&self, cf: &str, collection: &str) -> slate_planner::CollectionRef {
         slate_planner::CollectionRef {
@@ -466,174 +464,50 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .unwrap_or_default()
     }
 
-    /// Wrap a write source with the collection's validators then before-triggers
-    /// (the order v1 uses): `Trigger(before) → Validate → source`.
-    fn v2_wrap_before(
+    /// The find query selecting the documents a write targets (`take`-limited),
+    /// or `None` if the filter isn't v2-translatable yet (→ v1 fallback). The
+    /// translation is the one `find` uses, so writes match documents identically.
+    fn v2_write_query(
         &self,
-        cf: &str,
-        collection: &str,
-        action: &str,
-        source: slate_planner::Node,
-    ) -> slate_planner::Node {
-        let mut node = source;
-        let validators = self.v2_validators(cf, collection);
-        if !validators.is_empty() {
-            node = slate_planner::Node::Validate {
-                validators,
-                source: Box::new(node),
-            };
-        }
-        self.v2_wrap_before_triggers(cf, collection, action, node)
-    }
-
-    /// Wrap a write source with the collection's before-triggers only (no
-    /// validators) — used by delete, which performs no write.
-    fn v2_wrap_before_triggers(
-        &self,
-        cf: &str,
-        collection: &str,
-        action: &str,
-        source: slate_planner::Node,
-    ) -> slate_planner::Node {
-        let triggers = self.v2_triggers(cf, collection);
-        if triggers.is_empty() {
-            source
-        } else {
-            slate_planner::Node::Trigger {
-                cf: cf.into(),
-                action: action.into(),
-                hooks: triggers,
-                source: Box::new(source),
-            }
-        }
-    }
-
-    /// Wrap a finished write plan with the collection's after-triggers.
-    fn v2_wrap_after(
-        &self,
-        cf: &str,
-        collection: &str,
-        action: &str,
-        plan: slate_planner::Plan,
-    ) -> slate_planner::Plan {
-        let triggers = self.v2_triggers(cf, collection);
-        if triggers.is_empty() {
-            plan
-        } else {
-            slate_planner::Plan::Trigger {
-                cf: cf.into(),
-                action: action.into(),
-                hooks: triggers,
-                plan: Box::new(plan),
-            }
-        }
-    }
-
-    /// The read-source node selecting the documents a write targets: the matched
-    /// documents (identity projection) from the filter, optionally limited.
-    /// `None` if the filter can't be translated to v2 yet.
-    fn v2_write_source(
-        &self,
-        cf: &str,
-        collection: &str,
         filter_raw: &RawDocumentBuf,
         take: Option<usize>,
-    ) -> Result<Option<slate_planner::Node>, DbError> {
+    ) -> Result<Option<slate_ast::Query>, DbError> {
         let options = FindOptions {
             take,
             ..Default::default()
         };
-        let query = match slate_query::find_to_query(filter_raw, &options) {
-            Ok(q) => q,
-            Err(_) => return Ok(None),
-        };
-        let meta = self.collection_meta(cf, collection)?;
-        match slate_planner::lower(query, self.v2_container(cf, collection), &meta) {
-            slate_planner::Plan::Query(node) => Ok(Some(node)),
-            _ => Ok(None),
+        match slate_query::find_to_query(filter_raw, &options) {
+            Ok(query) => Ok(Some(query)),
+            Err(_) => Ok(None),
         }
     }
 
-    fn insert_v2(&self, cf: &str, collection: &str, docs: Vec<RawBson>) -> Cursor<'db, '_, S> {
-        let source = self.v2_wrap_before(
-            cf,
-            collection,
-            "inserting",
-            slate_planner::Node::Values(docs),
-        );
-        let plan = slate_planner::Plan::Insert {
-            collection: self.v2_container(cf, collection),
-            source,
-        };
-        let plan = self.v2_wrap_after(cf, collection, "inserted", plan);
-        Cursor::new_v2(&self.txn, plan, self.pool)
-    }
-
-    /// Build the v2 update plan from an already-resolved read `source` (so a
-    /// non-translatable filter can fall back to v1 without losing `mutation`).
-    fn build_update_v2(
+    /// The catalog context a write is planned against: the container plus its
+    /// validators and triggers. `meta` is the caller's choice — filter-bearing
+    /// writes pass real index metadata (so the matched-document source can use an
+    /// index); insert/upsert, which scan nothing, pass an empty one.
+    fn write_context(
         &self,
         cf: &str,
         collection: &str,
-        source: slate_planner::Node,
-        mutation: slate_mutation::Mutation,
-    ) -> Cursor<'db, '_, S> {
-        let source = self.v2_wrap_before(cf, collection, "updating", source);
-        let plan = slate_planner::Plan::Update {
-            collection: self.v2_container(cf, collection),
-            mutation,
-            source,
-        };
-        let plan = self.v2_wrap_after(cf, collection, "updated", plan);
-        Cursor::new_v2(&self.txn, plan, self.pool)
+        meta: slate_planner::CollectionMeta,
+    ) -> slate_planner::PlanContext {
+        slate_planner::PlanContext {
+            container: self.v2_container(cf, collection),
+            meta,
+            validators: self.v2_validators(cf, collection),
+            triggers: self.v2_triggers(cf, collection),
+        }
     }
 
-    fn build_replace_v2(
+    /// Plan `stmt` against `ctx` and wrap the result in a v2 cursor.
+    fn run_v2(
         &self,
-        cf: &str,
-        collection: &str,
-        source: slate_planner::Node,
-        replacement: RawDocumentBuf,
-    ) -> Cursor<'db, '_, S> {
-        let source = self.v2_wrap_before(cf, collection, "updating", source);
-        let plan = slate_planner::Plan::Replace {
-            collection: self.v2_container(cf, collection),
-            replacement,
-            source,
-        };
-        let plan = self.v2_wrap_after(cf, collection, "updated", plan);
-        Cursor::new_v2(&self.txn, plan, self.pool)
-    }
-
-    fn build_delete_v2(
-        &self,
-        cf: &str,
-        collection: &str,
-        source: slate_planner::Node,
-    ) -> Cursor<'db, '_, S> {
-        let source = self.v2_wrap_before_triggers(cf, collection, "deleting", source);
-        let plan = slate_planner::Plan::Delete {
-            collection: self.v2_container(cf, collection),
-            source,
-        };
-        let plan = self.v2_wrap_after(cf, collection, "deleted", plan);
-        Cursor::new_v2(&self.txn, plan, self.pool)
-    }
-
-    fn upsert_v2(
-        &self,
-        cf: &str,
-        collection: &str,
-        docs: Vec<RawBson>,
-        mode: slate_planner::UpsertMode,
-    ) -> Cursor<'db, '_, S> {
-        let plan = slate_planner::Plan::Upsert {
-            collection: self.v2_container(cf, collection),
-            mode,
-            hooks: self.v2_triggers(cf, collection),
-            source: slate_planner::Node::Values(docs),
-        };
-        Cursor::new_v2(&self.txn, plan, self.pool)
+        stmt: slate_planner::Statement,
+        ctx: slate_planner::PlanContext,
+    ) -> Result<Cursor<'db, '_, S>, DbError> {
+        let plan = slate_planner::plan(stmt, &ctx)?;
+        Ok(Cursor::new_v2(&self.txn, plan, self.pool))
     }
 
     /// v2 distinct: `Scan → [Filter] → Project(c.field) → Distinct → [Sort] →
@@ -647,60 +521,37 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter_raw: &RawDocumentBuf,
         options: &DistinctOptions,
     ) -> Result<Option<bson::RawBson>, DbError> {
-        let binding = slate_planner::RowBinding::Alias("c".into());
-        let mut node = slate_planner::Node::Scan {
-            collection: self.v2_container(cf, collection),
-        };
-        match slate_query::translate_filter(filter_raw) {
-            Ok(Some(predicate)) => {
-                node = slate_planner::Node::Filter {
-                    predicate,
-                    binding: binding.clone(),
-                    source: Box::new(node),
-                };
-            }
-            Ok(None) => {} // match-all
+        // A filter the Mongo front-end can't translate yet → v1 fallback.
+        let predicate = match slate_query::translate_filter(filter_raw) {
+            Ok(predicate) => predicate,
             Err(_) => return Ok(None),
-        }
-        node = slate_planner::Node::Project {
-            expr: distinct_field_expr(field),
-            binding: binding.clone(),
-            source: Box::new(node),
         };
-        node = slate_planner::Node::Distinct {
-            source: Box::new(node),
-            // Mongo `distinct` flattens array values one level (multikey).
-            flatten: true,
+        let sort = options.sort.map(|dir| match dir {
+            slate_query::SortDirection::Asc => slate_ast::SortDirection::Asc,
+            slate_query::SortDirection::Desc => slate_ast::SortDirection::Desc,
+        });
+        let stmt = slate_planner::Statement::Distinct {
+            alias: slate_query::ALIAS.to_string(),
+            field: field.to_string(),
+            predicate,
+            sort,
+            skip: options.skip.map(|n| n as u64),
+            take: options.take.map(|n| n as u64),
         };
-        if let Some(dir) = options.sort {
-            let direction = match dir {
-                slate_query::SortDirection::Asc => slate_ast::SortDirection::Asc,
-                slate_query::SortDirection::Desc => slate_ast::SortDirection::Desc,
-            };
-            // The distinct values are the bare rows, bound to `c`, so ordering
-            // by `c` sorts the values themselves.
-            node = slate_planner::Node::Sort {
-                keys: vec![slate_ast::OrderByItem {
-                    expr: slate_ast::ScalarExpr::Identifier("c".into()),
-                    direction,
-                }],
-                binding,
-                source: Box::new(node),
-            };
-        }
-        if options.skip.is_some() || options.take.is_some() {
-            node = slate_planner::Node::Limit {
-                skip: options.skip.unwrap_or(0),
-                take: options.take,
-                source: Box::new(node),
-            };
-        }
+        // Distinct scans the container directly (no index pushdown), so an empty
+        // meta suffices; it's a read, so no validators/triggers.
+        let ctx = slate_planner::PlanContext {
+            container: self.v2_container(cf, collection),
+            meta: slate_planner::CollectionMeta::default(),
+            validators: Vec::new(),
+            triggers: Vec::new(),
+        };
+        let plan = slate_planner::plan(stmt, &ctx)?;
 
         // Distinct yields bare scalar values, not documents, so run the plan
         // directly and gather them rather than going through `Cursor` (which
         // expects documents).
-        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool)
-            .execute(slate_planner::Plan::Query(node))?;
+        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool).execute(plan)?;
         let mut arr = bson::RawArrayBuf::new();
         for item in iter {
             if let Some(value) = item.map_err(DbError::from)? {
@@ -741,9 +592,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
 
         if self.query_engine == QueryEngine::V2
-            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+            && let Some(query) = self.v2_write_query(&filter_raw, Some(1))?
         {
-            return Ok(self.build_update_v2(cf, collection, source, mutation));
+            let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
+            return self.run_v2(slate_planner::Statement::Update { query, mutation }, ctx);
         }
 
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -771,9 +623,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
 
         if self.query_engine == QueryEngine::V2
-            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, None)?
+            && let Some(query) = self.v2_write_query(&filter_raw, None)?
         {
-            return Ok(self.build_update_v2(cf, collection, source, mutation));
+            let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
+            return self.run_v2(slate_planner::Statement::Update { query, mutation }, ctx);
         }
 
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -799,9 +652,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let raw = bson::serialize_to_raw_document_buf(&replacement)?;
 
         if self.query_engine == QueryEngine::V2
-            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+            && let Some(query) = self.v2_write_query(&filter_raw, Some(1))?
         {
-            return Ok(self.build_replace_v2(cf, collection, source, raw));
+            let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
+            return self.run_v2(
+                slate_planner::Statement::Replace {
+                    query,
+                    replacement: raw,
+                },
+                ctx,
+            );
         }
 
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -826,9 +686,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
 
         if self.query_engine == QueryEngine::V2
-            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, Some(1))?
+            && let Some(query) = self.v2_write_query(&filter_raw, Some(1))?
         {
-            return Ok(self.build_delete_v2(cf, collection, source));
+            let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
+            return self.run_v2(slate_planner::Statement::Delete { query }, ctx);
         }
 
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -851,9 +712,10 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
 
         if self.query_engine == QueryEngine::V2
-            && let Some(source) = self.v2_write_source(cf, collection, &filter_raw, None)?
+            && let Some(query) = self.v2_write_query(&filter_raw, None)?
         {
-            return Ok(self.build_delete_v2(cf, collection, source));
+            let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
+            return self.run_v2(slate_planner::Statement::Delete { query }, ctx);
         }
 
         let predicate = Self::parse_required_filter(&filter_raw)?;
@@ -881,8 +743,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         if self.query_engine == QueryEngine::V2 {
-            let values = raw_docs.into_iter().map(RawBson::Document).collect();
-            return Ok(self.upsert_v2(cf, collection, values, slate_planner::UpsertMode::Replace));
+            let docs = raw_docs.into_iter().map(RawBson::Document).collect();
+            let ctx = self.write_context(cf, collection, slate_planner::CollectionMeta::default());
+            return self.run_v2(
+                slate_planner::Statement::Upsert {
+                    docs,
+                    mode: slate_planner::UpsertMode::Replace,
+                },
+                ctx,
+            );
         }
 
         let stmt = Statement::Upsert {
@@ -906,8 +775,15 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .collect::<Result<Vec<_>, DbError>>()?;
 
         if self.query_engine == QueryEngine::V2 {
-            let values = raw_docs.into_iter().map(RawBson::Document).collect();
-            return Ok(self.upsert_v2(cf, collection, values, slate_planner::UpsertMode::Merge));
+            let docs = raw_docs.into_iter().map(RawBson::Document).collect();
+            let ctx = self.write_context(cf, collection, slate_planner::CollectionMeta::default());
+            return self.run_v2(
+                slate_planner::Statement::Upsert {
+                    docs,
+                    mode: slate_planner::UpsertMode::Merge,
+                },
+                ctx,
+            );
         }
 
         let stmt = Statement::Merge {

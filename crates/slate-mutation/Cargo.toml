@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 bson = { workspace = true }
-slate-engine = { path = "../slate-engine" }
+slate-rawbson = { path = "../slate-rawbson" }

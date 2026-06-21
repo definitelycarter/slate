@@ -1,8 +1,8 @@
-//! Lowering: a parsed [`slate_ast::Query`] into an executable [`Plan`].
+//! Lowering: a parsed [`slate_ast::Query`] into an executable [`Plan`] subtree.
 //!
 //! The query's `FROM` clause supplies only the alias — the container is chosen
 //! by the caller (matching Cosmos) and passed in as `container`, along with its
-//! index metadata ([`CollectionMeta`]) so the planner can choose an index.
+//! index metadata ([`CollectionMeta`](crate::sargable::CollectionMeta)).
 //!
 //! Pipeline shape:
 //!
@@ -15,34 +15,17 @@
 //! OFFSET/LIMIT      → Limit(...)
 //! ```
 //!
-//! ## Sargability
-//!
-//! The `WHERE` predicate is split: conjuncts of the form `c.<indexed-field>
-//! <cmp> <literal>` are *pushed* into an `IndexScan` (wrapped by `KeyLookup` to
-//! fetch documents), and primary-key equality becomes a direct `KeyLookup`.
-//! Everything else stays a residual `Filter`. A predicate that wraps the field
-//! in a computation (`UPPER(c.x) = ...`, `c.x + 1 = ...`) is not sargable and
-//! falls through to the residual.
+//! Index selection (which conjuncts are pushed into a scan) lives in
+//! [`crate::sargable`]; semantic validation in [`crate::validate`].
 
-use bson::{Bson, RawBson, RawDocumentBuf};
+use bson::{RawBson, RawDocumentBuf};
 use slate_ast::{
-    BinOp, FromClause, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause,
-    SubqueryKind,
+    FromClause, FromSource, Join, Literal, OrderByItem, Query, ScalarExpr, SubqueryKind,
 };
 
-use crate::plan::{
-    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
-    ScanDirection,
-};
-
-/// Index metadata for the queried collection, used to choose a scan source.
-#[derive(Debug, Clone, Default)]
-pub struct CollectionMeta {
-    /// Indexed field paths (e.g. `"age"`, `"address.city"`).
-    pub indexes: Vec<String>,
-    /// Primary-key field path (e.g. `"_id"`).
-    pub pk_path: String,
-}
+use crate::plan::{AggregateExpr, CollectionRef, GroupKey, Node, Plan, RowBinding};
+use crate::sargable::{CollectionMeta, plan_source, scan};
+use crate::validate::{contains_aggregate, is_aggregate_name};
 
 /// Lower `query` into a plan that reads from `container`.
 pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> Plan {
@@ -70,11 +53,38 @@ struct SubquerySpec {
     subplan: Node,
 }
 
+/// The base of the pipeline produced from the `FROM` clause: the source `node`
+/// and the `alias` it binds, the `residual` WHERE not pushed into that source,
+/// whether the node already yields an environment row (`is_env`), and any
+/// `joins` still to unwind.
+struct BaseSource {
+    alias: String,
+    node: Node,
+    residual: Option<ScalarExpr>,
+    is_env: bool,
+    joins: Vec<Join>,
+}
+
+/// Force the row-environment shape: if `node` isn't already an environment row,
+/// wrap it in a `Bind` of `alias` (the env-only nodes — `Unwind`, `Subquery` —
+/// need it). A no-op once the environment exists.
+fn ensure_env(node: Node, is_env: &mut bool, alias: &str) -> Node {
+    if *is_env {
+        node
+    } else {
+        *is_env = true;
+        Node::Bind {
+            alias: alias.to_string(),
+            source: Box::new(node),
+        }
+    }
+}
+
 /// Lower a query (outer or a subquery's inner query) into a [`Node`] subtree.
 /// The outer query reads its container via a `Scan`/index source; a subquery's
 /// `FROM x IN <array>` reads an in-document array via `Unwind` over a
 /// [`Node::CurrentRow`] (the correlated outer row).
-fn lower_query(
+pub(crate) fn lower_query(
     query: Query,
     container: CollectionRef,
     meta: &CollectionMeta,
@@ -100,27 +110,45 @@ fn lower_query(
     // for a FROM-less query — a single empty environment row evaluated once. The
     // array and FROM-less sources already yield an environment row; the container
     // source doesn't until a `Bind`.
-    let (alias, mut node, residual, mut is_env, joins) = match from {
+    let BaseSource {
+        alias,
+        mut node,
+        residual,
+        mut is_env,
+        joins,
+    } = match from {
         // FROM-less (`SELECT VALUE 1`): one empty row, no bindings. `WHERE` (if
         // any) filters that single row; `SELECT *` is rejected by the front-end.
-        None => (
-            String::new(),
-            Node::Values(vec![RawBson::Document(RawDocumentBuf::new())]),
-            filter,
-            true,
-            Vec::new(),
-        ),
+        None => BaseSource {
+            alias: String::new(),
+            node: Node::Values(vec![RawBson::Document(RawDocumentBuf::new())]),
+            residual: filter,
+            is_env: true,
+            joins: Vec::new(),
+        },
         Some(FromClause { source, joins }) => match source {
             // A subquery whose `FROM` names an enclosing alias is *item-scoped*:
             // it iterates that single bound value, which the outer row already
             // carries — so the source is just `CurrentRow`, not a container
             // re-scan. (Top-level `FROM c` has an empty outer scope → scan.)
             FromSource::ImplicitContainer { alias } if outer.contains(&alias.as_str()) => {
-                (alias, Node::CurrentRow, filter, true, joins)
+                BaseSource {
+                    alias,
+                    node: Node::CurrentRow,
+                    residual: filter,
+                    is_env: true,
+                    joins,
+                }
             }
             FromSource::ImplicitContainer { alias } => {
                 let (source, residual) = plan_source(filter, &alias, &container, meta);
-                (alias, source, residual, false, joins)
+                BaseSource {
+                    alias,
+                    node: source,
+                    residual,
+                    is_env: false,
+                    joins,
+                }
             }
             // `FROM base.path alias` — scan the container bound to `base`, then
             // navigate to `base.path` (a Project, which drops rows where the path
@@ -136,7 +164,13 @@ fn lower_query(
                         source: Box::new(scan(&container)),
                     }),
                 };
-                (alias, navigated, filter, false, joins)
+                BaseSource {
+                    alias,
+                    node: navigated,
+                    residual: filter,
+                    is_env: false,
+                    joins,
+                }
             }
             FromSource::Array { alias, array } => {
                 // The array expression may itself be a subquery (a nested
@@ -165,7 +199,13 @@ fn lower_query(
                     array,
                     source: Box::new(src),
                 };
-                (alias, source, filter, true, joins)
+                BaseSource {
+                    alias,
+                    node: source,
+                    residual: filter,
+                    is_env: true,
+                    joins,
+                }
             }
         },
     };
@@ -234,13 +274,7 @@ fn lower_query(
     // JOIN ... IN — each `Unwind` extends the environment. The first join (or a
     // subquery below) forces the environment shape via `Bind`.
     if !joins.is_empty() {
-        if !is_env {
-            node = Node::Bind {
-                alias: alias.clone(),
-                source: Box::new(node),
-            };
-            is_env = true;
-        }
+        node = ensure_env(node, &mut is_env, &alias);
         // A join's array can be a subquery (`JOIN j IN (SELECT …)`) and can
         // reference the FROM alias and earlier join aliases, so the visible scope
         // grows as we go. Any subquery is applied just before this join's unwind.
@@ -279,13 +313,7 @@ fn lower_query(
     // Correlated-apply nodes for the extracted subqueries — each augments the
     // row with its `$subN` slot, so the environment shape is required.
     if !subqueries.is_empty() {
-        if !is_env {
-            node = Node::Bind {
-                alias: alias.clone(),
-                source: Box::new(node),
-            };
-            is_env = true;
-        }
+        node = ensure_env(node, &mut is_env, &alias);
         for spec in subqueries {
             node = Node::Subquery {
                 slot: spec.slot,
@@ -441,260 +469,6 @@ fn extract_subqueries(
     }
 }
 
-// ── Aggregation ─────────────────────────────────────────────────
-
-/// A query the planner accepts syntactically but cannot plan.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PlanError {
-    pub message: String,
-}
-
-/// Reject unqualified identifiers (Cosmos requires every property reference to be
-/// bound — `SELECT id FROM c` is invalid; it must be `c.id`). An identifier is
-/// valid only if it names a binding in scope (the `FROM`/`JOIN` aliases, plus the
-/// enclosing aliases inside a subquery) or one of the special value words.
-pub fn validate_bindings(query: &Query) -> Result<(), PlanError> {
-    check_query(query, &[])
-}
-
-/// `undefined`/`NaN`/`Infinity` are value words, not bound identifiers — Cosmos
-/// accepts them anywhere a value is expected.
-fn is_special_ident(name: &str) -> bool {
-    matches!(name, "undefined" | "NaN" | "Infinity")
-}
-
-fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
-    let mut scope: Vec<&str> = outer.to_vec();
-    if let Some(from) = &query.from {
-        match &from.source {
-            FromSource::ImplicitContainer { alias } => scope.push(alias),
-            // The array is evaluated before its alias is bound.
-            FromSource::Array { alias, array } => {
-                check_expr(array, &scope)?;
-                scope.push(alias);
-            }
-            // `base` names the container root (valid by construction); only the
-            // bound `alias` enters scope for the rest of the query.
-            FromSource::Subroot { alias, .. } => scope.push(alias),
-        }
-        for join in &from.joins {
-            check_expr(&join.array, &scope)?;
-            scope.push(&join.alias);
-        }
-    }
-    match &query.select {
-        SelectClause::Star => {}
-        SelectClause::Value(e) => check_expr(e, &scope)?,
-        SelectClause::Projections(items) => {
-            for it in items {
-                check_expr(&it.expr, &scope)?;
-            }
-        }
-    }
-    if let Some(f) = &query.filter {
-        check_expr(f, &scope)?;
-    }
-    for k in &query.group_by {
-        check_expr(k, &scope)?;
-    }
-    for o in &query.order_by {
-        check_expr(&o.expr, &scope)?;
-    }
-    Ok(())
-}
-
-fn check_expr(expr: &ScalarExpr, scope: &[&str]) -> Result<(), PlanError> {
-    match expr {
-        ScalarExpr::Identifier(name) => {
-            if scope.contains(&name.as_str()) || is_special_ident(name) || name.starts_with('$') {
-                Ok(())
-            } else {
-                Err(PlanError {
-                    message: format!(
-                        "unqualified identifier `{name}` — Cosmos requires a bound path \
-                         (did you mean an alias like `c.{name}`?)"
-                    ),
-                })
-            }
-        }
-        ScalarExpr::Subquery { query, .. } => check_query(query, scope),
-        ScalarExpr::Member { base, .. } => check_expr(base, scope),
-        ScalarExpr::Index { base, index } => {
-            check_expr(base, scope)?;
-            check_expr(index, scope)
-        }
-        ScalarExpr::Unary { expr, .. } => check_expr(expr, scope),
-        ScalarExpr::Binary { lhs, rhs, .. } => {
-            check_expr(lhs, scope)?;
-            check_expr(rhs, scope)
-        }
-        ScalarExpr::Function { args, .. } => {
-            for a in args {
-                check_expr(a, scope)?;
-            }
-            Ok(())
-        }
-        ScalarExpr::Object(fields) => {
-            for (_, v) in fields {
-                check_expr(v, scope)?;
-            }
-            Ok(())
-        }
-        ScalarExpr::Array(items) => {
-            for i in items {
-                check_expr(i, scope)?;
-            }
-            Ok(())
-        }
-        ScalarExpr::PathGet { base, .. } => check_expr(base, scope),
-        ScalarExpr::MultikeyEq { base, value, .. } => {
-            check_expr(base, scope)?;
-            check_expr(value, scope)
-        }
-        // Literals, pre-converted values, and `@parameter`s bind no identifier.
-        ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Parameter(_) => Ok(()),
-    }
-}
-
-/// Enforce the `GROUP BY`/aggregate column rule (Cosmos): when a query groups or
-/// aggregates, every projected — and `ORDER BY` — expression must be built from
-/// the group keys, aggregates, and constants. A bare row reference (a column
-/// neither grouped nor inside an aggregate) is rejected, as is `SELECT *`.
-pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
-    let grouping = !query.group_by.is_empty()
-        || select_has_aggregate(&query.select)
-        || query.order_by.iter().any(|i| contains_aggregate(&i.expr));
-    if !grouping {
-        return Ok(());
-    }
-
-    // FROM-less aggregate (e.g. `SELECT COUNT(1)`) has no row bindings.
-    let mut bindings: Vec<&str> = Vec::new();
-    if let Some(from) = &query.from {
-        match &from.source {
-            FromSource::ImplicitContainer { alias }
-            | FromSource::Array { alias, .. }
-            | FromSource::Subroot { alias, .. } => bindings.push(alias.as_str()),
-        }
-        for join in &from.joins {
-            bindings.push(join.alias.as_str());
-        }
-    }
-
-    match &query.select {
-        SelectClause::Star => {
-            return Err(PlanError {
-                message: "SELECT * is not allowed with GROUP BY or aggregates".into(),
-            });
-        }
-        SelectClause::Value(e) => check_grounded(e, &query.group_by, &bindings)?,
-        SelectClause::Projections(items) => {
-            for it in items {
-                check_grounded(&it.expr, &query.group_by, &bindings)?;
-            }
-        }
-    }
-    for item in &query.order_by {
-        check_grounded(&item.expr, &query.group_by, &bindings)?;
-    }
-    Ok(())
-}
-
-/// Whether the projection contains an aggregate call.
-fn select_has_aggregate(select: &SelectClause) -> bool {
-    match select {
-        SelectClause::Value(e) => contains_aggregate(e),
-        SelectClause::Projections(items) => items.iter().any(|it| contains_aggregate(&it.expr)),
-        SelectClause::Star => false,
-    }
-}
-
-/// Check one expression against the grouping rule: it's fine if it equals a
-/// group key, is an aggregate call (its arguments are evaluated per row, so we
-/// don't descend), or is built only from constants and such. A reference to a
-/// binding (the `FROM`/`JOIN` alias) that isn't a group key is the violation.
-fn check_grounded(
-    expr: &ScalarExpr,
-    group_keys: &[ScalarExpr],
-    bindings: &[&str],
-) -> Result<(), PlanError> {
-    if group_keys.iter().any(|k| k == expr) {
-        return Ok(());
-    }
-    match expr {
-        ScalarExpr::Function { name, .. } if is_aggregate_name(name) => Ok(()),
-        // A subquery is self-contained (its inner correlation is its own scope),
-        // like an aggregate — it's a valid grouped projection.
-        ScalarExpr::Subquery { .. } => Ok(()),
-        ScalarExpr::Identifier(name) if bindings.contains(&name.as_str()) => Err(PlanError {
-            message: format!("'{name}' must appear in GROUP BY or be used in an aggregate"),
-        }),
-        ScalarExpr::Identifier(_)
-        | ScalarExpr::Literal(_)
-        | ScalarExpr::Value(_)
-        | ScalarExpr::Parameter(_) => Ok(()),
-        ScalarExpr::Member { base, .. } | ScalarExpr::PathGet { base, .. } => {
-            check_grounded(base, group_keys, bindings)
-        }
-        ScalarExpr::Index { base, index } => {
-            check_grounded(base, group_keys, bindings)?;
-            check_grounded(index, group_keys, bindings)
-        }
-        ScalarExpr::Unary { expr, .. } => check_grounded(expr, group_keys, bindings),
-        ScalarExpr::Binary { lhs, rhs, .. } => {
-            check_grounded(lhs, group_keys, bindings)?;
-            check_grounded(rhs, group_keys, bindings)
-        }
-        ScalarExpr::MultikeyEq { base, value, .. } => {
-            check_grounded(base, group_keys, bindings)?;
-            check_grounded(value, group_keys, bindings)
-        }
-        ScalarExpr::Function { args, .. } => {
-            for a in args {
-                check_grounded(a, group_keys, bindings)?;
-            }
-            Ok(())
-        }
-        ScalarExpr::Object(fields) => {
-            for (_, v) in fields {
-                check_grounded(v, group_keys, bindings)?;
-            }
-            Ok(())
-        }
-        ScalarExpr::Array(items) => {
-            for i in items {
-                check_grounded(i, group_keys, bindings)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Whether `name` (case-insensitive) is an aggregate function.
-fn is_aggregate_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
-    )
-}
-
-/// Read-only check for whether `expr` mentions any aggregate, so lowering can
-/// skip the (allocating) rewrite for the common non-aggregate projection.
-fn contains_aggregate(expr: &ScalarExpr) -> bool {
-    match expr {
-        ScalarExpr::Function { name, args } => {
-            is_aggregate_name(name) || args.iter().any(contains_aggregate)
-        }
-        ScalarExpr::Binary { lhs, rhs, .. } => contains_aggregate(lhs) || contains_aggregate(rhs),
-        ScalarExpr::Unary { expr, .. } => contains_aggregate(expr),
-        ScalarExpr::Member { base, .. } => contains_aggregate(base),
-        ScalarExpr::Index { base, index } => contains_aggregate(base) || contains_aggregate(index),
-        ScalarExpr::Object(fields) => fields.iter().any(|(_, v)| contains_aggregate(v)),
-        ScalarExpr::Array(items) => items.iter().any(contains_aggregate),
-        _ => false,
-    }
-}
-
 /// Rewrite a projection for aggregation: a whole sub-expression equal to a
 /// group key becomes a reference to its `$keyN` slot; each `AGG(arg)` becomes a
 /// `$aggN` slot recorded in `out`; every other sub-expression is rebuilt
@@ -764,300 +538,6 @@ fn rewrite_projection(
     }
 }
 
-// ── Sargability ─────────────────────────────────────────────────
-
-/// Decide the scan source and the residual (non-pushed) predicate.
-///
-/// - A top-level `OR` whose every branch is indexable → `IndexMerge(Or)` (with
-///   the full predicate kept as a residual recheck).
-/// - Otherwise the predicate is treated as a conjunction: pk equality wins
-///   (direct key lookup); else each indexed field's atoms become one
-///   `IndexScan` (range bounds combined), and `OR` sub-groups become
-///   `IndexMerge(Or)` — all intersected via `IndexMerge(And)` when more than
-///   one applies. Consumed atoms leave the residual; the rest stay a `Filter`.
-fn plan_source(
-    filter: Option<ScalarExpr>,
-    alias: &str,
-    container: &CollectionRef,
-    meta: &CollectionMeta,
-) -> (Node, Option<ScalarExpr>) {
-    let Some(expr) = filter else {
-        return (scan(container), None);
-    };
-
-    // Top-level OR → IndexMerge(Or) when fully indexable; recheck the full OR.
-    // A whole-filter Mongo implicit-equality (`f = v OR ARRAY_CONTAINS(f, v)`)
-    // is *not* a real disjunction — it is sargable as an equality on `f`, so it
-    // falls through to the conjunction path below rather than taking this route.
-    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. })
-        && as_mongo_eq(&expr, alias).is_none()
-    {
-        return match index_source_for(&expr, alias, container, meta) {
-            Some(ids) => (key_lookup(container, ids), Some(expr)),
-            None => (scan(container), Some(expr)),
-        };
-    }
-
-    let mut conjuncts = Vec::new();
-    flatten_and(expr, &mut conjuncts);
-
-    // Priority 1: primary-key equality (a plain `Eq` or the Mongo idiom) →
-    // direct point lookup. The pk is never an array, so the `ARRAY_CONTAINS`
-    // branch is always false and the equality is exact (safe to consume).
-    for i in 0..conjuncts.len() {
-        if let Some(value) = pk_eq_value(&conjuncts[i], alias, &meta.pk_path)
-            && let Some(id) = bson_to_raw(&value)
-        {
-            let source = Node::KeyLookup {
-                collection: container.clone(),
-                source: Box::new(Node::Values(vec![id])),
-            };
-            return (source, residual_excluding(conjuncts, &[i]));
-        }
-    }
-
-    // Collect ID sources from conjuncts, tracking which conjuncts are consumed.
-    let mut sources: Vec<Node> = Vec::new();
-    let mut consumed: Vec<usize> = Vec::new();
-
-    // Per indexed field: combine its atoms into a single IndexScan.
-    for field in &meta.indexes {
-        if let Some((scan, used)) = field_index_scan(&conjuncts, &consumed, alias, container, field)
-        {
-            sources.push(scan);
-            consumed.extend(used);
-        }
-    }
-
-    // Mongo implicit-equality on a scalar-indexed field → an index Eq lookup,
-    // and the conjunct is *consumed* (no residual recheck). A scalar index holds
-    // only scalar entries — an array-valued field produces none (see
-    // `index_record::extract_all`) — so every candidate the `Eq` returns already
-    // has `field == value`; the idiom's recheck (`field = v OR ARRAY_CONTAINS`)
-    // is therefore always true over the candidate set and is pure per-row
-    // overhead. (Array-valued documents are absent from a scalar index whether
-    // or not the recheck runs, so consuming it changes no results — pinned by
-    // the v1↔v2 differential `diff_fuzz`/`parity_audit`.)
-    //
-    // Multikey (`.[]`) equality is handled separately below and stays a recheck.
-    for (i, conjunct) in conjuncts.iter().enumerate() {
-        if consumed.contains(&i) {
-            continue;
-        }
-        if let Some((field, value)) = as_mongo_eq(conjunct, alias)
-            && meta.indexes.contains(&field)
-        {
-            sources.push(index_scan(container, &field, IndexScanRange::Eq(value)));
-            consumed.push(i);
-        }
-    }
-
-    // Explicit multikey equality on an indexed `.[]` path → index Eq lookup
-    // (kept as a residual recheck, like the Mongo idiom above). The index name
-    // is the verbatim `.[]` path the predicate carries.
-    for conjunct in &conjuncts {
-        if let Some((field, value)) = as_multikey_eq(conjunct, alias)
-            && meta.indexes.contains(&field)
-        {
-            sources.push(index_scan(container, &field, IndexScanRange::Eq(value)));
-        }
-    }
-
-    // OR sub-groups that are fully indexable become IndexMerge(Or) inputs.
-    // The conjunct is NOT consumed: it stays as a residual recheck, because an
-    // index merge can over-return (e.g. a range bound against a field holding
-    // mixed numeric types). The index narrows the candidate set; the recheck
-    // keeps the result precise — matching how the top-level-OR path behaves.
-    for (i, conjunct) in conjuncts.iter().enumerate() {
-        if consumed.contains(&i) {
-            continue;
-        }
-        if as_mongo_eq(conjunct, alias).is_some() {
-            continue; // already handled above
-        }
-        if matches!(conjunct, ScalarExpr::Binary { op: BinOp::Or, .. })
-            && let Some(ids) = index_source_for(conjunct, alias, container, meta)
-        {
-            sources.push(ids);
-        }
-    }
-
-    let residual = residual_excluding(conjuncts, &consumed);
-    match merge_sources(container, LogicalOp::And, sources) {
-        Some(ids) => (key_lookup(container, ids), residual),
-        None => (scan(container), residual),
-    }
-}
-
-/// Build one `IndexScan` covering all of `field`'s atoms (`Eq` wins; otherwise
-/// range bounds are combined). Returns the scan and the consumed conjunct
-/// indices, or `None` if `field` has no usable atom here.
-fn field_index_scan(
-    conjuncts: &[ScalarExpr],
-    consumed: &[usize],
-    alias: &str,
-    container: &CollectionRef,
-    field: &str,
-) -> Option<(Node, Vec<usize>)> {
-    let mut eq: Option<(Bson, usize)> = None;
-    let mut lower: Option<(Bson, bool, usize)> = None;
-    let mut upper: Option<(Bson, bool, usize)> = None;
-
-    for (i, conjunct) in conjuncts.iter().enumerate() {
-        if consumed.contains(&i) {
-            continue;
-        }
-        let Some((f, op, value)) = as_atom(conjunct, alias) else {
-            continue;
-        };
-        if f != field {
-            continue;
-        }
-        match op {
-            BinOp::Eq if eq.is_none() => eq = Some((value, i)),
-            BinOp::Gt if lower.is_none() => lower = Some((value, false, i)),
-            BinOp::Gte if lower.is_none() => lower = Some((value, true, i)),
-            BinOp::Lt if upper.is_none() => upper = Some((value, false, i)),
-            BinOp::Lte if upper.is_none() => upper = Some((value, true, i)),
-            _ => {}
-        }
-    }
-
-    if let Some((value, i)) = eq {
-        // Eq is the most selective; leave any range atoms to the residual.
-        return Some((
-            index_scan(container, field, IndexScanRange::Eq(value)),
-            vec![i],
-        ));
-    }
-    if lower.is_none() && upper.is_none() {
-        return None;
-    }
-    let mut used = Vec::new();
-    let lo = lower.map(|(v, incl, i)| {
-        used.push(i);
-        (v, incl)
-    });
-    let hi = upper.map(|(v, incl, i)| {
-        used.push(i);
-        (v, incl)
-    });
-    Some((
-        index_scan(
-            container,
-            field,
-            IndexScanRange::Range {
-                lower: lo,
-                upper: hi,
-            },
-        ),
-        used,
-    ))
-}
-
-/// Build an ID-yielding source for a single predicate, or `None` if it is not
-/// fully indexable: an atom on an indexed field → `IndexScan`; an `OR` whose
-/// every branch is indexable → `IndexMerge(Or)`.
-fn index_source_for(
-    expr: &ScalarExpr,
-    alias: &str,
-    container: &CollectionRef,
-    meta: &CollectionMeta,
-) -> Option<Node> {
-    // The Mongo implicit-equality idiom (`field = lit OR ARRAY_CONTAINS(field,
-    // lit)`) is itself an `Or`. Recognize it as a single indexed Eq *before*
-    // treating a generic `Or` as a disjunction to merge — otherwise flattening
-    // would split it and expose the lone, un-indexable `ARRAY_CONTAINS` branch,
-    // poisoning the whole merge (so an OR/IN of `{field: value}` fell back to a
-    // full scan).
-    if let Some((field, value)) = as_mongo_eq(expr, alias) {
-        return meta
-            .indexes
-            .contains(&field)
-            .then(|| index_scan(container, &field, IndexScanRange::Eq(value)));
-    }
-
-    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. }) {
-        let mut branches = Vec::new();
-        collect_or(expr, alias, &mut branches);
-        let mut sources = Vec::with_capacity(branches.len());
-        for branch in branches {
-            sources.push(index_source_for(branch, alias, container, meta)?);
-        }
-        return merge_sources(container, LogicalOp::Or, sources);
-    }
-
-    let (field, op, value) = as_atom(expr, alias)?;
-    if !meta.indexes.contains(&field) {
-        return None;
-    }
-    let range = match op {
-        BinOp::Eq => IndexScanRange::Eq(value),
-        BinOp::Gt => IndexScanRange::Range {
-            lower: Some((value, false)),
-            upper: None,
-        },
-        BinOp::Gte => IndexScanRange::Range {
-            lower: Some((value, true)),
-            upper: None,
-        },
-        BinOp::Lt => IndexScanRange::Range {
-            lower: None,
-            upper: Some((value, false)),
-        },
-        BinOp::Lte => IndexScanRange::Range {
-            lower: None,
-            upper: Some((value, true)),
-        },
-        _ => return None,
-    };
-    Some(index_scan(container, &field, range))
-}
-
-/// Fold ID sources into an `IndexMerge` tree (`None` if empty, the source
-/// itself if a single one).
-fn merge_sources(
-    container: &CollectionRef,
-    logical: LogicalOp,
-    sources: Vec<Node>,
-) -> Option<Node> {
-    let mut iter = sources.into_iter();
-    let first = iter.next()?;
-    Some(iter.fold(first, |acc, node| Node::IndexMerge {
-        collection: container.clone(),
-        logical,
-        lhs: Box::new(acc),
-        rhs: Box::new(node),
-    }))
-}
-
-/// Flatten an `Or` into its branches, but treat a Mongo implicit-equality idiom
-/// as one indivisible branch (its inner `Eq OR ARRAY_CONTAINS` must not be split
-/// — `index_source_for` recognizes the whole idiom as an indexed Eq).
-fn collect_or<'a>(expr: &'a ScalarExpr, alias: &str, out: &mut Vec<&'a ScalarExpr>) {
-    if as_mongo_eq(expr, alias).is_some() {
-        out.push(expr);
-        return;
-    }
-    if let ScalarExpr::Binary {
-        op: BinOp::Or,
-        lhs,
-        rhs,
-    } = expr
-    {
-        collect_or(lhs, alias, out);
-        collect_or(rhs, alias, out);
-    } else {
-        out.push(expr);
-    }
-}
-
-fn scan(container: &CollectionRef) -> Node {
-    Node::Scan {
-        collection: container.clone(),
-    }
-}
-
 /// Build the member-access chain `base.seg0.seg1…` as a scalar expression — the
 /// path a subroot `FROM base.path alias` navigates on each document.
 fn member_chain(base: &str, path: &[String]) -> ScalarExpr {
@@ -1071,210 +551,12 @@ fn member_chain(base: &str, path: &[String]) -> ScalarExpr {
     expr
 }
 
-fn index_scan(container: &CollectionRef, field: &str, range: IndexScanRange) -> Node {
-    Node::IndexScan {
-        collection: container.clone(),
-        field: field.to_string(),
-        range,
-        direction: ScanDirection::Forward,
-        limit: None,
-    }
-}
-
-/// Wrap an ID-yielding source in a `KeyLookup` to fetch the documents.
-fn key_lookup(container: &CollectionRef, ids: Node) -> Node {
-    Node::KeyLookup {
-        collection: container.clone(),
-        source: Box::new(ids),
-    }
-}
-
-/// Interpret a conjunct as `alias.<path> <cmp> <literal>` (either operand
-/// order), returning the field path, comparison op, and literal value.
-fn as_atom(expr: &ScalarExpr, alias: &str) -> Option<(String, BinOp, Bson)> {
-    let ScalarExpr::Binary { op, lhs, rhs } = expr else {
-        return None;
-    };
-    if !is_comparison(*op) {
-        return None;
-    }
-    if let (Some(path), Some(lit)) = (path_of(lhs.as_ref(), alias), as_literal(rhs.as_ref())) {
-        Some((path, *op, lit))
-    } else if let (Some(lit), Some(path)) = (as_literal(lhs.as_ref()), path_of(rhs.as_ref(), alias))
-    {
-        Some((path, flip(*op), lit))
-    } else {
-        None
-    }
-}
-
-/// Recognize the Mongo implicit-equality idiom the find front-end emits:
-/// `alias.field = lit OR ARRAY_CONTAINS(alias.field, lit)` (same field, same
-/// literal). Returns the field path and value — it is sargable as an equality
-/// on `field`, because an index/pk lookup for `lit` finds both the
-/// scalar-equal and the array-containing documents.
-fn as_mongo_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::Binary {
-        op: BinOp::Or,
-        lhs,
-        rhs,
-    } = expr
-    else {
-        return None;
-    };
-    // lhs: `field = lit`
-    let (eq_field, BinOp::Eq, eq_val) = as_atom(lhs.as_ref(), alias)? else {
-        return None;
-    };
-    // rhs: `ARRAY_CONTAINS(field, lit)` over the same field and value
-    let (ac_field, ac_val) = as_array_contains(rhs.as_ref(), alias)?;
-    if ac_field == eq_field && ac_val == eq_val {
-        Some((eq_field, eq_val))
-    } else {
-        None
-    }
-}
-
-/// Interpret `ARRAY_CONTAINS(alias.<path>, <literal>)`, returning the field
-/// path and the literal value.
-fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::Function { name, args } = expr else {
-        return None;
-    };
-    if !name.eq_ignore_ascii_case("ARRAY_CONTAINS") || args.len() != 2 {
-        return None;
-    }
-    Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
-}
-
-/// Recognize a [`ScalarExpr::MultikeyEq`] on `alias` — explicit multikey
-/// equality the find front-end emits for a `.[]` path. Returns the verbatim
-/// `.[]` path (which is also the index name) and the literal value, so it can
-/// be matched to a multikey index.
-fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::MultikeyEq {
-        base,
-        index_path,
-        value,
-    } = expr
-    else {
-        return None;
-    };
-    if !matches!(base.as_ref(), ScalarExpr::Identifier(a) if a == alias) {
-        return None;
-    }
-    Some((index_path.clone(), as_literal(value)?))
-}
-
-/// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo
-/// idiom (whose `ARRAY_CONTAINS` branch is vacuous for a non-array pk).
-fn pk_eq_value(expr: &ScalarExpr, alias: &str, pk: &str) -> Option<Bson> {
-    if let Some((field, BinOp::Eq, value)) = as_atom(expr, alias)
-        && field == pk
-    {
-        return Some(value);
-    }
-    match as_mongo_eq(expr, alias) {
-        Some((field, value)) if field == pk => Some(value),
-        _ => None,
-    }
-}
-
-/// The dotted field path of an `alias.a.b.c` access (`None` for bare `alias`,
-/// computed expressions, or a different root).
-fn path_of(expr: &ScalarExpr, alias: &str) -> Option<String> {
-    match expr {
-        ScalarExpr::Member { base, field } => match base.as_ref() {
-            ScalarExpr::Identifier(a) if a == alias => Some(field.clone()),
-            other => path_of(other, alias).map(|p| format!("{p}.{field}")),
-        },
-        _ => None,
-    }
-}
-
-fn as_literal(expr: &ScalarExpr) -> Option<Bson> {
-    match expr {
-        ScalarExpr::Literal(lit) => Some(literal_to_bson(lit)),
-        // A materialized value preserves its exact BSON type — important here,
-        // since an index bound must match the stored key's numeric type.
-        ScalarExpr::Value(b) => Some(b.clone()),
-        _ => None,
-    }
-}
-
-fn literal_to_bson(lit: &Literal) -> Bson {
-    match lit {
-        Literal::Null => Bson::Null,
-        Literal::Bool(b) => Bson::Boolean(*b),
-        Literal::Int(i) => Bson::Int64(*i),
-        Literal::Float(f) => Bson::Double(*f),
-        Literal::Str(s) => Bson::String(s.clone()),
-    }
-}
-
-fn bson_to_raw(value: &Bson) -> Option<RawBson> {
-    match RawBson::try_from(value.clone()) {
-        Ok(raw) => Some(raw),
-        Err(_) => None, // unrepresentable → skip the optimization
-    }
-}
-
-fn is_comparison(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Eq | BinOp::Gt | BinOp::Gte | BinOp::Lt | BinOp::Lte
-    )
-}
-
-/// Flip a comparison so the field is on the left (`40 < c.age` → `c.age > 40`).
-fn flip(op: BinOp) -> BinOp {
-    match op {
-        BinOp::Gt => BinOp::Lt,
-        BinOp::Gte => BinOp::Lte,
-        BinOp::Lt => BinOp::Gt,
-        BinOp::Lte => BinOp::Gte,
-        other => other,
-    }
-}
-
-fn flatten_and(expr: ScalarExpr, out: &mut Vec<ScalarExpr>) {
-    match expr {
-        ScalarExpr::Binary {
-            op: BinOp::And,
-            lhs,
-            rhs,
-        } => {
-            flatten_and(*lhs, out);
-            flatten_and(*rhs, out);
-        }
-        other => out.push(other),
-    }
-}
-
-/// Rebuild an `AND` from the conjuncts not in `used`, or `None` if none remain.
-fn residual_excluding(conjuncts: Vec<ScalarExpr>, used: &[usize]) -> Option<ScalarExpr> {
-    let remaining: Vec<ScalarExpr> = conjuncts
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| !used.contains(i))
-        .map(|(_, c)| c)
-        .collect();
-    rebuild_and(remaining)
-}
-
-fn rebuild_and(conjuncts: Vec<ScalarExpr>) -> Option<ScalarExpr> {
-    let mut iter = conjuncts.into_iter();
-    let first = iter.next()?;
-    Some(iter.fold(first, |acc, e| ScalarExpr::Binary {
-        op: BinOp::And,
-        lhs: Box::new(acc),
-        rhs: Box::new(e),
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Index range/merge enums and grouping validation moved to sibling modules.
+    use crate::plan::{IndexScanRange, LogicalOp};
+    use crate::validate::validate_grouping;
 
     fn container() -> CollectionRef {
         CollectionRef {
@@ -1358,6 +640,39 @@ mod tests {
         };
         assert_eq!(alias, "t");
         assert!(matches!(*source, Node::Bind { .. }));
+    }
+
+    #[test]
+    fn from_subroot_navigates_then_binds() {
+        // `FROM c.address e` scans the container, navigates to `c.address`, and
+        // binds that sub-value to `e`: Project(e) → Project(navigation) → Bind(c).
+        let Node::Project {
+            source, binding, ..
+        } = lower_sql("SELECT VALUE e FROM c.address e")
+        else {
+            panic!("expected Project");
+        };
+        assert_eq!(binding, RowBinding::Alias("e".into()));
+        let Node::Project { source: inner, .. } = *source else {
+            panic!("expected the navigation Project");
+        };
+        assert!(matches!(*inner, Node::Bind { .. }));
+    }
+
+    #[test]
+    fn projection_subquery_emits_subquery_node() {
+        // A subquery in the projection is extracted into a `$sub` slot computed by
+        // a correlated-apply `Subquery` node above the (env-forced) source.
+        let node = lower_sql("SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c");
+        let Node::Project {
+            source, binding, ..
+        } = node
+        else {
+            panic!("expected Project");
+        };
+        // The extracted subquery forces the environment shape.
+        assert_eq!(binding, RowBinding::Env);
+        assert!(matches!(*source, Node::Subquery { .. }));
     }
 
     // ── Sargability ─────────────────────────────────────────────

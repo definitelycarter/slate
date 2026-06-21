@@ -1470,6 +1470,7 @@ name = "slate-ast"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "slate-mutation",
 ]
 
 [[package]]
@@ -1550,7 +1551,7 @@ name = "slate-mutation"
 version = "0.1.0"
 dependencies = [
  "bson",
- "slate-engine",
+ "slate-rawbson",
 ]
 
 [[package]]

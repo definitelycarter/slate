@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 bson = { workspace = true }
+slate-mutation = { path = "../slate-mutation" }

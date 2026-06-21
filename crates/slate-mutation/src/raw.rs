@@ -12,8 +12,8 @@ use bson::raw::RawDocument;
 use bson::spec::ElementType;
 use bson::{Bson, RawDocumentBuf};
 
-use slate_engine::skip_bson_value;
-use slate_engine::{RawField, RawFieldLoc};
+use slate_rawbson::skip_bson_value;
+use slate_rawbson::{RawField, RawFieldLoc};
 
 // ── Result type ─────────────────────────────────────────────────
 

@@ -3,8 +3,10 @@
 //! The single intermediate representation that every query surface targets:
 //! `slate-sql` parses SQL text into it, `slate-query` translates a Mongo-style
 //! find into it, `slate-planner` lowers it to a physical plan, and `slate-eval`
-//! gives it meaning. Keeping it a dependency-free leaf is what lets all of those
-//! share one expression language without anyone depending on a sibling surface.
+//! gives it meaning. It depends only on `bson` and the light `slate-mutation`
+//! leaf (whose [`Mutation`] a write [`Statement`] carries) — never on a query
+//! *surface* — so all of those share one expression language and one statement
+//! type without any front-end depending on a sibling.
 //!
 //! The shapes here intentionally leave room to grow (see the `Future:` notes)
 //! without reshaping existing variants:
@@ -12,6 +14,9 @@
 //!   cross-collection-join extension.
 
 use std::collections::BTreeSet;
+
+use bson::{RawBson, RawDocumentBuf};
+use slate_mutation::Mutation;
 
 /// A literal scalar value as written in the source.
 ///
@@ -334,6 +339,59 @@ pub struct Join {
 pub struct OrderByItem {
     pub expr: ScalarExpr,
     pub direction: SortDirection,
+}
+
+/// A single operation to plan — the shared input that every query surface
+/// targets and `slate-planner` lowers to a physical plan. `slate-sql` parses
+/// SQL text into one; `slate-query` translates a Mongo request into one. Having
+/// reads *and* writes share this one type is what lets a single fallible
+/// `plan()` serve both surfaces (and keeps them from drifting).
+///
+/// A statement says *what* to do, free of catalog state: the target collection,
+/// its indexes, and its triggers/validators are supplied separately at plan time
+/// (so the same statement plans identically wherever it runs). Filter-bearing
+/// writes carry the [`Query`] that selects their target documents; the planner
+/// lowers that to the read source and wraps it with the write op.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Statement {
+    /// A read: `SELECT …` (SQL) or a Mongo `find`.
+    Query(Query),
+    /// Insert each document (a primary key is generated when absent).
+    Insert { docs: Vec<RawBson> },
+    /// Insert-or-(replace|merge) each document by primary key.
+    Upsert {
+        docs: Vec<RawBson>,
+        mode: UpsertMode,
+    },
+    /// Update the documents `query` selects by applying `mutation`.
+    Update { query: Query, mutation: Mutation },
+    /// Replace the documents `query` selects with `replacement` (pk preserved).
+    Replace {
+        query: Query,
+        replacement: RawDocumentBuf,
+    },
+    /// Delete the documents `query` selects.
+    Delete { query: Query },
+    /// Distinct values of `alias`.`field` among documents matching `predicate`,
+    /// flattening array values one level (Mongo `distinct` semantics, which —
+    /// unlike SQL `SELECT DISTINCT` — treats each array element as a value).
+    Distinct {
+        alias: String,
+        field: String,
+        predicate: Option<ScalarExpr>,
+        sort: Option<SortDirection>,
+        skip: Option<u64>,
+        take: Option<u64>,
+    },
+}
+
+/// How an upsert writes over an existing document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertMode {
+    /// Overwrite the existing document entirely (preserving its primary key).
+    Replace,
+    /// Field-merge the new document into the existing one.
+    Merge,
 }
 
 #[cfg(test)]
