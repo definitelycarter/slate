@@ -65,7 +65,7 @@ aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
 - [x] `CONCAT`  [x] `CONTAINS`  [x] `STARTSWITH`  [x] `LENGTH`  [x] `LOWER`  [x] `UPPER`  [x] `REGEXMATCH`
 - [x] `ENDSWITH`  [x] `INDEX_OF`  [x] `SUBSTRING`  [x] `LEFT`  [x] `RIGHT`
 - [x] `TRIM`  [x] `LTRIM`  [x] `RTRIM`  [x] `REPLACE`  [x] `REPLICATE`  [x] `REVERSE`
-- [x] `STRINGEQUALS`  [ ] `STRINGJOIN`  [ ] `STRINGSPLIT`  [ ] `TOSTRING`
+- [x] `STRINGEQUALS`  [x] `STRINGJOIN`  [x] `STRINGSPLIT`  [x] `TOSTRING`
 - [x] Parsing: `STRINGTONUMBER` `STRINGTOBOOLEAN` `STRINGTONULL` `STRINGTOARRAY` `STRINGTOOBJECT`
 
 The string predicates `STARTSWITH`/`ENDSWITH`/`CONTAINS`/`STRINGEQUALS` accept an
@@ -162,6 +162,8 @@ actual value.
 - [ ] **Numeric literal typing** — SQL integer literals are `Int64`; the index
   path now compares cross-type (correct), but selectivity is a known follow-up
   (canonical numeric index encoding).
+- [x] **`NaN` / `Infinity` literals** — parsed as `Double` literals (matching
+  Cosmos), not identifiers; `undefined` stays the undefined value.
 
 ---
 

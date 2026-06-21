@@ -100,6 +100,8 @@ mod sqrt;
 mod square;
 mod starts_with;
 mod stringequals;
+mod stringjoin;
+mod stringsplit;
 mod stringtoarray;
 mod stringtoboolean;
 mod stringtonull;
@@ -107,6 +109,7 @@ mod stringtonumber;
 mod stringtoobject;
 mod substring;
 mod tan;
+mod tostring;
 mod trim;
 mod trunc;
 mod upper;
@@ -186,6 +189,9 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "STARTSWITH" => starts_with::eval(name, args),
         "ENDSWITH" => endswith::eval(name, args),
         "STRINGEQUALS" => stringequals::eval(name, args),
+        "STRINGJOIN" => stringjoin::eval(name, args),
+        "STRINGSPLIT" => stringsplit::eval(name, args),
+        "TOSTRING" => tostring::eval(name, args),
         "STRINGTONUMBER" => stringtonumber::eval(name, args),
         "STRINGTOBOOLEAN" => stringtoboolean::eval(name, args),
         "STRINGTONULL" => stringtonull::eval(name, args),

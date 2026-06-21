@@ -926,6 +926,34 @@ fn select_star_without_from_is_rejected() {
 }
 
 #[test]
+fn tostring_renders_values() {
+    let db = seeded();
+    assert_eq!(strings(&db, "SELECT VALUE TOSTRING(125)"), vec!["125"]);
+    assert_eq!(
+        strings(&db, "SELECT VALUE TOSTRING([1,2,3])"),
+        vec!["[1,2,3]"]
+    );
+    // `NaN`/`Infinity` parse as numeric literals, so TOSTRING renders them.
+    assert_eq!(strings(&db, "SELECT VALUE TOSTRING(NaN)"), vec!["NaN"]);
+    assert_eq!(
+        strings(&db, "SELECT VALUE TOSTRING(Infinity)"),
+        vec!["Infinity"]
+    );
+}
+
+#[test]
+fn stringsplit_and_stringjoin_round_trip() {
+    let db = seeded();
+    assert_eq!(
+        strings(
+            &db,
+            "SELECT VALUE STRINGJOIN(STRINGSPLIT('a-b-c', '-'), '/')"
+        ),
+        vec!["a/b/c"]
+    );
+}
+
+#[test]
 fn getcurrent_uses_the_injected_clock() {
     // GETCURRENT* read the engine's injectable clock (the wasm hook) — no
     // syscall — so a fixed clock makes them deterministic.

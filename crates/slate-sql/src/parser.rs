@@ -562,7 +562,14 @@ impl Parser {
                     let args = self.parse_call_args()?;
                     Ok(ScalarExpr::Function { name, args })
                 } else {
-                    Ok(ScalarExpr::Identifier(name))
+                    // `NaN`/`Infinity` are numeric literals in Cosmos, not
+                    // identifiers (`undefined` stays an identifier — it resolves
+                    // to the undefined value). Case-sensitive, matching Cosmos.
+                    Ok(match name.as_str() {
+                        "NaN" => ScalarExpr::Literal(Literal::Float(f64::NAN)),
+                        "Infinity" => ScalarExpr::Literal(Literal::Float(f64::INFINITY)),
+                        _ => ScalarExpr::Identifier(name),
+                    })
                 }
             }
             other => Err(SqlError::Parse {
@@ -1159,6 +1166,27 @@ mod tests {
         assert!(matches!(
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
+        ));
+    }
+
+    #[test]
+    fn nan_and_infinity_are_float_literals() {
+        // Cosmos treats `NaN`/`Infinity` as numeric literals, not identifiers.
+        let q = parse("SELECT VALUE NaN");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Literal(Literal::Float(f))) if f.is_nan()
+        ));
+        let q = parse("SELECT VALUE Infinity");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Literal(Literal::Float(f))) if f.is_infinite() && f > 0.0
+        ));
+        // `undefined` stays an identifier (it resolves to the undefined value).
+        let q = parse("SELECT VALUE undefined");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(ScalarExpr::Identifier(ref n)) if n == "undefined"
         ));
     }
 }
