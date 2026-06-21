@@ -107,6 +107,13 @@ impl Parser {
     fn parse_query_body(&mut self) -> Result<Query> {
         self.expect(&Token::Select)?;
         let distinct = self.matches(&Token::Distinct);
+        // `TOP <n>` (Cosmos) caps the result count; it follows DISTINCT and is
+        // mutually exclusive with OFFSET/LIMIT (reconciled below).
+        let top = if self.matches(&Token::Top) {
+            Some(self.parse_u64()?)
+        } else {
+            None
+        };
         let select = self.parse_select()?;
 
         // The `FROM` clause is optional (Cosmos): a FROM-less query evaluates the
@@ -152,6 +159,18 @@ impl Parser {
             Some(self.parse_u64()?)
         } else {
             None
+        };
+
+        // `TOP` is just a result cap, so it folds into `limit` — but Cosmos
+        // rejects mixing it with OFFSET/LIMIT, so guard that first.
+        let limit = match top {
+            Some(_) if offset.is_some() || limit.is_some() => {
+                return Err(SqlError::Parse {
+                    message: "TOP cannot be combined with OFFSET or LIMIT".into(),
+                });
+            }
+            Some(t) => Some(t),
+            None => limit,
         };
 
         Ok(Query {
@@ -1169,6 +1188,51 @@ mod tests {
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
         ));
+    }
+
+    #[test]
+    fn select_top_folds_into_limit() {
+        let q = parse("SELECT TOP 2 VALUE c.x FROM c");
+        assert_eq!(q.limit, Some(2));
+        assert_eq!(q.offset, None);
+    }
+
+    #[test]
+    fn top_follows_distinct() {
+        // `DISTINCT TOP` is the valid order (Cosmos rejects `TOP DISTINCT`).
+        let q = parse("SELECT DISTINCT TOP 3 VALUE c.x FROM c");
+        assert!(q.distinct);
+        assert_eq!(q.limit, Some(3));
+        assert!(
+            parse_err("SELECT TOP 3 DISTINCT VALUE c.x FROM c")
+                .to_string()
+                .to_lowercase()
+                .contains("distinct")
+        );
+    }
+
+    #[test]
+    fn top_conflicts_with_offset_limit() {
+        assert!(
+            parse_err("SELECT TOP 2 VALUE c.x FROM c LIMIT 1")
+                .to_string()
+                .contains("TOP")
+        );
+        assert!(
+            parse_err("SELECT TOP 2 VALUE c.x FROM c OFFSET 1 LIMIT 1")
+                .to_string()
+                .contains("TOP")
+        );
+    }
+
+    #[test]
+    fn top_is_reserved_so_it_is_not_an_alias() {
+        // `AS top` is invalid in Cosmos (TOP is reserved); we match that.
+        assert!(
+            parse_err("SELECT c.x AS top FROM c")
+                .to_string()
+                .contains("identifier")
+        );
     }
 
     #[test]

@@ -112,7 +112,7 @@ are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
 - [x] `BETWEEN x AND y`  ⭐ *(desugars to `>= x AND <= y`, inclusive → sargable range; `NOT BETWEEN` supported)*
 - [x] `LIKE <pattern> [ESCAPE c]` *(desugars to a safely-escaped, anchored `REGEXMATCH`; `NOT LIKE` supported)*
 - [x] `DISTINCT` (`SELECT DISTINCT …`) *(dedups whole projected rows; an array value counts as one value — no Mongo-style flattening)*
-- [ ] `TOP N` *(Cosmos alias for `LIMIT`)*
+- [x] `TOP N` *(result cap; follows `DISTINCT`, reserved word, mutually exclusive with `OFFSET`/`LIMIT`)*
 
 ---
 

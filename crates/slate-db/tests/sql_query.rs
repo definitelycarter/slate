@@ -954,6 +954,30 @@ fn stringsplit_and_stringjoin_round_trip() {
 }
 
 #[test]
+fn select_top_caps_results() {
+    let db = seeded();
+    // TOP applies after ORDER BY, like a LIMIT.
+    assert_eq!(
+        strings(&db, "SELECT VALUE c.name FROM c ORDER BY c.age ASC"),
+        vec!["ada", "alan", "grace"]
+    );
+    assert_eq!(
+        strings(&db, "SELECT TOP 2 VALUE c.name FROM c ORDER BY c.age ASC"),
+        vec!["ada", "alan"]
+    );
+    // TOP cannot be combined with OFFSET/LIMIT.
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query(
+            DEFAULT_CF,
+            "people",
+            "SELECT TOP 2 VALUE c.name FROM c LIMIT 1"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn select_distinct_dedups_rows() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();

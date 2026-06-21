@@ -91,6 +91,7 @@ fn keyword_or_ident(word: String) -> Token {
         "desc" => Token::Desc,
         "offset" => Token::Offset,
         "limit" => Token::Limit,
+        "top" => Token::Top,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,

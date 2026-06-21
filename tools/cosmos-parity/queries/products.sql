@@ -45,7 +45,10 @@ SELECT VALUE MAX(c.price) FROM c
 SELECT c.category AS category, COUNT(1) AS n FROM c GROUP BY c.category
 SELECT c.category AS category, MAX(c.price) AS maxPrice FROM c GROUP BY c.category
 
-# ── DISTINCT ──────────────────────────────────────────────────────
+# ── TOP / DISTINCT ────────────────────────────────────────────────
+SELECT TOP 2 VALUE c.name FROM c ORDER BY c.price ASC
+SELECT TOP 3 c.name, c.price FROM c ORDER BY c.price DESC
+SELECT DISTINCT TOP 1 VALUE c.category FROM c
 SELECT DISTINCT VALUE c.category FROM c
 SELECT DISTINCT c.category FROM c
 SELECT DISTINCT VALUE c.inStock FROM c

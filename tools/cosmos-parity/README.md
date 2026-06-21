@@ -105,10 +105,8 @@ Real slate gaps:
 - **Divide / modulo by zero** (`SELECT VALUE 1 / 0`, `5 % 0`) — the emulator
   raises `400 BadRequest`; slate returns undefined (drops the row). (Confirm
   against hosted Cosmos — but a clear behavioral divergence to track.)
-- **Reserved word as alias** (`AS top`) — `TOP` is reserved in Cosmos, so it
-  can't alias a column; slate doesn't reserve it (we don't implement `TOP` yet).
-- **Not-yet-implemented functions** — date/time, spatial (`ST_*`), `NUMBERBIN`,
-  `VECTORDISTANCE` (the bulk of the corpus's remaining slate-errors).
+- **Not-yet-implemented functions** — spatial (`ST_*`) and `VECTORDISTANCE`
+  (the corpus's remaining slate-errors).
 - **Subroot FROM** (`FROM a.b e`) — the one remaining corpus parse error.
 
 Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Cosmos):

@@ -31,6 +31,7 @@ pub enum Token {
     Desc,
     Offset,
     Limit,
+    Top,
     And,
     Or,
     Not,
