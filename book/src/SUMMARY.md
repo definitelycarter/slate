@@ -1,5 +1,6 @@
 # Summary
 
+- [Getting Started](./getting-started.md)
 - [Architecture](./architecture.md)
 - [Querying](./querying.md)
 - [Mongo Operators](./mongo-operators.md)
