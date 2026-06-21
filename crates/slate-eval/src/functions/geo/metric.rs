@@ -7,7 +7,7 @@
 //! centimetres, area within ~1 ppm) but do not bit-reproduce its proprietary
 //! spatial library — close, not identical (tracked numeric gaps).
 
-use super::{Coord, Geometry};
+use super::{Coord, Geometry, vertices};
 
 /// WGS84 semi-major axis (m).
 const WGS84_A: f64 = 6_378_137.0;
@@ -22,8 +22,8 @@ const WGS84_MEAN_R: f64 = 6_371_008.771_415_06;
 /// distance between their vertices — an approximation that is exact for
 /// point-to-point and a reasonable lower-ish bound otherwise.
 pub(crate) fn distance(a: &Geometry, b: &Geometry) -> f64 {
-    let va = coords(a);
-    let vb = coords(b);
+    let va = vertices(a);
+    let vb = vertices(b);
     let mut min = f64::INFINITY;
     for &p in &va {
         for &q in &vb {
@@ -34,19 +34,6 @@ pub(crate) fn distance(a: &Geometry, b: &Geometry) -> f64 {
         }
     }
     min
-}
-
-/// Flatten a geometry to the list of its `[lng, lat]` vertices. `Coord` is
-/// `Copy`, so this copies rather than clones.
-fn coords(g: &Geometry) -> Vec<Coord> {
-    match g {
-        Geometry::Point(p) => vec![*p],
-        Geometry::MultiPoint(ps) | Geometry::LineString(ps) => ps.to_vec(),
-        Geometry::Polygon(rings) | Geometry::MultiLineString(rings) => {
-            rings.iter().flatten().copied().collect()
-        }
-        Geometry::MultiPolygon(polys) => polys.iter().flatten().flatten().copied().collect(),
-    }
 }
 
 /// Vincenty inverse formula: geodesic distance (m) between two `[lng, lat]`

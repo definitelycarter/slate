@@ -20,8 +20,10 @@
 use bson::Bson;
 
 mod metric;
+mod predicate;
 
 pub(crate) use metric::{area, distance};
+pub(crate) use predicate::within;
 
 /// A `[longitude, latitude]` position in degrees.
 pub(crate) type Coord = [f64; 2];
@@ -75,6 +77,20 @@ pub(crate) fn validity(b: &Bson) -> Validity {
 /// non-geometry input yields `Value::Undefined`, matching Cosmos.
 pub(crate) fn parse(b: &Bson) -> Option<Geometry> {
     read(b).ok()
+}
+
+/// Flatten a geometry to the list of its `[lng, lat]` vertices. `Coord` is
+/// `Copy`, so this copies rather than clones. Shared by the metric and predicate
+/// submodules.
+pub(super) fn vertices(g: &Geometry) -> Vec<Coord> {
+    match g {
+        Geometry::Point(p) => vec![*p],
+        Geometry::MultiPoint(ps) | Geometry::LineString(ps) => ps.to_vec(),
+        Geometry::Polygon(rings) | Geometry::MultiLineString(rings) => {
+            rings.iter().flatten().copied().collect()
+        }
+        Geometry::MultiPolygon(polys) => polys.iter().flatten().flatten().copied().collect(),
+    }
 }
 
 /// Coerce a BSON numeric (any of the three numeric types — coordinates may be

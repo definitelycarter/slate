@@ -109,6 +109,7 @@ mod st_area;
 mod st_distance;
 mod st_isvalid;
 mod st_isvaliddetailed;
+mod st_within;
 mod starts_with;
 mod stringequals;
 mod stringjoin;
@@ -230,6 +231,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "ST_DISTANCE" => st_distance::eval(name, args),
         "ST_ISVALID" => st_isvalid::eval(name, args),
         "ST_ISVALIDDETAILED" => st_isvaliddetailed::eval(name, args),
+        "ST_WITHIN" => st_within::eval(name, args),
         other => Err(EvalError {
             message: format!("unknown function: {other}"),
         }),
