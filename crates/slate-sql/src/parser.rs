@@ -289,7 +289,21 @@ impl Parser {
     // ── Expressions (precedence climbing) ───────────────────────
 
     fn parse_expr(&mut self) -> Result<ScalarExpr> {
-        self.parse_or()
+        self.parse_coalesce()
+    }
+
+    /// `a ?? b` — the coalesce operator, lowest precedence (below `OR`) and
+    /// right-associative (`a ?? b ?? c` = `a ?? (b ?? c)`). Desugars to
+    /// `IIF(IS_DEFINED(a), a, b)`, so it coalesces only on *undefined* (a defined
+    /// `null` is returned as-is), matching Cosmos.
+    fn parse_coalesce(&mut self) -> Result<ScalarExpr> {
+        let lhs = self.parse_or()?;
+        if self.matches(&Token::Coalesce) {
+            let rhs = self.parse_coalesce()?;
+            Ok(coalesce(lhs, rhs))
+        } else {
+            Ok(lhs)
+        }
     }
 
     fn parse_or(&mut self) -> Result<ScalarExpr> {
@@ -661,6 +675,20 @@ fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
+    }
+}
+
+/// Desugar `a ?? b` to `IIF(IS_DEFINED(a), a, b)`. `a` is duplicated because it
+/// is both the test and the result and the AST has no node sharing; this is a
+/// one-time parse-time clone of the left subexpression.
+fn coalesce(lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
+    let is_defined = ScalarExpr::Function {
+        name: "IS_DEFINED".into(),
+        args: vec![lhs.clone()],
+    };
+    ScalarExpr::Function {
+        name: "IIF".into(),
+        args: vec![is_defined, lhs, rhs],
     }
 }
 
@@ -1188,6 +1216,38 @@ mod tests {
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
         ));
+    }
+
+    #[test]
+    fn coalesce_desugars_to_iif() {
+        // `a ?? b` → IIF(IS_DEFINED(a), a, b).
+        let q = parse("SELECT VALUE c.x ?? c.y FROM c");
+        let SelectClause::Value(ScalarExpr::Function { name, args }) = &q.select else {
+            panic!("expected a function");
+        };
+        assert_eq!(name, "IIF");
+        assert_eq!(args.len(), 3);
+        assert!(matches!(&args[0], ScalarExpr::Function { name, .. } if name == "IS_DEFINED"));
+    }
+
+    #[test]
+    fn coalesce_is_lower_precedence_than_arithmetic() {
+        // `2 + c.x ?? 3` parses as `(2 + c.x) ?? 3`, so the IIF result branch is
+        // the addition — not `2 + (c.x ?? 3)`.
+        let q = parse("SELECT VALUE 2 + c.x ?? 3 FROM c");
+        let SelectClause::Value(ScalarExpr::Function { name, args }) = &q.select else {
+            panic!("expected IIF");
+        };
+        assert_eq!(name, "IIF");
+        assert!(matches!(
+            &args[1],
+            ScalarExpr::Binary { op: BinOp::Add, .. }
+        ));
+    }
+
+    #[test]
+    fn lone_question_mark_is_a_lex_error() {
+        assert!(crate::lexer::tokenize("SELECT VALUE 1 ?").is_err());
     }
 
     #[test]

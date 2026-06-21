@@ -288,6 +288,18 @@ fn lex_symbol(cur: &mut Cursor, at: usize) -> Result<Token> {
                 });
             }
         },
+        '?' => match cur.peek() {
+            Some(&(_, '?')) => {
+                cur.next();
+                Token::Coalesce
+            }
+            _ => {
+                return Err(SqlError::Lex {
+                    message: "unexpected '?' (did you mean '??'?)".into(),
+                    at: i,
+                });
+            }
+        },
         other => {
             return Err(SqlError::Lex {
                 message: format!("unexpected character '{other}'"),

@@ -954,6 +954,27 @@ fn stringsplit_and_stringjoin_round_trip() {
 }
 
 #[test]
+fn coalesce_operator_falls_back_on_undefined() {
+    let db = seeded();
+    // Missing field → fall back to the right operand.
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.missing ?? "fallback" FROM c ORDER BY c.age ASC"#
+        ),
+        vec!["fallback", "fallback", "fallback"]
+    );
+    // Present field → keep it.
+    assert_eq!(
+        strings(
+            &db,
+            r#"SELECT VALUE c.name ?? "fallback" FROM c ORDER BY c.age ASC"#
+        ),
+        vec!["ada", "alan", "grace"]
+    );
+}
+
+#[test]
 fn select_top_caps_results() {
     let db = seeded();
     // TOP applies after ORDER BY, like a LIMIT.

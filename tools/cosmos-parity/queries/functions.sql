@@ -86,3 +86,9 @@ SELECT VALUE IS_FINITE_NUMBER(1)
 # ── Conditional ───────────────────────────────────────────────────
 SELECT VALUE IIF(true, 'yes', 'no')
 SELECT VALUE IIF(1 > 2, 'yes', 'no')
+
+# ── Coalesce (??) — undefined falls through, null does not ─────────
+SELECT VALUE 1 ?? 2
+SELECT VALUE null ?? 2
+SELECT VALUE undefined ?? 2
+SELECT VALUE undefined ?? undefined ?? 3

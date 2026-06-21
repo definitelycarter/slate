@@ -62,6 +62,8 @@ pub enum Token {
     Star,
     Slash,
     Percent,
+    /// `??` — coalesce (returns the left operand unless it is undefined).
+    Coalesce,
 
     /// End-of-input sentinel — always the final token.
     Eof,

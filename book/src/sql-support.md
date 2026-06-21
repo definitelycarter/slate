@@ -86,7 +86,7 @@ optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
 
 ### Conditional (Tier 1)
 
-- [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [ ] `??` coalesce operator
+- [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [x] `??` coalesce operator *(lowest precedence; falls through on undefined only — a defined `null` is kept)*
 
 ### Date & time (Tier 0–1)
 
