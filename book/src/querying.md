@@ -66,6 +66,22 @@ FROM <alias>
 
 The `FROM` clause names only the row alias; the container is the `(cf, collection)` passed to `query()` (matching Cosmos, where the container is external to the query text). SQL is read-only and always runs on the v2 engine.
 
+These run live against the playground's `products` and `families` collections —
+edit and run them (see the [Playground](./playground.md) for the data):
+
+```slate-sql
+SELECT c.name, c.price FROM products c WHERE c.price > 100 ORDER BY c.price DESC
+```
+
+```slate-sql
+SELECT c.category, COUNT(1) AS n, AVG(c.price) AS avgPrice
+FROM products c GROUP BY c.category
+```
+
+```slate-sql
+SELECT f.lastName, ch.firstName, ch.grade FROM families f JOIN ch IN f.children
+```
+
 Supply values for `@name` placeholders with `query_with_params(cf, collection, sql, params)`, where `params` serializes to a document keyed by the bare parameter names (no leading `@`) — e.g. `WHERE c.age > @minAge` with `doc! { "minAge": 21 }`. A referenced parameter with no supplied value is a hard error (matching Cosmos), which catches a misspelled or forgotten name; the plain `query` API supplies no parameters, so any `@name` there is rejected too. Parameters are visible everywhere an expression is evaluated (`WHERE`, projections, `ORDER BY`, `JOIN … IN`).
 
 The `WHERE` expression is the full scalar grammar plus three predicate forms: `<expr> IN (a, b, …)`, `<expr> BETWEEN <lo> AND <hi>`, and `<expr> LIKE '<pattern>' [ESCAPE '<c>']` (each negatable with `NOT`). They are pure sugar — `IN` desugars to an OR of equalities and `BETWEEN` to an inclusive `>= lo AND <= hi`, so both reuse the planner's sargable paths unchanged (an `IN` over an indexed field becomes an `IndexMerge(Or)` and a `BETWEEN` a range `IndexScan`; see [Plan Scenarios](#plan-scenarios)). `LIKE` desugars to an anchored `RegexMatch`: the SQL wildcards `%` (any run) and `_` (any single character) and `[…]`/`[^…]` sets become regex constructs, while every other character — including regex metacharacters — is escaped to a literal, so a pattern is never a regex-injection vector.

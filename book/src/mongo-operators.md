@@ -12,52 +12,67 @@ uses `.[]` (`"tags.[]"`), described under [Array fields](#array-fields).
 
 ## Query operators (filters)
 
+The filter examples below are **live** — each `slate-find` cell runs against the
+playground's `products` and `families` collections (the first line names the
+collection). Edit and run them; see the [Playground](./playground.md) for the
+dataset shapes.
+
 ### Implicit equality — `{ field: value }`
 
 A bare field/value pair matches a scalar field equal to `value` **or** an array
-field that contains it:
+field that contains it — so the same filter works whether the field holds a scalar
+or an array:
 
-```json
-{ "status": "active" }
+```slate-find
+products
+{ "category": "Electronics" }
 ```
-→ `c.status = "active" OR ARRAY_CONTAINS(c.status, "active")`.
+That's `c.category = "Electronics" OR ARRAY_CONTAINS(c.category, "Electronics")`. A
+filter on the string-array field `tags` uses the very same form:
 
-So the same filter works whether `status` holds a scalar or an array. As a special
-case, `{ "field": null }` also matches documents where the field is **absent**
-(missing *or* explicitly null), matching Mongo.
+```slate-find
+products
+{ "tags": "office" }
+```
+As a special case, `{ "field": null }` also matches documents where the field is
+**absent** (missing *or* explicitly null), matching Mongo.
 
 ### `$eq`
 
 Explicit form of implicit equality (same `= OR ARRAY_CONTAINS` semantics):
 
-```json
-{ "status": { "$eq": "active" } }
+```slate-find
+products
+{ "category": { "$eq": "Furniture" } }
 ```
 
 ### Comparison — `$gt`, `$gte`, `$lt`, `$lte`
 
-```json
-{ "age": { "$gte": 21 } }
-{ "price": { "$gt": 10, "$lt": 100 } }
+```slate-find
+products
+{ "price": { "$gt": 25, "$lt": 400 } }
 ```
-Multiple operators in one sub-document AND together (`price > 10 AND price < 100`).
+Multiple operators in one sub-document AND together (`price > 25 AND price < 400`).
 Comparisons are **type-bracketed** like SQL — a number bound only matches numbers,
 a string bound only strings. (Not available on explicit `.[]` array paths.)
 
 ### `$exists`
 
-```json
-{ "deletedAt": { "$exists": false } }
+```slate-find
+families
+{ "isRegistered": { "$exists": true } }
 ```
-→ `NOT IS_DEFINED(c.deletedAt)`. `$exists: true` is `IS_DEFINED(c.field)`. The
-value must be a boolean. (Not available on explicit `.[]` array paths.)
+→ `IS_DEFINED(c.isRegistered)`. The negated form
+`{ "field": { "$exists": false } }` is `NOT IS_DEFINED(c.field)`. The value must be
+a boolean. (Not available on explicit `.[]` array paths.)
 
 ### `$regex` / `$options`
 
-```json
-{ "name": { "$regex": "^ad", "$options": "i" } }
+```slate-find
+products
+{ "name": { "$regex": "^Premium", "$options": "i" } }
 ```
-→ `REGEXMATCH(c.name, "(?i)^ad")`. The options string (`i`, `m`, `s`, `x`) is
+→ `REGEXMATCH(c.name, "(?i)^Premium")`. The options string (`i`, `m`, `s`, `x`) is
 folded into an inline regex flag group. `$regex` is exclusive — it cannot be
 combined with other operators in the same sub-document.
 
@@ -65,26 +80,29 @@ combined with other operators in the same sub-document.
 
 Each takes an array of sub-filters:
 
-```json
-{ "$or": [ { "status": "active" }, { "age": { "$gte": 65 } } ] }
+```slate-find
+products
+{ "$or": [ { "category": "Furniture" }, { "price": { "$lt": 30 } } ] }
 ```
 Multiple fields at the top level are an **implicit AND**:
 
-```json
-{ "status": "active", "age": { "$gte": 21 } }
+```slate-find
+products
+{ "category": "Electronics", "inStock": true }
 ```
-→ `status = "active" AND age >= 21`. When both branches of an `$or` are indexed
-equalities the planner builds an `IndexMerge`; see [Querying](./querying.md).
+→ `category = "Electronics" AND inStock = true`. When both branches of an `$or` are
+indexed equalities the planner builds an `IndexMerge`; see [Querying](./querying.md).
 
 ### Array fields
 
 An explicit multikey path (`"tags.[]"`, `"items.[].sku"`) tests **array
 membership** and compiles to a form the planner can match against a `.[]` index:
 
-```json
-{ "tags.[]": "rust" }
+```slate-find
+products
+{ "tags.[]": "office" }
 ```
-matches any document whose `tags` array contains `"rust"`. On an explicit `.[]`
+matches any document whose `tags` array contains `"office"`. On an explicit `.[]`
 path only equality is supported — range and `$exists` are not.
 
 ### Unsupported operators
