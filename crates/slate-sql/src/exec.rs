@@ -177,7 +177,7 @@ fn dup_row<'a>(row: &Row<'a>) -> Row<'a> {
     row.iter()
         .map(|(n, b)| {
             let bound = match b {
-                Bound::Borrowed(r) => Bound::Borrowed(*r),
+                Bound::Borrowed(r) => Bound::Borrowed(r),
                 Bound::Owned(v) => Bound::Owned(v.clone()),
             };
             (*n, bound)

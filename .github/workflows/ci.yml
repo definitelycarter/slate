@@ -14,7 +14,7 @@ env:
 
 jobs:
   check:
-    name: fmt + test
+    name: fmt + clippy + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -30,14 +30,12 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
 
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       # Default features (memory + lua + runtime) — RocksDB is opt-in and not
       # built here, so no system libclang is needed. Runs the full unit +
       # integration suite, including the hermetic Cosmos golden replay
       # (crates/slate-db/tests/cosmos_golden.rs, which asserts on divergence).
       - name: Test
         run: cargo test --workspace
-
-      # clippy is intentionally not a gate yet: the workspace has pre-existing
-      # warnings plus a handful of deny-by-default `approx_constant` findings in
-      # test code. Once those are cleaned up, add a clippy job with
-      # `-- -D warnings` to make it enforced.

@@ -257,9 +257,7 @@ impl Parser {
             while self.matches(&Token::Dot) {
                 path.push(self.parse_ident()?);
             }
-            let alias = if self.matches(&Token::As) {
-                self.parse_ident()?
-            } else if matches!(self.peek(), Token::Ident(_)) {
+            let alias = if self.matches(&Token::As) || matches!(self.peek(), Token::Ident(_)) {
                 self.parse_ident()?
             } else {
                 // `path` is non-empty (we consumed at least one `.segment`).
@@ -275,11 +273,7 @@ impl Parser {
                 alias: first,
                 array: self.parse_expr()?,
             }
-        } else if self.matches(&Token::As) {
-            FromSource::ImplicitContainer {
-                alias: self.parse_ident()?,
-            }
-        } else if matches!(self.peek(), Token::Ident(_)) {
+        } else if self.matches(&Token::As) || matches!(self.peek(), Token::Ident(_)) {
             FromSource::ImplicitContainer {
                 alias: self.parse_ident()?,
             }

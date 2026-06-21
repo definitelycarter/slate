@@ -124,23 +124,23 @@ fn lex_number(cur: &mut Cursor, start: usize) -> Result<Token> {
     }
 
     // Exponent.
-    if let Some(&(_, e)) = cur.peek() {
-        if e == 'e' || e == 'E' {
-            is_float = true;
-            s.push('e');
+    if let Some(&(_, e)) = cur.peek()
+        && (e == 'e' || e == 'E')
+    {
+        is_float = true;
+        s.push('e');
+        cur.next();
+        if let Some(&(_, sign)) = cur.peek()
+            && (sign == '+' || sign == '-')
+        {
+            s.push(sign);
             cur.next();
-            if let Some(&(_, sign)) = cur.peek() {
-                if sign == '+' || sign == '-' {
-                    s.push(sign);
-                    cur.next();
-                }
-            }
-            if !take_digits(cur, &mut s) {
-                return Err(SqlError::Lex {
-                    message: "expected digits in number exponent".into(),
-                    at: start,
-                });
-            }
+        }
+        if !take_digits(cur, &mut s) {
+            return Err(SqlError::Lex {
+                message: "expected digits in number exponent".into(),
+                at: start,
+            });
         }
     }
 
@@ -337,10 +337,10 @@ mod tests {
     #[test]
     fn numbers_int_and_float() {
         assert_eq!(
-            lex("42 3.14 1e3 2.5e-2"),
+            lex("42 1.75 1e3 2.5e-2"),
             vec![
                 Token::Int(42),
-                Token::Float(3.14),
+                Token::Float(1.75),
                 Token::Float(1000.0),
                 Token::Float(0.025),
                 Token::Eof

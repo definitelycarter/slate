@@ -194,9 +194,10 @@ pub(super) fn from_parts(name: &str, args: Vec<Value>) -> Result<Value> {
                 .zip(u32::try_from(s).ok()),
         )
         .and_then(|(date, ((h, mi), s))| date.and_hms_opt(h, mi, s));
-    let (Some(ndt), Ok(frac)) = (built, i128::try_from(frac)) else {
+    let Some(ndt) = built else {
         return Ok(Value::Undefined);
     };
+    let frac = i128::from(frac);
     if !(0..TICKS_PER_SEC).contains(&frac) {
         return Ok(Value::Undefined);
     }

@@ -137,7 +137,7 @@ impl Record {
 
     /// Read the TTL millis from the record header.
     pub fn ttl_millis(&self) -> Option<i64> {
-        if self.bytes[0] == TAG_TTL && self.bytes.len() >= 1 + TTL_SIZE {
+        if self.bytes[0] == TAG_TTL && self.bytes.len() > TTL_SIZE {
             Some(i64::from_le_bytes(
                 self.bytes[1..1 + TTL_SIZE].try_into().unwrap(),
             ))

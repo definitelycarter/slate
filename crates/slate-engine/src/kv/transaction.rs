@@ -21,11 +21,12 @@ pub struct KvTransaction<'a, S: Store + 'a> {
     pub(crate) txn: S::Txn<'a>,
     pub(crate) now_millis: i64,
     /// Per-transaction memoization of resolved collection handles, keyed by
-    /// `(cf, name)`. Resolving a handle costs a sys-CF get + index prefix scan
-    /// + deserialize; a single query resolves it twice (find meta + executor
-    /// node), and a `find_one` loop repeats that per call. Cached handles are
-    /// invalidated by the DDL methods that change a collection's shape
-    /// (`drop_collection`, `create_index_with_options`, `drop_index`).
+    /// `(cf, name)`. Resolving a handle costs a sys-CF get, an index prefix
+    /// scan, and a deserialize; a single query resolves it twice (find meta and
+    /// executor node), and a `find_one` loop repeats that per call. Cached
+    /// handles are invalidated by the DDL methods that change a collection's
+    /// shape (`drop_collection`, `create_index_with_options`, `drop_index`).
+    #[allow(clippy::type_complexity)]
     pub(crate) catalog_cache:
         RefCell<HashMap<(String, String), CollectionHandle<<S::Txn<'a> as Transaction>::Cf>>>,
 }
@@ -87,10 +88,10 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         // collide as a write-write conflict at commit, so this in-snapshot check
         // need only catch already-visible duplicates.
         for (key, value) in &changes.unique_puts {
-            if let Some(existing) = self.txn.get(handle.cf(), key)? {
-                if existing != *value {
-                    return Err(unique_violation(handle.name(), key, &existing));
-                }
+            if let Some(existing) = self.txn.get(handle.cf(), key)?
+                && existing != *value
+            {
+                return Err(unique_violation(handle.name(), key, &existing));
             }
             self.txn.put(handle.cf(), key, value)?;
         }
@@ -351,12 +352,11 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
                         // Eq: keep only exact value matches (reject longer
                         // prefix-sharing values and same-bytes-different-type).
-                        if let Some((want_tag, want_bytes)) = &eq_match {
-                            if entry.value_bytes() != want_bytes.as_slice()
-                                || entry.element_type() != Some(*want_tag)
-                            {
-                                continue;
-                            }
+                        if let Some((want_tag, want_bytes)) = &eq_match
+                            && (entry.value_bytes() != want_bytes.as_slice()
+                                || entry.element_type() != Some(*want_tag))
+                        {
+                            continue;
                         }
 
                         if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {

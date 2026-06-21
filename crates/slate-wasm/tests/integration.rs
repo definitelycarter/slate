@@ -150,7 +150,7 @@ fn update_one_returns_updated_doc() {
         .update_one(
             "users",
             obj(&[("_id", JsValue::from_str("u1"))]),
-            obj(&[("$set", obj(&[("age", JsValue::from_f64(31.0))]).into())]),
+            obj(&[("$set", obj(&[("age", JsValue::from_f64(31.0))]))]),
         )
         .unwrap();
 

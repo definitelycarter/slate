@@ -14,6 +14,12 @@ pub struct RuntimeRegistry {
     runtimes: HashMap<RuntimeKind, Arc<dyn ScriptRuntime>>,
 }
 
+impl Default for RuntimeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeRegistry {
     pub fn new() -> Self {
         Self {

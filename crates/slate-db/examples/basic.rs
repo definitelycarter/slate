@@ -8,7 +8,7 @@ fn main() -> Result<(), DbError> {
     let db = DatabaseBuilder::new().open(MemoryStore::new())?;
 
     // ── Create a collection ─────────────────────────────────────
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.create_collection(&CollectionConfig {
         name: "users".into(),
         ..Default::default()
@@ -16,7 +16,7 @@ fn main() -> Result<(), DbError> {
     txn.commit()?;
 
     // ── Insert documents ────────────────────────────────────────
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
 
     txn.insert_one(
         DEFAULT_CF,
@@ -178,7 +178,7 @@ fn main() -> Result<(), DbError> {
     println!("Updated ages.");
 
     // ── Create an index ─────────────────────────────────────────
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.create_index(DEFAULT_CF, "users", "role")?;
     txn.commit()?;
     println!("Created index on 'role'.");
@@ -223,7 +223,7 @@ fn main() -> Result<(), DbError> {
     // ── Custom column family ─────────────────────────────────────
     // Collections can be scoped to a column family instead of DEFAULT_CF.
     // The same collection name in different CFs are fully isolated.
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.create_collection(&CollectionConfig {
         name: "events".into(),
         cf: "analytics".into(),

@@ -22,6 +22,12 @@ pub struct DatabaseBuilder {
     sweep_interval: Option<std::time::Duration>,
 }
 
+impl Default for DatabaseBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
@@ -725,10 +731,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         if let Err(e) = self
             .txn
             .create_index(&config.cf, &config.name, &config.ttl_path)
+            && !matches!(e, slate_engine::EngineError::IndexExists(_))
         {
-            if !matches!(e, slate_engine::EngineError::IndexExists(_)) {
-                return Err(e.into());
-            }
+            return Err(e.into());
         }
         Ok(())
     }

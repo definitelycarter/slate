@@ -14,7 +14,7 @@ fn main() -> Result<(), DbError> {
         .open(MemoryStore::new())?;
 
     // ── Set up collections ────────────────────────────────────
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.create_collection(&CollectionConfig {
         cf: "app".into(),
         name: "users".into(),
@@ -31,7 +31,7 @@ fn main() -> Result<(), DbError> {
     // The trigger fires on every mutation (insert, update, delete).
     // It logs each action to the "audit" collection and prints
     // the lifecycle event so you can see the before/after pairs.
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.register_trigger(
         "app",
         "users",
@@ -62,7 +62,7 @@ fn main() -> Result<(), DbError> {
     // ── INSERT ────────────────────────────────────────────────
     // Fires: inserting → inserted
     println!("--- insert_one ---");
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.insert_one(
         "app",
         "users",
@@ -128,7 +128,7 @@ fn main() -> Result<(), DbError> {
     txn.commit()?;
 
     println!("\n--- delete_many ---");
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.insert_one(
         "app",
         "users",

@@ -19,7 +19,7 @@ mod tests {
     #[test]
     fn cosmos_example() {
         // https://learn.microsoft.com/en-us/cosmos-db/query/pi
-        assert_eq!(call("PI", vec![]).unwrap(), def(3.141592653589793_f64));
+        assert_eq!(call("PI", vec![]).unwrap(), def(std::f64::consts::PI));
     }
 
     #[test]

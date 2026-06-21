@@ -37,7 +37,7 @@ mod tests {
         approx(call("LOG", vec![def(5)]).unwrap(), 1.6094379124341003);
         approx(
             call("LOG", vec![def(2), def(10)]).unwrap(),
-            0.3010299956639812,
+            std::f64::consts::LOG10_2,
         );
     }
 

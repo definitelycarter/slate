@@ -30,6 +30,7 @@ mod tests {
     use super::super::{call, def};
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a Cosmos doc example, not π
     fn cosmos_examples() {
         assert_eq!(
             call("STRINGTONUMBER", vec![def("100")]).unwrap(),

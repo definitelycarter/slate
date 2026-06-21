@@ -470,6 +470,9 @@ fn literal_to_bson(lit: &Literal) -> Bson {
     }
 }
 
+// Explicit match (not `.ok()`) per the crate's no-silent-discard convention; a
+// non-representable value simply skips the index optimization.
+#[allow(clippy::manual_ok_err)]
 fn bson_to_raw(value: &Bson) -> Option<RawBson> {
     match RawBson::try_from(value.clone()) {
         Ok(raw) => Some(raw),

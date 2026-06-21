@@ -42,10 +42,20 @@ impl PrefixIter {
         // SAFETY: same as forward — Arc keeps OrdMap alive for the struct's lifetime.
         let iter: RangedIter<'static, Vec<u8>, Vec<u8>> =
             if let Some(upper) = increment_prefix(&prefix) {
-                unsafe { std::mem::transmute(data.range(prefix.clone()..upper)) }
+                unsafe {
+                    std::mem::transmute::<
+                        RangedIter<'_, Vec<u8>, Vec<u8>>,
+                        RangedIter<'static, Vec<u8>, Vec<u8>>,
+                    >(data.range(prefix.clone()..upper))
+                }
             } else {
                 // All 0xFF — no upper bound; use open-ended range (starts_with filter applies).
-                unsafe { std::mem::transmute(data.range(prefix.clone()..)) }
+                unsafe {
+                    std::mem::transmute::<
+                        RangedIter<'_, Vec<u8>, Vec<u8>>,
+                        RangedIter<'static, Vec<u8>, Vec<u8>>,
+                    >(data.range(prefix.clone()..))
+                }
             };
         Self {
             _data: data,

@@ -18,6 +18,12 @@ pub struct LuaScriptRuntime {
     instruction_limit: u32,
 }
 
+impl Default for LuaScriptRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LuaScriptRuntime {
     pub fn new() -> Self {
         Self {
@@ -230,12 +236,12 @@ mod tests {
         let pass = handle
             .call(&rawdoc! { "name": "alice" }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(pass.get_bool("ok").unwrap(), true);
+        assert!(pass.get_bool("ok").unwrap());
 
         let fail = handle
             .call(&rawdoc! { "status": "active" }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(fail.get_bool("ok").unwrap(), false);
+        assert!(!fail.get_bool("ok").unwrap());
     }
 
     #[test]
@@ -284,10 +290,10 @@ mod tests {
     fn pure_roundtrip_float() {
         let handle = load(b"return function(doc) return doc end");
         let out = handle
-            .call(&rawdoc! { "f": 3.14 }, &ScriptCapabilities::Pure)
+            .call(&rawdoc! { "f": 2.5 }, &ScriptCapabilities::Pure)
             .unwrap();
         let f = out.get_f64("f").unwrap();
-        assert!((f - 3.14).abs() < f64::EPSILON);
+        assert!((f - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -296,7 +302,7 @@ mod tests {
         let out = handle
             .call(&rawdoc! { "b": true }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(out.get_bool("b").unwrap(), true);
+        assert!(out.get_bool("b").unwrap());
     }
 
     #[test]
@@ -365,7 +371,7 @@ mod tests {
     fn pure_sandbox_blocks_globals() {
         let handle = load(b"return function(doc) return { has_os = (os ~= nil) } end");
         let result = handle.call(&rawdoc! {}, &ScriptCapabilities::Pure).unwrap();
-        assert_eq!(result.get_bool("has_os").unwrap(), false);
+        assert!(!result.get_bool("has_os").unwrap());
     }
 
     #[test]
@@ -495,7 +501,7 @@ mod tests {
         let result = handle
             .call(&rawdoc! { "x": 1 }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(result.get_bool("added").unwrap(), true);
+        assert!(result.get_bool("added").unwrap());
 
         // Second get_or_load returns cached handle
         let handle2 = pool
@@ -510,6 +516,6 @@ mod tests {
         let result2 = handle2
             .call(&rawdoc! { "y": 2 }, &ScriptCapabilities::Pure)
             .unwrap();
-        assert_eq!(result2.get_bool("added").unwrap(), true);
+        assert!(result2.get_bool("added").unwrap());
     }
 }

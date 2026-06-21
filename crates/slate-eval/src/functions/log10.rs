@@ -23,7 +23,10 @@ mod tests {
     fn cosmos_examples() {
         // https://learn.microsoft.com/en-us/cosmos-db/query/log10
         approx(call("LOG10", vec![def(5)]).unwrap(), 0.6989700043360189);
-        approx(call("LOG10", vec![def(2)]).unwrap(), 0.3010299956639812);
+        approx(
+            call("LOG10", vec![def(2)]).unwrap(),
+            std::f64::consts::LOG10_2,
+        );
         approx(call("LOG10", vec![def(100)]).unwrap(), 2.0);
     }
 }

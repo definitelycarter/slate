@@ -14,7 +14,7 @@ fn main() -> Result<(), DbError> {
         .open(MemoryStore::new())?;
 
     // ── Create a "users" collection ─────────────────────────────
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.create_collection(&CollectionConfig {
         cf: "app".into(),
         name: "users".into(),
@@ -26,7 +26,7 @@ fn main() -> Result<(), DbError> {
     // Validators are pure functions: they receive { doc = <the document> }
     // and must return { ok = true } to pass, or { ok = false, reason = "..." }
     // to reject the document.
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
 
     // 1) "name" must be a non-empty string
     txn.register_validator(
@@ -70,7 +70,7 @@ fn main() -> Result<(), DbError> {
 
     // ── Successful insert ───────────────────────────────────────
     println!("--- insert valid document ---");
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.insert_one(
         "app",
         "users",
@@ -82,7 +82,7 @@ fn main() -> Result<(), DbError> {
 
     // ── Another successful insert (age is optional) ─────────────
     println!("--- insert valid document (no age) ---");
-    let mut txn = db.begin(false)?;
+    let txn = db.begin(false)?;
     txn.insert_one("app", "users", doc! { "_id": "u2", "name": "Bob" })?
         .drain()?;
     txn.commit()?;
@@ -93,7 +93,7 @@ fn main() -> Result<(), DbError> {
     // (releasing the write lock) before we begin the next one.
     println!("--- insert document with missing name ---");
     {
-        let mut txn = db.begin(false)?;
+        let txn = db.begin(false)?;
         let result = txn
             .insert_one("app", "users", doc! { "_id": "u3", "age": 25 })?
             .drain();
@@ -106,7 +106,7 @@ fn main() -> Result<(), DbError> {
     // ── Failed insert: negative age ─────────────────────────────
     println!("--- insert document with negative age ---");
     {
-        let mut txn = db.begin(false)?;
+        let txn = db.begin(false)?;
         let result = txn
             .insert_one(
                 "app",
@@ -123,7 +123,7 @@ fn main() -> Result<(), DbError> {
     // ── Failed insert: empty name ───────────────────────────────
     println!("--- insert document with empty name ---");
     {
-        let mut txn = db.begin(false)?;
+        let txn = db.begin(false)?;
         let result = txn
             .insert_one("app", "users", doc! { "_id": "u5", "name": "", "age": 20 })?
             .drain();

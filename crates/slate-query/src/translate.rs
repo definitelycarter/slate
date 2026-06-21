@@ -188,7 +188,7 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<Expression> {
     // An explicit multikey path (`tags.[]`, `items.[].sku`) is array-membership,
     // tested via MULTIKEY_EQ (which the planner can match to a `.[]` index).
     if field.contains("[]") {
-        return Ok(multikey_eq(field, value)?);
+        return multikey_eq(field, value);
     }
     // `literal` is built twice rather than cloned (both are cheap leaf nodes).
     let eq = binary(BinOp::Eq, path(field), literal(value)?);

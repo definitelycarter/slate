@@ -381,5 +381,5 @@ fn is_array_table(table: &mlua::Table) -> Result<bool, mlua::Error> {
             _ => return Ok(false),
         }
     }
-    Ok(count == raw_len as usize)
+    Ok(count == raw_len)
 }
