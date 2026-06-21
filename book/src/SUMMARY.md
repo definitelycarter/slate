@@ -4,7 +4,7 @@
 - [Architecture](./architecture.md)
 - [Querying](./querying.md)
 - [Mongo Operators](./mongo-operators.md)
-- [SQL Support](./sql-support.md)
+- [SQL Reference](./sql-support.md)
 - [Function Reference](./functions.md)
 - [Playground](./playground.md)
 - [Swift / Apple Platforms](./swift.md)

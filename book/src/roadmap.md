@@ -627,6 +627,22 @@ A lightweight SQL parser (hand-written recursive descent or `sqlparser-rs`) that
 existing plan tree. The SQL surface is purely additive — the filter/find API continues to
 work unchanged.
 
+### Status & not-yet-implemented
+
+Most of the above has shipped — `SELECT`/`VALUE`/`*`/tabular, `WHERE`, `GROUP BY`,
+`ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, the five aggregates, and subqueries (see
+the [SQL Reference](./sql-support.md) and [Function Reference](./functions.md)).
+Remaining gaps:
+
+- **`HAVING`** and **`ARRAY_AGG`/`COLLECT`** aggregation extensions.
+- **`RAND`** (needs the transaction RNG) and **`DOCUMENTID`** scalar functions.
+- **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`,
+  `ORDER BY RANK`: needs a full-text index + BM25 scoring.
+- **Vector** — `VECTORDISTANCE`: needs a vector index.
+- **Numeric-index selectivity** — cross-type numeric comparison is correct; a
+  canonical numeric index encoding for selectivity is a follow-up.
+- **Spatial index** — the `ST_*` functions are implemented; a spatial index is not.
+
 ---
 
 ## Partial Indexes

@@ -1,201 +1,74 @@
-# SQL Support
+# SQL Reference
 
-Slate's SQL surface (`Transaction::query`) targets the **CosmosDB SQL** dialect.
-This page tracks coverage against the Cosmos function/keyword/clause set so we
-can work through it incrementally.
+Slate's SQL surface (`Transaction::query`) implements the **CosmosDB SQL** dialect.
+This page covers the grammar, keywords, and clauses; for the built-in scalar and
+aggregate functions, see the [Function Reference](./functions.md). For the query
+model and plan shapes, see [Querying](./querying.md).
 
-**Legend:** `[x]` implemented · `[ ]` planned · ⭐ high value / architecturally
-fun · 🚧 needs new infrastructure (deferred).
+## Grammar
 
-**How we work through it:** one commit per item (or per small batch of
-functions). Each scalar function is a new file in `slate-eval/functions/` whose
-tests mirror the worked example on its Cosmos doc page
-(`learn.microsoft.com/en-us/cosmos-db/query/<name>`), so we track the spec, not
-our own guesses. Keywords/clauses touch the parser → AST → planner.
+```
+SELECT [DISTINCT] [TOP n] VALUE <expr> | * | <expr> [AS k], …
+[FROM <alias> [JOIN <a> IN <arr>]*]
+[WHERE <expr>]
+[GROUP BY <expr>, …]
+[ORDER BY <expr> [ASC|DESC], …]
+[OFFSET n] [LIMIT n]
+```
 
-**Type semantics:** type-identity tests (`IS_STRING`, …) are strict by BSON
-type; `IS_INTEGER` is a value/range test (Cosmos); comparison coerces numerics
-by value. Math functions follow Cosmos's all-`double` numeric model, so they
-return a `Double` (`CEILING(0)` → `0.0`) — `ABS` is the exception, preserving
-the input's integer type. See `slate-eval/functions/mod.rs`.
+The `FROM` clause names only the **row alias**; the container is the
+`(cf, collection)` passed to `query()` (matching Cosmos, where the container is
+external to the query text). `WHERE` is the full scalar grammar (operators,
+function calls, object/array literals) plus the `IN` / `BETWEEN` / `LIKE` predicate
+forms below. `@name` placeholders are supplied via
+`query_with_params(cf, collection, sql, params)`.
 
-## Current surface
+## Type semantics
 
-`SELECT [DISTINCT] VALUE <expr> | * | <expr> [AS k], …  [FROM <alias>  [JOIN <a> IN <arr>]*]
-[WHERE …] [GROUP BY …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
+- **Type-identity tests** (`IS_STRING`, …) are strict by BSON type; `IS_INTEGER`
+  is a value/range test (Cosmos semantics); comparison coerces numerics by value.
+- **Number model:** every number is a 64-bit double, so math functions return a
+  `Double` (`CEILING(0)` → `0.0`) — `ABS` is the exception, preserving the input's
+  integer type, and the `INT*`/`INC` functions return integers. See the
+  [Function Reference](./functions.md) for the per-function detail.
+- A **type mismatch yields `undefined`**, which is omitted from a projection and
+  excludes a row from a `WHERE` (rather than erroring).
 
-Done: `FROM` (optional — see below), `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`,
-`JOIN … IN`, `SELECT VALUE`, `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar
-expressions, object/array literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`,
-aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
-(scalar / `EXISTS` / `ARRAY` over `FROM x IN <array>`).
+## Keywords
 
----
-
-## Tiers (suggested order)
-
-- **Tier 0** — scalar functions: pure `slate-eval/functions.rs` adds, no
-  parser/planner changes. Knock out in batches.
-- **Tier 1** — expression sugar (`IN`, `BETWEEN`, `LIKE`, `IIF`, `@params`):
-  small parser + lowering work; `IN`/`BETWEEN` are sargable.
-- **Tier 2** — aggregates without `GROUP BY` (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`),
-  `SELECT DISTINCT`, `TOP`: a new `Aggregate` executor node.
-- **Tier 3** — `GROUP BY` + per-group aggregates: AST clause + hash-aggregation
-  node.
-- **Tier 4** — subqueries (correlated array subqueries first; then `EXISTS` /
-  `IN (subquery)`): depends on Tier 2/3.
-
----
-
-## Scalar functions
-
-### Math (Tier 0)
-
-- [x] `ABS`
-- [x] `CEILING`  [x] `FLOOR`  [x] `ROUND`  [x] `TRUNC`  [x] `SIGN`
-- [x] `SQRT`  [x] `SQUARE`  [x] `POWER`  [x] `EXP`  [x] `LOG`  [x] `LOG10`
-- [x] `PI`  [ ] `RAND` *(non-deterministic — needs the txn's RNG/clock)*
-- [x] `NUMBERBIN` *(round down to a multiple of bin size; bin size 0 → undefined)*
-- [x] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
-- [x] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(integer args only; ÷/mod 0 → undefined)*
-- [x] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
-
-### String (Tier 0)
-
-- [x] `CONCAT`  [x] `CONTAINS`  [x] `STARTSWITH`  [x] `LENGTH`  [x] `LOWER`  [x] `UPPER`  [x] `REGEXMATCH`
-- [x] `ENDSWITH`  [x] `INDEX_OF`  [x] `SUBSTRING`  [x] `LEFT`  [x] `RIGHT`
-- [x] `TRIM`  [x] `LTRIM`  [x] `RTRIM`  [x] `REPLACE`  [x] `REPLICATE`  [x] `REVERSE`
-- [x] `STRINGEQUALS`  [x] `STRINGJOIN`  [x] `STRINGSPLIT`  [x] `TOSTRING`
-- [x] Parsing: `STRINGTONUMBER` `STRINGTOBOOLEAN` `STRINGTONULL` `STRINGTOARRAY` `STRINGTOOBJECT`
-
-The string predicates `STARTSWITH`/`ENDSWITH`/`CONTAINS`/`STRINGEQUALS` accept an
-optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
-`SUBSTRING`, `LEFT`, and `RIGHT` index by character (not byte).
-
-### Array (Tier 0)
-
-- [x] `ARRAY_CONTAINS`  [x] `ARRAY_LENGTH`
-- [x] `ARRAY_CONCAT`  [x] `ARRAY_SLICE`  [x] `ARRAY_CONTAINS_ALL`  [x] `ARRAY_CONTAINS_ANY`
-- [x] `CHOOSE`  [x] `SETINTERSECT`  [x] `SETUNION`  [x] `OBJECTTOARRAY`
-
-### Type checking (Tier 0)
-
-- [x] `IS_DEFINED`  [x] `IS_NULL`
-- [x] `IS_STRING`  [x] `IS_NUMBER`  [x] `IS_BOOL`  [x] `IS_ARRAY`  [x] `IS_OBJECT`  [x] `IS_PRIMITIVE`
-- [x] `IS_INTEGER`  [x] `IS_FINITE_NUMBER`
-
-### Conditional (Tier 1)
-
-- [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [x] `??` coalesce operator *(lowest precedence; falls through on undefined only — a defined `null` is kept)*
-
-### Date & time (Tier 0–1)
-
-Cosmos datetimes are ISO-8601 strings (`…fffffffZ`, 100ns precision); timestamps
-are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
-`chrono` (no wall-clock feature → wasm-safe).
-- [x] `DATETIMEADD`  [x] `DATETIMEDIFF`  [x] `DATETIMEPART`  [x] `DATETIMEBIN`  [x] `DATETIMEFROMPARTS`
-- [x] `DATETIMETOTIMESTAMP`  [x] `DATETIMETOTICKS`  [x] `TIMESTAMPTODATETIME`  [x] `TICKSTODATETIME`
-- [x] `GETCURRENTDATETIME` / `…STATIC`  [x] `GETCURRENTTIMESTAMP` / `…STATIC`  [x] `GETCURRENTTICKS` / `…STATIC`
-  — read the engine's injectable clock (`EngineTransaction::now_millis`, captured
-  at txn begin) threaded into the eval context via `$now`. No syscall in the
-  evaluator, so it stays wasm-clean; on wasm supply `with_clock(|| Date.now())`.
-
-### Item (Tier 1)
-
-- [ ] `DOCUMENTID` *(returns the configured pk value — slate pk path is dynamic)*
-
-### Spatial (Tier 2)
-
-GeoJSON geometries are ordinary documents (`{ "type": "Point", "coordinates":
-[lng, lat] }`, plus `LineString`/`Polygon`/`Multi*`), so no new BSON type is
-needed — they reach eval as a `Document`. Metric results are computed on the
-WGS84 ellipsoid (a mean-radius sphere is ~0.3% off).
-
-- [x] `ST_ISVALID`  [x] `ST_ISVALIDDETAILED` *(GeoJSON validity: coordinate ranges, ring closure, min ring size)*
-- [x] `ST_WITHIN`  [x] `ST_INTERSECTS` *(planar lng/lat predicates — boolean results match Cosmos exactly)*
-- [x] `ST_DISTANCE` *(Vincenty geodesic, meters)*  [x] `ST_AREA` *(authalic-sphere area, m²)*
-
-The two **metric** functions land very close to the Cosmos oracle (`ST_DISTANCE`
-within ~cm, `ST_AREA` within ~1 ppm) but do not bit-reproduce Cosmos's
-proprietary spatial library, so they stay value-mismatches in the corpus replay
-(see the cosmos-parity notes). There is no spatial *index* yet — these are
-eval-only scalar functions.
-
----
-
-## Keywords (Tier 1 unless noted)
-
-- [x] `IN (a, b, …)`  ⭐ *(desugars to OR-of-equalities → sargable `IndexMerge(Or)`; `NOT IN` supported)*
-- [x] `BETWEEN x AND y`  ⭐ *(desugars to `>= x AND <= y`, inclusive → sargable range; `NOT BETWEEN` supported)*
-- [x] `LIKE <pattern> [ESCAPE c]` *(desugars to a safely-escaped, anchored `REGEXMATCH`; `NOT LIKE` supported)*
-- [x] `DISTINCT` (`SELECT DISTINCT …`) *(dedups whole projected rows; an array value counts as one value — no Mongo-style flattening)*
-- [x] `TOP N` *(result cap; follows `DISTINCT`, reserved word, mutually exclusive with `OFFSET`/`LIMIT`)*
-
----
+- `IN (a, b, …)` — desugars to an OR of equalities → sargable `IndexMerge(Or)`; `NOT IN` supported.
+- `BETWEEN x AND y` — desugars to `>= x AND <= y` (inclusive) → sargable range; `NOT BETWEEN` supported.
+- `LIKE <pattern> [ESCAPE c]` — desugars to a safely-escaped, anchored `REGEXMATCH` (the wildcards `%`/`_` and `[…]`/`[^…]` sets become regex constructs; every other character is escaped to a literal, so a pattern is never a regex-injection vector); `NOT LIKE` supported.
+- `DISTINCT` (`SELECT DISTINCT …`) — dedups whole projected rows (an array value counts as one value; no Mongo-style flattening).
+- `TOP n` — a result cap; follows `DISTINCT`, mutually exclusive with `OFFSET`/`LIMIT`.
 
 ## Clauses
 
-- [x] `FROM`  [x] `WHERE`  [x] `ORDER BY`  [x] `OFFSET … LIMIT`  [x] `SELECT`
-- [x] `FROM` is **optional** (matching Cosmos): a FROM-less query (`SELECT VALUE 1`,
-  `SELECT 1 AS a, 2 AS b`) evaluates the `SELECT` exactly once over a single
-  implicit row. Lowers to a one-row `Values` source feeding the projection. Only
-  `SELECT *` requires a `FROM` (rejected without one); subqueries may be FROM-less
-  too (`(SELECT VALUE 1)`).
-- [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` and `ORDER BY`
-  reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
-  aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,
-  matching Cosmos.
-- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)`, in any
-  position: projection, `WHERE`, a multi-value subquery as a `JOIN` source
-  (`JOIN t IN (SELECT …)`), or a nested `FROM` source. Correlated or
-  uncorrelated, nesting to any depth. Each lowers to a correlated-apply
-  (`Subquery`) node over a `CurrentRow` leaf, reusing the full node set inside the
-  subplan. A subquery whose `FROM` names an outer alias is item-scoped (iterates
-  that single bound value), matching Cosmos.
-- [x] Subroot `FROM <base>.<path> [AS] <alias>` — scope iteration to a sub-path
-  of each document; `alias` binds to the whole sub-value (object or array, no
-  unwinding), one row per document, dropping documents where the path is
-  undefined. The alias is optional (defaults to the last path segment).
+- **`SELECT`** — three projection forms: `VALUE <expr>` (one bare value per row), `*` (the whole document), and tabular `<expr> [AS k], …` (a document of the selected columns). Tabular keys follow Cosmos: the last path segment of a member access, an explicit `AS`, or a positional `$1`/`$2`/… for an unnamed computed column; two columns resolving to the same key are a parse error.
+- **`FROM` is optional** (matching Cosmos): a FROM-less query (`SELECT VALUE 1`, `SELECT 1 AS a, 2 AS b`) evaluates the `SELECT` once over a single implicit row. Only `SELECT *` requires a `FROM`.
+- **`JOIN <a> IN <array-expr>`** — cross-joins each document with the elements of one of its in-document arrays (it does not join another container).
+- **`WHERE` / `ORDER BY` / `OFFSET … LIMIT`** — standard; `ORDER BY` takes multiple keys with per-key `ASC`/`DESC`.
+- **`GROUP BY <expr>, …`** — one row per distinct group; `SELECT` and `ORDER BY` may reference only the group-key expressions or aggregates (`ORDER BY` sorts the resulting group rows). An ungrouped non-aggregate column — or `SELECT *` — is rejected, matching Cosmos.
+- **Subqueries** range over an *in-document array* (`FROM x IN <array>`), never another container. Three forms: a scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)`. They appear in `SELECT`, `WHERE`, and as a `JOIN` source; may be **correlated** (referencing the outer row) or uncorrelated, and may nest to any depth. A subquery whose `FROM` names an outer alias is item-scoped (iterates that single bound value), matching Cosmos.
+- **Subroot `FROM <base>.<path> [AS] <alias>`** — scopes iteration to a sub-path of each document; the alias binds to the whole sub-value (no unwinding), dropping documents where the path is undefined. The alias is optional (defaults to the last path segment).
 
----
+## Aggregation
 
-## Aggregation functions (Tier 2)
+`COUNT`, `SUM`, `AVG`, `MIN`, `MAX` collapse the matching rows (or each `GROUP BY`
+group) to one result row, via the blocking `Aggregate` node. A query that
+aggregates always emits one row per group, so `COUNT` over an empty set is `0`. See
+the [Function Reference](./functions.md#aggregate-functions) for the per-function
+skip/poison/type rules.
 
-Both whole-result and per-group (`GROUP BY`) aggregation run through the blocking
-`Aggregate` executor node.
-- [x] `COUNT`  [x] `SUM`  [x] `AVG`  [x] `MIN`  [x] `MAX`
+## Not yet supported
 
-Semantics (Cosmos): `COUNT(expr)` counts defined values (`COUNT(1)` counts all),
-empty → `0`. `SUM`/`AVG` skip undefined but a non-numeric *defined* value poisons
-the result to undefined; empty → undefined. `MIN`/`MAX` use the shared total
-order, preserve the winning value's type, and have no poison rule. `COUNT` →
-`Int64`, `SUM`/`AVG` → `Double` (the all-double convention), `MIN`/`MAX` → the
-actual value.
+The parser accepts any `IDENT(...)` as a function call, so unimplemented functions
+surface as an eval-time "unknown function" error rather than a parse error. Notable
+gaps (tracked in the [Roadmap](./roadmap.md)):
 
----
-
-## Cross-cutting gaps
-
-- [x] **`@params` end-to-end** ⭐ — `query_with_params(cf, collection, sql, params)`
-  threads a params document (keys are the bare names, no `@`) through the
-  executor into expression evaluation; a referenced-but-unsupplied parameter is
-  a hard error (matching Cosmos), not silently undefined.
-- [ ] **Numeric literal typing** — SQL integer literals are `Int64`; the index
-  path now compares cross-type (correct), but selectivity is a known follow-up
-  (canonical numeric index encoding).
-- [x] **`NaN` / `Infinity` literals** — parsed as `Double` literals (matching
-  Cosmos), not identifiers; `undefined` stays the undefined value.
-
----
-
-## Deferred — need new infrastructure 🚧
-
-These require subsystems slate doesn't have yet; out of scope for the SQL pass.
-
-- **Full-text search**: `FULLTEXTCONTAINS` / `…ALL` / `…ANY`, `FULLTEXTSCORE`,
-  `RRF`, `ORDER BY RANK` — need a full-text index + BM25 scoring.
-- **Vector**: `VECTORDISTANCE` — needs a vector index.
-
-(The spatial `ST_*` functions, formerly listed here, are now implemented as
-eval-only scalar functions — see [Spatial](#spatial-tier-2). A spatial *index*
-is still future work.)
+- **`RAND`** — non-deterministic; needs the transaction's RNG.
+- **`DOCUMENTID`** — returns the configured pk value.
+- **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`, `ORDER BY RANK`: needs a full-text index + BM25 scoring.
+- **Vector** — `VECTORDISTANCE`: needs a vector index.
+- **Numeric-index selectivity** — cross-type numeric comparison is correct, but a canonical numeric index encoding for selectivity is a follow-up.
+- **Spatial index** — the `ST_*` functions are implemented (see the [Function Reference](./functions.md#spatial)); a spatial *index* is future work.
