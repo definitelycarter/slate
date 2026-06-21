@@ -6,7 +6,7 @@
 
 use bson::raw::{BindRawBsonRef, CString, RawBsonRef, RawDocumentBuf};
 use bson::{Bson, RawBson};
-use slate_ast::ScalarExpr;
+use slate_ast::Expression;
 use slate_eval::EvalError;
 use slate_eval::raweval::{self, RawValue};
 
@@ -16,7 +16,7 @@ use crate::{ExecError, ValueIter};
 /// Unwind `array` into the binding `alias` for each incoming environment row.
 pub(crate) fn execute<'a>(
     alias: String,
-    array: ScalarExpr,
+    array: Expression,
     source: ValueIter<'a>,
     params: env::Params,
 ) -> ValueIter<'a> {
@@ -37,7 +37,7 @@ pub(crate) fn execute<'a>(
 fn expand(
     row: &RawBson,
     alias: &str,
-    array: &ScalarExpr,
+    array: &Expression,
     params: Option<&bson::RawDocument>,
 ) -> Result<Vec<RawBson>, ExecError> {
     let bindings = env::bindings_of(row)?;

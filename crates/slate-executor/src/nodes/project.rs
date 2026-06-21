@@ -6,7 +6,7 @@
 //! identity (`c`) and the bound document passes through.
 
 use bson::RawBson;
-use slate_ast::ScalarExpr;
+use slate_ast::Expression;
 use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
@@ -15,7 +15,7 @@ use crate::{ExecError, ValueIter};
 
 /// Wrap `source`, evaluating `expr` against each row environment.
 pub(crate) fn execute<'a>(
-    expr: ScalarExpr,
+    expr: Expression,
     binding: RowBinding,
     source: ValueIter<'a>,
     params: env::Params,
@@ -24,7 +24,7 @@ pub(crate) fn execute<'a>(
     // whole bound row, so pass it straight through — no eval, no copy. This is
     // the `find` shape, and what brings the scan path to v1 parity. Detect it
     // once here rather than per row.
-    if let (RowBinding::Alias(alias), ScalarExpr::Identifier(name)) = (&binding, &expr)
+    if let (RowBinding::Alias(alias), Expression::Identifier(name)) = (&binding, &expr)
         && alias == name
     {
         return Box::new(source);

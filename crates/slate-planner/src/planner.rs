@@ -7,7 +7,7 @@
 //! the catalog state ([`PlanContext`]: the target collection, its index
 //! metadata, and its resolved hooks); it builds no `Node`/`Plan` trees itself.
 
-use slate_ast::{OrderByItem, ScalarExpr, SortDirection, Statement};
+use slate_ast::{Expression, OrderByItem, SortDirection, Statement};
 use slate_vm::ResolvedHook;
 
 use crate::lower::lower_query;
@@ -167,13 +167,13 @@ fn wrap_after(ctx: &PlanContext, action: &str, plan: Plan) -> Plan {
 
 /// Build the Mongo `distinct` pipeline: `Scan → [Filter] → Project(path) →
 /// Distinct(flatten) → [Sort] → [Limit]`. The projected path uses array-
-/// distributing [`ScalarExpr::PathGet`] and `Distinct` flattens one level, so an
+/// distributing [`Expression::PathGet`] and `Distinct` flattens one level, so an
 /// array field's elements are the distinct values (Mongo semantics, not SQL's).
 fn build_distinct(
     ctx: &PlanContext,
     alias: &str,
     field: &str,
-    predicate: Option<ScalarExpr>,
+    predicate: Option<Expression>,
     sort: Option<SortDirection>,
     skip: Option<u64>,
     take: Option<u64>,
@@ -190,8 +190,8 @@ fn build_distinct(
         };
     }
     node = Node::Project {
-        expr: ScalarExpr::PathGet {
-            base: Box::new(ScalarExpr::Identifier(alias.to_string())),
+        expr: Expression::PathGet {
+            base: Box::new(Expression::Identifier(alias.to_string())),
             path: field.split('.').map(str::to_string).collect(),
         },
         binding: binding.clone(),
@@ -206,7 +206,7 @@ fn build_distinct(
         // by `alias` sorts the values themselves.
         node = Node::Sort {
             keys: vec![OrderByItem {
-                expr: ScalarExpr::Identifier(alias.to_string()),
+                expr: Expression::Identifier(alias.to_string()),
                 direction,
             }],
             binding,

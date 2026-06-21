@@ -12,7 +12,7 @@
 //! they are sargable like a plain equality — see the "Mongo idiom" section.
 
 use bson::{Bson, RawBson};
-use slate_ast::{BinOp, Literal, ScalarExpr};
+use slate_ast::{BinOp, Expression, Literal};
 
 use crate::plan::{CollectionRef, IndexScanRange, LogicalOp, Node, ScanDirection};
 
@@ -37,11 +37,11 @@ pub struct CollectionMeta {
 ///   `IndexMerge(Or)` — all intersected via `IndexMerge(And)` when more than
 ///   one applies. Consumed atoms leave the residual; the rest stay a `Filter`.
 pub(crate) fn plan_source(
-    filter: Option<ScalarExpr>,
+    filter: Option<Expression>,
     alias: &str,
     container: &CollectionRef,
     meta: &CollectionMeta,
-) -> (Node, Option<ScalarExpr>) {
+) -> (Node, Option<Expression>) {
     let Some(expr) = filter else {
         return (scan(container), None);
     };
@@ -50,7 +50,7 @@ pub(crate) fn plan_source(
     // A whole-filter Mongo implicit-equality (`f = v OR ARRAY_CONTAINS(f, v)`)
     // is *not* a real disjunction — it is sargable as an equality on `f`, so it
     // falls through to the conjunction path below rather than taking this route.
-    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. })
+    if matches!(expr, Expression::Binary { op: BinOp::Or, .. })
         && as_mongo_eq(&expr, alias).is_none()
     {
         return match index_source_for(&expr, alias, container, meta) {
@@ -139,7 +139,7 @@ pub(crate) fn plan_source(
         if as_mongo_eq(conjunct, alias).is_some() {
             continue; // already handled above
         }
-        if matches!(conjunct, ScalarExpr::Binary { op: BinOp::Or, .. })
+        if matches!(conjunct, Expression::Binary { op: BinOp::Or, .. })
             && let Some(ids) = index_source_for(conjunct, alias, container, meta)
         {
             sources.push(ids);
@@ -157,7 +157,7 @@ pub(crate) fn plan_source(
 /// range bounds are combined). Returns the scan and the consumed conjunct
 /// indices, or `None` if `field` has no usable atom here.
 fn field_index_scan(
-    conjuncts: &[ScalarExpr],
+    conjuncts: &[Expression],
     consumed: &[usize],
     alias: &str,
     container: &CollectionRef,
@@ -223,7 +223,7 @@ fn field_index_scan(
 /// fully indexable: an atom on an indexed field → `IndexScan`; an `OR` whose
 /// every branch is indexable → `IndexMerge(Or)`.
 fn index_source_for(
-    expr: &ScalarExpr,
+    expr: &Expression,
     alias: &str,
     container: &CollectionRef,
     meta: &CollectionMeta,
@@ -241,7 +241,7 @@ fn index_source_for(
             .then(|| index_scan(container, &field, IndexScanRange::Eq(value)));
     }
 
-    if matches!(expr, ScalarExpr::Binary { op: BinOp::Or, .. }) {
+    if matches!(expr, Expression::Binary { op: BinOp::Or, .. }) {
         let mut branches = Vec::new();
         collect_or(expr, alias, &mut branches);
         let mut sources = Vec::with_capacity(branches.len());
@@ -298,12 +298,12 @@ fn merge_sources(
 /// Flatten an `Or` into its branches, but treat a Mongo implicit-equality idiom
 /// as one indivisible branch (its inner `Eq OR ARRAY_CONTAINS` must not be split
 /// — `index_source_for` recognizes the whole idiom as an indexed Eq).
-fn collect_or<'a>(expr: &'a ScalarExpr, alias: &str, out: &mut Vec<&'a ScalarExpr>) {
+fn collect_or<'a>(expr: &'a Expression, alias: &str, out: &mut Vec<&'a Expression>) {
     if as_mongo_eq(expr, alias).is_some() {
         out.push(expr);
         return;
     }
-    if let ScalarExpr::Binary {
+    if let Expression::Binary {
         op: BinOp::Or,
         lhs,
         rhs,
@@ -342,8 +342,8 @@ fn key_lookup(container: &CollectionRef, ids: Node) -> Node {
 
 /// Interpret a conjunct as `alias.<path> <cmp> <literal>` (either operand
 /// order), returning the field path, comparison op, and literal value.
-fn as_atom(expr: &ScalarExpr, alias: &str) -> Option<(String, BinOp, Bson)> {
-    let ScalarExpr::Binary { op, lhs, rhs } = expr else {
+fn as_atom(expr: &Expression, alias: &str) -> Option<(String, BinOp, Bson)> {
+    let Expression::Binary { op, lhs, rhs } = expr else {
         return None;
     };
     if !is_comparison(*op) {
@@ -371,8 +371,8 @@ fn as_atom(expr: &ScalarExpr, alias: &str) -> Option<(String, BinOp, Bson)> {
 /// literal). Returns the field path and value — it is sargable as an equality
 /// on `field`, because an index/pk lookup for `lit` finds both the
 /// scalar-equal and the array-containing documents.
-fn as_mongo_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::Binary {
+fn as_mongo_eq(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
+    let Expression::Binary {
         op: BinOp::Or,
         lhs,
         rhs,
@@ -395,8 +395,8 @@ fn as_mongo_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
 
 /// Interpret `ARRAY_CONTAINS(alias.<path>, <literal>)`, returning the field
 /// path and the literal value.
-fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::Function { name, args } = expr else {
+fn as_array_contains(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
+    let Expression::Function { name, args } = expr else {
         return None;
     };
     if !name.eq_ignore_ascii_case("ARRAY_CONTAINS") || args.len() != 2 {
@@ -405,12 +405,12 @@ fn as_array_contains(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
     Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
 }
 
-/// Recognize a [`ScalarExpr::MultikeyEq`] on `alias` — explicit multikey
+/// Recognize a [`Expression::MultikeyEq`] on `alias` — explicit multikey
 /// equality the find front-end emits for a `.[]` path. Returns the verbatim
 /// `.[]` path (which is also the index name) and the literal value, so it can
 /// be matched to a multikey index.
-fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
-    let ScalarExpr::MultikeyEq {
+fn as_multikey_eq(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
+    let Expression::MultikeyEq {
         base,
         index_path,
         value,
@@ -418,7 +418,7 @@ fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
     else {
         return None;
     };
-    if !matches!(base.as_ref(), ScalarExpr::Identifier(a) if a == alias) {
+    if !matches!(base.as_ref(), Expression::Identifier(a) if a == alias) {
         return None;
     }
     Some((index_path.clone(), as_literal(value)?))
@@ -426,7 +426,7 @@ fn as_multikey_eq(expr: &ScalarExpr, alias: &str) -> Option<(String, Bson)> {
 
 /// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo
 /// idiom (whose `ARRAY_CONTAINS` branch is vacuous for a non-array pk).
-fn pk_eq_value(expr: &ScalarExpr, alias: &str, pk: &str) -> Option<Bson> {
+fn pk_eq_value(expr: &Expression, alias: &str, pk: &str) -> Option<Bson> {
     if let Some((field, BinOp::Eq, value)) = as_atom(expr, alias)
         && field == pk
     {
@@ -440,22 +440,22 @@ fn pk_eq_value(expr: &ScalarExpr, alias: &str, pk: &str) -> Option<Bson> {
 
 /// The dotted field path of an `alias.a.b.c` access (`None` for bare `alias`,
 /// computed expressions, or a different root).
-fn path_of(expr: &ScalarExpr, alias: &str) -> Option<String> {
+fn path_of(expr: &Expression, alias: &str) -> Option<String> {
     match expr {
-        ScalarExpr::Member { base, field } => match base.as_ref() {
-            ScalarExpr::Identifier(a) if a == alias => Some(field.clone()),
+        Expression::Member { base, field } => match base.as_ref() {
+            Expression::Identifier(a) if a == alias => Some(field.clone()),
             other => path_of(other, alias).map(|p| format!("{p}.{field}")),
         },
         _ => None,
     }
 }
 
-fn as_literal(expr: &ScalarExpr) -> Option<Bson> {
+fn as_literal(expr: &Expression) -> Option<Bson> {
     match expr {
-        ScalarExpr::Literal(lit) => Some(literal_to_bson(lit)),
+        Expression::Literal(lit) => Some(literal_to_bson(lit)),
         // A materialized value preserves its exact BSON type — important here,
         // since an index bound must match the stored key's numeric type.
-        ScalarExpr::Value(b) => Some(b.clone()),
+        Expression::Value(b) => Some(b.clone()),
         _ => None,
     }
 }
@@ -495,9 +495,9 @@ fn flip(op: BinOp) -> BinOp {
     }
 }
 
-fn flatten_and(expr: ScalarExpr, out: &mut Vec<ScalarExpr>) {
+fn flatten_and(expr: Expression, out: &mut Vec<Expression>) {
     match expr {
-        ScalarExpr::Binary {
+        Expression::Binary {
             op: BinOp::And,
             lhs,
             rhs,
@@ -510,8 +510,8 @@ fn flatten_and(expr: ScalarExpr, out: &mut Vec<ScalarExpr>) {
 }
 
 /// Rebuild an `AND` from the conjuncts not in `used`, or `None` if none remain.
-fn residual_excluding(conjuncts: Vec<ScalarExpr>, used: &[usize]) -> Option<ScalarExpr> {
-    let remaining: Vec<ScalarExpr> = conjuncts
+fn residual_excluding(conjuncts: Vec<Expression>, used: &[usize]) -> Option<Expression> {
+    let remaining: Vec<Expression> = conjuncts
         .into_iter()
         .enumerate()
         .filter(|(i, _)| !used.contains(i))
@@ -520,10 +520,10 @@ fn residual_excluding(conjuncts: Vec<ScalarExpr>, used: &[usize]) -> Option<Scal
     rebuild_and(remaining)
 }
 
-fn rebuild_and(conjuncts: Vec<ScalarExpr>) -> Option<ScalarExpr> {
+fn rebuild_and(conjuncts: Vec<Expression>) -> Option<Expression> {
     let mut iter = conjuncts.into_iter();
     let first = iter.next()?;
-    Some(iter.fold(first, |acc, e| ScalarExpr::Binary {
+    Some(iter.fold(first, |acc, e| Expression::Binary {
         op: BinOp::And,
         lhs: Box::new(acc),
         rhs: Box::new(e),

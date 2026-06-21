@@ -11,7 +11,7 @@ use bson::{Bson, Document};
 
 use crate::error::Result;
 use crate::value::Value;
-use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
+use slate_ast::{BinOp, Expression, Literal, UnaryOp};
 
 /// The bindings visible to an expression: alias → bound document/value, plus
 /// query parameters (`@name`).
@@ -46,24 +46,24 @@ impl<'a> Env<'a> {
 }
 
 /// Evaluate a scalar expression in `env`.
-pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
+pub fn eval(expr: &Expression, env: &Env) -> Result<Value> {
     match expr {
-        ScalarExpr::Literal(lit) => Ok(Value::Defined(literal_to_bson(lit))),
-        ScalarExpr::Value(b) => Ok(Value::Defined(b.clone())),
-        ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
-        ScalarExpr::Parameter(name) => Ok(env.param(name)),
+        Expression::Literal(lit) => Ok(Value::Defined(literal_to_bson(lit))),
+        Expression::Value(b) => Ok(Value::Defined(b.clone())),
+        Expression::Identifier(name) => Ok(env.lookup(name)),
+        Expression::Parameter(name) => Ok(env.param(name)),
         // The planner extracts subqueries into a correlated-apply node, so the
         // evaluator never sees this variant in a well-formed plan.
-        ScalarExpr::Subquery { .. } => Err(crate::EvalError {
+        Expression::Subquery { .. } => Err(crate::EvalError {
             message: "subquery must be lowered by the planner, not evaluated directly".into(),
         }),
 
-        ScalarExpr::Member { base, field } => Ok(member_access(eval(base, env)?, field)),
-        ScalarExpr::Index { base, index } => Ok(index_access(eval(base, env)?, eval(index, env)?)),
+        Expression::Member { base, field } => Ok(member_access(eval(base, env)?, field)),
+        Expression::Index { base, index } => Ok(index_access(eval(base, env)?, eval(index, env)?)),
 
-        ScalarExpr::Unary { op, expr } => Ok(eval_unary(*op, eval(expr, env)?)),
+        Expression::Unary { op, expr } => Ok(eval_unary(*op, eval(expr, env)?)),
 
-        ScalarExpr::Binary { op, lhs, rhs } => match op {
+        Expression::Binary { op, lhs, rhs } => match op {
             BinOp::And => {
                 let l = truthy(&eval(lhs, env)?);
                 if l == Some(false) {
@@ -87,7 +87,7 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
             }
         },
 
-        ScalarExpr::Function { name, args } => {
+        Expression::Function { name, args } => {
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval(a, env)?);
@@ -95,7 +95,7 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
             crate::functions::call(name, vals)
         }
 
-        ScalarExpr::Object(fields) => {
+        Expression::Object(fields) => {
             let mut doc = Document::new();
             for (k, v) in fields {
                 // Undefined fields are omitted (Cosmos behavior).
@@ -106,7 +106,7 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
             Ok(Value::Defined(Bson::Document(doc)))
         }
 
-        ScalarExpr::Array(items) => {
+        Expression::Array(items) => {
             let mut arr = Vec::with_capacity(items.len());
             for it in items {
                 // Undefined elements are omitted (Cosmos behavior).
@@ -120,11 +120,11 @@ pub fn eval(expr: &ScalarExpr, env: &Env) -> Result<Value> {
         // Mongo-only constructs (the storage path uses `raweval`; these owned
         // implementations keep the variants' meaning consistent across both
         // evaluators). See [`crate::raweval`].
-        ScalarExpr::PathGet { base, path } => {
+        Expression::PathGet { base, path } => {
             let segments: Vec<&str> = path.iter().map(String::as_str).collect();
             Ok(path_get(eval(base, env)?, &segments))
         }
-        ScalarExpr::MultikeyEq {
+        Expression::MultikeyEq {
             base,
             index_path,
             value,
@@ -468,14 +468,14 @@ mod tests {
     use bson::bson;
 
     /// Evaluate `expr` against a single binding `c -> doc`.
-    fn eval_with(expr: &ScalarExpr, alias: &str, doc: &Bson) -> Value {
+    fn eval_with(expr: &Expression, alias: &str, doc: &Bson) -> Value {
         let params = Document::new();
         let binds = [(alias, doc)];
         let env = Env::new(&binds, &params);
         eval(expr, &env).unwrap()
     }
 
-    fn parse_expr(src: &str) -> ScalarExpr {
+    fn parse_expr(src: &str) -> Expression {
         // Reuse the full query parser to get a scalar expression.
         let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
         let slate_ast::SelectClause::Value(e) = q.select else {

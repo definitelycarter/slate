@@ -22,8 +22,8 @@
 //! ## Status
 //!
 //! Intentionally minimal to start: a [`Node::Values`] literal source. The IR
-//! grows from here — `Scan`, `Filter { predicate: ScalarExpr }`,
-//! `Project { expr: ScalarExpr }`, `Unwind { alias, array }`, `Sort`, `Limit`,
+//! grows from here — `Scan`, `Filter { predicate: Expression }`,
+//! `Project { expr: Expression }`, `Unwind { alias, array }`, `Sort`, `Limit`,
 //! `Distinct` — with expression types and the evaluator coming from `slate-sql`
 //! so there is exactly one of each across find and SQL.
 

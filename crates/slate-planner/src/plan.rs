@@ -6,7 +6,7 @@
 //! deliberately small for now — see the crate docs for the planned set.
 
 use bson::{Bson, RawBson, RawDocumentBuf};
-use slate_ast::{OrderByItem, ScalarExpr, SubqueryKind};
+use slate_ast::{Expression, OrderByItem, SubqueryKind};
 use slate_vm::ResolvedHook;
 
 /// A top-level plan: a read query, or a write whose `source` is a read-node
@@ -193,7 +193,7 @@ pub enum Node {
     /// undefined `array` yields no rows (inner-join semantics).
     Unwind {
         alias: String,
-        array: ScalarExpr,
+        array: Expression,
         source: Box<Node>,
     },
 
@@ -202,7 +202,7 @@ pub enum Node {
     /// projection is the identity (`c`) and emits the bound document — which,
     /// in [`RowBinding::Alias`] mode, passes the row through with no copy.
     Project {
-        expr: ScalarExpr,
+        expr: Expression,
         binding: RowBinding,
         source: Box<Node>,
     },
@@ -214,7 +214,7 @@ pub enum Node {
     /// merge, and (later) for `HAVING` and `JOIN ... ON`. Rows where the
     /// predicate is false *or* undefined are dropped (the 3-valued rule).
     Filter {
-        predicate: ScalarExpr,
+        predicate: Expression,
         binding: RowBinding,
         source: Box<Node>,
     },
@@ -301,7 +301,7 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupKey {
     pub slot: String,
-    pub expr: ScalarExpr,
+    pub expr: Expression,
 }
 
 /// One aggregate of an [`Node::Aggregate`]: the recognized function name (e.g.
@@ -310,6 +310,6 @@ pub struct GroupKey {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AggregateExpr {
     pub func: String,
-    pub arg: ScalarExpr,
+    pub arg: Expression,
     pub slot: String,
 }

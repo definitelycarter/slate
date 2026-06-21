@@ -12,7 +12,7 @@
 
 use bson::raw::{RawBsonRef, RawDocument};
 use slate_ast::{
-    BinOp, FromClause, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause,
+    BinOp, Expression, FromClause, FromSource, Literal, OrderByItem, Query, SelectClause,
     SortDirection, UnaryOp,
 };
 
@@ -64,7 +64,7 @@ pub fn find_to_query(filter: &RawDocument, options: &FindOptions) -> Result<Quer
 ///
 /// `Ok(None)` is the match-all (empty) filter; `Ok(Some(_))` a predicate;
 /// `Err` an unsupported or malformed filter. Exposed for the write paths.
-pub fn translate_filter(doc: &RawDocument) -> Result<Option<ScalarExpr>> {
+pub fn translate_filter(doc: &RawDocument) -> Result<Option<Expression>> {
     let mut conjuncts = Vec::new();
     for entry in doc.iter() {
         let (key, value) = entry.map_err(malformed)?;
@@ -89,7 +89,7 @@ pub fn translate_filter(doc: &RawDocument) -> Result<Option<ScalarExpr>> {
 /// `{"address.city": ...}` key.
 fn projection(columns: Option<&[String]>) -> SelectClause {
     let Some(cols) = columns else {
-        return SelectClause::Value(ScalarExpr::Identifier(ALIAS.into()));
+        return SelectClause::Value(Expression::Identifier(ALIAS.into()));
     };
     // The pk is always included, mirroring v1.
     let mut tree = PathTree::default();
@@ -124,7 +124,7 @@ impl PathTree {
     /// Convert to an object expression. `prefix` is the accumulated dotted path
     /// from the root; a leaf (no children) projects `c.<prefix>`, a branch
     /// projects a nested object over its children.
-    fn to_object(&self, prefix: &str) -> ScalarExpr {
+    fn to_object(&self, prefix: &str) -> Expression {
         if self.children.is_empty() {
             return path(prefix);
         }
@@ -141,12 +141,12 @@ impl PathTree {
                 Some((seg.clone(), child.to_object(&child_prefix)))
             })
             .collect();
-        ScalarExpr::Object(fields)
+        Expression::Object(fields)
     }
 }
 
 /// `$and` / `$or`: fold a list of sub-filters. Empty list contributes nothing.
-fn translate_logical(value: RawBsonRef, op: BinOp) -> Result<Option<ScalarExpr>> {
+fn translate_logical(value: RawBsonRef, op: BinOp) -> Result<Option<Expression>> {
     let RawBsonRef::Array(arr) = value else {
         return Err(TranslateError::Malformed(
             "$and/$or expects an array".into(),
@@ -168,7 +168,7 @@ fn translate_logical(value: RawBsonRef, op: BinOp) -> Result<Option<ScalarExpr>>
 
 /// A `{field: ...}` clause — either an operator sub-document or implicit
 /// equality.
-fn translate_field(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
+fn translate_field(field: &str, value: RawBsonRef) -> Result<Expression> {
     if let RawBsonRef::Document(sub) = value
         && let Some(first) = sub.iter().next()
         && first.map_err(malformed)?.0.as_str().starts_with('$')
@@ -184,7 +184,7 @@ fn translate_field(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
 /// The `null` value is special: Mongo's `{field: null}` matches an explicit
 /// null, an array containing null, **and a missing field**, so it also tests
 /// `NOT IS_DEFINED(c.field)`.
-fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
+fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<Expression> {
     // An explicit multikey path (`tags.[]`, `items.[].sku`) is array-membership,
     // tested via MULTIKEY_EQ (which the planner can match to a `.[]` index).
     if field.contains("[]") {
@@ -192,16 +192,16 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
     }
     // `literal` is built twice rather than cloned (both are cheap leaf nodes).
     let eq = binary(BinOp::Eq, path(field), literal(value)?);
-    let contains = ScalarExpr::Function {
+    let contains = Expression::Function {
         name: "ARRAY_CONTAINS".into(),
         args: vec![path(field), literal(value)?],
     };
     let matches = binary(BinOp::Or, eq, contains);
 
     if matches!(value, RawBsonRef::Null) {
-        let missing = ScalarExpr::Unary {
+        let missing = Expression::Unary {
             op: UnaryOp::Not,
-            expr: Box::new(ScalarExpr::Function {
+            expr: Box::new(Expression::Function {
                 name: "IS_DEFINED".into(),
                 args: vec![path(field)],
             }),
@@ -212,19 +212,19 @@ fn eq_or_contains(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
     }
 }
 
-/// Explicit multikey equality `{field.[]: value}` → a [`ScalarExpr::MultikeyEq`]
+/// Explicit multikey equality `{field.[]: value}` → a [`Expression::MultikeyEq`]
 /// carrying the verbatim `.[]` path (so the planner can match it to a `.[]`
 /// index by name).
-fn multikey_eq(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
-    Ok(ScalarExpr::MultikeyEq {
-        base: Box::new(ScalarExpr::Identifier(ALIAS.into())),
+fn multikey_eq(field: &str, value: RawBsonRef) -> Result<Expression> {
+    Ok(Expression::MultikeyEq {
+        base: Box::new(Expression::Identifier(ALIAS.into())),
         index_path: field.to_string(),
         value: Box::new(literal(value)?),
     })
 }
 
 /// A `{field: {$op: v, ...}}` operator sub-document.
-fn translate_operators(field: &str, doc: &RawDocument) -> Result<ScalarExpr> {
+fn translate_operators(field: &str, doc: &RawDocument) -> Result<Expression> {
     // `$regex` (with optional `$options`) is special: it maps to REGEXMATCH and
     // doesn't compose with other operators in the same sub-document.
     if let Some(expr) = translate_regex(field, doc)? {
@@ -258,7 +258,7 @@ fn translate_operators(field: &str, doc: &RawDocument) -> Result<ScalarExpr> {
 
 /// `$regex`/`$options` → `REGEXMATCH(c.field, "(?<opts>)<pat>")`, or `None` if
 /// this sub-document has no `$regex`.
-fn translate_regex(field: &str, doc: &RawDocument) -> Result<Option<ScalarExpr>> {
+fn translate_regex(field: &str, doc: &RawDocument) -> Result<Option<Expression>> {
     let mut pattern: Option<String> = None;
     let mut options: Option<String> = None;
     let mut has_other = false;
@@ -292,27 +292,27 @@ fn translate_regex(field: &str, doc: &RawDocument) -> Result<Option<ScalarExpr>>
         Some(opts) => format!("(?{opts}){pat}"),
         None => pat,
     };
-    Ok(Some(ScalarExpr::Function {
+    Ok(Some(Expression::Function {
         name: "REGEXMATCH".into(),
-        args: vec![path(field), ScalarExpr::Literal(Literal::Str(full))],
+        args: vec![path(field), Expression::Literal(Literal::Str(full))],
     }))
 }
 
 /// `$exists: bool` → `IS_DEFINED(c.field)` (negated when false).
-fn translate_exists(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
+fn translate_exists(field: &str, value: RawBsonRef) -> Result<Expression> {
     let RawBsonRef::Boolean(b) = value else {
         return Err(TranslateError::Malformed(
             "$exists expects a boolean".into(),
         ));
     };
-    let is_def = ScalarExpr::Function {
+    let is_def = Expression::Function {
         name: "IS_DEFINED".into(),
         args: vec![path(field)],
     };
     Ok(if b {
         is_def
     } else {
-        ScalarExpr::Unary {
+        Expression::Unary {
             op: UnaryOp::Not,
             expr: Box::new(is_def),
         }
@@ -320,10 +320,10 @@ fn translate_exists(field: &str, value: RawBsonRef) -> Result<ScalarExpr> {
 }
 
 /// Build the member-access path `c.a.b.c` for a dotted field.
-fn path(field: &str) -> ScalarExpr {
-    let mut expr = ScalarExpr::Identifier(ALIAS.into());
+fn path(field: &str) -> Expression {
+    let mut expr = Expression::Identifier(ALIAS.into());
     for part in field.split('.') {
-        expr = ScalarExpr::Member {
+        expr = Expression::Member {
             base: Box::new(expr),
             field: part.into(),
         };
@@ -335,7 +335,7 @@ fn path(field: &str) -> ScalarExpr {
 /// (so `Int32` stays `Int32`, which an index bound depends on, and `DateTime`/
 /// `ObjectId` are expressible). Documents/arrays as comparison operands are
 /// rejected — they aren't a scalar a predicate can compare against.
-fn literal(value: RawBsonRef) -> Result<ScalarExpr> {
+fn literal(value: RawBsonRef) -> Result<Expression> {
     if matches!(value, RawBsonRef::Document(_) | RawBsonRef::Array(_)) {
         return Err(TranslateError::Unsupported(format!(
             "non-scalar literal of type {:?}",
@@ -344,11 +344,11 @@ fn literal(value: RawBsonRef) -> Result<ScalarExpr> {
     }
     let b = bson::Bson::try_from(value)
         .map_err(|e| TranslateError::Malformed(format!("could not read filter value: {e}")))?;
-    Ok(ScalarExpr::Value(b))
+    Ok(Expression::Value(b))
 }
 
-fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
-    ScalarExpr::Binary {
+fn binary(op: BinOp, lhs: Expression, rhs: Expression) -> Expression {
+    Expression::Binary {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
@@ -356,13 +356,13 @@ fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
 }
 
 /// Combine predicates with `op`, or `None` if there are none.
-fn fold(parts: Vec<ScalarExpr>, op: BinOp) -> Option<ScalarExpr> {
+fn fold(parts: Vec<Expression>, op: BinOp) -> Option<Expression> {
     let mut it = parts.into_iter();
     let first = it.next()?;
     Some(it.fold(first, |acc, e| binary(op, acc, e)))
 }
 
-fn extend(conjuncts: &mut Vec<ScalarExpr>, group: Option<ScalarExpr>) {
+fn extend(conjuncts: &mut Vec<Expression>, group: Option<Expression>) {
     if let Some(p) = group {
         conjuncts.push(p);
     }
@@ -378,15 +378,15 @@ mod tests {
     use crate::Sort;
     use bson::{Bson, Document, RawDocumentBuf, doc};
 
-    fn tf(d: Document) -> Result<Option<ScalarExpr>> {
+    fn tf(d: Document) -> Result<Option<Expression>> {
         let raw = RawDocumentBuf::try_from(&d).unwrap();
         translate_filter(&raw)
     }
 
     /// `doc!` stores small integers as `Int32`, and the translator preserves
-    /// that exact type via `ScalarExpr::Value`.
-    fn lit_i(n: i32) -> ScalarExpr {
-        ScalarExpr::Value(Bson::Int32(n))
+    /// that exact type via `Expression::Value`.
+    fn lit_i(n: i32) -> Expression {
+        Expression::Value(Bson::Int32(n))
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
         let expected = binary(
             BinOp::Or,
             binary(BinOp::Eq, path("age"), lit_i(30)),
-            ScalarExpr::Function {
+            Expression::Function {
                 name: "ARRAY_CONTAINS".into(),
                 args: vec![path("age"), lit_i(30)],
             },
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn exists_true_and_false() {
-        let is_def = ScalarExpr::Function {
+        let is_def = Expression::Function {
             name: "IS_DEFINED".into(),
             args: vec![path("f")],
         };
@@ -466,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             tf(doc! { "f": { "$exists": false } }).unwrap().unwrap(),
-            ScalarExpr::Unary {
+            Expression::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(is_def)
             }
@@ -480,11 +480,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             expr,
-            ScalarExpr::Function {
+            Expression::Function {
                 name: "REGEXMATCH".into(),
                 args: vec![
                     path("name"),
-                    ScalarExpr::Literal(Literal::Str("(?i)^ad".into()))
+                    Expression::Literal(Literal::Str("(?i)^ad".into()))
                 ],
             }
         );
@@ -506,7 +506,7 @@ mod tests {
             binary(
                 BinOp::Gt,
                 path("when"),
-                ScalarExpr::Value(Bson::DateTime(dt))
+                Expression::Value(Bson::DateTime(dt))
             )
         );
     }
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(q.order_by.len(), 1);
         assert_eq!(q.order_by[0].direction, SortDirection::Desc);
         // projection includes the pk plus selected columns as an object
-        let SelectClause::Value(ScalarExpr::Object(fields)) = &q.select else {
+        let SelectClause::Value(Expression::Object(fields)) = &q.select else {
             panic!("expected object projection, got {:?}", q.select);
         };
         let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
@@ -557,7 +557,7 @@ mod tests {
         let q = find_to_query(&raw, &FindOptions::default()).unwrap();
         assert_eq!(
             q.select,
-            SelectClause::Value(ScalarExpr::Identifier("c".into()))
+            SelectClause::Value(Expression::Identifier("c".into()))
         );
         assert_eq!(q.filter, None);
     }

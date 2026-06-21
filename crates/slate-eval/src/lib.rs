@@ -1,6 +1,6 @@
 //! `slate-eval` — evaluation semantics for the shared [`slate_ast`] query AST.
 //!
-//! This is the *meaning* of a [`slate_ast::ScalarExpr`], split out from any
+//! This is the *meaning* of a [`slate_ast::Expression`], split out from any
 //! particular query surface so the storage executor and the in-memory engines
 //! can share it without depending on a parser. There are two evaluators that
 //! must agree:

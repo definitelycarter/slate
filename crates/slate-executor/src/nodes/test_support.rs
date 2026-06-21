@@ -2,7 +2,7 @@
 //! parsing shortcuts.
 
 use bson::rawdoc;
-use slate_ast::ScalarExpr;
+use slate_ast::Expression;
 use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
 use slate_planner::CollectionRef;
 use slate_store::MemoryStore;
@@ -41,7 +41,7 @@ pub(crate) fn people_ref() -> CollectionRef {
 }
 
 /// Parse `SELECT VALUE <src> FROM c` and return the projection expression.
-pub(crate) fn sv(src: &str) -> ScalarExpr {
+pub(crate) fn sv(src: &str) -> Expression {
     let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
     let slate_ast::SelectClause::Value(e) = q.select else {
         panic!("expected SELECT VALUE")
@@ -50,7 +50,7 @@ pub(crate) fn sv(src: &str) -> ScalarExpr {
 }
 
 /// Parse the `WHERE` predicate of `SELECT VALUE c FROM c WHERE <src>`.
-pub(crate) fn pred(src: &str) -> ScalarExpr {
+pub(crate) fn pred(src: &str) -> Expression {
     let q = slate_sql::parse(&format!("SELECT VALUE c FROM c WHERE {src}")).unwrap();
     q.filter.unwrap()
 }

@@ -34,7 +34,7 @@ pub enum Literal {
 
 /// A value-producing expression (the core of `SELECT VALUE`, `WHERE`, etc.).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ScalarExpr {
+pub enum Expression {
     /// A literal written in source text (SQL) — kept BSON-free so it stays
     /// purely syntactic.
     Literal(Literal),
@@ -50,32 +50,32 @@ pub enum ScalarExpr {
     Parameter(String),
     /// `<base>.<field>` member access.
     Member {
-        base: Box<ScalarExpr>,
+        base: Box<Expression>,
         field: String,
     },
     /// `<base>[<index>]` — array index or object-key access.
     Index {
-        base: Box<ScalarExpr>,
-        index: Box<ScalarExpr>,
+        base: Box<Expression>,
+        index: Box<Expression>,
     },
     Unary {
         op: UnaryOp,
-        expr: Box<ScalarExpr>,
+        expr: Box<Expression>,
     },
     Binary {
         op: BinOp,
-        lhs: Box<ScalarExpr>,
-        rhs: Box<ScalarExpr>,
+        lhs: Box<Expression>,
+        rhs: Box<Expression>,
     },
     /// `NAME(arg, ...)` — scalar function call.
     Function {
         name: String,
-        args: Vec<ScalarExpr>,
+        args: Vec<Expression>,
     },
     /// `{ "k": expr, ... }` object literal.
-    Object(Vec<(String, ScalarExpr)>),
+    Object(Vec<(String, Expression)>),
     /// `[ expr, ... ]` array literal.
-    Array(Vec<ScalarExpr>),
+    Array(Vec<Expression>),
 
     // ── Mongo-only constructs ───────────────────────────────────
     //
@@ -87,16 +87,16 @@ pub enum ScalarExpr {
     /// array applies the remaining path to each element and flattens one level.
     /// Mongo path semantics, used by `distinct` over array paths.
     PathGet {
-        base: Box<ScalarExpr>,
+        base: Box<Expression>,
         path: Vec<String>,
     },
     /// Explicit multikey-array equality: true when an array reachable at the
     /// `.[]` path `index_path` contains `value`. `index_path` is kept verbatim
     /// (e.g. `"tags.[]"`) so the planner can match it to a multikey index.
     MultikeyEq {
-        base: Box<ScalarExpr>,
+        base: Box<Expression>,
         index_path: String,
-        value: Box<ScalarExpr>,
+        value: Box<Expression>,
     },
 
     /// A subquery used in scalar position — `(SELECT …)`, `EXISTS (…)`, or
@@ -110,7 +110,7 @@ pub enum ScalarExpr {
     },
 }
 
-/// How a [`ScalarExpr::Subquery`]'s row stream is reduced to a value.
+/// How a [`Expression::Subquery`]'s row stream is reduced to a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubqueryKind {
     /// `(SELECT …)` — the single produced value, or undefined if none.
@@ -121,43 +121,43 @@ pub enum SubqueryKind {
     Array,
 }
 
-impl ScalarExpr {
+impl Expression {
     /// Add the names of every `@parameter` referenced in this expression
     /// (recursively, without the leading `@`) to `out`.
     pub fn collect_parameters<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
         match self {
-            ScalarExpr::Parameter(name) => {
+            Expression::Parameter(name) => {
                 out.insert(name.as_str());
             }
-            ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Identifier(_) => {}
-            ScalarExpr::Member { base, .. } | ScalarExpr::PathGet { base, .. } => {
+            Expression::Literal(_) | Expression::Value(_) | Expression::Identifier(_) => {}
+            Expression::Member { base, .. } | Expression::PathGet { base, .. } => {
                 base.collect_parameters(out)
             }
-            ScalarExpr::Index { base, index } => {
+            Expression::Index { base, index } => {
                 base.collect_parameters(out);
                 index.collect_parameters(out);
             }
-            ScalarExpr::Unary { expr, .. } => expr.collect_parameters(out),
-            ScalarExpr::Binary { lhs, rhs, .. } => {
+            Expression::Unary { expr, .. } => expr.collect_parameters(out),
+            Expression::Binary { lhs, rhs, .. } => {
                 lhs.collect_parameters(out);
                 rhs.collect_parameters(out);
             }
-            ScalarExpr::MultikeyEq { base, value, .. } => {
+            Expression::MultikeyEq { base, value, .. } => {
                 base.collect_parameters(out);
                 value.collect_parameters(out);
             }
-            ScalarExpr::Function { args, .. } | ScalarExpr::Array(args) => {
+            Expression::Function { args, .. } | Expression::Array(args) => {
                 for e in args {
                     e.collect_parameters(out);
                 }
             }
-            ScalarExpr::Object(fields) => {
+            Expression::Object(fields) => {
                 for (_, e) in fields {
                     e.collect_parameters(out);
                 }
             }
             // A subquery may reference outer `@params`; descend into it.
-            ScalarExpr::Subquery { query, .. } => query.collect_parameters(out),
+            Expression::Subquery { query, .. } => query.collect_parameters(out),
         }
     }
 }
@@ -202,11 +202,11 @@ pub struct Query {
     /// evaluates exactly once over a single implicit row. `SELECT *` is invalid
     /// without a `FROM` (rejected by the front-end).
     pub from: Option<FromClause>,
-    pub filter: Option<ScalarExpr>,
+    pub filter: Option<Expression>,
     /// `GROUP BY <expr>, …` — empty when absent. Rows are collapsed into one per
     /// distinct tuple of these expressions, and the `SELECT` may then reference
     /// only these expressions or aggregates.
-    pub group_by: Vec<ScalarExpr>,
+    pub group_by: Vec<Expression>,
     pub order_by: Vec<OrderByItem>,
     pub offset: Option<u64>,
     pub limit: Option<u64>,
@@ -226,7 +226,7 @@ impl Query {
 
     /// Add every referenced `@parameter` name to `out` (recursing into nested
     /// subqueries). Shared by [`parameter_names`](Self::parameter_names) and the
-    /// subquery arm of [`ScalarExpr::collect_parameters`].
+    /// subquery arm of [`Expression::collect_parameters`].
     pub fn collect_parameters<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
         match &self.select {
             SelectClause::Value(e) => e.collect_parameters(out),
@@ -260,7 +260,7 @@ impl Query {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectClause {
     /// `SELECT VALUE <expr>` — yields exactly one value per surviving row.
-    Value(ScalarExpr),
+    Value(Expression),
     /// `SELECT *` — yields the whole bound row (the identity projection).
     Star,
     /// `SELECT <expr> [AS <key>], ...` — yields a document of the projected
@@ -277,7 +277,7 @@ pub enum SelectClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectItem {
     pub key: String,
-    pub expr: ScalarExpr,
+    pub expr: Expression,
 }
 
 impl SelectClause {
@@ -285,12 +285,12 @@ impl SelectClause {
     /// produces: `VALUE e` → `e`; `*` → the row identity (`alias`); a tabular
     /// list → an object literal `{ key: expr, ... }`. `alias` is the `FROM`
     /// alias, used only by `*`.
-    pub fn into_value_expr(self, alias: &str) -> ScalarExpr {
+    pub fn into_value_expr(self, alias: &str) -> Expression {
         match self {
             SelectClause::Value(expr) => expr,
-            SelectClause::Star => ScalarExpr::Identifier(alias.to_string()),
+            SelectClause::Star => Expression::Identifier(alias.to_string()),
             SelectClause::Projections(items) => {
-                ScalarExpr::Object(items.into_iter().map(|it| (it.key, it.expr)).collect())
+                Expression::Object(items.into_iter().map(|it| (it.key, it.expr)).collect())
             }
         }
     }
@@ -311,7 +311,7 @@ pub enum FromSource {
     /// `FROM <alias> IN <array>` — the alias binds to each element of an array
     /// expression, with no container scan. Used by subqueries, whose source is
     /// an in-document array (correlated) or a literal (uncorrelated).
-    Array { alias: String, array: ScalarExpr },
+    Array { alias: String, array: Expression },
     /// `FROM <base>.<path> <alias>` — scope iteration to a sub-path of each
     /// container document: `alias` binds to `base.path` (the whole sub-value,
     /// object or array — no unwinding), one row per document, dropping documents
@@ -332,12 +332,12 @@ pub enum FromSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Join {
     pub alias: String,
-    pub array: ScalarExpr,
+    pub array: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByItem {
-    pub expr: ScalarExpr,
+    pub expr: Expression,
     pub direction: SortDirection,
 }
 
@@ -378,7 +378,7 @@ pub enum Statement {
     Distinct {
         alias: String,
         field: String,
-        predicate: Option<ScalarExpr>,
+        predicate: Option<Expression>,
         sort: Option<SortDirection>,
         skip: Option<u64>,
         take: Option<u64>,
@@ -398,26 +398,26 @@ pub enum UpsertMode {
 mod tests {
     use super::*;
 
-    fn param(n: &str) -> ScalarExpr {
-        ScalarExpr::Parameter(n.into())
+    fn param(n: &str) -> Expression {
+        Expression::Parameter(n.into())
     }
 
     #[test]
     fn collect_parameters_walks_nested_expressions() {
         // (@a + c.x) OR F(@b, [@c, @a]) — three distinct names, `a` repeated.
-        let expr = ScalarExpr::Binary {
+        let expr = Expression::Binary {
             op: BinOp::Or,
-            lhs: Box::new(ScalarExpr::Binary {
+            lhs: Box::new(Expression::Binary {
                 op: BinOp::Add,
                 lhs: Box::new(param("a")),
-                rhs: Box::new(ScalarExpr::Member {
-                    base: Box::new(ScalarExpr::Identifier("c".into())),
+                rhs: Box::new(Expression::Member {
+                    base: Box::new(Expression::Identifier("c".into())),
                     field: "x".into(),
                 }),
             }),
-            rhs: Box::new(ScalarExpr::Function {
+            rhs: Box::new(Expression::Function {
                 name: "F".into(),
-                args: vec![param("b"), ScalarExpr::Array(vec![param("c"), param("a")])],
+                args: vec![param("b"), Expression::Array(vec![param("c"), param("a")])],
             }),
         };
         let mut out = BTreeSet::new();

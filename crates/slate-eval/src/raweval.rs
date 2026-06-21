@@ -24,10 +24,10 @@ use crate::eval::{
     Num, Scalar, and3, arith, as_number, cmp_pred, compare_scalar, or3, scalar_of_bson,
 };
 use crate::value::Value;
-use slate_ast::{BinOp, Literal, ScalarExpr, UnaryOp};
+use slate_ast::{BinOp, Expression, Literal, UnaryOp};
 use slate_rawbson::RawField;
 
-/// The result of evaluating a [`ScalarExpr`] over raw bytes.
+/// The result of evaluating a [`Expression`] over raw bytes.
 ///
 /// `Ref` borrows directly from the input document (the common, fast case);
 /// `Owned`/`OwnedRaw` hold a value computed during evaluation.
@@ -140,37 +140,37 @@ impl<'a> RawEnv<'a> {
 
 /// Evaluate a scalar expression in `env`, borrowing from the input where
 /// possible.
-pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+pub fn eval<'a>(expr: &'a Expression, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     match expr {
-        ScalarExpr::Literal(lit) => Ok(literal_value(lit)),
+        Expression::Literal(lit) => Ok(literal_value(lit)),
         // A materialized value: cheap to clone (literals are scalars). The
         // borrowed-bytes fast paths apply to bound rows, not query constants.
-        ScalarExpr::Value(b) => Ok(RawValue::Owned(b.clone())),
-        ScalarExpr::Identifier(name) => Ok(env.lookup(name)),
-        ScalarExpr::Parameter(name) => env.param(name),
+        Expression::Value(b) => Ok(RawValue::Owned(b.clone())),
+        Expression::Identifier(name) => Ok(env.lookup(name)),
+        Expression::Parameter(name) => env.param(name),
         // Extracted into a correlated-apply node by the planner; never seen here.
-        ScalarExpr::Subquery { .. } => Err(EvalError {
+        Expression::Subquery { .. } => Err(EvalError {
             message: "subquery must be lowered by the planner, not evaluated directly".into(),
         }),
 
-        ScalarExpr::Member { base, field } => member_access(eval(base, env)?, field),
-        ScalarExpr::Index { base, index } => {
+        Expression::Member { base, field } => member_access(eval(base, env)?, field),
+        Expression::Index { base, index } => {
             let b = eval(base, env)?;
             let i = eval(index, env)?;
             index_access(b, i)
         }
 
-        ScalarExpr::Unary { op, expr } => Ok(eval_unary(*op, eval(expr, env)?)),
+        Expression::Unary { op, expr } => Ok(eval_unary(*op, eval(expr, env)?)),
 
-        ScalarExpr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, env),
+        Expression::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, env),
 
-        ScalarExpr::Function { name, args } => eval_function(name, args, env),
+        Expression::Function { name, args } => eval_function(name, args, env),
 
-        ScalarExpr::Object(fields) => build_object(fields, env),
-        ScalarExpr::Array(items) => build_array(items, env),
+        Expression::Object(fields) => build_object(fields, env),
+        Expression::Array(items) => build_array(items, env),
 
-        ScalarExpr::PathGet { base, path } => get_path(eval(base, env)?, path),
-        ScalarExpr::MultikeyEq {
+        Expression::PathGet { base, path } => get_path(eval(base, env)?, path),
+        Expression::MultikeyEq {
             base,
             index_path,
             value,
@@ -192,7 +192,7 @@ pub fn eval<'a>(expr: &'a ScalarExpr, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
 /// `Bson` — and must agree with [`crate::functions`], which the differential
 /// `raw_matches_owned` test pins down. Everything else materializes its
 /// arguments and dispatches through the shared [`crate::functions::call`].
-fn eval_function<'a>(name: &str, args: &'a [ScalarExpr], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     if args.len() == 1 {
         if name.eq_ignore_ascii_case("IS_DEFINED") {
             return Ok(bool_value(!eval(&args[0], env)?.is_undefined()));
@@ -436,8 +436,8 @@ fn eval_unary<'a>(op: UnaryOp, v: RawValue<'a>) -> RawValue<'a> {
 
 fn eval_binary<'a>(
     op: BinOp,
-    lhs: &'a ScalarExpr,
-    rhs: &'a ScalarExpr,
+    lhs: &'a Expression,
+    rhs: &'a Expression,
     env: &RawEnv<'a>,
 ) -> Result<RawValue<'a>> {
     match op {
@@ -485,7 +485,7 @@ fn eval_binop<'a>(op: BinOp, l: RawValue<'a>, r: RawValue<'a>) -> RawValue<'a> {
 
 // ── Object / array construction ─────────────────────────────────
 
-fn build_object<'a>(fields: &'a [(String, ScalarExpr)], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn build_object<'a>(fields: &'a [(String, Expression)], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     // Build the result directly in raw form: each field value is appended as
     // raw bytes, so the projected document needs no Bson round-trip on output.
     let mut doc = RawDocumentBuf::new();
@@ -501,7 +501,7 @@ fn build_object<'a>(fields: &'a [(String, ScalarExpr)], env: &RawEnv<'a>) -> Res
     Ok(RawValue::OwnedRaw(RawBson::Document(doc)))
 }
 
-fn build_array<'a>(items: &'a [ScalarExpr], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn build_array<'a>(items: &'a [Expression], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     let mut arr = RawArrayBuf::new();
     for it in items {
         // Undefined elements are omitted (Cosmos behavior).
@@ -686,24 +686,24 @@ pub enum ObjKey {
 /// Compile `expr` for repeated evaluation. `sole` is the single `FROM` alias
 /// when the node reads bare rows ([`RowBinding::Alias`] mode); pass `None` for
 /// the multi-binding environment shape so identifiers fall back to name lookup.
-pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
+pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
     match expr {
-        ScalarExpr::Literal(l) => Compiled::Literal(l.clone()),
+        Expression::Literal(l) => Compiled::Literal(l.clone()),
         // Pre-convert the constant to raw bytes once. The common scalar/array
         // constants convert; anything that doesn't falls back to a per-row clone.
-        ScalarExpr::Value(b) => match RawBson::try_from(b.clone()) {
+        Expression::Value(b) => match RawBson::try_from(b.clone()) {
             Ok(raw) => Compiled::Value(raw),
             Err(_) => Compiled::ValueBson(b.clone()),
         },
-        ScalarExpr::Identifier(n) => {
+        Expression::Identifier(n) => {
             if sole == Some(n.as_str()) {
                 Compiled::Row
             } else {
                 Compiled::Identifier(n.clone())
             }
         }
-        ScalarExpr::Parameter(n) => Compiled::Parameter(n.clone()),
-        ScalarExpr::Member { base, field } => {
+        Expression::Parameter(n) => Compiled::Parameter(n.clone()),
+        Expression::Member { base, field } => {
             // Collapse `<sole-alias>.<field>` to a direct field read on the row,
             // dropping the identifier lookup and its intermediate value.
             match compile(base, sole) {
@@ -714,15 +714,15 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
                 },
             }
         }
-        ScalarExpr::Index { base, index } => Compiled::Index {
+        Expression::Index { base, index } => Compiled::Index {
             base: Box::new(compile(base, sole)),
             index: Box::new(compile(index, sole)),
         },
-        ScalarExpr::Unary { op, expr } => Compiled::Unary {
+        Expression::Unary { op, expr } => Compiled::Unary {
             op: *op,
             expr: Box::new(compile(expr, sole)),
         },
-        ScalarExpr::Binary { op, lhs, rhs } => {
+        Expression::Binary { op, lhs, rhs } => {
             // Fuse the Mongo implicit-equality idiom so the field is read once.
             if *op == BinOp::Or
                 && let Some((base, value)) = as_eq_or_contains(lhs, rhs)
@@ -738,8 +738,8 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
                 rhs: Box::new(compile(rhs, sole)),
             }
         }
-        ScalarExpr::Function { name, args } => compile_function(name, args, sole),
-        ScalarExpr::Object(fields) => Compiled::Object(
+        Expression::Function { name, args } => compile_function(name, args, sole),
+        Expression::Object(fields) => Compiled::Object(
             fields
                 .iter()
                 .map(|(k, v)| {
@@ -752,14 +752,14 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
                 })
                 .collect(),
         ),
-        ScalarExpr::Array(items) => {
+        Expression::Array(items) => {
             Compiled::Array(items.iter().map(|e| compile(e, sole)).collect())
         }
-        ScalarExpr::PathGet { base, path } => Compiled::PathGet {
+        Expression::PathGet { base, path } => Compiled::PathGet {
             base: Box::new(compile(base, sole)),
             path: path.clone(),
         },
-        ScalarExpr::MultikeyEq {
+        Expression::MultikeyEq {
             base,
             index_path,
             value,
@@ -774,7 +774,7 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
                 .collect(),
             value: Box::new(compile(value, sole)),
         },
-        ScalarExpr::Subquery { .. } => {
+        Expression::Subquery { .. } => {
             Compiled::Unsupported("subquery must be lowered by the planner".into())
         }
     }
@@ -785,10 +785,10 @@ pub fn compile(expr: &ScalarExpr, sole: Option<&str>) -> Compiled {
 /// returning its shared `(base, value)` when both sides reference the same
 /// operands. Used by [`compile`] to fuse the redundant double field read.
 fn as_eq_or_contains<'a>(
-    lhs: &'a ScalarExpr,
-    rhs: &'a ScalarExpr,
-) -> Option<(&'a ScalarExpr, &'a ScalarExpr)> {
-    let ScalarExpr::Binary {
+    lhs: &'a Expression,
+    rhs: &'a Expression,
+) -> Option<(&'a Expression, &'a Expression)> {
+    let Expression::Binary {
         op: BinOp::Eq,
         lhs: eq_base,
         rhs: eq_value,
@@ -796,7 +796,7 @@ fn as_eq_or_contains<'a>(
     else {
         return None;
     };
-    let ScalarExpr::Function { name, args } = rhs else {
+    let Expression::Function { name, args } = rhs else {
         return None;
     };
     if !name.eq_ignore_ascii_case("ARRAY_CONTAINS") || args.len() != 2 {
@@ -813,7 +813,7 @@ fn as_eq_or_contains<'a>(
 
 /// Resolve a function call to its compiled form, mirroring the dispatch in
 /// [`eval_function`] but doing the name match once.
-fn compile_function(name: &str, args: &[ScalarExpr], sole: Option<&str>) -> Compiled {
+fn compile_function(name: &str, args: &[Expression], sole: Option<&str>) -> Compiled {
     let c = |e| Box::new(compile(e, sole));
     if args.len() == 1 {
         if name.eq_ignore_ascii_case("IS_DEFINED") {
@@ -836,7 +836,7 @@ fn compile_function(name: &str, args: &[ScalarExpr], sole: Option<&str>) -> Comp
 }
 
 /// Evaluate a [`Compiled`] expression in `env`. Semantically identical to
-/// [`eval`] over the source [`ScalarExpr`].
+/// [`eval`] over the source [`Expression`].
 pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     match c {
         Compiled::Unsupported(msg) => Err(EvalError {
@@ -992,7 +992,7 @@ mod tests {
     use bson::{Document, RawDocumentBuf, bson};
     use slate_ast::SelectClause;
 
-    fn parse_expr(src: &str) -> ScalarExpr {
+    fn parse_expr(src: &str) -> Expression {
         let q = slate_sql::parse(&format!("SELECT VALUE {src} FROM c")).unwrap();
         let SelectClause::Value(e) = q.select else {
             panic!("expected SELECT VALUE")

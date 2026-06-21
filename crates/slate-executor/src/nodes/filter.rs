@@ -6,7 +6,7 @@
 //! 3-valued rule).
 
 use bson::RawBson;
-use slate_ast::ScalarExpr;
+use slate_ast::Expression;
 use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
@@ -15,7 +15,7 @@ use crate::{ExecError, ValueIter};
 
 /// Wrap `source`, keeping only rows where `predicate` evaluates to `true`.
 pub(crate) fn execute<'a>(
-    predicate: ScalarExpr,
+    predicate: Expression,
     binding: RowBinding,
     source: ValueIter<'a>,
     params: env::Params,

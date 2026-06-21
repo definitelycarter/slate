@@ -20,7 +20,7 @@
 
 use bson::{RawBson, RawDocumentBuf};
 use slate_ast::{
-    FromClause, FromSource, Join, Literal, OrderByItem, Query, ScalarExpr, SubqueryKind,
+    Expression, FromClause, FromSource, Join, Literal, OrderByItem, Query, SubqueryKind,
 };
 
 use crate::plan::{AggregateExpr, CollectionRef, GroupKey, Node, Plan, RowBinding};
@@ -35,9 +35,9 @@ pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> P
 /// A subquery used directly as a FROM/JOIN iteration source is *multi-value*:
 /// it yields the set of rows to unwind, so it must reduce as an array regardless
 /// of the parser's default (a parenthesized `(SELECT …)` is tagged scalar).
-fn as_iteration_source(expr: ScalarExpr) -> ScalarExpr {
+fn as_iteration_source(expr: Expression) -> Expression {
     match expr {
-        ScalarExpr::Subquery { query, .. } => ScalarExpr::Subquery {
+        Expression::Subquery { query, .. } => Expression::Subquery {
             query,
             kind: SubqueryKind::Array,
         },
@@ -60,7 +60,7 @@ struct SubquerySpec {
 struct BaseSource {
     alias: String,
     node: Node,
-    residual: Option<ScalarExpr>,
+    residual: Option<Expression>,
     is_env: bool,
     joins: Vec<Join>,
 }
@@ -404,15 +404,15 @@ pub(crate) fn lower_query(
 /// reference to a fresh `$subN` slot and is recorded in `out` with its inner
 /// query lowered to a subtree. Every other sub-expression is rebuilt unchanged.
 fn extract_subqueries(
-    expr: ScalarExpr,
+    expr: Expression,
     container: &CollectionRef,
     meta: &CollectionMeta,
     out: &mut Vec<SubquerySpec>,
     outer: &[&str],
     next: &mut usize,
-) -> ScalarExpr {
+) -> Expression {
     match expr {
-        ScalarExpr::Subquery { query, kind } => {
+        Expression::Subquery { query, kind } => {
             let subplan = lower_query(*query, container.clone(), meta, outer);
             // A query-wide counter keeps slot names unique across every position
             // (projection, WHERE, JOIN sources), so a later subquery can't shadow
@@ -424,41 +424,41 @@ fn extract_subqueries(
                 kind,
                 subplan,
             });
-            ScalarExpr::Identifier(slot)
+            Expression::Identifier(slot)
         }
-        ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
+        Expression::Binary { op, lhs, rhs } => Expression::Binary {
             op,
             lhs: Box::new(extract_subqueries(*lhs, container, meta, out, outer, next)),
             rhs: Box::new(extract_subqueries(*rhs, container, meta, out, outer, next)),
         },
-        ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
+        Expression::Unary { op, expr } => Expression::Unary {
             op,
             expr: Box::new(extract_subqueries(*expr, container, meta, out, outer, next)),
         },
-        ScalarExpr::Member { base, field } => ScalarExpr::Member {
+        Expression::Member { base, field } => Expression::Member {
             base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
             field,
         },
-        ScalarExpr::Index { base, index } => ScalarExpr::Index {
+        Expression::Index { base, index } => Expression::Index {
             base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
             index: Box::new(extract_subqueries(
                 *index, container, meta, out, outer, next,
             )),
         },
-        ScalarExpr::Function { name, args } => ScalarExpr::Function {
+        Expression::Function { name, args } => Expression::Function {
             name,
             args: args
                 .into_iter()
                 .map(|a| extract_subqueries(a, container, meta, out, outer, next))
                 .collect(),
         },
-        ScalarExpr::Object(fields) => ScalarExpr::Object(
+        Expression::Object(fields) => Expression::Object(
             fields
                 .into_iter()
                 .map(|(k, v)| (k, extract_subqueries(v, container, meta, out, outer, next)))
                 .collect(),
         ),
-        ScalarExpr::Array(items) => ScalarExpr::Array(
+        Expression::Array(items) => Expression::Array(
             items
                 .into_iter()
                 .map(|i| extract_subqueries(i, container, meta, out, outer, next))
@@ -475,59 +475,59 @@ fn extract_subqueries(
 /// unchanged. Aggregate arguments aren't re-scanned — aggregates don't nest, and
 /// they're evaluated per-row inside the aggregation node, not per-group.
 fn rewrite_projection(
-    expr: ScalarExpr,
+    expr: Expression,
     group_keys: &[GroupKey],
     out: &mut Vec<AggregateExpr>,
-) -> ScalarExpr {
+) -> Expression {
     // A whole sub-expression that matches a group key reads from its slot.
     if let Some(key) = group_keys.iter().find(|k| k.expr == expr) {
-        return ScalarExpr::Identifier(key.slot.clone());
+        return Expression::Identifier(key.slot.clone());
     }
     match expr {
-        ScalarExpr::Function { name, args } if is_aggregate_name(&name) => {
+        Expression::Function { name, args } if is_aggregate_name(&name) => {
             let arg = args
                 .into_iter()
                 .next()
-                .unwrap_or(ScalarExpr::Literal(Literal::Int(1)));
+                .unwrap_or(Expression::Literal(Literal::Int(1)));
             let slot = format!("$agg{}", out.len());
             out.push(AggregateExpr {
                 func: name,
                 arg,
                 slot: slot.clone(),
             });
-            ScalarExpr::Identifier(slot)
+            Expression::Identifier(slot)
         }
-        ScalarExpr::Function { name, args } => ScalarExpr::Function {
+        Expression::Function { name, args } => Expression::Function {
             name,
             args: args
                 .into_iter()
                 .map(|a| rewrite_projection(a, group_keys, out))
                 .collect(),
         },
-        ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
+        Expression::Binary { op, lhs, rhs } => Expression::Binary {
             op,
             lhs: Box::new(rewrite_projection(*lhs, group_keys, out)),
             rhs: Box::new(rewrite_projection(*rhs, group_keys, out)),
         },
-        ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
+        Expression::Unary { op, expr } => Expression::Unary {
             op,
             expr: Box::new(rewrite_projection(*expr, group_keys, out)),
         },
-        ScalarExpr::Member { base, field } => ScalarExpr::Member {
+        Expression::Member { base, field } => Expression::Member {
             base: Box::new(rewrite_projection(*base, group_keys, out)),
             field,
         },
-        ScalarExpr::Index { base, index } => ScalarExpr::Index {
+        Expression::Index { base, index } => Expression::Index {
             base: Box::new(rewrite_projection(*base, group_keys, out)),
             index: Box::new(rewrite_projection(*index, group_keys, out)),
         },
-        ScalarExpr::Object(fields) => ScalarExpr::Object(
+        Expression::Object(fields) => Expression::Object(
             fields
                 .into_iter()
                 .map(|(k, v)| (k, rewrite_projection(v, group_keys, out)))
                 .collect(),
         ),
-        ScalarExpr::Array(items) => ScalarExpr::Array(
+        Expression::Array(items) => Expression::Array(
             items
                 .into_iter()
                 .map(|i| rewrite_projection(i, group_keys, out))
@@ -540,10 +540,10 @@ fn rewrite_projection(
 
 /// Build the member-access chain `base.seg0.seg1…` as a scalar expression — the
 /// path a subroot `FROM base.path alias` navigates on each document.
-fn member_chain(base: &str, path: &[String]) -> ScalarExpr {
-    let mut expr = ScalarExpr::Identifier(base.to_string());
+fn member_chain(base: &str, path: &[String]) -> Expression {
+    let mut expr = Expression::Identifier(base.to_string());
     for seg in path {
-        expr = ScalarExpr::Member {
+        expr = Expression::Member {
             base: Box::new(expr),
             field: seg.clone(),
         };

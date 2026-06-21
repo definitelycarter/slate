@@ -6,7 +6,7 @@
 //! and surface a [`PlanError`]. The aggregate-detection helpers live here too,
 //! shared with lowering's group/aggregate rewrite.
 
-use slate_ast::{FromSource, Query, ScalarExpr, SelectClause};
+use slate_ast::{Expression, FromSource, Query, SelectClause};
 
 /// A query the planner accepts syntactically but cannot plan.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,9 +68,9 @@ fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
     Ok(())
 }
 
-fn check_expr(expr: &ScalarExpr, scope: &[&str]) -> Result<(), PlanError> {
+fn check_expr(expr: &Expression, scope: &[&str]) -> Result<(), PlanError> {
     match expr {
-        ScalarExpr::Identifier(name) => {
+        Expression::Identifier(name) => {
             if scope.contains(&name.as_str()) || is_special_ident(name) || name.starts_with('$') {
                 Ok(())
             } else {
@@ -82,42 +82,42 @@ fn check_expr(expr: &ScalarExpr, scope: &[&str]) -> Result<(), PlanError> {
                 })
             }
         }
-        ScalarExpr::Subquery { query, .. } => check_query(query, scope),
-        ScalarExpr::Member { base, .. } => check_expr(base, scope),
-        ScalarExpr::Index { base, index } => {
+        Expression::Subquery { query, .. } => check_query(query, scope),
+        Expression::Member { base, .. } => check_expr(base, scope),
+        Expression::Index { base, index } => {
             check_expr(base, scope)?;
             check_expr(index, scope)
         }
-        ScalarExpr::Unary { expr, .. } => check_expr(expr, scope),
-        ScalarExpr::Binary { lhs, rhs, .. } => {
+        Expression::Unary { expr, .. } => check_expr(expr, scope),
+        Expression::Binary { lhs, rhs, .. } => {
             check_expr(lhs, scope)?;
             check_expr(rhs, scope)
         }
-        ScalarExpr::Function { args, .. } => {
+        Expression::Function { args, .. } => {
             for a in args {
                 check_expr(a, scope)?;
             }
             Ok(())
         }
-        ScalarExpr::Object(fields) => {
+        Expression::Object(fields) => {
             for (_, v) in fields {
                 check_expr(v, scope)?;
             }
             Ok(())
         }
-        ScalarExpr::Array(items) => {
+        Expression::Array(items) => {
             for i in items {
                 check_expr(i, scope)?;
             }
             Ok(())
         }
-        ScalarExpr::PathGet { base, .. } => check_expr(base, scope),
-        ScalarExpr::MultikeyEq { base, value, .. } => {
+        Expression::PathGet { base, .. } => check_expr(base, scope),
+        Expression::MultikeyEq { base, value, .. } => {
             check_expr(base, scope)?;
             check_expr(value, scope)
         }
         // Literals, pre-converted values, and `@parameter`s bind no identifier.
-        ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Parameter(_) => Ok(()),
+        Expression::Literal(_) | Expression::Value(_) | Expression::Parameter(_) => Ok(()),
     }
 }
 
@@ -179,54 +179,54 @@ fn select_has_aggregate(select: &SelectClause) -> bool {
 /// don't descend), or is built only from constants and such. A reference to a
 /// binding (the `FROM`/`JOIN` alias) that isn't a group key is the violation.
 fn check_grounded(
-    expr: &ScalarExpr,
-    group_keys: &[ScalarExpr],
+    expr: &Expression,
+    group_keys: &[Expression],
     bindings: &[&str],
 ) -> Result<(), PlanError> {
     if group_keys.iter().any(|k| k == expr) {
         return Ok(());
     }
     match expr {
-        ScalarExpr::Function { name, .. } if is_aggregate_name(name) => Ok(()),
+        Expression::Function { name, .. } if is_aggregate_name(name) => Ok(()),
         // A subquery is self-contained (its inner correlation is its own scope),
         // like an aggregate — it's a valid grouped projection.
-        ScalarExpr::Subquery { .. } => Ok(()),
-        ScalarExpr::Identifier(name) if bindings.contains(&name.as_str()) => Err(PlanError {
+        Expression::Subquery { .. } => Ok(()),
+        Expression::Identifier(name) if bindings.contains(&name.as_str()) => Err(PlanError {
             message: format!("'{name}' must appear in GROUP BY or be used in an aggregate"),
         }),
-        ScalarExpr::Identifier(_)
-        | ScalarExpr::Literal(_)
-        | ScalarExpr::Value(_)
-        | ScalarExpr::Parameter(_) => Ok(()),
-        ScalarExpr::Member { base, .. } | ScalarExpr::PathGet { base, .. } => {
+        Expression::Identifier(_)
+        | Expression::Literal(_)
+        | Expression::Value(_)
+        | Expression::Parameter(_) => Ok(()),
+        Expression::Member { base, .. } | Expression::PathGet { base, .. } => {
             check_grounded(base, group_keys, bindings)
         }
-        ScalarExpr::Index { base, index } => {
+        Expression::Index { base, index } => {
             check_grounded(base, group_keys, bindings)?;
             check_grounded(index, group_keys, bindings)
         }
-        ScalarExpr::Unary { expr, .. } => check_grounded(expr, group_keys, bindings),
-        ScalarExpr::Binary { lhs, rhs, .. } => {
+        Expression::Unary { expr, .. } => check_grounded(expr, group_keys, bindings),
+        Expression::Binary { lhs, rhs, .. } => {
             check_grounded(lhs, group_keys, bindings)?;
             check_grounded(rhs, group_keys, bindings)
         }
-        ScalarExpr::MultikeyEq { base, value, .. } => {
+        Expression::MultikeyEq { base, value, .. } => {
             check_grounded(base, group_keys, bindings)?;
             check_grounded(value, group_keys, bindings)
         }
-        ScalarExpr::Function { args, .. } => {
+        Expression::Function { args, .. } => {
             for a in args {
                 check_grounded(a, group_keys, bindings)?;
             }
             Ok(())
         }
-        ScalarExpr::Object(fields) => {
+        Expression::Object(fields) => {
             for (_, v) in fields {
                 check_grounded(v, group_keys, bindings)?;
             }
             Ok(())
         }
-        ScalarExpr::Array(items) => {
+        Expression::Array(items) => {
             for i in items {
                 check_grounded(i, group_keys, bindings)?;
             }
@@ -245,17 +245,17 @@ pub(crate) fn is_aggregate_name(name: &str) -> bool {
 
 /// Read-only check for whether `expr` mentions any aggregate, so lowering can
 /// skip the (allocating) rewrite for the common non-aggregate projection.
-pub(crate) fn contains_aggregate(expr: &ScalarExpr) -> bool {
+pub(crate) fn contains_aggregate(expr: &Expression) -> bool {
     match expr {
-        ScalarExpr::Function { name, args } => {
+        Expression::Function { name, args } => {
             is_aggregate_name(name) || args.iter().any(contains_aggregate)
         }
-        ScalarExpr::Binary { lhs, rhs, .. } => contains_aggregate(lhs) || contains_aggregate(rhs),
-        ScalarExpr::Unary { expr, .. } => contains_aggregate(expr),
-        ScalarExpr::Member { base, .. } => contains_aggregate(base),
-        ScalarExpr::Index { base, index } => contains_aggregate(base) || contains_aggregate(index),
-        ScalarExpr::Object(fields) => fields.iter().any(|(_, v)| contains_aggregate(v)),
-        ScalarExpr::Array(items) => items.iter().any(contains_aggregate),
+        Expression::Binary { lhs, rhs, .. } => contains_aggregate(lhs) || contains_aggregate(rhs),
+        Expression::Unary { expr, .. } => contains_aggregate(expr),
+        Expression::Member { base, .. } => contains_aggregate(base),
+        Expression::Index { base, index } => contains_aggregate(base) || contains_aggregate(index),
+        Expression::Object(fields) => fields.iter().any(|(_, v)| contains_aggregate(v)),
+        Expression::Array(items) => items.iter().any(contains_aggregate),
         _ => false,
     }
 }

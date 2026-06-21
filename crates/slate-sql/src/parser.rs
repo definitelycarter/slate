@@ -18,10 +18,10 @@ pub struct Parser {
 /// The output key for an unaliased projection column (Cosmos rule): the last
 /// path segment of a member access (or a bare identifier's name), else a
 /// positional `$N` for an unnamed computed column.
-fn infer_key(expr: &ScalarExpr, positional: &mut u32) -> String {
+fn infer_key(expr: &Expression, positional: &mut u32) -> String {
     match expr {
-        ScalarExpr::Member { field, .. } => field.clone(),
-        ScalarExpr::Identifier(name) => name.clone(),
+        Expression::Member { field, .. } => field.clone(),
+        Expression::Identifier(name) => name.clone(),
         _ => {
             *positional += 1;
             format!("${positional}")
@@ -186,7 +186,7 @@ impl Parser {
     }
 
     /// Parse the comma-separated expression list after `GROUP BY`.
-    fn parse_group_by(&mut self) -> Result<Vec<ScalarExpr>> {
+    fn parse_group_by(&mut self) -> Result<Vec<Expression>> {
         let mut keys = Vec::new();
         loop {
             keys.push(self.parse_expr()?);
@@ -319,7 +319,7 @@ impl Parser {
 
     // ── Expressions (precedence climbing) ───────────────────────
 
-    fn parse_expr(&mut self) -> Result<ScalarExpr> {
+    fn parse_expr(&mut self) -> Result<Expression> {
         self.parse_coalesce()
     }
 
@@ -327,7 +327,7 @@ impl Parser {
     /// right-associative (`a ?? b ?? c` = `a ?? (b ?? c)`). Desugars to
     /// `IIF(IS_DEFINED(a), a, b)`, so it coalesces only on *undefined* (a defined
     /// `null` is returned as-is), matching Cosmos.
-    fn parse_coalesce(&mut self) -> Result<ScalarExpr> {
+    fn parse_coalesce(&mut self) -> Result<Expression> {
         let lhs = self.parse_or()?;
         if self.matches(&Token::Coalesce) {
             let rhs = self.parse_coalesce()?;
@@ -337,7 +337,7 @@ impl Parser {
         }
     }
 
-    fn parse_or(&mut self) -> Result<ScalarExpr> {
+    fn parse_or(&mut self) -> Result<Expression> {
         let mut lhs = self.parse_and()?;
         while self.matches(&Token::Or) {
             let rhs = self.parse_and()?;
@@ -346,7 +346,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_and(&mut self) -> Result<ScalarExpr> {
+    fn parse_and(&mut self) -> Result<Expression> {
         let mut lhs = self.parse_not()?;
         while self.matches(&Token::And) {
             let rhs = self.parse_not()?;
@@ -355,10 +355,10 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_not(&mut self) -> Result<ScalarExpr> {
+    fn parse_not(&mut self) -> Result<Expression> {
         if self.matches(&Token::Not) {
             let expr = self.parse_not()?;
-            Ok(ScalarExpr::Unary {
+            Ok(Expression::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(expr),
             })
@@ -367,7 +367,7 @@ impl Parser {
         }
     }
 
-    fn parse_comparison(&mut self) -> Result<ScalarExpr> {
+    fn parse_comparison(&mut self) -> Result<Expression> {
         let lhs = self.parse_additive()?;
 
         // `IN (…)` and `BETWEEN … AND …`, each optionally negated with `NOT`.
@@ -421,14 +421,14 @@ impl Parser {
     /// equality path means the planner indexes it as an `IndexMerge(Or)` for
     /// free. The LHS is cloned into each disjunct because the OR-of-equalities
     /// encoding inherently repeats it; the operands are small AST nodes.
-    fn parse_in_list(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+    fn parse_in_list(&mut self, lhs: Expression) -> Result<Expression> {
         self.expect(&Token::LParen)?;
         if self.peek() == &Token::RParen {
             return Err(SqlError::Parse {
                 message: "IN requires at least one value".into(),
             });
         }
-        let mut disjunction: Option<ScalarExpr> = None;
+        let mut disjunction: Option<Expression> = None;
         loop {
             let item = self.parse_expr()?;
             let eq = binary(BinOp::Eq, lhs.clone(), item);
@@ -450,7 +450,7 @@ impl Parser {
     /// inclusive on both ends, as in Cosmos. The bounds parse at additive
     /// precedence (the same level as the operands of `=`/`<`), so the middle
     /// `AND` is the BETWEEN separator rather than boolean conjunction.
-    fn parse_between(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+    fn parse_between(&mut self, lhs: Expression) -> Result<Expression> {
         let lower = self.parse_additive()?;
         self.expect(&Token::And)?;
         let upper = self.parse_additive()?;
@@ -465,7 +465,7 @@ impl Parser {
     /// become regex constructs, and every other character — including regex
     /// metacharacters — is escaped, so a literal `.` or `(` in the pattern stays
     /// literal. The pattern (and `ESCAPE`) must be string literals.
-    fn parse_like(&mut self, lhs: ScalarExpr) -> Result<ScalarExpr> {
+    fn parse_like(&mut self, lhs: Expression) -> Result<Expression> {
         let pattern = match self.take() {
             Token::Str(s) => s,
             other => {
@@ -497,13 +497,13 @@ impl Parser {
             None
         };
         let regex = like_to_regex(&pattern, escape);
-        Ok(ScalarExpr::Function {
+        Ok(Expression::Function {
             name: "REGEXMATCH".into(),
-            args: vec![lhs, ScalarExpr::Literal(Literal::Str(regex))],
+            args: vec![lhs, Expression::Literal(Literal::Str(regex))],
         })
     }
 
-    fn parse_additive(&mut self) -> Result<ScalarExpr> {
+    fn parse_additive(&mut self) -> Result<Expression> {
         let mut lhs = self.parse_multiplicative()?;
         loop {
             let op = match self.peek() {
@@ -518,7 +518,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_multiplicative(&mut self) -> Result<ScalarExpr> {
+    fn parse_multiplicative(&mut self) -> Result<Expression> {
         let mut lhs = self.parse_unary()?;
         loop {
             let op = match self.peek() {
@@ -534,11 +534,11 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_unary(&mut self) -> Result<ScalarExpr> {
+    fn parse_unary(&mut self) -> Result<Expression> {
         if self.peek() == &Token::Minus {
             self.advance();
             let expr = self.parse_unary()?;
-            Ok(ScalarExpr::Unary {
+            Ok(Expression::Unary {
                 op: UnaryOp::Neg,
                 expr: Box::new(expr),
             })
@@ -547,14 +547,14 @@ impl Parser {
         }
     }
 
-    fn parse_postfix(&mut self) -> Result<ScalarExpr> {
+    fn parse_postfix(&mut self) -> Result<Expression> {
         let mut expr = self.parse_primary()?;
         loop {
             match self.peek() {
                 Token::Dot => {
                     self.advance();
                     let field = self.parse_ident()?;
-                    expr = ScalarExpr::Member {
+                    expr = Expression::Member {
                         base: Box::new(expr),
                         field,
                     };
@@ -563,7 +563,7 @@ impl Parser {
                     self.advance();
                     let index = self.parse_expr()?;
                     self.expect(&Token::RBracket)?;
-                    expr = ScalarExpr::Index {
+                    expr = Expression::Index {
                         base: Box::new(expr),
                         index: Box::new(index),
                     };
@@ -574,21 +574,21 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<ScalarExpr> {
+    fn parse_primary(&mut self) -> Result<Expression> {
         match self.take() {
-            Token::Int(i) => Ok(ScalarExpr::Literal(Literal::Int(i))),
-            Token::Float(f) => Ok(ScalarExpr::Literal(Literal::Float(f))),
-            Token::Str(s) => Ok(ScalarExpr::Literal(Literal::Str(s))),
-            Token::True => Ok(ScalarExpr::Literal(Literal::Bool(true))),
-            Token::False => Ok(ScalarExpr::Literal(Literal::Bool(false))),
-            Token::Null => Ok(ScalarExpr::Literal(Literal::Null)),
-            Token::Param(p) => Ok(ScalarExpr::Parameter(p)),
+            Token::Int(i) => Ok(Expression::Literal(Literal::Int(i))),
+            Token::Float(f) => Ok(Expression::Literal(Literal::Float(f))),
+            Token::Str(s) => Ok(Expression::Literal(Literal::Str(s))),
+            Token::True => Ok(Expression::Literal(Literal::Bool(true))),
+            Token::False => Ok(Expression::Literal(Literal::Bool(false))),
+            Token::Null => Ok(Expression::Literal(Literal::Null)),
+            Token::Param(p) => Ok(Expression::Parameter(p)),
             Token::LParen => {
                 // `(SELECT …)` is a scalar subquery; otherwise a grouped expr.
                 if self.peek() == &Token::Select {
                     let query = self.parse_query_body()?;
                     self.expect(&Token::RParen)?;
-                    Ok(ScalarExpr::Subquery {
+                    Ok(Expression::Subquery {
                         query: Box::new(query),
                         kind: SubqueryKind::Scalar,
                     })
@@ -614,27 +614,27 @@ impl Parser {
                         } else {
                             SubqueryKind::Array
                         };
-                        return Ok(ScalarExpr::Subquery {
+                        return Ok(Expression::Subquery {
                             query: Box::new(query),
                             kind,
                         });
                     }
                     // Not a subquery — a normal call (`(` already consumed).
                     let args = self.parse_call_args()?;
-                    return Ok(ScalarExpr::Function { name, args });
+                    return Ok(Expression::Function { name, args });
                 }
                 if self.peek() == &Token::LParen {
                     self.advance();
                     let args = self.parse_call_args()?;
-                    Ok(ScalarExpr::Function { name, args })
+                    Ok(Expression::Function { name, args })
                 } else {
                     // `NaN`/`Infinity` are numeric literals in Cosmos, not
                     // identifiers (`undefined` stays an identifier — it resolves
                     // to the undefined value). Case-sensitive, matching Cosmos.
                     Ok(match name.as_str() {
-                        "NaN" => ScalarExpr::Literal(Literal::Float(f64::NAN)),
-                        "Infinity" => ScalarExpr::Literal(Literal::Float(f64::INFINITY)),
-                        _ => ScalarExpr::Identifier(name),
+                        "NaN" => Expression::Literal(Literal::Float(f64::NAN)),
+                        "Infinity" => Expression::Literal(Literal::Float(f64::INFINITY)),
+                        _ => Expression::Identifier(name),
                     })
                 }
             }
@@ -645,7 +645,7 @@ impl Parser {
     }
 
     /// Parse the argument list after a consumed `(`.
-    fn parse_call_args(&mut self) -> Result<Vec<ScalarExpr>> {
+    fn parse_call_args(&mut self) -> Result<Vec<Expression>> {
         let mut args = Vec::new();
         if self.peek() != &Token::RParen {
             loop {
@@ -660,7 +660,7 @@ impl Parser {
     }
 
     /// Parse the body after a consumed `{`.
-    fn parse_object(&mut self) -> Result<ScalarExpr> {
+    fn parse_object(&mut self) -> Result<Expression> {
         let mut fields = Vec::new();
         if self.peek() != &Token::RBrace {
             loop {
@@ -682,11 +682,11 @@ impl Parser {
             }
         }
         self.expect(&Token::RBrace)?;
-        Ok(ScalarExpr::Object(fields))
+        Ok(Expression::Object(fields))
     }
 
     /// Parse the body after a consumed `[`.
-    fn parse_array(&mut self) -> Result<ScalarExpr> {
+    fn parse_array(&mut self) -> Result<Expression> {
         let mut items = Vec::new();
         if self.peek() != &Token::RBracket {
             loop {
@@ -697,12 +697,12 @@ impl Parser {
             }
         }
         self.expect(&Token::RBracket)?;
-        Ok(ScalarExpr::Array(items))
+        Ok(Expression::Array(items))
     }
 }
 
-fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
-    ScalarExpr::Binary {
+fn binary(op: BinOp, lhs: Expression, rhs: Expression) -> Expression {
+    Expression::Binary {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
@@ -712,21 +712,21 @@ fn binary(op: BinOp, lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
 /// Desugar `a ?? b` to `IIF(IS_DEFINED(a), a, b)`. `a` is duplicated because it
 /// is both the test and the result and the AST has no node sharing; this is a
 /// one-time parse-time clone of the left subexpression.
-fn coalesce(lhs: ScalarExpr, rhs: ScalarExpr) -> ScalarExpr {
-    let is_defined = ScalarExpr::Function {
+fn coalesce(lhs: Expression, rhs: Expression) -> Expression {
+    let is_defined = Expression::Function {
         name: "IS_DEFINED".into(),
         args: vec![lhs.clone()],
     };
-    ScalarExpr::Function {
+    Expression::Function {
         name: "IIF".into(),
         args: vec![is_defined, lhs, rhs],
     }
 }
 
 /// Wrap `expr` in a logical `NOT` when `negated`, else return it unchanged.
-fn maybe_not(negated: bool, expr: ScalarExpr) -> ScalarExpr {
+fn maybe_not(negated: bool, expr: Expression) -> Expression {
     if negated {
-        ScalarExpr::Unary {
+        Expression::Unary {
             op: UnaryOp::Not,
             expr: Box::new(expr),
         }
@@ -824,7 +824,7 @@ mod tests {
     #[test]
     fn minimal_select_value() {
         let q = parse("SELECT VALUE c FROM c");
-        assert!(matches!(q.select, SelectClause::Value(ScalarExpr::Identifier(ref a)) if a == "c"));
+        assert!(matches!(q.select, SelectClause::Value(Expression::Identifier(ref a)) if a == "c"));
         let from = q.from.as_ref().unwrap();
         assert!(matches!(
             from.source,
@@ -885,9 +885,9 @@ mod tests {
             panic!("expected SELECT VALUE")
         };
         match expr {
-            ScalarExpr::Member { base, field } => {
+            Expression::Member { base, field } => {
                 assert_eq!(field, "name");
-                assert!(matches!(*base, ScalarExpr::Index { .. }));
+                assert!(matches!(*base, Expression::Index { .. }));
             }
             other => panic!("expected Member, got {other:?}"),
         }
@@ -901,11 +901,11 @@ mod tests {
             panic!("expected SELECT VALUE")
         };
         match expr {
-            ScalarExpr::Binary {
+            Expression::Binary {
                 op: BinOp::Add,
                 rhs,
                 ..
-            } => assert!(matches!(*rhs, ScalarExpr::Binary { op: BinOp::Mul, .. })),
+            } => assert!(matches!(*rhs, Expression::Binary { op: BinOp::Mul, .. })),
             other => panic!("expected Add at root, got {other:?}"),
         }
     }
@@ -915,9 +915,9 @@ mod tests {
         // a OR b AND c => Or(a, And(b,c))
         let q = parse("SELECT VALUE c FROM c WHERE a OR b AND c");
         match q.filter {
-            Some(ScalarExpr::Binary {
+            Some(Expression::Binary {
                 op: BinOp::Or, rhs, ..
-            }) => assert!(matches!(*rhs, ScalarExpr::Binary { op: BinOp::And, .. })),
+            }) => assert!(matches!(*rhs, Expression::Binary { op: BinOp::And, .. })),
             other => panic!("expected Or at root, got {other:?}"),
         }
     }
@@ -929,7 +929,7 @@ mod tests {
             panic!("expected SELECT VALUE")
         };
         match expr {
-            ScalarExpr::Function { name, args } => {
+            Expression::Function { name, args } => {
                 assert_eq!(name, "UPPER");
                 assert_eq!(args.len(), 1);
             }
@@ -943,7 +943,7 @@ mod tests {
         let SelectClause::Value(expr) = q.select else {
             panic!("expected SELECT VALUE")
         };
-        assert!(matches!(expr, ScalarExpr::Object(ref f) if f.len() == 2));
+        assert!(matches!(expr, Expression::Object(ref f) if f.len() == 2));
         let from = q.from.as_ref().unwrap();
         assert_eq!(from.joins.len(), 1);
         assert_eq!(from.joins[0].alias, "t");
@@ -955,7 +955,7 @@ mod tests {
         let from = q.from.as_ref().unwrap();
         assert_eq!(from.joins.len(), 1);
         assert!(
-            matches!(&from.joins[0].array, ScalarExpr::Member { field, .. } if field == "tags")
+            matches!(&from.joins[0].array, Expression::Member { field, .. } if field == "tags")
         );
     }
 
@@ -973,8 +973,8 @@ mod tests {
     fn parameter_in_predicate() {
         let q = parse("SELECT VALUE c FROM c WHERE c.age > @minAge");
         match q.filter {
-            Some(ScalarExpr::Binary { rhs, .. }) => {
-                assert!(matches!(*rhs, ScalarExpr::Parameter(ref p) if p == "minAge"))
+            Some(Expression::Binary { rhs, .. }) => {
+                assert!(matches!(*rhs, Expression::Parameter(ref p) if p == "minAge"))
             }
             other => panic!("expected Binary, got {other:?}"),
         }
@@ -1023,7 +1023,7 @@ mod tests {
     fn in_list_desugars_to_or_of_equalities() {
         // c.status IN (1, 2, 3)  =>  (status = 1 OR status = 2) OR status = 3
         let q = parse("SELECT VALUE c FROM c WHERE c.status IN (1, 2, 3)");
-        let Some(ScalarExpr::Binary {
+        let Some(Expression::Binary {
             op: BinOp::Or,
             lhs,
             rhs,
@@ -1032,7 +1032,7 @@ mod tests {
             panic!("expected a top-level OR");
         };
         // The last disjunct is `status = 3`.
-        let ScalarExpr::Binary {
+        let Expression::Binary {
             op: BinOp::Eq,
             rhs: eq_rhs,
             ..
@@ -1040,16 +1040,16 @@ mod tests {
         else {
             panic!("expected equality as the last disjunct");
         };
-        assert!(matches!(*eq_rhs, ScalarExpr::Literal(Literal::Int(3))));
+        assert!(matches!(*eq_rhs, Expression::Literal(Literal::Int(3))));
         // The earlier values fold left into another OR.
-        assert!(matches!(*lhs, ScalarExpr::Binary { op: BinOp::Or, .. }));
+        assert!(matches!(*lhs, Expression::Binary { op: BinOp::Or, .. }));
     }
 
     #[test]
     fn between_desugars_to_inclusive_range() {
         // c.age BETWEEN 18 AND 65  =>  age >= 18 AND age <= 65
         let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 18 AND 65");
-        let Some(ScalarExpr::Binary {
+        let Some(Expression::Binary {
             op: BinOp::And,
             lhs,
             rhs,
@@ -1057,7 +1057,7 @@ mod tests {
         else {
             panic!("expected a top-level AND");
         };
-        let ScalarExpr::Binary {
+        let Expression::Binary {
             op: BinOp::Gte,
             rhs: lo,
             ..
@@ -1065,7 +1065,7 @@ mod tests {
         else {
             panic!("expected >= as the lower bound");
         };
-        let ScalarExpr::Binary {
+        let Expression::Binary {
             op: BinOp::Lte,
             rhs: hi,
             ..
@@ -1073,31 +1073,31 @@ mod tests {
         else {
             panic!("expected <= as the upper bound");
         };
-        assert!(matches!(*lo, ScalarExpr::Literal(Literal::Int(18))));
-        assert!(matches!(*hi, ScalarExpr::Literal(Literal::Int(65))));
+        assert!(matches!(*lo, Expression::Literal(Literal::Int(18))));
+        assert!(matches!(*hi, Expression::Literal(Literal::Int(65))));
     }
 
     #[test]
     fn not_in_and_not_between_wrap_in_not() {
         let q = parse("SELECT VALUE c FROM c WHERE c.status NOT IN (1, 2)");
-        let Some(ScalarExpr::Unary {
+        let Some(Expression::Unary {
             op: UnaryOp::Not,
             expr,
         }) = q.filter
         else {
             panic!("expected NOT around the desugared IN");
         };
-        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::Or, .. }));
+        assert!(matches!(*expr, Expression::Binary { op: BinOp::Or, .. }));
 
         let q = parse("SELECT VALUE c FROM c WHERE c.age NOT BETWEEN 1 AND 2");
-        let Some(ScalarExpr::Unary {
+        let Some(Expression::Unary {
             op: UnaryOp::Not,
             expr,
         }) = q.filter
         else {
             panic!("expected NOT around the desugared BETWEEN");
         };
-        assert!(matches!(*expr, ScalarExpr::Binary { op: BinOp::And, .. }));
+        assert!(matches!(*expr, Expression::Binary { op: BinOp::And, .. }));
     }
 
     #[test]
@@ -1115,7 +1115,7 @@ mod tests {
         let q = parse("SELECT VALUE c FROM c WHERE c.age BETWEEN 1 AND 2 OR c.x = 9");
         assert!(matches!(
             q.filter,
-            Some(ScalarExpr::Binary { op: BinOp::Or, .. })
+            Some(Expression::Binary { op: BinOp::Or, .. })
         ));
     }
 
@@ -1141,35 +1141,35 @@ mod tests {
     #[test]
     fn like_desugars_to_regexmatch() {
         let q = parse(r#"SELECT VALUE c FROM c WHERE c.name LIKE "a%""#);
-        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+        let Some(Expression::Function { name, args }) = q.filter else {
             panic!("expected a REGEXMATCH call");
         };
         assert_eq!(name, "REGEXMATCH");
         assert_eq!(args.len(), 2);
-        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^a.*$"));
+        assert!(matches!(args[1], Expression::Literal(Literal::Str(ref r)) if r == "^a.*$"));
     }
 
     #[test]
     fn like_with_escape_clause() {
         let q = parse(r#"SELECT VALUE c FROM c WHERE c.x LIKE "%20^%%" ESCAPE "^""#);
-        let Some(ScalarExpr::Function { name, args }) = q.filter else {
+        let Some(Expression::Function { name, args }) = q.filter else {
             panic!("expected a REGEXMATCH call");
         };
         assert_eq!(name, "REGEXMATCH");
-        assert!(matches!(args[1], ScalarExpr::Literal(Literal::Str(ref r)) if r == "^.*20%.*$"));
+        assert!(matches!(args[1], Expression::Literal(Literal::Str(ref r)) if r == "^.*20%.*$"));
     }
 
     #[test]
     fn not_like_wraps_in_not() {
         let q = parse(r#"SELECT VALUE c FROM c WHERE c.name NOT LIKE "a%""#);
-        let Some(ScalarExpr::Unary {
+        let Some(Expression::Unary {
             op: UnaryOp::Not,
             expr,
         }) = q.filter
         else {
             panic!("expected NOT around the desugared LIKE");
         };
-        assert!(matches!(*expr, ScalarExpr::Function { ref name, .. } if name == "REGEXMATCH"));
+        assert!(matches!(*expr, Expression::Function { ref name, .. } if name == "REGEXMATCH"));
     }
 
     #[test]
@@ -1184,7 +1184,7 @@ mod tests {
     fn group_by_clause_parses() {
         let q = parse("SELECT c.kind, COUNT(c.tags) FROM c GROUP BY c.kind");
         assert_eq!(q.group_by.len(), 1);
-        assert!(matches!(q.group_by[0], ScalarExpr::Member { ref field, .. } if field == "kind"));
+        assert!(matches!(q.group_by[0], Expression::Member { ref field, .. } if field == "kind"));
     }
 
     #[test]
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn scalar_subquery_parses() {
         let q = parse("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c");
-        let SelectClause::Value(ScalarExpr::Subquery { kind, query }) = q.select else {
+        let SelectClause::Value(Expression::Subquery { kind, query }) = q.select else {
             panic!("expected a scalar subquery");
         };
         assert_eq!(kind, SubqueryKind::Scalar);
@@ -1216,7 +1216,7 @@ mod tests {
         let q = parse("SELECT VALUE c FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags)");
         assert!(matches!(
             q.filter,
-            Some(ScalarExpr::Subquery {
+            Some(Expression::Subquery {
                 kind: SubqueryKind::Exists,
                 ..
             })
@@ -1224,7 +1224,7 @@ mod tests {
         let q = parse("SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c");
         assert!(matches!(
             q.select,
-            SelectClause::Value(ScalarExpr::Subquery {
+            SelectClause::Value(Expression::Subquery {
                 kind: SubqueryKind::Array,
                 ..
             })
@@ -1245,7 +1245,7 @@ mod tests {
         let q = parse("SELECT VALUE EXISTS(c.x) FROM c");
         assert!(matches!(
             q.select,
-            SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
+            SelectClause::Value(Expression::Function { ref name, .. }) if name == "EXISTS"
         ));
     }
 
@@ -1288,12 +1288,12 @@ mod tests {
     fn coalesce_desugars_to_iif() {
         // `a ?? b` → IIF(IS_DEFINED(a), a, b).
         let q = parse("SELECT VALUE c.x ?? c.y FROM c");
-        let SelectClause::Value(ScalarExpr::Function { name, args }) = &q.select else {
+        let SelectClause::Value(Expression::Function { name, args }) = &q.select else {
             panic!("expected a function");
         };
         assert_eq!(name, "IIF");
         assert_eq!(args.len(), 3);
-        assert!(matches!(&args[0], ScalarExpr::Function { name, .. } if name == "IS_DEFINED"));
+        assert!(matches!(&args[0], Expression::Function { name, .. } if name == "IS_DEFINED"));
     }
 
     #[test]
@@ -1301,13 +1301,13 @@ mod tests {
         // `2 + c.x ?? 3` parses as `(2 + c.x) ?? 3`, so the IIF result branch is
         // the addition — not `2 + (c.x ?? 3)`.
         let q = parse("SELECT VALUE 2 + c.x ?? 3 FROM c");
-        let SelectClause::Value(ScalarExpr::Function { name, args }) = &q.select else {
+        let SelectClause::Value(Expression::Function { name, args }) = &q.select else {
             panic!("expected IIF");
         };
         assert_eq!(name, "IIF");
         assert!(matches!(
             &args[1],
-            ScalarExpr::Binary { op: BinOp::Add, .. }
+            Expression::Binary { op: BinOp::Add, .. }
         ));
     }
 
@@ -1374,18 +1374,18 @@ mod tests {
         let q = parse("SELECT VALUE NaN");
         assert!(matches!(
             q.select,
-            SelectClause::Value(ScalarExpr::Literal(Literal::Float(f))) if f.is_nan()
+            SelectClause::Value(Expression::Literal(Literal::Float(f))) if f.is_nan()
         ));
         let q = parse("SELECT VALUE Infinity");
         assert!(matches!(
             q.select,
-            SelectClause::Value(ScalarExpr::Literal(Literal::Float(f))) if f.is_infinite() && f > 0.0
+            SelectClause::Value(Expression::Literal(Literal::Float(f))) if f.is_infinite() && f > 0.0
         ));
         // `undefined` stays an identifier (it resolves to the undefined value).
         let q = parse("SELECT VALUE undefined");
         assert!(matches!(
             q.select,
-            SelectClause::Value(ScalarExpr::Identifier(ref n)) if n == "undefined"
+            SelectClause::Value(Expression::Identifier(ref n)) if n == "undefined"
         ));
     }
 }
