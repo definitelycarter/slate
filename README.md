@@ -64,11 +64,13 @@ cargo run -p slate-cli
 ```
 
 In the shell, lines starting with `.` are commands (`.help` lists them) and
-everything else is run as SQL against the active collection:
+everything else is run as SQL against the active collection. A SQL statement is
+terminated by `;` and may span multiple lines:
 
 ```
 slate> .seed
-slate(sample)> SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city
+slate(sample)> SELECT c.city, COUNT(1) AS n
+          ...> FROM c GROUP BY c.city;
 slate(sample)> .insert {"_id":"5","name":"linus","city":"Helsinki"}
 ```
 

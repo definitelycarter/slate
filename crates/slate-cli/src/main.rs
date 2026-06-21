@@ -15,7 +15,7 @@ use slate_db::{Database, DatabaseBuilder};
 use slate_store::Store;
 
 use slate_cli::format::fmt_duration;
-use slate_cli::{Command, Output, Session};
+use slate_cli::{Command, Feed, InputBuffer, Output, Session};
 
 const USAGE: &str = "\
 slate — interactive Slate shell
@@ -49,10 +49,12 @@ Commands:
     .index <field>              create an index on a field
     .indexes                    list indexes on the active collection
 
-Anything else is run as SQL against the active collection, where `c` is the row:
-    SELECT * FROM c
-    SELECT VALUE c.name FROM c WHERE c.age > 40 ORDER BY c.age DESC
-    SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city
+Anything else is run as SQL against the active collection, where `c` is the
+row. End a statement with `;` — it may span multiple lines (`...>` continues it,
+Ctrl-C cancels it):
+    SELECT * FROM c;
+    SELECT VALUE c.name FROM c WHERE c.age > 40 ORDER BY c.age DESC;
+    SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city;
 ";
 
 fn main() -> ExitCode {
@@ -158,19 +160,30 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
         load_history(&mut rl, path);
     }
 
-    eprintln!("Type `.help` for commands, `.quit` to exit.\n");
+    eprintln!("Type `.help` for commands, `.quit` to exit. End SQL with `;`.\n");
 
+    let mut buffer = InputBuffer::new();
     loop {
-        let prompt = match session.current() {
-            Some(name) => format!("slate({name})> "),
-            None => "slate> ".to_string(),
+        // A statement-in-progress gets the continuation prompt; otherwise the
+        // primary prompt reflects the active collection.
+        let prompt = if buffer.is_pending() {
+            "   ...> ".to_string()
+        } else {
+            match session.current() {
+                Some(name) => format!("slate({name})> "),
+                None => "slate> ".to_string(),
+            }
         };
         match rl.readline(&prompt) {
             Ok(line) => {
-                if !line.trim().is_empty() {
-                    let _ = rl.add_history_entry(line.as_str());
+                let statement = match buffer.push(&line) {
+                    Feed::Ready(stmt) => stmt,
+                    Feed::More => continue, // keep buffering at the `...>` prompt
+                };
+                if !statement.trim().is_empty() {
+                    let _ = rl.add_history_entry(statement.as_str());
                 }
-                let command = match Command::parse(&line) {
+                let command = match Command::parse(&statement) {
                     Ok(cmd) => cmd,
                     Err(e) => {
                         eprintln!("error: {e}");
@@ -186,8 +199,13 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
                     Err(e) => eprintln!("error: {e}"),
                 }
             }
-            Err(ReadlineError::Interrupted) => continue, // Ctrl-C: abandon the line
-            Err(ReadlineError::Eof) => break,            // Ctrl-D: leave
+            // Ctrl-C: cancel any partially-typed statement and return to a fresh
+            // prompt (a no-op when nothing is buffered).
+            Err(ReadlineError::Interrupted) => {
+                buffer.clear();
+                continue;
+            }
+            Err(ReadlineError::Eof) => break, // Ctrl-D: leave
             Err(e) => {
                 eprintln!("error: {e}");
                 break;

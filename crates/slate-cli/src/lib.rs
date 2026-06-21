@@ -12,7 +12,9 @@
 
 pub mod command;
 pub mod format;
+pub mod input;
 pub mod session;
 
 pub use command::Command;
+pub use input::{Feed, InputBuffer};
 pub use session::{Output, Session};

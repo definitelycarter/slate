@@ -258,7 +258,7 @@ impl<S: Store> Session<S> {
         self.current = Some(NAME.to_string());
         let note = if exists { " (already present)" } else { "" };
         Ok(Output::Message(format!(
-            "collection `{NAME}` ready{note} — now in use; try `SELECT * FROM c`"
+            "collection `{NAME}` ready{note} — now in use; try `SELECT * FROM c;`"
         )))
     }
 }

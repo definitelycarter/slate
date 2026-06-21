@@ -416,7 +416,10 @@ meta-commands (`.create`, `.use`, `.insert`, `.update`, `.delete`, `.count`,
 SQL against the active collection. It opens an in-memory database by default, or
 a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
 Input history persists to `~/.slate_history` across sessions, and every query or
-command result is annotated with its execution time.
+command result is annotated with its execution time. SQL statements are
+terminated by `;` and may span multiple lines (a `...>` continuation prompt
+buffers the rest; Ctrl-C cancels a half-typed statement); meta-commands stay
+single-line.
 
 The command/session/format core lives in the crate's library (not the binary):
 a line is parsed to a `Command`, run against a `Database<S>` into a semantic
