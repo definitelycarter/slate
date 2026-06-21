@@ -44,9 +44,13 @@ Commands:
     .seed                       load a small sample collection
     .insert <json>              insert a document, or an array of documents
     .update <filter> <update>   update matching documents (Mongo operators)
+    .replace <filter> <json>    replace the first matching document (no merge)
     .delete <filter>            delete matching documents
     .count [filter]             count documents (optionally filtered)
+    .distinct <field> [filter]  distinct values of a field
     .index <field>              create an index on a field
+    .unique-index <field>       create a unique index on a field
+    .drop-index <field>         drop an index on a field
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
 

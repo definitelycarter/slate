@@ -29,10 +29,21 @@ pub enum Command {
     Insert(Value),
     /// Update every document matching `filter` with `update` (Mongo operators).
     Update { filter: Value, update: Value },
+    /// Replace the first document matching `filter` with `replacement` (no merge).
+    Replace { filter: Value, replacement: Value },
     /// Delete every document matching `filter`.
     Delete { filter: Value },
+    /// Distinct values of a field, optionally restricted by `filter`.
+    Distinct {
+        field: String,
+        filter: Option<Value>,
+    },
     /// Create an index on a field of the current collection.
     CreateIndex(String),
+    /// Create a unique index on a field of the current collection.
+    CreateUniqueIndex(String),
+    /// Drop an index on a field of the current collection.
+    DropIndex(String),
     /// List indexes on the current collection.
     ListIndexes,
     /// Count documents in the current collection, optionally filtered.
@@ -75,6 +86,8 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "create" => Ok(Command::Create(name_arg(args, "create")?)),
         "drop" => Ok(Command::Drop(name_arg(args, "drop")?)),
         "index" => Ok(Command::CreateIndex(name_arg(args, "index")?)),
+        "unique-index" => Ok(Command::CreateUniqueIndex(name_arg(args, "unique-index")?)),
+        "drop-index" => Ok(Command::DropIndex(name_arg(args, "drop-index")?)),
         "indexes" => Ok(Command::ListIndexes),
         "schema" => {
             if args.trim().is_empty() {
@@ -98,9 +111,43 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
             )?;
             Ok(Command::Update { filter, update })
         }
+        "replace" => {
+            let [filter, replacement] = exactly(
+                parse_json_values(args)?,
+                "replace expects <filter-json> <replacement-json>",
+            )?;
+            Ok(Command::Replace {
+                filter,
+                replacement,
+            })
+        }
         "delete" => {
             let [filter] = exactly(parse_json_values(args)?, "delete expects <filter-json>")?;
             Ok(Command::Delete { filter })
+        }
+        "distinct" => {
+            // `<field> [filter-json]` — the field is the first bare word, the
+            // rest (if any) is a single JSON filter.
+            let (field, rest) = match args.split_once(char::is_whitespace) {
+                Some((f, r)) => (f, r.trim()),
+                None => (args, ""),
+            };
+            if field.is_empty() {
+                return Err(".distinct requires a field".to_string());
+            }
+            let filter = if rest.is_empty() {
+                None
+            } else {
+                let [filter] = exactly(
+                    parse_json_values(rest)?,
+                    "distinct expects <field> [filter-json]",
+                )?;
+                Some(filter)
+            };
+            Ok(Command::Distinct {
+                field: field.to_string(),
+                filter,
+            })
         }
         "count" => {
             let values = parse_json_values(args)?;
@@ -243,6 +290,51 @@ mod tests {
             Command::CreateIndex("email".to_string())
         );
         assert_eq!(Command::parse(".indexes").unwrap(), Command::ListIndexes);
+    }
+
+    #[test]
+    fn replace_takes_two_documents() {
+        assert_eq!(
+            Command::parse(r#".replace {"_id":"1"} {"_id":"1","name":"ada"}"#).unwrap(),
+            Command::Replace {
+                filter: json!({"_id": "1"}),
+                replacement: json!({"_id": "1", "name": "ada"}),
+            }
+        );
+        assert!(Command::parse(r#".replace {"a":1}"#).is_err());
+    }
+
+    #[test]
+    fn distinct_field_and_optional_filter() {
+        assert_eq!(
+            Command::parse(".distinct city").unwrap(),
+            Command::Distinct {
+                field: "city".to_string(),
+                filter: None,
+            }
+        );
+        assert_eq!(
+            Command::parse(r#".distinct city {"age":{"$gt":40}}"#).unwrap(),
+            Command::Distinct {
+                field: "city".to_string(),
+                filter: Some(json!({"age": {"$gt": 40}})),
+            }
+        );
+        assert!(Command::parse(".distinct").is_err());
+    }
+
+    #[test]
+    fn unique_and_drop_index_take_a_field() {
+        assert_eq!(
+            Command::parse(".unique-index email").unwrap(),
+            Command::CreateUniqueIndex("email".to_string())
+        );
+        assert_eq!(
+            Command::parse(".drop-index email").unwrap(),
+            Command::DropIndex("email".to_string())
+        );
+        assert!(Command::parse(".unique-index").is_err());
+        assert!(Command::parse(".drop-index a b").is_err());
     }
 
     #[test]

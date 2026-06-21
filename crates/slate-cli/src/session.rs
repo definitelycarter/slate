@@ -9,9 +9,10 @@
 //! `execute` returns a semantic [`Output`] rather than printing, so it can be
 //! driven and asserted on in tests with no terminal.
 
+use bson::Bson;
 use serde_json::{Value, json};
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DistinctOptions};
 use slate_store::Store;
 
 use crate::command::Command;
@@ -94,8 +95,15 @@ impl<S: Store> Session<S> {
             Command::Drop(name) => self.drop(name),
             Command::Insert(value) => self.insert(value),
             Command::Update { filter, update } => self.update(filter, update),
+            Command::Replace {
+                filter,
+                replacement,
+            } => self.replace(filter, replacement),
             Command::Delete { filter } => self.delete(filter),
+            Command::Distinct { field, filter } => self.distinct(field, filter),
             Command::CreateIndex(field) => self.create_index(field),
+            Command::CreateUniqueIndex(field) => self.create_unique_index(field),
+            Command::DropIndex(field) => self.drop_index(field),
             Command::ListIndexes => self.list_indexes(),
             Command::Count(filter) => self.count(filter),
             Command::Schema(name) => self.schema(name),
@@ -192,6 +200,18 @@ impl<S: Store> Session<S> {
         Ok(Output::Affected(affected))
     }
 
+    fn replace(&self, filter: Value, replacement: Value) -> Result<Output, String> {
+        let collection = self.require_collection()?;
+        let txn = self.db.begin(false).map_err(es)?;
+        let affected = txn
+            .replace_one(DEFAULT_CF, collection, filter, replacement)
+            .map_err(es)?
+            .drain()
+            .map_err(es)?;
+        txn.commit().map_err(es)?;
+        Ok(Output::Affected(affected))
+    }
+
     fn delete(&self, filter: Value) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
@@ -204,6 +224,30 @@ impl<S: Store> Session<S> {
         Ok(Output::Affected(affected))
     }
 
+    fn distinct(&self, field: String, filter: Option<Value>) -> Result<Output, String> {
+        let collection = self.require_collection()?;
+        let filter = filter.unwrap_or_else(|| json!({}));
+        let txn = self.db.begin(true).map_err(es)?;
+        let result = txn
+            .distinct(
+                DEFAULT_CF,
+                collection,
+                &field,
+                filter,
+                DistinctOptions::default(),
+            )
+            .map_err(es)?;
+        txn.rollback().map_err(es)?;
+
+        // `distinct` yields a BSON array of bare values; render one row per
+        // value so the result reads like a query (and gets a row count).
+        let rows = match Bson::try_from(result).map_err(es)? {
+            Bson::Array(items) => items.into_iter().map(format::render_bson).collect(),
+            other => vec![format::render_bson(other)],
+        };
+        Ok(Output::Rows(rows))
+    }
+
     fn create_index(&self, field: String) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
@@ -211,6 +255,25 @@ impl<S: Store> Session<S> {
             .map_err(es)?;
         txn.commit().map_err(es)?;
         Ok(Output::Message(format!("created index on `{field}`")))
+    }
+
+    fn create_unique_index(&self, field: String) -> Result<Output, String> {
+        let collection = self.require_collection()?;
+        let txn = self.db.begin(false).map_err(es)?;
+        txn.create_unique_index(DEFAULT_CF, collection, &field)
+            .map_err(es)?;
+        txn.commit().map_err(es)?;
+        Ok(Output::Message(format!(
+            "created unique index on `{field}`"
+        )))
+    }
+
+    fn drop_index(&self, field: String) -> Result<Output, String> {
+        let collection = self.require_collection()?;
+        let txn = self.db.begin(false).map_err(es)?;
+        txn.drop_index(DEFAULT_CF, collection, &field).map_err(es)?;
+        txn.commit().map_err(es)?;
+        Ok(Output::Message(format!("dropped index on `{field}`")))
     }
 
     fn list_indexes(&self) -> Result<Output, String> {
@@ -427,6 +490,97 @@ mod tests {
         let out = run(&mut s, r#".delete {"name":"alan"}"#);
         assert_eq!(out, Output::Affected(1));
         assert_eq!(run(&mut s, ".count"), Output::Count(1));
+    }
+
+    #[test]
+    fn distinct_over_seed_with_and_without_filter() {
+        let mut s = session();
+        run(&mut s, ".seed");
+        match run(&mut s, ".distinct city") {
+            Output::Rows(rows) => {
+                // London, New York, Austin — three distinct cities.
+                assert_eq!(rows.len(), 3);
+                assert!(rows.iter().any(|r| r == "\"London\""));
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        match run(&mut s, r#".distinct city {"age":{"$gt":42}}"#) {
+            Output::Rows(rows) => {
+                // grace (44, New York) and edsger (52, Austin).
+                assert_eq!(rows.len(), 2);
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_swaps_the_whole_document() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(&mut s, r#".insert {"_id":"1","name":"ada","age":36}"#);
+        let out = run(
+            &mut s,
+            r#".replace {"_id":"1"} {"_id":"1","name":"ada lovelace"}"#,
+        );
+        assert_eq!(out, Output::Affected(1));
+
+        // Replace is not a merge: the old `age` field is gone.
+        match run(&mut s, "SELECT * FROM c") {
+            Output::Rows(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert!(rows[0].contains("ada lovelace"));
+                assert!(
+                    !rows[0].contains("\"age\""),
+                    "age should be gone: {}",
+                    rows[0]
+                );
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unique_index_enforced_and_flagged_in_schema() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(
+            &mut s,
+            r#".insert [{"_id":"1","email":"a@x"},{"_id":"2","email":"b@x"}]"#,
+        );
+        assert!(matches!(
+            run(&mut s, ".unique-index email"),
+            Output::Message(_)
+        ));
+        match run(&mut s, ".schema") {
+            Output::Schema(report) => assert!(
+                report
+                    .indexes
+                    .iter()
+                    .any(|ix| ix.field == "email" && ix.unique),
+                "email index should be unique: {:?}",
+                report.indexes
+            ),
+            other => panic!("expected schema, got {other:?}"),
+        }
+        // A duplicate email now violates the unique index.
+        let dup = s.execute(Command::parse(r#".insert {"_id":"3","email":"a@x"}"#).unwrap());
+        assert!(dup.is_err(), "duplicate insert should be rejected");
+    }
+
+    #[test]
+    fn drop_index_removes_it() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(&mut s, ".index city");
+        match run(&mut s, ".indexes") {
+            Output::Indexes(fields) => assert!(fields.iter().any(|f| f == "city")),
+            other => panic!("expected indexes, got {other:?}"),
+        }
+        run(&mut s, ".drop-index city");
+        match run(&mut s, ".indexes") {
+            Output::Indexes(fields) => assert!(!fields.iter().any(|f| f == "city")),
+            other => panic!("expected indexes, got {other:?}"),
+        }
     }
 
     #[test]

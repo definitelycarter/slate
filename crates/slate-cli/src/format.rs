@@ -28,7 +28,9 @@ pub fn fmt_duration(elapsed: Duration) -> String {
     }
 }
 
-fn render_bson(bson: Bson) -> String {
+/// Render an owned BSON value as a JSON string — documents and arrays
+/// pretty-printed across lines, scalars inline.
+pub fn render_bson(bson: Bson) -> String {
     let multiline = matches!(bson, Bson::Document(_) | Bson::Array(_));
     let json = bson.into_relaxed_extjson();
     if multiline {
