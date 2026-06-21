@@ -269,3 +269,102 @@ fn upsert_many_inserts_and_replaces() {
     assert_eq!(get_f64(&doc, "val"), 10.0);
     log("upsert_many: pass");
 }
+
+// ── SQL query ───────────────────────────────────────────────
+
+/// Seed a `people` collection used by the SQL round-trip tests.
+fn seed_people(db: &SlateDb) {
+    db.create_collection("people").unwrap();
+    let arr = js_sys::Array::new();
+    for (id, name, age) in [
+        ("p1", "Alice", 30.0),
+        ("p2", "Bob", 25.0),
+        ("p3", "Carol", 35.0),
+    ] {
+        arr.push(&obj(&[
+            ("_id", JsValue::from_str(id)),
+            ("name", JsValue::from_str(name)),
+            ("age", JsValue::from_f64(age)),
+        ]));
+    }
+    db.insert_many("people", arr).unwrap();
+}
+
+#[wasm_bindgen_test]
+fn query_projection_round_trip() {
+    let db = SlateDb::new().unwrap();
+    seed_people(&db);
+
+    // Filter + projection + ORDER BY: a document-shaped result.
+    let rows = db
+        .query(
+            "people",
+            "SELECT c.name, c.age FROM c WHERE c.age > 26 ORDER BY c.age DESC",
+        )
+        .unwrap();
+    log_val("query rows", &rows);
+    assert_eq!(rows.length(), 2);
+    assert_eq!(get_str(&rows.get(0), "name"), "Carol");
+    assert_eq!(get_f64(&rows.get(0), "age"), 35.0);
+    assert_eq!(get_str(&rows.get(1), "name"), "Alice");
+    log("query projection: pass");
+}
+
+#[wasm_bindgen_test]
+fn query_select_value_scalar() {
+    let db = SlateDb::new().unwrap();
+    seed_people(&db);
+
+    // SELECT VALUE yields bare scalars (strings), not documents — exercises the
+    // value-level conversion path that `find` never hits.
+    let names = db
+        .query("people", "SELECT VALUE c.name FROM c ORDER BY c.name ASC")
+        .unwrap();
+    log_val("scalar names", &names);
+    assert_eq!(names.length(), 3);
+    assert_eq!(names.get(0).as_string().unwrap(), "Alice");
+    assert_eq!(names.get(1).as_string().unwrap(), "Bob");
+    assert_eq!(names.get(2).as_string().unwrap(), "Carol");
+    log("query select value: pass");
+}
+
+#[wasm_bindgen_test]
+fn query_group_by_aggregate() {
+    let db = SlateDb::new().unwrap();
+    db.create_collection("sales").unwrap();
+    let arr = js_sys::Array::new();
+    for (i, (region, amt)) in [("west", 10.0), ("west", 20.0), ("east", 5.0)]
+        .iter()
+        .enumerate()
+    {
+        arr.push(&obj(&[
+            ("_id", JsValue::from_str(&format!("s{i}"))),
+            ("region", JsValue::from_str(region)),
+            ("amount", JsValue::from_f64(*amt)),
+        ]));
+    }
+    db.insert_many("sales", arr).unwrap();
+
+    let rows = db
+        .query(
+            "sales",
+            "SELECT c.region, COUNT(1) AS n FROM c GROUP BY c.region ORDER BY c.region ASC",
+        )
+        .unwrap();
+    log_val("group by rows", &rows);
+    assert_eq!(rows.length(), 2);
+    assert_eq!(get_str(&rows.get(0), "region"), "east");
+    assert_eq!(get_f64(&rows.get(0), "n"), 1.0);
+    assert_eq!(get_str(&rows.get(1), "region"), "west");
+    assert_eq!(get_f64(&rows.get(1), "n"), 2.0);
+    log("query group by: pass");
+}
+
+#[wasm_bindgen_test]
+fn query_invalid_sql_is_err() {
+    let db = SlateDb::new().unwrap();
+    seed_people(&db);
+    // A parse error must surface as a JS error, not a panic.
+    assert!(db.query("people", "SELECT FROM WHERE").is_err());
+    log("query invalid sql: pass");
+}

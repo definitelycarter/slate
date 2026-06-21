@@ -30,6 +30,18 @@ fn raw_to_js(raw: RawDocumentBuf) -> Result<JsValue, JsError> {
     serde::Serialize::serialize(&doc, &SERIALIZER).map_err(to_js_err)
 }
 
+/// Convert a single SQL result *value* to JS.
+///
+/// Unlike `find` (which always streams documents), a SQL `SELECT VALUE`
+/// projection can yield scalars or arrays — e.g. `SELECT VALUE c.name` yields
+/// strings — so query rows are converted at the BSON value level rather than as
+/// documents.
+fn value_to_js(value: bson::RawBson) -> Result<JsValue, DbError> {
+    let bson = bson::Bson::try_from(value.as_raw_bson_ref())?;
+    serde::Serialize::serialize(&bson, &SERIALIZER)
+        .map_err(|e| DbError::Serialization(e.to_string()))
+}
+
 fn js_array_to_raws(arr: &js_sys::Array) -> Result<Vec<RawDocumentBuf>, JsError> {
     let mut docs = Vec::with_capacity(arr.length() as usize);
     for i in 0..arr.length() {
@@ -155,6 +167,26 @@ impl SlateDb {
         self.read(|txn| {
             let count = txn.count(DEFAULT_CF, collection, raw)?;
             Ok(count as u32)
+        })
+    }
+
+    /// Run a CosmosDB-style SQL statement against `collection` and return the
+    /// result rows as a JS array.
+    ///
+    /// SQL is read-only and shares the query stack with `find`. The container is
+    /// chosen out-of-band here (the `FROM` clause only binds the row alias,
+    /// matching Cosmos), so — like `find` — the collection is an explicit
+    /// argument rather than part of the query text. Rows are converted at the
+    /// value level (see [`value_to_js`]) so scalar `SELECT VALUE` projections,
+    /// not just documents, round-trip cleanly.
+    pub fn query(&self, collection: &str, sql: &str) -> Result<js_sys::Array, JsError> {
+        self.read(|txn| {
+            let cursor = txn.query(DEFAULT_CF, collection, sql)?;
+            let arr = js_sys::Array::new();
+            for value in cursor.iter_raw_values()? {
+                arr.push(&value_to_js(value?)?);
+            }
+            Ok(arr)
         })
     }
 
