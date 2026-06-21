@@ -413,8 +413,10 @@ actually running scripts on wasm32.
 probed without writing a throwaway binary. Lines beginning with `.` are
 meta-commands (`.create`, `.use`, `.insert`, `.update`, `.replace`, `.delete`,
 `.count`, `.distinct`, `.index`, `.unique-index`, `.drop-index`, `.indexes`,
-`.schema`, `.collections`, `.drop`, `.seed`); anything else runs as SQL against
-the active collection. It opens an in-memory database by default, or
+`.schema`, `.backup`, `.collections`, `.drop`, `.seed`); anything else runs as
+SQL against the active collection. `.backup <dir>` takes an online physical
+backup on the persistent backends (rocksdb/redb); it is rejected with a clear
+message on the in-memory backend. It opens an in-memory database by default, or
 a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
 Input history persists to `~/.slate_history` across sessions, and every query or
 command result is annotated with its execution time. SQL statements are

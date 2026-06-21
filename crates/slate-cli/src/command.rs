@@ -53,6 +53,8 @@ pub enum Command {
     Schema(Option<String>),
     /// Load a small sample collection and make it current.
     Seed,
+    /// Back up the database to a directory (persistent backends only).
+    Backup(String),
     /// A SQL statement to run against the current collection.
     Sql(String),
 }
@@ -97,6 +99,15 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
             }
         }
         "seed" => Ok(Command::Seed),
+        "backup" => {
+            // Take the whole remaining argument as the path so destinations
+            // containing spaces still work.
+            let path = args.trim();
+            if path.is_empty() {
+                return Err(".backup requires a destination path".to_string());
+            }
+            Ok(Command::Backup(path.to_string()))
+        }
         "insert" => {
             let [doc] = exactly(
                 parse_json_values(args)?,
@@ -345,6 +356,20 @@ mod tests {
             Command::Schema(Some("users".to_string()))
         );
         assert!(Command::parse(".schema a b").is_err());
+    }
+
+    #[test]
+    fn backup_takes_a_path() {
+        assert_eq!(
+            Command::parse(".backup /tmp/snap").unwrap(),
+            Command::Backup("/tmp/snap".to_string())
+        );
+        // Paths with spaces are preserved.
+        assert_eq!(
+            Command::parse(".backup /tmp/my snap").unwrap(),
+            Command::Backup("/tmp/my snap".to_string())
+        );
+        assert!(Command::parse(".backup").is_err());
     }
 
     #[test]

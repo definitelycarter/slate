@@ -13,7 +13,7 @@ use bson::Bson;
 use serde_json::{Value, json};
 
 use slate_db::{CollectionConfig, DEFAULT_CF, Database, DistinctOptions};
-use slate_store::Store;
+use slate_store::{BackupStore, Store};
 
 use crate::command::Command;
 use crate::format;
@@ -73,7 +73,11 @@ fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
-impl<S: Store> Session<S> {
+// The session requires `BackupStore` (not just `Store`) so `.backup` can reach
+// the existing `Database::backup` passthrough. This costs nothing: every store
+// the CLI opens — memory, rocksdb, redb — implements `BackupStore`, and the
+// memory backend's impl returns a clear "not supported" error we surface as-is.
+impl<S: BackupStore> Session<S> {
     pub fn new(db: Database<S>) -> Self {
         Self { db, current: None }
     }
@@ -108,6 +112,7 @@ impl<S: Store> Session<S> {
             Command::Count(filter) => self.count(filter),
             Command::Schema(name) => self.schema(name),
             Command::Seed => self.seed(),
+            Command::Backup(dest) => self.backup(dest),
             Command::Sql(sql) => self.sql(&sql),
         }
     }
@@ -374,6 +379,14 @@ impl<S: Store> Session<S> {
         Ok(Output::Message(format!(
             "collection `{NAME}` ready{note} — now in use; try `SELECT * FROM c;`"
         )))
+    }
+
+    fn backup(&self, dest: String) -> Result<Output, String> {
+        // Online passthrough to the store's physical backup. On the in-memory
+        // backend this surfaces a clear "not supported" error rather than
+        // pretending to succeed.
+        self.db.backup(&dest).map_err(es)?;
+        Ok(Output::Message(format!("backed up to `{dest}`")))
     }
 }
 
@@ -660,6 +673,21 @@ mod tests {
     fn use_unknown_collection_errors() {
         let mut s = session();
         assert!(s.execute(Command::parse(".use nope").unwrap()).is_err());
+    }
+
+    #[test]
+    fn backup_on_memory_backend_errors_clearly() {
+        // The success path needs a persistent backend (verified manually); the
+        // memory store rejects backup, and we surface that clearly rather than
+        // claiming success.
+        let mut s = session();
+        let err = s
+            .execute(Command::parse(".backup /tmp/slate-backup-test").unwrap())
+            .unwrap_err();
+        assert!(
+            err.contains("backup") || err.contains("in-memory"),
+            "unexpected backup error: {err}"
+        );
     }
 
     #[test]

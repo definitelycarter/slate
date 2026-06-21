@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use slate_db::{Database, DatabaseBuilder};
-use slate_store::Store;
+use slate_store::{BackupStore, Store};
 
 use slate_cli::format::fmt_duration;
 use slate_cli::{Command, Feed, InputBuffer, Output, Session};
@@ -53,6 +53,7 @@ Commands:
     .drop-index <field>         drop an index on a field
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
+    .backup <dir>               back up the database (rocksdb/redb only)
 
 Anything else is run as SQL against the active collection, where `c` is the
 row. End a statement with `;` — it may span multiple lines (`...>` continues it,
@@ -156,7 +157,7 @@ fn run_redb(_path: String) -> Result<(), String> {
 
 // ── REPL loop ───────────────────────────────────────────────────
 
-fn run<S: Store>(db: Database<S>) -> Result<(), String> {
+fn run<S: Store + BackupStore>(db: Database<S>) -> Result<(), String> {
     let mut session = Session::new(db);
     let mut rl = DefaultEditor::new().map_err(|e| e.to_string())?;
 
