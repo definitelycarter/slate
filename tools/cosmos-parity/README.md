@@ -117,6 +117,13 @@ Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Co
   (the Cosmos docs show this form working).
 - **`COUNT` scalar-subquery in `WHERE`** raises an internal `localCount must be a
   number` error in the emulator; slate evaluates it.
+- **Aggregate inside a `SELECT VALUE` subquery hoists to the outer query.**
+  `SELECT VALUE (SELECT VALUE COUNT(t) FROM t) FROM c JOIN t IN c.tags` returns
+  `[5]` (one aggregated row), but the *same* subquery as `SELECT (…) AS n` returns
+  five `{n:1}` rows — the projection shape shouldn't change whether the outer
+  query aggregates, and the `COUNT` lives inside an independent subquery. slate is
+  self-consistent: per-row `1` in both forms. (Use `COUNT(1) FROM c JOIN t IN
+  c.tags` for a real total.)
 
 Fixed (kept here as the trail): unqualified identifiers now rejected; FROM
 `<container> [AS] alias`; item-scoped `FROM <outer-alias>` subqueries; subqueries
