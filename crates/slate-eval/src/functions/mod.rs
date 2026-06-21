@@ -105,6 +105,7 @@ mod sign;
 mod sin;
 mod sqrt;
 mod square;
+mod st_distance;
 mod st_isvalid;
 mod st_isvaliddetailed;
 mod starts_with;
@@ -224,6 +225,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "REVERSE" => reverse::eval(name, args),
         "REGEXMATCH" => regexmatch::eval(name, args),
         // Spatial (GeoJSON ST_*) functions.
+        "ST_DISTANCE" => st_distance::eval(name, args),
         "ST_ISVALID" => st_isvalid::eval(name, args),
         "ST_ISVALIDDETAILED" => st_isvaliddetailed::eval(name, args),
         other => Err(EvalError {

@@ -19,6 +19,10 @@
 
 use bson::Bson;
 
+mod metric;
+
+pub(crate) use metric::distance;
+
 /// A `[longitude, latitude]` position in degrees.
 pub(crate) type Coord = [f64; 2];
 
@@ -64,6 +68,13 @@ pub(crate) fn validity(b: &Bson) -> Validity {
             reason: Some(reason),
         },
     }
+}
+
+/// Parse a value into a usable [`Geometry`], or `None` if it is not a valid
+/// GeoJSON geometry. The metric/predicate functions use this: invalid or
+/// non-geometry input yields `Value::Undefined`, matching Cosmos.
+pub(crate) fn parse(b: &Bson) -> Option<Geometry> {
+    read(b).ok()
 }
 
 /// Coerce a BSON numeric (any of the three numeric types — coordinates may be
