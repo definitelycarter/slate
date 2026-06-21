@@ -81,6 +81,7 @@ mod log;
 mod log10;
 mod lower;
 mod ltrim;
+mod numberbin;
 mod objecttoarray;
 mod pi;
 mod power;
@@ -143,6 +144,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "EXP" => exp::eval(name, args),
         "LOG" => log::eval(name, args),
         "LOG10" => log10::eval(name, args),
+        "NUMBERBIN" => numberbin::eval(name, args),
         "PI" => pi::eval(name, args),
         "SIN" => sin::eval(name, args),
         "COS" => cos::eval(name, args),
