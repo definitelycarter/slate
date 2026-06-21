@@ -39,3 +39,26 @@ jobs:
       # (crates/slate-db/tests/cosmos_golden.rs, which asserts on divergence).
       - name: Test
         run: cargo test --workspace
+
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Guards the scripting decoupling: slate-wasm takes slate-db with
+      # default-features off (lua excluded), so mlua's vendored C — which can't
+      # target wasm32 — never reaches the build. If someone re-forces a lua
+      # feature into the query stack, this job fails. This checks that the
+      # target compiles, not lint-cleanliness (the `check` job already enforces
+      # clippy `-D warnings` on the host build), so plain `cargo build` is used.
+      - name: Build slate-wasm for wasm32
+        run: cargo build -p slate-wasm --target wasm32-unknown-unknown

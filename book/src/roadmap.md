@@ -384,24 +384,28 @@ and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
 
 ---
 
-## wasm: feature-gate the VM backend
+## ~~wasm: decouple the VM backend~~ — Done
 
-`slate-executor` hardcodes `slate-vm = { features = ["lua"] }`, which drags
-`mlua` (native Lua, C-vendored) into *every* build — so `slate-wasm` can't
-compile to `wasm32` even though the wasm story is the `js` VM backend
-(JS-side Lua via wasm-bindgen). Fix: make the backend a propagated feature.
+`slate-executor` previously hardcoded `slate-vm = { features = ["lua"] }`,
+which dragged `mlua` (native Lua, C-vendored) into *every* build — so
+`slate-wasm` couldn't compile to `wasm32`.
 
-- `slate-executor`: depend on `slate-vm` with `default-features = false`; add
-  `lua = ["slate-vm/lua"]` / `js = ["slate-vm/js"]`.
-- `slate-db`: extend its `lua`/`js` features to also flip
-  `slate-executor/lua`|`/js`, and take `slate-executor` with
-  `default-features = false`.
-- `slate-wasm`: `slate-db = { default-features = false, features = ["js"] }`.
+No propagated feature turned out to be necessary. The executor touches
+scripting only through `slate-vm`'s trait objects (`VmPool`,
+`dyn ScriptRuntime`/`ScriptHandle`, `VmError`) and never names a concrete
+runtime, so the fix was simply to drop the forced `lua` feature from the
+normal dep and move it to a dev-dependency (tests still build a real
+`LuaScriptRuntime`). Under resolver v2 the dev-dep feature does not leak into
+the normal build, so the query stack — and `slate-wasm`, which takes
+`slate-db` with `default-features = false` — is now mlua-free and compiles to
+`wasm32-unknown-unknown`. A CI job (`cargo build -p slate-wasm --target
+wasm32-unknown-unknown`) guards against regression. Native keeps `lua` via
+`slate-db`'s default features.
 
-Native keeps `lua` (slate-db default). Verify `slate-eval` already builds for
-`wasm32` (it does — `chrono` has no wall-clock feature; `GETCURRENT*` use the
-injected clock). Check whether `slate-executor`'s own tests need a default
-`lua`.
+Concrete runtimes stay pluggable: register them into a `VmPool` and inject it
+via `DatabaseBuilder::with_scripting(pool)`. The `js` VM backend (JS-side Lua
+via wasm-bindgen, see "Scripting on wasm32" above) remains the path for
+actually running scripts on wasm32.
 
 ## Interactive Shell (CLI) — Done
 

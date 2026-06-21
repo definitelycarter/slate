@@ -223,6 +223,8 @@ The meaning of the AST: an `owned` evaluator (`eval`, walks `bson::Bson`) and a 
 
 A runtime-agnostic scripting engine for extending database behavior with user-defined logic. Scripts are used for triggers (side effects on mutations), validators (document-level constraints), and UDFs. The VM layer is completely decoupled from storage — it knows nothing about collections, indexes, or transactions.
 
+Concrete runtimes are **pluggable and injected**: the database registers them into a `VmPool` and hands it to the engine via `DatabaseBuilder::with_scripting(pool)`. Everything below the database layer — including `slate-executor` — depends only on the trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`) and never links a concrete runtime. A build that registers no runtime (notably `wasm32`, which takes `slate-db` with `default-features = false`) therefore excludes the Lua runtime and its vendored C entirely. The Lua feature lives only in `slate-db`'s default features (native) and in `slate-executor`'s dev-dependencies (so tests can build a real `LuaScriptRuntime`).
+
 ### Architecture
 
 ```
@@ -521,6 +523,7 @@ For a join-free query the planner binds the whole row to a single alias (`RowBin
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 - **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).
+- **Runtime-agnostic scripting** — trigger/validator dispatch goes through `slate-vm`'s trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`); the executor never names a concrete runtime, so it builds without `mlua` and the whole query stack compiles to `wasm32`. Scripting is injected from above via `DatabaseBuilder::with_scripting`; tests register a `LuaScriptRuntime` through a dev-dependency.
 
 ## Platform Bindings
 
@@ -548,3 +551,4 @@ const docs = db.find("users", { name: "Alice" });
 - **Mutations return documents** — insert, update, delete all return the affected documents as an `Array` of JS objects. Use `.length` for count.
 - **MemoryStore only** — no filesystem access on wasm32. Persistent storage (OPFS, IndexedDB) is future work.
 - **Clock injection** — uses `Date.now()` via `js_sys` since `SystemTime::now()` panics on wasm32. Injected through `DatabaseBuilder::with_clock()`.
+- **No Lua runtime** — `slate-db` is pulled with `default-features = false`, so the Lua runtime (and mlua's vendored C, which cannot target wasm32) is excluded. Scripting stays pluggable: register a wasm-safe `ScriptRuntime` (the `js` backend bridges to a JS-side Lua engine) into a `VmPool` and inject it via `DatabaseBuilder::with_scripting`. The `wasm32-unknown-unknown` build of this crate is guarded in CI.
