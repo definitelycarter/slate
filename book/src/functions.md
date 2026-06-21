@@ -4,6 +4,13 @@ Slate implements CosmosDB's built-in functions for use in SQL queries (and, wher
 noted, behind the Mongo update operators). This chapter is the per-function
 catalog; for the grammar that calls them, see [Querying](./querying.md).
 
+Slate is embedded in this page as WebAssembly, so the examples are **live**. Edit
+and run the cell below to try any function:
+
+```slate-sql
+SELECT VALUE UPPER("hello world")
+```
+
 ## Conventions
 
 - **Case-insensitive.** `ABS(x)`, `abs(x)`, and `Abs(x)` are identical — names are
@@ -24,7 +31,7 @@ catalog; for the grammar that calls them, see [Querying](./querying.md).
 **Categories:** [Math](#math) · [Integer & bitwise](#integer--bitwise) ·
 [Type checking](#type-checking) · [String](#string) · [Array](#array) ·
 [Conditional & object](#conditional--object) · [Mutation helpers](#mutation-helpers) ·
-[Date & time](#date--time) · [Aggregates](#aggregate-functions)
+[Date & time](#date--time) · [Spatial](#spatial) · [Aggregates](#aggregate-functions)
 
 ## Math
 
@@ -540,6 +547,40 @@ Converts ticks (100-nanosecond intervals since the Unix epoch) to a DateTime str
 Converts a timestamp (Unix epoch milliseconds) to a DateTime string.
 - **Returns:** DateTime string; a non-integer argument yields undefined.
 - **Example:** `TIMESTAMPTODATETIME(0)` → `"1970-01-01T00:00:00.0000000Z"`
+
+## Spatial
+
+GeoJSON geometries are ordinary documents — `{ "type": "Point", "coordinates": [lng, lat] }`, plus `LineString`/`Polygon`/`Multi*` — so no new type is needed; they reach functions as a `Document`. Invalid or non-geometry input yields `undefined`. The boolean predicates (`ST_ISVALID*`, `ST_WITHIN`, `ST_INTERSECTS`) match CosmosDB exactly; the metric functions (`ST_DISTANCE`, `ST_AREA`) compute on the WGS84 ellipsoid and land within ~cm / ~1 ppm of CosmosDB (which uses a proprietary spatial library). There is no spatial index yet — these are scalar functions.
+
+### `ST_ISVALID(geometry)`
+Whether a value is a valid GeoJSON geometry — coordinate ranges, ring closure, and minimum ring size.
+- **Returns:** Boolean.
+- **Example:** `ST_ISVALID({ "type": "Point", "coordinates": [31.9, -4.8] })` → `true`
+
+### `ST_ISVALIDDETAILED(geometry)`
+GeoJSON validity with an explanation when invalid.
+- **Returns:** Document `{ "valid": bool, "reason"?: string }`.
+- **Example:** `ST_ISVALIDDETAILED({ "type": "Point", "coordinates": [200, 5] })` → `{ "valid": false, "reason": … }` (longitude out of range)
+
+### `ST_WITHIN(geometry1, geometry2)`
+Whether `geometry1` is contained within `geometry2` (planar lng/lat predicate).
+- **Returns:** Boolean.
+- **Example:** a point inside a polygon → `true`
+
+### `ST_INTERSECTS(geometry1, geometry2)`
+Whether two geometries spatially intersect (planar lng/lat predicate).
+- **Returns:** Boolean.
+- **Example:** two crossing geometries → `true`
+
+### `ST_DISTANCE(geometry1, geometry2)`
+Distance in **meters** between two geometries, on the WGS84 ellipsoid (Vincenty geodesic).
+- **Returns:** Double (meters); cross-type or invalid input → undefined.
+- **Example:** `ST_DISTANCE(<point>, <point>)` → the geodesic distance between them
+
+### `ST_AREA(geometry)`
+Area in **square meters** of a polygonal geometry, on the WGS84 ellipsoid.
+- **Returns:** Double (m²); non-polygonal or invalid input → undefined.
+- **Example:** `ST_AREA(<polygon>)` → its area in m²
 
 ## Aggregate functions
 
