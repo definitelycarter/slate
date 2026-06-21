@@ -5,13 +5,16 @@
 //! Lines starting with `.` are meta-commands (`.help` lists them); everything
 //! else is run as CosmosDB-style SQL against the current collection.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use slate_db::{Database, DatabaseBuilder};
 use slate_store::Store;
 
+use slate_cli::format::fmt_duration;
 use slate_cli::{Command, Output, Session};
 
 const USAGE: &str = "\
@@ -150,6 +153,11 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
     let mut session = Session::new(db);
     let mut rl = DefaultEditor::new().map_err(|e| e.to_string())?;
 
+    let history = history_path();
+    if let Some(path) = &history {
+        load_history(&mut rl, path);
+    }
+
     eprintln!("Type `.help` for commands, `.quit` to exit.\n");
 
     loop {
@@ -159,7 +167,9 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
         };
         match rl.readline(&prompt) {
             Ok(line) => {
-                let _ = rl.add_history_entry(line.as_str());
+                if !line.trim().is_empty() {
+                    let _ = rl.add_history_entry(line.as_str());
+                }
                 let command = match Command::parse(&line) {
                     Ok(cmd) => cmd,
                     Err(e) => {
@@ -167,9 +177,12 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
                         continue;
                     }
                 };
-                match session.execute(command) {
+                let start = Instant::now();
+                let result = session.execute(command);
+                let elapsed = start.elapsed();
+                match result {
                     Ok(Output::Quit) => break,
-                    Ok(output) => print_output(&output),
+                    Ok(output) => print_output(&output, elapsed),
                     Err(e) => eprintln!("error: {e}"),
                 }
             }
@@ -181,22 +194,61 @@ fn run<S: Store>(db: Database<S>) -> Result<(), String> {
             }
         }
     }
+
+    // Persist history on every exit path — `.quit`, Ctrl-D, and the error break
+    // all fall through to here.
+    if let Some(path) = &history
+        && let Err(e) = rl.save_history(path)
+    {
+        eprintln!("warning: could not save history to {}: {e}", path.display());
+    }
     Ok(())
 }
 
-fn print_output(output: &Output) {
+/// Location of the persistent REPL history file (`~/.slate_history`), or `None`
+/// when `HOME` is unset — in which case history is simply not persisted.
+fn history_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".slate_history"))
+}
+
+/// Load prior history into the editor, creating the file on first run. A broken
+/// or unreadable history file must never stop the shell, so failures here only
+/// warn.
+fn load_history<H: rustyline::Helper>(
+    rl: &mut rustyline::Editor<H, rustyline::history::DefaultHistory>,
+    path: &std::path::Path,
+) {
+    if !path.exists()
+        && let Err(e) = std::fs::File::create(path)
+    {
+        eprintln!(
+            "warning: could not create history file {}: {e}",
+            path.display()
+        );
+        return;
+    }
+    if let Err(e) = rl.load_history(path) {
+        eprintln!(
+            "warning: could not load history from {}: {e}",
+            path.display()
+        );
+    }
+}
+
+fn print_output(output: &Output, elapsed: Duration) {
+    let took = fmt_duration(elapsed);
     match output {
         Output::Empty | Output::Quit => {}
         Output::Help => print!("{HELP}"),
         Output::Message(msg) => println!("{msg}"),
-        Output::Affected(n) => println!("{n} document(s) affected"),
-        Output::Count(n) => println!("{n}"),
+        Output::Affected(n) => println!("({n} affected, {took})"),
+        Output::Count(n) => println!("{n} ({took})"),
         Output::Rows(rows) => {
             for row in rows {
                 println!("{row}");
             }
             println!(
-                "({} row{})",
+                "({} row{}, {took})",
                 rows.len(),
                 if rows.len() == 1 { "" } else { "s" }
             );
