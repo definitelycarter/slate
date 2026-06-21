@@ -1,9 +1,11 @@
-//! Metric spatial computations on the WGS84 ellipsoid: `ST_DISTANCE`.
+//! Metric spatial computations on the WGS84 ellipsoid: `ST_DISTANCE` and
+//! `ST_AREA`.
 //!
-//! Cosmos measures distance on the WGS84 ellipsoid (a sphere is ~0.3% off), so
-//! point-to-point distance uses the Vincenty inverse geodesic. This lands within
-//! centimetres of the Cosmos oracle but does not bit-reproduce its proprietary
-//! spatial library — close, not identical (a tracked numeric gap).
+//! Cosmos measures on the WGS84 ellipsoid (a sphere is ~0.3% off), so distance
+//! uses the Vincenty inverse geodesic and area the authalic-sphere spherical
+//! excess. Both land very close to the Cosmos oracle (distance within
+//! centimetres, area within ~1 ppm) but do not bit-reproduce its proprietary
+//! spatial library — close, not identical (tracked numeric gaps).
 
 use super::{Coord, Geometry};
 
@@ -120,6 +122,63 @@ fn haversine(p1: Coord, p2: Coord) -> f64 {
     2.0 * WGS84_MEAN_R * h.sqrt().asin()
 }
 
+/// Area in **square meters** of a geometry on the WGS84 ellipsoid. Only the
+/// areal geometries (`Polygon`, `MultiPolygon`) have a non-zero area; everything
+/// else is zero, matching Cosmos.
+pub(crate) fn area(g: &Geometry) -> f64 {
+    match g {
+        Geometry::Polygon(rings) => polygon_area(rings),
+        Geometry::MultiPolygon(polys) => polys.iter().map(|p| polygon_area(p)).sum(),
+        _ => 0.0,
+    }
+}
+
+/// A polygon's area: exterior ring minus any holes. Ring areas are taken as
+/// absolute values so winding direction (which GeoJSON does not strictly enforce
+/// across all data) cannot flip a sign.
+fn polygon_area(rings: &[Vec<Coord>]) -> f64 {
+    let mut iter = rings.iter();
+    let Some(exterior) = iter.next().map(|r| ring_area(r)) else {
+        return 0.0;
+    };
+    let holes: f64 = iter.map(|r| ring_area(r)).sum();
+    (exterior - holes).max(0.0)
+}
+
+/// Area of a single closed linear ring via spherical excess on the **authalic
+/// sphere**, using authalic latitudes. The authalic mapping is equal-area, so
+/// this is the WGS84 ellipsoidal area to ~1 ppm — close to Cosmos but not a
+/// bit-for-bit match (a tracked numeric gap).
+fn ring_area(ring: &[Coord]) -> f64 {
+    let e2 = WGS84_F * (2.0 - WGS84_F);
+    let e = e2.sqrt();
+    let r_auth = authalic_radius(e);
+    let qp = authalic_q(std::f64::consts::FRAC_PI_2, e, e2);
+    let mut total = 0.0;
+    for w in ring.windows(2) {
+        let (lng1, lat1) = (w[0][0].to_radians(), w[0][1].to_radians());
+        let (lng2, lat2) = (w[1][0].to_radians(), w[1][1].to_radians());
+        // sin(authalic latitude) = q(φ) / q(π/2).
+        let s1 = authalic_q(lat1, e, e2) / qp;
+        let s2 = authalic_q(lat2, e, e2) / qp;
+        total += (lng2 - lng1) * (2.0 + s1 + s2);
+    }
+    (total * r_auth * r_auth / 2.0).abs()
+}
+
+/// The authalic radius (radius of the sphere with the ellipsoid's surface area).
+fn authalic_radius(e: f64) -> f64 {
+    let a = WGS84_A;
+    let b = a * (1.0 - WGS84_F);
+    (a * a / 2.0 + b * b / 2.0 * (e.atanh() / e)).sqrt()
+}
+
+/// The authalic area function q(φ); `sin(authalic latitude) = q(φ) / q(π/2)`.
+fn authalic_q(phi: f64, e: f64, e2: f64) -> f64 {
+    let s = phi.sin();
+    (1.0 - e2) * (s / (1.0 - e2 * s * s) - (1.0 / (2.0 * e)) * ((1.0 - e * s) / (1.0 + e * s)).ln())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +207,50 @@ mod tests {
         // A degree of latitude is ~110.9 km near the equator on WGS84.
         let d = distance(&Geometry::Point([0.0, 0.0]), &Geometry::Point([0.0, 1.0]));
         assert!((d - 110_574.0).abs() < 50.0, "got {d}");
+    }
+
+    #[test]
+    fn cosmos_example_area_within_one_ppm() {
+        // https://learn.microsoft.com/en-us/cosmos-db/query/st-area
+        // Cosmos oracle: 735970283.0522614 m². The authalic-sphere area lands
+        // within ~731 m² (~1 ppm) — close but not a bit-for-bit match.
+        let poly = Geometry::Polygon(vec![vec![
+            [31.8, -5.0],
+            [32.0, -5.0],
+            [32.0, -4.7],
+            [31.8, -4.7],
+            [31.8, -5.0],
+        ]]);
+        let got = area(&poly);
+        assert!((got - 735_970_283.052).abs() < 1500.0, "got {got}");
+    }
+
+    #[test]
+    fn hole_is_subtracted() {
+        let outer = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]];
+        let hole = vec![
+            [0.25, 0.25],
+            [0.75, 0.25],
+            [0.75, 0.75],
+            [0.25, 0.75],
+            [0.25, 0.25],
+        ];
+        let solid = area(&Geometry::Polygon(vec![outer.clone()]));
+        let with_hole = area(&Geometry::Polygon(vec![outer, hole]));
+        assert!(with_hole < solid);
+        // The hole is a quarter of the square's side each way → 1/4 of the area.
+        assert!(
+            (with_hole - solid * 0.75).abs() < solid * 0.01,
+            "got {with_hole}"
+        );
+    }
+
+    #[test]
+    fn non_areal_geometry_is_zero() {
+        assert_eq!(area(&Geometry::Point([0.0, 0.0])), 0.0);
+        assert_eq!(
+            area(&Geometry::LineString(vec![[0.0, 0.0], [1.0, 1.0]])),
+            0.0
+        );
     }
 }

@@ -21,7 +21,7 @@ use bson::Bson;
 
 mod metric;
 
-pub(crate) use metric::distance;
+pub(crate) use metric::{area, distance};
 
 /// A `[longitude, latitude]` position in degrees.
 pub(crate) type Coord = [f64; 2];
