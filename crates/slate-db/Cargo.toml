@@ -12,7 +12,6 @@ js = ["slate-vm/js"]
 
 [dependencies]
 slate-engine = { path = "../slate-engine" }
-slate-mutation = { path = "../slate-mutation" }
 slate-store = { path = "../slate-store", default-features = false }
 slate-query = { path = "../slate-query" }
 slate-ast = { path = "../slate-ast" }

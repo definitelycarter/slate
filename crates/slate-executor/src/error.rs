@@ -4,7 +4,7 @@ use std::fmt;
 
 use slate_engine::EngineError;
 use slate_eval::EvalError;
-use slate_mutation::MutationError;
+use slate_rawbson::RawMergeError;
 use slate_vm::VmError;
 
 /// An error raised while executing a plan.
@@ -12,7 +12,7 @@ use slate_vm::VmError;
 pub enum ExecError {
     Eval(EvalError),
     Engine(EngineError),
-    Mutation(MutationError),
+    Mutation(RawMergeError),
     /// A script (validator/trigger) runtime error.
     Vm(VmError),
     /// A validator rejected a document.
@@ -33,8 +33,8 @@ impl fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
-impl From<MutationError> for ExecError {
-    fn from(e: MutationError) -> Self {
+impl From<RawMergeError> for ExecError {
+    fn from(e: RawMergeError) -> Self {
         ExecError::Mutation(e)
     }
 }

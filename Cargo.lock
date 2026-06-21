@@ -1498,7 +1498,6 @@ dependencies = [
  "slate-ast",
  "slate-engine",
  "slate-executor",
- "slate-mutation",
  "slate-planner",
  "slate-query",
  "slate-sql",
@@ -1540,19 +1539,11 @@ dependencies = [
  "slate-ast",
  "slate-engine",
  "slate-eval",
- "slate-mutation",
  "slate-planner",
+ "slate-rawbson",
  "slate-sql",
  "slate-store",
  "slate-vm",
-]
-
-[[package]]
-name = "slate-mutation"
-version = "0.1.0"
-dependencies = [
- "bson",
- "slate-rawbson",
 ]
 
 [[package]]

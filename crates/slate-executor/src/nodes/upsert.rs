@@ -10,8 +10,8 @@ use bson::raw::{CString, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 use slate_eval::EvalError;
-use slate_mutation::raw_merge;
 use slate_planner::UpsertMode;
+use slate_rawbson::raw_merge;
 use slate_vm::{ResolvedHook, pool::VmPool};
 
 use super::trigger::fire_hooks;

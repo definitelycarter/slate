@@ -9,7 +9,7 @@ slate-ast = { path = "../slate-ast" }
 slate-eval = { path = "../slate-eval" }
 slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
-slate-mutation = { path = "../slate-mutation" }
+slate-rawbson = { path = "../slate-rawbson" }
 slate-vm = { path = "../slate-vm", features = ["lua"] }
 
 [dev-dependencies]

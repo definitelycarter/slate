@@ -22,7 +22,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore backends
-  ├── slate-rawbson          → Fast raw byte-level BSON field scanner (shared leaf)
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner + document merge (shared leaf)
   ├── slate-engine           → Storage engine: key encoding, TTL, indexes, catalog, record format
   ├── slate-ast              → Shared query AST — the IR both query surfaces target
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort + filter→AST translation
@@ -30,7 +30,6 @@ slate/
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction
-  ├── slate-mutation         → Field-level document mutation engine
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: public API, query planning + execution
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
@@ -38,7 +37,7 @@ slate/
   └── slate-cli              → `slate`, an interactive shell (REPL) over the public API
 ```
 
-The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor, so they can't drift.
+The `slate-ast` … `slate-executor` crates are the query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor, so they can't drift.
 
 ## Quick Start
 

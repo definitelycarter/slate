@@ -9,7 +9,7 @@ A layered system: a key-value storage backend, an engine layer for key encoding 
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
-  ├── slate-rawbson          → Fast raw byte-level BSON field scanner (shared leaf, no deps but bson)
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner + document merge (shared leaf, no deps but bson)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
   ├── slate-ast              → Shared query AST — the single IR every query surface targets
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort DTOs + filter→AST translation
@@ -17,14 +17,13 @@ slate/
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy raw evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction
-  ├── slate-mutation         → Field-level document mutation engine ($set/$inc/$unset → ops)
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: public API + query-stack wiring
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
 
-The query stack (`slate-ast` … `slate-executor`, plus `slate-mutation`) is the engine: both query surfaces lower to one shared AST, planner, and executor, so they can't drift. See [Roadmap — Query Engine](roadmap.md).
+The query stack (`slate-ast` … `slate-executor`) is the engine: both query surfaces lower to one shared AST, planner, and executor, so they can't drift. See [Roadmap — Query Engine](roadmap.md).
 
 ## Tier 1: Storage Layer (`slate-store`)
 
@@ -214,9 +213,9 @@ The meaning of the AST: an `owned` evaluator (`eval`, walks `bson::Bson`) and a 
 
 **`slate-executor`** runs the plan: pull-based streaming, one small per-node function per `Node`, mirroring the engine's `RawIter`. The stream item is `Result<Option<RawBson>, ExecError>` — the `Option` is the *undefined* channel (a `None` row is dropped at the output boundary), and carrying raw `RawBson` keeps `find` zero-copy.
 
-### Mutations (`slate-mutation`)
+### Mutations (`slate-eval`, `slate-rawbson`)
 
-`parse_mutation` converts a BSON update document (`$set`, `$inc`, `$unset`, …) into a `Mutation` — a flat `Vec<FieldMutation>` of field-level operations, applied to raw documents by the write pipeline (`raw_merge` for upsert merges).
+`UPDATE` assignments are applied by `slate_eval::apply_assignments`: a raw byte-edit fast path splices each evaluated value into the document in place for the simple shapes (single-segment scalar writes, `$push`/`$pop` on the field's own array), falling back to a deserialize-mutate-reserialize rebuild for dotted paths, whole document/array values, and `$lpush`. Upsert *merges* — overlaying an update document's fields onto an existing one — use `slate_rawbson::raw_merge`, which overwrites in place when a value keeps its BSON type and width and splices otherwise. Both paths return "unchanged" so the write node can drop an untouched row.
 
 ## Tier 2.5: Scripting Engine (`slate-vm`)
 

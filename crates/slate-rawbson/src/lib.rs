@@ -10,6 +10,9 @@
 use bson::raw::{RawArray, RawBsonRef, RawDocument};
 use bson::spec::ElementType;
 
+mod merge;
+pub use merge::{RawMergeError, raw_merge};
+
 // ── skip_bson_value ─────────────────────────────────────────────
 
 /// Given a BSON type byte and the position where value bytes begin, return the

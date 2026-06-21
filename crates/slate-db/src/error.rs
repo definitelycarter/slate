@@ -62,17 +62,6 @@ impl From<bson::error::Error> for DbError {
     }
 }
 
-// `MutationError` reaches `DbError` via the executor's upsert-merge path
-// (`raw_merge`), surfaced as `ExecError::Mutation`.
-impl From<slate_mutation::MutationError> for DbError {
-    fn from(e: slate_mutation::MutationError) -> Self {
-        match e {
-            slate_mutation::MutationError::Invalid(m) => DbError::InvalidQuery(m),
-            slate_mutation::MutationError::Serialization(m) => DbError::Serialization(m),
-        }
-    }
-}
-
 impl From<slate_query::TranslateError> for DbError {
     fn from(e: slate_query::TranslateError) -> Self {
         DbError::InvalidQuery(e.to_string())
@@ -128,7 +117,9 @@ impl From<slate_executor::ExecError> for DbError {
         match e {
             E::Eval(ev) => DbError::InvalidQuery(ev.to_string()),
             E::Engine(en) => en.into(),
-            E::Mutation(m) => m.into(),
+            // `ExecError::Mutation` wraps a `slate_rawbson::RawMergeError` from the
+            // upsert-merge path; surface its message without naming the type.
+            E::Mutation(m) => DbError::Serialization(m.to_string()),
             E::Vm(v) => DbError::Vm(v),
             E::Validation(msg) => DbError::InvalidDocument(msg),
         }
