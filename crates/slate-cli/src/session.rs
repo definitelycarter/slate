@@ -135,6 +135,7 @@ impl<S: BackupStore> Session<S> {
             Command::Count(filter) => self.count(filter),
             Command::Schema(name) => self.schema(name),
             Command::Seed => self.seed(),
+            Command::SeedFile { path, collection } => self.seed_file(path, collection),
             Command::Backup(dest) => self.backup(dest),
             Command::Sql(sql) => self.sql(&sql),
         }
@@ -402,6 +403,12 @@ impl<S: BackupStore> Session<S> {
         Ok(Output::Message(format!(
             "collection `{NAME}` ready{note} — now in use; try `SELECT * FROM c;`"
         )))
+    }
+
+    /// Bulk-load a dataset file into `collection`. Placeholder until the loader
+    /// lands; for now this records the command surface only.
+    fn seed_file(&mut self, _path: String, _collection: String) -> Result<Output, String> {
+        Err("`.seed <path>` is not implemented yet".to_string())
     }
 
     fn backup(&self, dest: String) -> Result<Output, String> {

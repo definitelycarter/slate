@@ -46,7 +46,8 @@ Commands:
     .use <name>                 set the active collection
     .create <name>              create a collection (and make it active)
     .drop <name>                drop a collection
-    .seed                       load a small sample collection
+    .seed                       load a small built-in sample collection
+    .seed <path>                bulk-load a JSON array or JSONL file
     .insert <json>              insert a document, or an array of documents
     .update <filter> <update>   update matching documents (Mongo operators)
     .replace <filter> <json>    replace the first matching document (no merge)

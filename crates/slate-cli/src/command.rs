@@ -53,6 +53,9 @@ pub enum Command {
     Schema(Option<String>),
     /// Load a small sample collection and make it current.
     Seed,
+    /// Bulk-load documents from a file into `collection` (defaulting to the
+    /// file stem) and make that collection current.
+    SeedFile { path: String, collection: String },
     /// Back up the database to a directory (persistent backends only).
     Backup(String),
     /// A SQL statement to run against the current collection.
@@ -98,7 +101,23 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
                 Ok(Command::Schema(Some(name_arg(args, "schema")?)))
             }
         }
-        "seed" => Ok(Command::Seed),
+        "seed" => {
+            // No argument keeps the built-in sample loader. Otherwise the whole
+            // remaining argument is the dataset path (paths may contain spaces,
+            // like `.backup`); the collection defaults to the sanitized file
+            // stem since a trailing override can't be told apart from a path
+            // that contains spaces.
+            let path = args.trim();
+            if path.is_empty() {
+                Ok(Command::Seed)
+            } else {
+                let collection = collection_from_path(path);
+                Ok(Command::SeedFile {
+                    path: path.to_string(),
+                    collection,
+                })
+            }
+        }
         "backup" => {
             // Take the whole remaining argument as the path so destinations
             // containing spaces still work.
@@ -185,6 +204,32 @@ fn name_arg(args: &str, cmd: &str) -> Result<String, String> {
         return Err(format!(".{cmd} takes a single name"));
     }
     Ok(name.to_string())
+}
+
+/// Derive a collection name from a dataset file path: the file stem with every
+/// character outside `[A-Za-z0-9_]` replaced by `_`, so `movies.json` → `movies`
+/// and `2024 sales.jsonl` → `2024_sales`. Falls back to `seeded` when the stem is
+/// empty or has no usable characters.
+fn collection_from_path(path: &str) -> String {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let sanitized: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "seeded".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Parse zero or more whitespace-separated JSON values.
@@ -370,6 +415,35 @@ mod tests {
             Command::Backup("/tmp/my snap".to_string())
         );
         assert!(Command::parse(".backup").is_err());
+    }
+
+    #[test]
+    fn seed_without_path_loads_the_builtin_sample() {
+        assert_eq!(Command::parse(".seed").unwrap(), Command::Seed);
+    }
+
+    #[test]
+    fn seed_with_path_defaults_collection_to_file_stem() {
+        assert_eq!(
+            Command::parse(".seed /data/movies.json").unwrap(),
+            Command::SeedFile {
+                path: "/data/movies.json".to_string(),
+                collection: "movies".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn seed_path_keeps_spaces_and_sanitizes_the_stem() {
+        // The whole argument is the path; the derived name replaces non-word
+        // characters in the stem (here, the space) with `_`.
+        assert_eq!(
+            Command::parse(".seed /tmp/2024 sales.jsonl").unwrap(),
+            Command::SeedFile {
+                path: "/tmp/2024 sales.jsonl".to_string(),
+                collection: "2024_sales".to_string(),
+            }
+        );
     }
 
     #[test]
