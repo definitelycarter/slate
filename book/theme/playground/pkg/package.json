@@ -1,0 +1,15 @@
+{
+  "name": "slate-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "slate_wasm_bg.wasm",
+    "slate_wasm.js",
+    "slate_wasm.d.ts"
+  ],
+  "main": "slate_wasm.js",
+  "types": "slate_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -1,0 +1,31 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_slatedb_free: (a: number, b: number) => void;
+export const slatedb_count: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_create_collection: (a: number, b: number, c: number) => [number, number];
+export const slatedb_create_index: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const slatedb_delete_many: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_delete_one: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_drop_collection: (a: number, b: number, c: number) => [number, number];
+export const slatedb_drop_index: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const slatedb_find: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_find_one: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_insert_many: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_insert_one: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_list_collections: (a: number) => [number, number, number];
+export const slatedb_list_indexes: (a: number, b: number, c: number) => [number, number, number];
+export const slatedb_merge_many: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const slatedb_new: () => [number, number, number];
+export const slatedb_query: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+export const slatedb_replace_one: (a: number, b: number, c: number, d: any, e: any) => [number, number, number];
+export const slatedb_update_many: (a: number, b: number, c: number, d: any, e: any) => [number, number, number];
+export const slatedb_update_one: (a: number, b: number, c: number, d: any, e: any) => [number, number, number];
+export const slatedb_upsert_many: (a: number, b: number, c: number, d: any) => [number, number, number];
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;
