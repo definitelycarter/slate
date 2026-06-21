@@ -1,0 +1,72 @@
+# Exhaustive scalar-function coverage — one FROM-less query per function we
+# support, so results are deterministic and need no data. Divergences here pin
+# down where slate's function semantics differ from Cosmos (e.g. numeric typing).
+
+# ── Math ──────────────────────────────────────────────────────────
+SELECT VALUE ABS(-7)
+SELECT VALUE ABS(-7.5)
+SELECT VALUE CEILING(4.2)
+SELECT VALUE FLOOR(4.8)
+SELECT VALUE ROUND(2.4)
+SELECT VALUE ROUND(2.5)
+SELECT VALUE ROUND(3.5)
+SELECT VALUE TRUNC(4.9)
+SELECT VALUE SIGN(-3)
+SELECT VALUE SIGN(0)
+SELECT VALUE SIGN(5)
+SELECT VALUE SQRT(16)
+SELECT VALUE SQUARE(5)
+SELECT VALUE EXP(0)
+SELECT VALUE LOG(1)
+SELECT VALUE LOG10(1000)
+SELECT VALUE POWER(2, 10)
+SELECT VALUE PI()
+
+# ── String ────────────────────────────────────────────────────────
+SELECT VALUE UPPER('abc')
+SELECT VALUE LOWER('ABC')
+SELECT VALUE CONCAT('a', 'b', 'c')
+SELECT VALUE LENGTH('hello')
+SELECT VALUE LEFT('hello', 2)
+SELECT VALUE RIGHT('hello', 2)
+SELECT VALUE SUBSTRING('hello', 1, 3)
+SELECT VALUE REPLACE('hello', 'l', 'L')
+SELECT VALUE REPLICATE('ab', 3)
+SELECT VALUE REVERSE('abc')
+SELECT VALUE TRIM('  x  ')
+SELECT VALUE LTRIM('  x')
+SELECT VALUE RTRIM('x  ')
+SELECT VALUE INDEX_OF('hello', 'll')
+SELECT VALUE CONTAINS('hello', 'ell')
+SELECT VALUE STARTSWITH('hello', 'he')
+SELECT VALUE ENDSWITH('hello', 'lo')
+SELECT VALUE STRINGEQUALS('abc', 'abc')
+SELECT VALUE REGEXMATCH('abc', 'a.c')
+
+# ── Array / set ───────────────────────────────────────────────────
+SELECT VALUE ARRAY_LENGTH([1, 2, 3])
+SELECT VALUE ARRAY_CONCAT([1, 2], [3, 4])
+SELECT VALUE ARRAY_CONTAINS([1, 2, 3], 2)
+SELECT VALUE ARRAY_CONTAINS_ALL([1, 2, 3], 1, 2)
+SELECT VALUE ARRAY_CONTAINS_ANY([1, 2, 3], 9, 2)
+SELECT VALUE ARRAY_SLICE([1, 2, 3, 4], 1, 2)
+SELECT VALUE SETINTERSECT([1, 2, 3], [2, 3, 4])
+SELECT VALUE SETUNION([1, 2], [2, 3])
+SELECT VALUE CHOOSE(2, 'a', 'b', 'c')
+SELECT VALUE OBJECTTOARRAY({'a': 1, 'b': 2})
+
+# ── Type checking ─────────────────────────────────────────────────
+SELECT VALUE IS_DEFINED(1)
+SELECT VALUE IS_NULL(null)
+SELECT VALUE IS_BOOL(true)
+SELECT VALUE IS_NUMBER(1)
+SELECT VALUE IS_STRING('a')
+SELECT VALUE IS_ARRAY([1])
+SELECT VALUE IS_OBJECT({'a': 1})
+SELECT VALUE IS_PRIMITIVE(1)
+SELECT VALUE IS_INTEGER(1)
+SELECT VALUE IS_FINITE_NUMBER(1)
+
+# ── Conditional ───────────────────────────────────────────────────
+SELECT VALUE IIF(true, 'yes', 'no')
+SELECT VALUE IIF(1 > 2, 'yes', 'no')

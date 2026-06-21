@@ -108,8 +108,19 @@ impl Parser {
         self.expect(&Token::Select)?;
         let select = self.parse_select()?;
 
-        self.expect(&Token::From)?;
-        let from = self.parse_from()?;
+        // The `FROM` clause is optional (Cosmos): a FROM-less query evaluates the
+        // `SELECT` exactly once over a single implicit row, e.g. `SELECT VALUE 1`.
+        // `SELECT *` is the one form that requires a source to expand.
+        let from = if self.matches(&Token::From) {
+            Some(self.parse_from()?)
+        } else {
+            if matches!(select, SelectClause::Star) {
+                return Err(SqlError::Parse {
+                    message: "SELECT * requires a FROM clause".into(),
+                });
+            }
+            None
+        };
 
         let filter = if self.matches(&Token::Where) {
             Some(self.parse_expr()?)
@@ -198,16 +209,30 @@ impl Parser {
     }
 
     fn parse_from(&mut self) -> Result<FromClause> {
-        let alias = self.parse_ident()?;
-        // `FROM x IN <array>` (a subquery's array source) vs `FROM <alias>` (the
-        // container). The `IN` form binds the alias to each array element.
+        let first = self.parse_ident()?;
+        // Forms:
+        //   FROM x IN <array>          — array source (a subquery's source)
+        //   FROM <container> AS <a>    — container with an explicit alias
+        //   FROM <container> <a>       — container with an alias (no AS)
+        //   FROM <alias>               — bare alias bound to the container
+        // The container is chosen out-of-band (matching Cosmos, where the FROM
+        // container name need not match the queried container), so when a name
+        // and an alias are both present we keep only the alias.
         let source = if self.matches(&Token::In) {
             FromSource::Array {
-                alias,
+                alias: first,
                 array: self.parse_expr()?,
             }
+        } else if self.matches(&Token::As) {
+            FromSource::ImplicitContainer {
+                alias: self.parse_ident()?,
+            }
+        } else if matches!(self.peek(), Token::Ident(_)) {
+            FromSource::ImplicitContainer {
+                alias: self.parse_ident()?,
+            }
         } else {
-            FromSource::ImplicitContainer { alias }
+            FromSource::ImplicitContainer { alias: first }
         };
 
         let mut joins = Vec::new();
@@ -713,12 +738,56 @@ mod tests {
     fn minimal_select_value() {
         let q = parse("SELECT VALUE c FROM c");
         assert!(matches!(q.select, SelectClause::Value(ScalarExpr::Identifier(ref a)) if a == "c"));
+        let from = q.from.as_ref().unwrap();
         assert!(matches!(
-            q.from.source,
+            from.source,
             FromSource::ImplicitContainer { ref alias } if alias == "c"
         ));
-        assert!(q.from.joins.is_empty());
+        assert!(from.joins.is_empty());
         assert!(q.filter.is_none());
+    }
+
+    #[test]
+    fn from_container_with_alias() {
+        // `FROM <container> <alias>` and `FROM <container> AS <alias>` keep the
+        // alias (the container name is external and only a label).
+        for sql in [
+            "SELECT VALUE e.name FROM employees e",
+            "SELECT VALUE e.name FROM employees AS e",
+        ] {
+            let q = parse(sql);
+            assert!(
+                matches!(q.from.as_ref().unwrap().source,
+                    FromSource::ImplicitContainer { ref alias } if alias == "e"),
+                "{sql}"
+            );
+        }
+        // Bare alias still works.
+        assert!(matches!(
+            parse("SELECT VALUE c.x FROM c").from.as_ref().unwrap().source,
+            FromSource::ImplicitContainer { ref alias } if alias == "c"
+        ));
+    }
+
+    #[test]
+    fn from_is_optional() {
+        // `SELECT VALUE <expr>` with no FROM (Cosmos evaluates it once).
+        let q = parse("SELECT VALUE 1 + 1");
+        assert!(q.from.is_none());
+        assert!(matches!(q.select, SelectClause::Value(_)));
+
+        // A projection list with no FROM is also valid (wraps into an object).
+        let q = parse("SELECT 1 AS a, 2 AS b");
+        assert!(q.from.is_none());
+        assert!(matches!(q.select, SelectClause::Projections(ref items) if items.len() == 2));
+    }
+
+    #[test]
+    fn select_star_requires_from() {
+        // `SELECT *` is the one form that needs a source to expand.
+        assert!(matches!(parse_err("SELECT *"), SqlError::Parse { .. }));
+        // With a FROM it parses fine.
+        assert!(parse("SELECT * FROM c").from.is_some());
     }
 
     #[test]
@@ -788,16 +857,18 @@ mod tests {
             panic!("expected SELECT VALUE")
         };
         assert!(matches!(expr, ScalarExpr::Object(ref f) if f.len() == 2));
-        assert_eq!(q.from.joins.len(), 1);
-        assert_eq!(q.from.joins[0].alias, "t");
+        let from = q.from.as_ref().unwrap();
+        assert_eq!(from.joins.len(), 1);
+        assert_eq!(from.joins[0].alias, "t");
     }
 
     #[test]
     fn array_unwind_join() {
         let q = parse("SELECT VALUE t FROM c JOIN t IN c.tags");
-        assert_eq!(q.from.joins.len(), 1);
+        let from = q.from.as_ref().unwrap();
+        assert_eq!(from.joins.len(), 1);
         assert!(
-            matches!(&q.from.joins[0].array, ScalarExpr::Member { field, .. } if field == "tags")
+            matches!(&from.joins[0].array, ScalarExpr::Member { field, .. } if field == "tags")
         );
     }
 
@@ -853,8 +924,10 @@ mod tests {
 
     #[test]
     fn trailing_garbage_errors() {
+        // `FROM c garbage` is now a valid container+alias; use trailing tokens
+        // after an otherwise-complete query instead.
         assert!(matches!(
-            parse_err("SELECT VALUE c FROM c garbage"),
+            parse_err("SELECT VALUE c FROM c LIMIT 5 garbage"),
             SqlError::Parse { .. }
         ));
     }
@@ -1046,7 +1119,9 @@ mod tests {
         };
         assert_eq!(kind, SubqueryKind::Scalar);
         // The inner query's FROM is an array source.
-        assert!(matches!(query.from.source, FromSource::Array { ref alias, .. } if alias == "t"));
+        assert!(
+            matches!(query.from.as_ref().unwrap().source, FromSource::Array { ref alias, .. } if alias == "t")
+        );
     }
 
     #[test]
@@ -1072,7 +1147,9 @@ mod tests {
     #[test]
     fn from_array_source_parses() {
         let q = parse("SELECT VALUE x FROM x IN [1, 2, 3]");
-        assert!(matches!(q.from.source, FromSource::Array { ref alias, .. } if alias == "x"));
+        assert!(
+            matches!(q.from.as_ref().unwrap().source, FromSource::Array { ref alias, .. } if alias == "x")
+        );
     }
 
     #[test]

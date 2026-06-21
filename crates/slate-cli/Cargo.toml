@@ -1,0 +1,24 @@
+[package]
+name = "slate-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "slate"
+path = "src/main.rs"
+
+[features]
+default = ["memory"]
+memory = ["slate-store/memory"]
+rocksdb = ["slate-store/rocksdb"]
+redb = ["slate-store/redb"]
+
+[dependencies]
+slate-db = { path = "../slate-db" }
+slate-sql = { path = "../slate-sql" }
+slate-store = { path = "../slate-store", default-features = false }
+bson = { workspace = true, features = ["serde_json-1"] }
+# preserve_order: keep JSON object field order on insert (REPL + parity fixtures)
+# so it round-trips like BSON, matching what Cosmos returns.
+serde_json = { version = "1", features = ["preserve_order"] }
+rustyline = "14"

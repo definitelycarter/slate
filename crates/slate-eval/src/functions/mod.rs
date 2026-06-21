@@ -31,21 +31,40 @@ use crate::error::{EvalError, Result};
 use crate::value::Value;
 
 mod abs;
+mod acos;
 mod array_concat;
 mod array_contains;
 mod array_contains_all;
 mod array_contains_any;
 mod array_length;
 mod array_slice;
+mod asin;
+mod atan;
+mod atn2;
 mod ceiling;
 mod choose;
 mod concat;
 mod contains;
+mod cos;
+mod cot;
+mod datetime;
+mod degrees;
 mod endswith;
 mod exp;
 mod floor;
 mod iif;
 mod index_of;
+mod intadd;
+mod intbitand;
+mod intbitleftshift;
+mod intbitnot;
+mod intbitor;
+mod intbitrightshift;
+mod intbitxor;
+mod intdiv;
+mod intmod;
+mod intmul;
+mod intsub;
 mod is_array;
 mod is_bool;
 mod is_defined;
@@ -65,6 +84,7 @@ mod ltrim;
 mod objecttoarray;
 mod pi;
 mod power;
+mod radians;
 mod regexmatch;
 mod replace;
 mod replicate;
@@ -75,11 +95,18 @@ mod rtrim;
 mod setintersect;
 mod setunion;
 mod sign;
+mod sin;
 mod sqrt;
 mod square;
 mod starts_with;
 mod stringequals;
+mod stringtoarray;
+mod stringtoboolean;
+mod stringtonull;
+mod stringtonumber;
+mod stringtoobject;
 mod substring;
+mod tan;
 mod trim;
 mod trunc;
 mod upper;
@@ -114,6 +141,36 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "LOG" => log::eval(name, args),
         "LOG10" => log10::eval(name, args),
         "PI" => pi::eval(name, args),
+        "SIN" => sin::eval(name, args),
+        "COS" => cos::eval(name, args),
+        "TAN" => tan::eval(name, args),
+        "COT" => cot::eval(name, args),
+        "ASIN" => asin::eval(name, args),
+        "ACOS" => acos::eval(name, args),
+        "ATAN" => atan::eval(name, args),
+        "ATN2" => atn2::eval(name, args),
+        "DEGREES" => degrees::eval(name, args),
+        "RADIANS" => radians::eval(name, args),
+        "INTADD" => intadd::eval(name, args),
+        "INTSUB" => intsub::eval(name, args),
+        "INTMUL" => intmul::eval(name, args),
+        "INTDIV" => intdiv::eval(name, args),
+        "INTMOD" => intmod::eval(name, args),
+        "INTBITAND" => intbitand::eval(name, args),
+        "INTBITOR" => intbitor::eval(name, args),
+        "INTBITXOR" => intbitxor::eval(name, args),
+        "INTBITNOT" => intbitnot::eval(name, args),
+        "INTBITLEFTSHIFT" => intbitleftshift::eval(name, args),
+        "INTBITRIGHTSHIFT" => intbitrightshift::eval(name, args),
+        "DATETIMEADD" => datetime::add(name, args),
+        "DATETIMEDIFF" => datetime::diff(name, args),
+        "DATETIMEPART" => datetime::part(name, args),
+        "DATETIMEBIN" => datetime::bin(name, args),
+        "DATETIMEFROMPARTS" => datetime::from_parts(name, args),
+        "DATETIMETOTICKS" => datetime::to_ticks(name, args),
+        "DATETIMETOTIMESTAMP" => datetime::to_timestamp(name, args),
+        "TICKSTODATETIME" => datetime::from_ticks(name, args),
+        "TIMESTAMPTODATETIME" => datetime::from_timestamp(name, args),
         "ARRAY_LENGTH" => array_length::eval(name, args),
         "ARRAY_CONTAINS" => array_contains::eval(name, args),
         "ARRAY_CONTAINS_ALL" => array_contains_all::eval(name, args),
@@ -129,6 +186,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "STARTSWITH" => starts_with::eval(name, args),
         "ENDSWITH" => endswith::eval(name, args),
         "STRINGEQUALS" => stringequals::eval(name, args),
+        "STRINGTONUMBER" => stringtonumber::eval(name, args),
+        "STRINGTOBOOLEAN" => stringtoboolean::eval(name, args),
+        "STRINGTONULL" => stringtonull::eval(name, args),
+        "STRINGTOARRAY" => stringtoarray::eval(name, args),
+        "STRINGTOOBJECT" => stringtoobject::eval(name, args),
         "INDEX_OF" => index_of::eval(name, args),
         "SUBSTRING" => substring::eval(name, args),
         "LEFT" => left::eval(name, args),
@@ -144,6 +206,17 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             message: format!("unknown function: {other}"),
         }),
     }
+}
+
+/// Whether `name` is a clock-dependent `GETCURRENT*` function. The evaluator
+/// handles these specially (they read the injected "now", not a syscall).
+pub(crate) fn is_current_time(name: &str) -> bool {
+    datetime::is_current(name)
+}
+
+/// Resolve a `GETCURRENT*` function from the injected epoch-millis "now".
+pub(crate) fn current_time(name: &str, now_ms: i64) -> Value {
+    datetime::current(name, now_ms)
 }
 
 // ── Shared helpers (visible to the function submodules) ─────────────
@@ -194,6 +267,50 @@ fn f64_arg(v: &Value) -> Option<f64> {
         Value::Defined(Bson::Int32(i)) => Some(*i as f64),
         Value::Defined(Bson::Int64(i)) => Some(*i as f64),
         Value::Defined(Bson::Double(f)) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Convert a parsed JSON value into BSON — the shared backbone of the
+/// `STRINGTOARRAY` / `STRINGTOOBJECT` parsers. Integers become `Int64`, reals
+/// `Double`; object key order is preserved (serde_json's `preserve_order`).
+fn json_to_bson(v: serde_json::Value) -> Bson {
+    use serde_json::Value as J;
+    match v {
+        J::Null => Bson::Null,
+        J::Bool(b) => Bson::Boolean(b),
+        J::Number(n) => match (n.as_i64(), n.as_f64()) {
+            (Some(i), _) => Bson::Int64(i),
+            (None, Some(f)) => Bson::Double(f),
+            _ => Bson::Null,
+        },
+        J::String(s) => Bson::String(s),
+        J::Array(a) => Bson::Array(a.into_iter().map(json_to_bson).collect()),
+        J::Object(o) => {
+            let mut doc = bson::Document::new();
+            for (k, val) in o {
+                doc.insert(k, json_to_bson(val));
+            }
+            Bson::Document(doc)
+        }
+    }
+}
+
+/// Extract a strict integer value — Cosmos's `INT*` and bitwise functions operate
+/// on integers only. Integer-typed, or a `Double` with no fractional part; a
+/// fractional or non-numeric argument yields `None` (→ undefined).
+fn int_value(v: &Value) -> Option<i64> {
+    match v {
+        Value::Defined(Bson::Int32(i)) => Some(*i as i64),
+        Value::Defined(Bson::Int64(i)) => Some(*i),
+        Value::Defined(Bson::Double(f))
+            if f.is_finite()
+                && f.fract() == 0.0
+                && *f >= i64::MIN as f64
+                && *f <= i64::MAX as f64 =>
+        {
+            Some(*f as i64)
+        }
         _ => None,
     }
 }

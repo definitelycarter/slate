@@ -150,10 +150,19 @@ fn lex_number(cur: &mut Cursor, start: usize) -> Result<Token> {
                 at: start,
             })
     } else {
-        s.parse::<i64>().map(Token::Int).map_err(|e| SqlError::Lex {
-            message: format!("invalid integer literal: {e}"),
-            at: start,
-        })
+        // An integer literal that overflows i64 falls back to f64 — CosmosDB
+        // treats every number as a double, so a huge literal is a number, not a
+        // lex error.
+        match s.parse::<i64>() {
+            Ok(i) => Ok(Token::Int(i)),
+            Err(_) => s
+                .parse::<f64>()
+                .map(Token::Float)
+                .map_err(|e| SqlError::Lex {
+                    message: format!("invalid integer literal: {e}"),
+                    at: start,
+                }),
+        }
     }
 }
 
@@ -322,6 +331,15 @@ mod tests {
                 Token::Float(0.025),
                 Token::Eof
             ]
+        );
+    }
+
+    #[test]
+    fn oversized_integer_is_float() {
+        // 2^64-1 overflows i64, so it lexes as a float rather than erroring.
+        assert_eq!(
+            lex("18446744073709551615"),
+            vec![Token::Float(18446744073709551615.0), Token::Eof]
         );
     }
 

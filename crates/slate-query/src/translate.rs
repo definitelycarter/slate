@@ -44,12 +44,12 @@ pub fn find_to_query(filter: &RawDocument, options: &FindOptions) -> Result<Quer
 
     Ok(Query {
         select: projection(options.columns.as_deref()),
-        from: FromClause {
+        from: Some(FromClause {
             source: FromSource::ImplicitContainer {
                 alias: ALIAS.into(),
             },
             joins: Vec::new(),
-        },
+        }),
         filter,
         group_by: Vec::new(),
         order_by,

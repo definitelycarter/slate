@@ -42,25 +42,34 @@ pub fn execute(query: &Query, docs: &[Bson]) -> Result<Vec<Bson>> {
 
 /// Execute `query` over `docs`, resolving `@name` parameters from `params`.
 pub fn execute_with_params(query: &Query, docs: &[Bson], params: &Document) -> Result<Vec<Bson>> {
-    let base_alias = match &query.from.source {
-        FromSource::ImplicitContainer { alias } => alias.as_str(),
-        // An array source only appears inside a subquery, which this standalone
-        // in-memory executor doesn't run (the planner/executor path does).
-        FromSource::Array { .. } => {
-            return Err(SqlError::Eval {
-                message: "FROM <alias> IN <array> is only valid inside a subquery".into(),
-            });
-        }
+    // FROM-less query (`SELECT VALUE 1`): a single implicit row with no
+    // bindings, so the SELECT is evaluated exactly once.
+    let (base_alias, mut rows): (&str, Vec<Row>) = match &query.from {
+        None => ("", vec![Vec::new()]),
+        Some(from) => match &from.source {
+            FromSource::ImplicitContainer { alias } => (
+                alias.as_str(),
+                // Base rows: one per source document.
+                docs.iter()
+                    .map(|d| vec![(alias.as_str(), Bound::Borrowed(d))])
+                    .collect(),
+            ),
+            // An array source only appears inside a subquery, which this standalone
+            // in-memory executor doesn't run (the planner/executor path does).
+            FromSource::Array { .. } => {
+                return Err(SqlError::Eval {
+                    message: "FROM <alias> IN <array> is only valid inside a subquery".into(),
+                });
+            }
+        },
     };
 
-    // Base rows: one per source document.
-    let mut rows: Vec<Row> = docs
-        .iter()
-        .map(|d| vec![(base_alias, Bound::Borrowed(d))])
-        .collect();
-
     // Joins: array-unwind cross product, evaluated left to right.
-    for join in &query.from.joins {
+    let joins = match &query.from {
+        Some(from) => from.joins.as_slice(),
+        None => &[],
+    };
+    for join in joins {
         let mut next: Vec<Row> = Vec::new();
         for row in &rows {
             let binds = bindings(row);
@@ -185,6 +194,19 @@ mod tests {
     fn select_value_scalar() {
         let out = run("SELECT VALUE c.name FROM c", &people());
         assert_eq!(out, vec![bson!("ada"), bson!("alan"), bson!("grace")]);
+    }
+
+    #[test]
+    fn from_less_value_evaluates_once() {
+        // No FROM, no documents: the SELECT is evaluated exactly once.
+        let out = run("SELECT VALUE 1 + 1", &[]);
+        assert_eq!(out, vec![bson!(2_i64)]);
+    }
+
+    #[test]
+    fn from_less_projection_wraps_in_object() {
+        let out = run("SELECT 1 AS a, 2 AS b", &[]);
+        assert_eq!(out, vec![bson!({ "a": 1_i64, "b": 2_i64 })]);
     }
 
     #[test]

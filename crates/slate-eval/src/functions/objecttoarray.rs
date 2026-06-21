@@ -12,16 +12,19 @@ use crate::value::Value;
 use super::{arity_err, str_arg};
 
 pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
-    if args.len() != 1 && args.len() != 3 {
-        return Err(arity_err(name, "1 or 3"));
-    }
-    let (kname, vname) = if args.len() == 3 {
-        match (str_arg(&args[1]), str_arg(&args[2])) {
+    // 1 arg: default field names `k`/`v`. 2 args: custom key name, default value
+    // name `v`. 3 args: custom key and value names. (Matches Cosmos.)
+    let (kname, vname) = match args.len() {
+        1 => ("k".to_string(), "v".to_string()),
+        2 => match str_arg(&args[1]) {
+            Some(k) => (k.to_string(), "v".to_string()),
+            None => return Ok(Value::Undefined),
+        },
+        3 => match (str_arg(&args[1]), str_arg(&args[2])) {
             (Some(k), Some(v)) => (k.to_string(), v.to_string()),
             _ => return Ok(Value::Undefined),
-        }
-    } else {
-        ("k".to_string(), "v".to_string())
+        },
+        _ => return Err(arity_err(name, "1 to 3")),
     };
     let Some(Bson::Document(doc)) = args.into_iter().next().and_then(Value::into_bson) else {
         return Ok(Value::Undefined);

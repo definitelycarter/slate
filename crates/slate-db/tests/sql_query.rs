@@ -854,3 +854,198 @@ fn group_by_rejects_ungrouped_column() {
         .is_err()
     );
 }
+
+// ── FROM-less queries (Cosmos: the FROM clause is optional) ──────────
+
+#[test]
+fn from_less_value_evaluates_once() {
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "people", "SELECT VALUE 1 + 1")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![2]);
+}
+
+#[test]
+fn from_less_needs_no_collection() {
+    // A FROM-less query reads no container, so the named collection need not
+    // even exist — this is what lets the REPL run `SELECT VALUE 1` with nothing
+    // selected.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "does_not_exist", "SELECT VALUE 7 * 6")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![42]);
+}
+
+#[test]
+fn from_less_projection_wraps_in_object() {
+    // No VALUE → the projection list wraps into a single object row.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<Document> = txn
+        .query(DEFAULT_CF, "x", "SELECT 1 AS a, 2 AS b")
+        .unwrap()
+        .iter_values::<Document>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![doc! { "a": 1_i64, "b": 2_i64 }]);
+}
+
+#[test]
+fn from_less_scalar_subquery() {
+    // A FROM-less subquery is valid too, and reduces to its single value.
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE (SELECT VALUE 1)")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![1]);
+}
+
+#[test]
+fn select_star_without_from_is_rejected() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    assert!(txn.query(DEFAULT_CF, "x", "SELECT *").is_err());
+}
+
+#[test]
+fn getcurrent_uses_the_injected_clock() {
+    // GETCURRENT* read the engine's injectable clock (the wasm hook) — no
+    // syscall — so a fixed clock makes them deterministic.
+    let db = DatabaseBuilder::new()
+        .with_clock(|| 1000) // 1000ms after the Unix epoch
+        .open(MemoryStore::new())
+        .unwrap();
+    let txn = db.begin(true).unwrap();
+    let ts: Vec<i64> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTTIMESTAMP()")
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(ts, vec![1000]);
+    let dt: Vec<String> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTDATETIME()")
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(dt, vec!["1970-01-01T00:00:01.0000000Z"]);
+}
+
+#[test]
+fn unqualified_identifier_is_rejected() {
+    // Cosmos requires bound paths; an unqualified column is an error, not undefined.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE name FROM c")
+            .is_err()
+    );
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE d.name FROM c")
+            .is_err()
+    );
+    // Qualified paths and the special value words are fine.
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE c.name FROM c")
+            .is_ok()
+    );
+    assert!(
+        txn.query(DEFAULT_CF, "people", "SELECT VALUE undefined FROM c")
+            .is_ok()
+    );
+}
+
+#[test]
+fn join_source_subquery() {
+    // A multi-value subquery as a JOIN source: `JOIN t IN (SELECT …)` unwinds the
+    // correlated subquery's result.
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let mut out: Vec<String> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE t FROM c JOIN t IN (SELECT VALUE s FROM s IN c.tags WHERE s != 'zzz')",
+        )
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    out.sort();
+    // ada: x,y  alan: y,z  grace: (none)
+    assert_eq!(out, vec!["x", "y", "y", "z"]);
+}
+
+#[test]
+fn subquery_from_outer_alias_is_item_scoped() {
+    // A subquery whose FROM names a JOIN alias is item-scoped: it counts the
+    // single bound element (1), not the whole collection (the bug was a re-scan).
+    let db = seeded();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<i64> = txn
+        .query(
+            DEFAULT_CF,
+            "people",
+            "SELECT VALUE (SELECT VALUE COUNT(1) FROM t) FROM c JOIN t IN c.tags",
+        )
+        .unwrap()
+        .iter_values::<i64>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // ada has 2 tags, alan 2, grace 0 → 4 join rows, each subquery counts 1.
+    assert_eq!(out, vec![1, 1, 1, 1]);
+}
+
+#[test]
+fn is_null_recognizes_a_null_object_field() {
+    // Accessing a null field of a computed object yields a raw null; IS_NULL
+    // must recognize it (regression for the OwnedRaw(Null) case).
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(true).unwrap();
+    let out: Vec<bool> = txn
+        .query(DEFAULT_CF, "x", "SELECT VALUE IS_NULL({a: 1, b: null}.b)")
+        .unwrap()
+        .iter_values::<bool>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(out, vec![true]);
+}
+
+#[test]
+fn from_container_alias_form() {
+    // CosmosDB's `FROM <container> [AS] <alias>` — the container name is just a
+    // label (the container is chosen out-of-band), so the alias binds to it.
+    let db = seeded();
+    assert_eq!(
+        strings(&db, "SELECT VALUE p.name FROM people p ORDER BY p.name"),
+        vec!["ada", "alan", "grace"]
+    );
+    assert_eq!(
+        strings(&db, "SELECT VALUE p.name FROM people AS p WHERE p.age > 40"),
+        vec!["alan", "grace"]
+    );
+}

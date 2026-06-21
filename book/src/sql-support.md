@@ -21,13 +21,13 @@ the input's integer type. See `slate-eval/functions/mod.rs`.
 
 ## Current surface
 
-`SELECT VALUE <expr> | * | <expr> [AS k], …  FROM <alias>  [JOIN <a> IN <arr>]*
+`SELECT VALUE <expr> | * | <expr> [AS k], …  [FROM <alias>  [JOIN <a> IN <arr>]*]
 [WHERE …] [GROUP BY …] [ORDER BY … [ASC|DESC]] [OFFSET n] [LIMIT n]`
 
-Done: `FROM`, `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, `SELECT VALUE`,
-`SELECT *`, tabular `SELECT a, b [AS c]`, full scalar expressions, object/array
-literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
-(`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
+Done: `FROM` (optional — see below), `WHERE`, `ORDER BY`, `OFFSET`/`LIMIT`,
+`JOIN … IN`, `SELECT VALUE`, `SELECT *`, tabular `SELECT a, b [AS c]`, full scalar
+expressions, object/array literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`,
+aggregate functions (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `GROUP BY`, subqueries
 (scalar / `EXISTS` / `ARRAY` over `FROM x IN <array>`).
 
 ---
@@ -56,9 +56,9 @@ literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
 - [x] `SQRT`  [x] `SQUARE`  [x] `POWER`  [x] `EXP`  [x] `LOG`  [x] `LOG10`
 - [x] `PI`  [ ] `RAND` *(non-deterministic — needs the txn's RNG/clock)*
 - [ ] `NUMBERBIN` *(round to a multiple)*
-- [ ] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
-- [ ] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(i64-typed)*
-- [ ] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
+- [x] Trig: `SIN` `COS` `TAN` `COT` `ASIN` `ACOS` `ATAN` `ATN2` `DEGREES` `RADIANS`
+- [x] Integer ops: `INTADD` `INTSUB` `INTMUL` `INTDIV` `INTMOD` *(integer args only; ÷/mod 0 → undefined)*
+- [x] Bitwise: `INTBITAND` `INTBITOR` `INTBITXOR` `INTBITNOT` `INTBITLEFTSHIFT` `INTBITRIGHTSHIFT`
 
 ### String (Tier 0)
 
@@ -66,7 +66,7 @@ literals, `IN`/`NOT IN`, `BETWEEN`/`NOT BETWEEN`, aggregate functions
 - [x] `ENDSWITH`  [x] `INDEX_OF`  [x] `SUBSTRING`  [x] `LEFT`  [x] `RIGHT`
 - [x] `TRIM`  [x] `LTRIM`  [x] `RTRIM`  [x] `REPLACE`  [x] `REPLICATE`  [x] `REVERSE`
 - [x] `STRINGEQUALS`  [ ] `STRINGJOIN`  [ ] `STRINGSPLIT`  [ ] `TOSTRING`
-- [ ] Parsing: `STRINGTONUMBER` `STRINGTOBOOLEAN` `STRINGTONULL` `STRINGTOARRAY` `STRINGTOOBJECT`
+- [x] Parsing: `STRINGTONUMBER` `STRINGTOBOOLEAN` `STRINGTONULL` `STRINGTOARRAY` `STRINGTOOBJECT`
 
 The string predicates `STARTSWITH`/`ENDSWITH`/`CONTAINS`/`STRINGEQUALS` accept an
 optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
@@ -88,12 +88,17 @@ optional trailing `true` for a case-insensitive comparison; `INDEX_OF`,
 
 - [x] `IIF(cond, a, b)`  *(only the boolean `true` takes the true branch)*  [ ] `??` coalesce operator
 
-### Date & time (Tier 0–1, own batch)
+### Date & time (Tier 0–1)
 
-Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_millis`.
-- [ ] `GETCURRENTDATETIME` / `…STATIC`  [ ] `GETCURRENTTIMESTAMP` / `…STATIC`  [ ] `GETCURRENTTICKS` / `…STATIC`
-- [ ] `DATETIMEADD`  [ ] `DATETIMEDIFF`  [ ] `DATETIMEPART`  [ ] `DATETIMEBIN`  [ ] `DATETIMEFROMPARTS`
-- [ ] `DATETIMETOTIMESTAMP`  [ ] `DATETIMETOTICKS`  [ ] `TIMESTAMPTODATETIME`  [ ] `TICKSTODATETIME`
+Cosmos datetimes are ISO-8601 strings (`…fffffffZ`, 100ns precision); timestamps
+are Unix ms; ticks are 100ns since the Unix epoch. Modelled as `i128` ticks via
+`chrono` (no wall-clock feature → wasm-safe).
+- [x] `DATETIMEADD`  [x] `DATETIMEDIFF`  [x] `DATETIMEPART`  [x] `DATETIMEBIN`  [x] `DATETIMEFROMPARTS`
+- [x] `DATETIMETOTIMESTAMP`  [x] `DATETIMETOTICKS`  [x] `TIMESTAMPTODATETIME`  [x] `TICKSTODATETIME`
+- [x] `GETCURRENTDATETIME` / `…STATIC`  [x] `GETCURRENTTIMESTAMP` / `…STATIC`  [x] `GETCURRENTTICKS` / `…STATIC`
+  — read the engine's injectable clock (`EngineTransaction::now_millis`, captured
+  at txn begin) threaded into the eval context via `$now`. No syscall in the
+  evaluator, so it stays wasm-clean; on wasm supply `with_clock(|| Date.now())`.
 
 ### Item (Tier 1)
 
@@ -114,15 +119,22 @@ Needs an ISO-8601 ⇄ BSON `DateTime` story; the txn already captures `now_milli
 ## Clauses
 
 - [x] `FROM`  [x] `WHERE`  [x] `ORDER BY`  [x] `OFFSET … LIMIT`  [x] `SELECT`
+- [x] `FROM` is **optional** (matching Cosmos): a FROM-less query (`SELECT VALUE 1`,
+  `SELECT 1 AS a, 2 AS b`) evaluates the `SELECT` exactly once over a single
+  implicit row. Lowers to a one-row `Values` source feeding the projection. Only
+  `SELECT *` requires a `FROM` (rejected without one); subqueries may be FROM-less
+  too (`(SELECT VALUE 1)`).
 - [x] `GROUP BY <expr>, …` — one row per distinct group; `SELECT` and `ORDER BY`
   reference group keys and/or aggregates (`ORDER BY` sorts the group rows, after
   aggregation). An ungrouped non-aggregate column — or `SELECT *` — is rejected,
   matching Cosmos.
-- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)` over an
-  in-document array (`FROM x IN <array>`), correlated or uncorrelated, nesting
-  to any depth. Each lowers to a correlated-apply (`Subquery`) node over a
-  `CurrentRow` leaf, reusing the full node set inside the subplan. *Not yet: a
-  multi-value subquery as a `JOIN` source (`JOIN t IN (SELECT …)`).*
+- [x] Subquery — scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)`, in any
+  position: projection, `WHERE`, a multi-value subquery as a `JOIN` source
+  (`JOIN t IN (SELECT …)`), or a nested `FROM` source. Correlated or
+  uncorrelated, nesting to any depth. Each lowers to a correlated-apply
+  (`Subquery`) node over a `CurrentRow` leaf, reusing the full node set inside the
+  subplan. A subquery whose `FROM` names an outer alias is item-scoped (iterates
+  that single bound value), matching Cosmos.
 
 ---
 

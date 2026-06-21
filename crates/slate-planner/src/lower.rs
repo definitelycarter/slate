@@ -24,9 +24,10 @@
 //! in a computation (`UPPER(c.x) = ...`, `c.x + 1 = ...`) is not sargable and
 //! falls through to the residual.
 
-use bson::{Bson, RawBson};
+use bson::{Bson, RawBson, RawDocumentBuf};
 use slate_ast::{
-    BinOp, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause, SubqueryKind,
+    BinOp, FromClause, FromSource, Literal, OrderByItem, Query, ScalarExpr, SelectClause,
+    SubqueryKind,
 };
 
 use crate::plan::{
@@ -45,7 +46,20 @@ pub struct CollectionMeta {
 
 /// Lower `query` into a plan that reads from `container`.
 pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> Plan {
-    Plan::Query(lower_query(query, container, meta))
+    Plan::Query(lower_query(query, container, meta, &[]))
+}
+
+/// A subquery used directly as a FROM/JOIN iteration source is *multi-value*:
+/// it yields the set of rows to unwind, so it must reduce as an array regardless
+/// of the parser's default (a parenthesized `(SELECT …)` is tagged scalar).
+fn as_iteration_source(expr: ScalarExpr) -> ScalarExpr {
+    match expr {
+        ScalarExpr::Subquery { query, .. } => ScalarExpr::Subquery {
+            query,
+            kind: SubqueryKind::Array,
+        },
+        other => other,
+    }
 }
 
 /// A subquery pulled out of an expression: its result binds to `slot`, computed
@@ -60,7 +74,12 @@ struct SubquerySpec {
 /// The outer query reads its container via a `Scan`/index source; a subquery's
 /// `FROM x IN <array>` reads an in-document array via `Unwind` over a
 /// [`Node::CurrentRow`] (the correlated outer row).
-fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) -> Node {
+fn lower_query(
+    query: Query,
+    container: CollectionRef,
+    meta: &CollectionMeta,
+    outer: &[&str],
+) -> Node {
     let Query {
         select,
         from,
@@ -71,23 +90,67 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
         limit,
     } = query;
 
+    // Query-wide counter for subquery slot names (`$subN`), shared across the
+    // FROM/JOIN sources and the projection so every slot is unique.
+    let mut next_slot = 0usize;
+
     // The base source: a container scan/index path, or — for a subquery — an
-    // `Unwind` of the correlated array over the outer row (`CurrentRow`). The
-    // array source already yields an environment row; the container source
-    // doesn't until a `Bind`.
-    let (alias, mut node, residual, mut is_env) = match from.source {
-        FromSource::ImplicitContainer { alias } => {
-            let (source, residual) = plan_source(filter, &alias, &container, meta);
-            (alias, source, residual, false)
-        }
-        FromSource::Array { alias, array } => {
-            let source = Node::Unwind {
-                alias: alias.clone(),
-                array,
-                source: Box::new(Node::CurrentRow),
-            };
-            (alias, source, filter, true)
-        }
+    // `Unwind` of the correlated array over the outer row (`CurrentRow`), or —
+    // for a FROM-less query — a single empty environment row evaluated once. The
+    // array and FROM-less sources already yield an environment row; the container
+    // source doesn't until a `Bind`.
+    let (alias, mut node, residual, mut is_env, joins) = match from {
+        // FROM-less (`SELECT VALUE 1`): one empty row, no bindings. `WHERE` (if
+        // any) filters that single row; `SELECT *` is rejected by the front-end.
+        None => (
+            String::new(),
+            Node::Values(vec![RawBson::Document(RawDocumentBuf::new())]),
+            filter,
+            true,
+            Vec::new(),
+        ),
+        Some(FromClause { source, joins }) => match source {
+            // A subquery whose `FROM` names an enclosing alias is *item-scoped*:
+            // it iterates that single bound value, which the outer row already
+            // carries — so the source is just `CurrentRow`, not a container
+            // re-scan. (Top-level `FROM c` has an empty outer scope → scan.)
+            FromSource::ImplicitContainer { alias } if outer.contains(&alias.as_str()) => {
+                (alias, Node::CurrentRow, filter, true, joins)
+            }
+            FromSource::ImplicitContainer { alias } => {
+                let (source, residual) = plan_source(filter, &alias, &container, meta);
+                (alias, source, residual, false, joins)
+            }
+            FromSource::Array { alias, array } => {
+                // The array expression may itself be a subquery (a nested
+                // `FROM x IN (SELECT …)`), multi-value here; extract it over the
+                // correlated row.
+                let mut subs = Vec::new();
+                let array = extract_subqueries(
+                    as_iteration_source(array),
+                    &container,
+                    meta,
+                    &mut subs,
+                    outer,
+                    &mut next_slot,
+                );
+                let mut src = Node::CurrentRow;
+                for spec in subs {
+                    src = Node::Subquery {
+                        slot: spec.slot,
+                        kind: spec.kind,
+                        subplan: Box::new(spec.subplan),
+                        source: Box::new(src),
+                    };
+                }
+                let source = Node::Unwind {
+                    alias: alias.clone(),
+                    array,
+                    source: Box::new(src),
+                };
+                (alias, source, filter, true, joins)
+            }
+        },
     };
 
     // GROUP BY keys, each bound to a `$keyN` slot in the aggregation output.
@@ -106,8 +169,26 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
     // becomes a slot the aggregate then reads.
     let value_expr = select.into_value_expr(&alias);
     let mut subqueries: Vec<SubquerySpec> = Vec::new();
-    let value_expr = extract_subqueries(value_expr, &container, meta, &mut subqueries);
-    let residual = residual.map(|p| extract_subqueries(p, &container, meta, &mut subqueries));
+    // Bindings a nested subquery can reference: the enclosing scope plus this
+    // query's own alias and joins. Borrows `alias`/`joins`, used only here
+    // (before either is moved below).
+    let mut scope: Vec<&str> = outer.to_vec();
+    if !alias.is_empty() {
+        scope.push(&alias);
+    }
+    for j in &joins {
+        scope.push(&j.alias);
+    }
+    let value_expr = extract_subqueries(
+        value_expr,
+        &container,
+        meta,
+        &mut subqueries,
+        &scope,
+        &mut next_slot,
+    );
+    let residual = residual
+        .map(|p| extract_subqueries(p, &container, meta, &mut subqueries, &scope, &mut next_slot));
 
     // Resolve the projection: a whole sub-expression equal to a group key
     // becomes its `$keyN` slot, and each `AGG(arg)` becomes a `$aggN` slot. The
@@ -135,7 +216,7 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
 
     // JOIN ... IN — each `Unwind` extends the environment. The first join (or a
     // subquery below) forces the environment shape via `Bind`.
-    if !from.joins.is_empty() {
+    if !joins.is_empty() {
         if !is_env {
             node = Node::Bind {
                 alias: alias.clone(),
@@ -143,12 +224,38 @@ fn lower_query(query: Query, container: CollectionRef, meta: &CollectionMeta) ->
             };
             is_env = true;
         }
-        for join in from.joins {
+        // A join's array can be a subquery (`JOIN j IN (SELECT …)`) and can
+        // reference the FROM alias and earlier join aliases, so the visible scope
+        // grows as we go. Any subquery is applied just before this join's unwind.
+        let mut jscope: Vec<String> = outer.iter().map(|s| s.to_string()).collect();
+        if !alias.is_empty() {
+            jscope.push(alias.clone());
+        }
+        for join in joins {
+            let scope_refs: Vec<&str> = jscope.iter().map(String::as_str).collect();
+            let mut subs = Vec::new();
+            let array = extract_subqueries(
+                as_iteration_source(join.array),
+                &container,
+                meta,
+                &mut subs,
+                &scope_refs,
+                &mut next_slot,
+            );
+            for spec in subs {
+                node = Node::Subquery {
+                    slot: spec.slot,
+                    kind: spec.kind,
+                    subplan: Box::new(spec.subplan),
+                    source: Box::new(node),
+                };
+            }
             node = Node::Unwind {
-                alias: join.alias,
-                array: join.array,
+                alias: join.alias.clone(),
+                array,
                 source: Box::new(node),
             };
+            jscope.push(join.alias);
         }
     }
 
@@ -247,11 +354,17 @@ fn extract_subqueries(
     container: &CollectionRef,
     meta: &CollectionMeta,
     out: &mut Vec<SubquerySpec>,
+    outer: &[&str],
+    next: &mut usize,
 ) -> ScalarExpr {
     match expr {
         ScalarExpr::Subquery { query, kind } => {
-            let subplan = lower_query(*query, container.clone(), meta);
-            let slot = format!("$sub{}", out.len());
+            let subplan = lower_query(*query, container.clone(), meta, outer);
+            // A query-wide counter keeps slot names unique across every position
+            // (projection, WHERE, JOIN sources), so a later subquery can't shadow
+            // an earlier slot in the row environment.
+            let slot = format!("$sub{next}");
+            *next += 1;
             out.push(SubquerySpec {
                 slot: slot.clone(),
                 kind,
@@ -261,38 +374,40 @@ fn extract_subqueries(
         }
         ScalarExpr::Binary { op, lhs, rhs } => ScalarExpr::Binary {
             op,
-            lhs: Box::new(extract_subqueries(*lhs, container, meta, out)),
-            rhs: Box::new(extract_subqueries(*rhs, container, meta, out)),
+            lhs: Box::new(extract_subqueries(*lhs, container, meta, out, outer, next)),
+            rhs: Box::new(extract_subqueries(*rhs, container, meta, out, outer, next)),
         },
         ScalarExpr::Unary { op, expr } => ScalarExpr::Unary {
             op,
-            expr: Box::new(extract_subqueries(*expr, container, meta, out)),
+            expr: Box::new(extract_subqueries(*expr, container, meta, out, outer, next)),
         },
         ScalarExpr::Member { base, field } => ScalarExpr::Member {
-            base: Box::new(extract_subqueries(*base, container, meta, out)),
+            base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
             field,
         },
         ScalarExpr::Index { base, index } => ScalarExpr::Index {
-            base: Box::new(extract_subqueries(*base, container, meta, out)),
-            index: Box::new(extract_subqueries(*index, container, meta, out)),
+            base: Box::new(extract_subqueries(*base, container, meta, out, outer, next)),
+            index: Box::new(extract_subqueries(
+                *index, container, meta, out, outer, next,
+            )),
         },
         ScalarExpr::Function { name, args } => ScalarExpr::Function {
             name,
             args: args
                 .into_iter()
-                .map(|a| extract_subqueries(a, container, meta, out))
+                .map(|a| extract_subqueries(a, container, meta, out, outer, next))
                 .collect(),
         },
         ScalarExpr::Object(fields) => ScalarExpr::Object(
             fields
                 .into_iter()
-                .map(|(k, v)| (k, extract_subqueries(v, container, meta, out)))
+                .map(|(k, v)| (k, extract_subqueries(v, container, meta, out, outer, next)))
                 .collect(),
         ),
         ScalarExpr::Array(items) => ScalarExpr::Array(
             items
                 .into_iter()
-                .map(|i| extract_subqueries(i, container, meta, out))
+                .map(|i| extract_subqueries(i, container, meta, out, outer, next))
                 .collect(),
         ),
         // Leaves and Mongo-only constructs hold no SQL subqueries.
@@ -308,6 +423,110 @@ pub struct PlanError {
     pub message: String,
 }
 
+/// Reject unqualified identifiers (Cosmos requires every property reference to be
+/// bound — `SELECT id FROM c` is invalid; it must be `c.id`). An identifier is
+/// valid only if it names a binding in scope (the `FROM`/`JOIN` aliases, plus the
+/// enclosing aliases inside a subquery) or one of the special value words.
+pub fn validate_bindings(query: &Query) -> Result<(), PlanError> {
+    check_query(query, &[])
+}
+
+/// `undefined`/`NaN`/`Infinity` are value words, not bound identifiers — Cosmos
+/// accepts them anywhere a value is expected.
+fn is_special_ident(name: &str) -> bool {
+    matches!(name, "undefined" | "NaN" | "Infinity")
+}
+
+fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
+    let mut scope: Vec<&str> = outer.to_vec();
+    if let Some(from) = &query.from {
+        match &from.source {
+            FromSource::ImplicitContainer { alias } => scope.push(alias),
+            // The array is evaluated before its alias is bound.
+            FromSource::Array { alias, array } => {
+                check_expr(array, &scope)?;
+                scope.push(alias);
+            }
+        }
+        for join in &from.joins {
+            check_expr(&join.array, &scope)?;
+            scope.push(&join.alias);
+        }
+    }
+    match &query.select {
+        SelectClause::Star => {}
+        SelectClause::Value(e) => check_expr(e, &scope)?,
+        SelectClause::Projections(items) => {
+            for it in items {
+                check_expr(&it.expr, &scope)?;
+            }
+        }
+    }
+    if let Some(f) = &query.filter {
+        check_expr(f, &scope)?;
+    }
+    for k in &query.group_by {
+        check_expr(k, &scope)?;
+    }
+    for o in &query.order_by {
+        check_expr(&o.expr, &scope)?;
+    }
+    Ok(())
+}
+
+fn check_expr(expr: &ScalarExpr, scope: &[&str]) -> Result<(), PlanError> {
+    match expr {
+        ScalarExpr::Identifier(name) => {
+            if scope.contains(&name.as_str()) || is_special_ident(name) || name.starts_with('$') {
+                Ok(())
+            } else {
+                Err(PlanError {
+                    message: format!(
+                        "unqualified identifier `{name}` — Cosmos requires a bound path \
+                         (did you mean an alias like `c.{name}`?)"
+                    ),
+                })
+            }
+        }
+        ScalarExpr::Subquery { query, .. } => check_query(query, scope),
+        ScalarExpr::Member { base, .. } => check_expr(base, scope),
+        ScalarExpr::Index { base, index } => {
+            check_expr(base, scope)?;
+            check_expr(index, scope)
+        }
+        ScalarExpr::Unary { expr, .. } => check_expr(expr, scope),
+        ScalarExpr::Binary { lhs, rhs, .. } => {
+            check_expr(lhs, scope)?;
+            check_expr(rhs, scope)
+        }
+        ScalarExpr::Function { args, .. } => {
+            for a in args {
+                check_expr(a, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Object(fields) => {
+            for (_, v) in fields {
+                check_expr(v, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::Array(items) => {
+            for i in items {
+                check_expr(i, scope)?;
+            }
+            Ok(())
+        }
+        ScalarExpr::PathGet { base, .. } => check_expr(base, scope),
+        ScalarExpr::MultikeyEq { base, value, .. } => {
+            check_expr(base, scope)?;
+            check_expr(value, scope)
+        }
+        // Literals, pre-converted values, and `@parameter`s bind no identifier.
+        ScalarExpr::Literal(_) | ScalarExpr::Value(_) | ScalarExpr::Parameter(_) => Ok(()),
+    }
+}
+
 /// Enforce the `GROUP BY`/aggregate column rule (Cosmos): when a query groups or
 /// aggregates, every projected — and `ORDER BY` — expression must be built from
 /// the group keys, aggregates, and constants. A bare row reference (a column
@@ -320,12 +539,17 @@ pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
         return Ok(());
     }
 
-    let alias = match &query.from.source {
-        FromSource::ImplicitContainer { alias } | FromSource::Array { alias, .. } => alias,
-    };
-    let mut bindings: Vec<&str> = vec![alias.as_str()];
-    for join in &query.from.joins {
-        bindings.push(join.alias.as_str());
+    // FROM-less aggregate (e.g. `SELECT COUNT(1)`) has no row bindings.
+    let mut bindings: Vec<&str> = Vec::new();
+    if let Some(from) = &query.from {
+        match &from.source {
+            FromSource::ImplicitContainer { alias } | FromSource::Array { alias, .. } => {
+                bindings.push(alias.as_str())
+            }
+        }
+        for join in &from.joins {
+            bindings.push(join.alias.as_str());
+        }
     }
 
     match &query.select {

@@ -1,0 +1,57 @@
+[
+  {
+    "id": "AndersenFamily",
+    "lastName": "Andersen",
+    "isRegistered": true,
+    "creationDate": 1431620472,
+    "address": { "state": "WA", "county": "King", "city": "Seattle" },
+    "parents": [
+      { "firstName": "Thomas" },
+      { "firstName": "Mary Kay" }
+    ],
+    "children": [
+      {
+        "firstName": "Henriette Thaulow",
+        "gender": "female",
+        "grade": 5,
+        "pets": [ { "givenName": "Fluffy" } ]
+      }
+    ],
+    "tags": ["a", "b", "c"]
+  },
+  {
+    "id": "WakefieldFamily",
+    "lastName": "Wakefield",
+    "isRegistered": false,
+    "creationDate": 1431620462,
+    "address": { "state": "NY", "county": "Manhattan", "city": "NY" },
+    "parents": [
+      { "firstName": "Robin" },
+      { "firstName": "Ben" }
+    ],
+    "children": [
+      {
+        "firstName": "Jesse",
+        "gender": "female",
+        "grade": 1,
+        "pets": [ { "givenName": "Goofy" }, { "givenName": "Shadow" } ]
+      },
+      {
+        "firstName": "Lisa",
+        "gender": "female",
+        "grade": 8
+      }
+    ],
+    "tags": ["x", "y"]
+  },
+  {
+    "id": "SmithFamily",
+    "lastName": "Smith",
+    "isRegistered": true,
+    "creationDate": 1431620999,
+    "address": { "state": "WA", "county": "Pierce", "city": "Tacoma" },
+    "parents": [ { "firstName": "Joe" } ],
+    "children": [],
+    "tags": []
+  }
+]

@@ -129,6 +129,10 @@ pub(crate) fn unique_violation(collection: &str, key: &[u8], existing_value: &[u
 impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     type Cf = <S::Txn<'a> as Transaction>::Cf;
 
+    fn now_millis(&self) -> i64 {
+        self.now_millis
+    }
+
     fn get(
         &self,
         handle: &CollectionHandle<Self::Cf>,

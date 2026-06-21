@@ -14,6 +14,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
 - **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required)
+- **Interactive shell** — `slate`, a REPL to create collections, insert documents, and run SQL against a live (in-memory or persistent) database
 - **Sub-millisecond indexed queries** at 10k records across all backends
 
 ## Crate Structure
@@ -33,7 +34,8 @@ slate/
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: public API, query planning + execution
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
-  └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
+  ├── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
+  └── slate-cli              → `slate`, an interactive shell (REPL) over the public API
 ```
 
 The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the **v2** query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor. It is the default; the original in-crate engine remains selectable as `QueryEngine::V1` during a soak before removal.
@@ -57,6 +59,18 @@ cargo run --release -p slate-store-bench
 cargo run --example basic -p slate-db
 cargo run --example triggers -p slate-db
 cargo run --example validators -p slate-db
+
+# Launch the interactive shell (in-memory; --rocksdb <path> to persist)
+cargo run -p slate-cli
+```
+
+In the shell, lines starting with `.` are commands (`.help` lists them) and
+everything else is run as SQL against the active collection:
+
+```
+slate> .seed
+slate(sample)> SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city
+slate(sample)> .insert {"_id":"5","name":"linus","city":"Helsinki"}
 ```
 
 ## Usage
