@@ -9,6 +9,10 @@
 //! `execute` returns a semantic [`Output`] rather than printing, so it can be
 //! driven and asserted on in tests with no terminal.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+
 use bson::Bson;
 use serde_json::{Value, json};
 
@@ -409,10 +413,13 @@ impl<S: BackupStore> Session<S> {
 
     /// Bulk-load a dataset file into `collection`, creating the collection if it
     /// does not exist and making it current. The whole load runs in one write
-    /// transaction so a bad document (e.g. a duplicate `_id`) rolls back the
-    /// import instead of leaving it half-applied.
+    /// transaction so a bad document (e.g. a duplicate `_id`, or a malformed
+    /// line) rolls the import back instead of leaving it half-applied —
+    /// returning early drops `txn` uncommitted, which discards every write.
     fn seed_file(&mut self, path: String, collection: String) -> Result<Output, String> {
-        let docs = load_documents(std::path::Path::new(&path))?;
+        let path = Path::new(&path);
+        let file = File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        let mut reader = BufReader::new(file);
 
         let exists = self
             .db
@@ -430,16 +437,75 @@ impl<S: BackupStore> Session<S> {
             .map_err(es)?;
         }
 
-        // Insert in bounded batches so a huge file isn't one giant `insert_many`,
-        // draining each batch to surface per-document errors as they happen.
-        let mut count = 0u64;
-        for chunk in docs.chunks(SEED_BATCH) {
-            count += txn
-                .insert_many(DEFAULT_CF, &collection, chunk.iter())
+        // Insert one bounded batch, draining it so per-document errors (such as a
+        // duplicate `_id`) surface here. Scoped before the `commit` below so its
+        // borrow of `txn` is released in time.
+        let flush = |batch: &[Value]| -> Result<u64, String> {
+            if batch.is_empty() {
+                return Ok(0);
+            }
+            txn.insert_many(DEFAULT_CF, &collection, batch.iter())
                 .map_err(es)?
                 .drain()
-                .map_err(es)?;
-        }
+                .map_err(es)
+        };
+
+        // Auto-detect the format from the first non-whitespace byte: `[` is a
+        // single JSON array, `{` is JSONL/NDJSON.
+        let count = match detect_format(&mut reader, path)? {
+            // An array is one JSON value, so read it whole (it isn't line-oriented),
+            // then insert it in bounded batches.
+            Some(b'[') => {
+                let mut text = String::new();
+                reader
+                    .read_to_string(&mut text)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                let docs = parse_array(&text)?;
+                let mut count = 0u64;
+                for chunk in docs.chunks(SEED_BATCH) {
+                    count += flush(chunk)?;
+                }
+                count
+            }
+            // JSONL: stream line by line so a large file is never fully resident —
+            // only one batch of parsed documents is held at a time.
+            Some(b'{') => {
+                let mut count = 0u64;
+                let mut batch: Vec<Value> = Vec::with_capacity(SEED_BATCH);
+                for (i, line) in reader.lines().enumerate() {
+                    let line = line.map_err(|e| {
+                        format!("{}: read error on line {}: {e}", path.display(), i + 1)
+                    })?;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let value: Value = serde_json::from_str(trimmed)
+                        .map_err(|e| format!("line {}: invalid JSON: {e}", i + 1))?;
+                    if !value.is_object() {
+                        return Err(format!("line {}: not a JSON object", i + 1));
+                    }
+                    batch.push(value);
+                    if batch.len() >= SEED_BATCH {
+                        count += flush(&batch)?;
+                        batch.clear();
+                    }
+                }
+                count += flush(&batch)?;
+                if count == 0 {
+                    return Err(format!("{}: no documents found", path.display()));
+                }
+                count
+            }
+            Some(_) => {
+                return Err(format!(
+                    "{}: expected a JSON array (starting with `[`) or JSONL (one `{{...}}` per line)",
+                    path.display()
+                ));
+            }
+            None => return Err(format!("{}: no JSON documents found", path.display())),
+        };
+
         txn.commit().map_err(es)?;
 
         // A clone so the name can both become the active collection and be
@@ -475,24 +541,17 @@ fn seed_docs() -> Vec<Value> {
 /// Documents per `insert_many` batch when loading a file.
 const SEED_BATCH: usize = 1000;
 
-/// Read a dataset file and parse it into a list of JSON documents, auto-detecting
-/// the format from the first non-whitespace byte: `[` is a single JSON array of
-/// documents, `{` is JSONL/NDJSON (one document per line, blank lines skipped —
-/// `mongoexport`'s default). On a malformed document the error names its position
-/// (array index or 1-based line number) and the load stops rather than importing
-/// part of the file.
-fn load_documents(path: &std::path::Path) -> Result<Vec<Value>, String> {
-    let text = std::fs::read_to_string(path)
+/// Peek the first non-whitespace byte of `reader` without consuming it, so the
+/// format-specific reader still sees the whole stream (and JSONL line numbers
+/// stay accurate). Returns `None` for an empty or whitespace-only file.
+///
+/// Only the first buffered chunk is inspected — enough for any real dataset,
+/// whose opening `[`/`{` sits at the very start.
+fn detect_format<R: BufRead>(reader: &mut R, path: &Path) -> Result<Option<u8>, String> {
+    let buf = reader
+        .fill_buf()
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    match text.trim_start().as_bytes().first() {
-        Some(b'[') => parse_array(&text),
-        Some(b'{') => parse_jsonl(&text),
-        Some(_) => Err(format!(
-            "{}: expected a JSON array (starting with `[`) or JSONL (one `{{...}}` per line)",
-            path.display()
-        )),
-        None => Err(format!("{} is empty", path.display())),
-    }
+    Ok(buf.iter().copied().find(|b| !b.is_ascii_whitespace()))
 }
 
 /// Parse a whole-file JSON array into its document elements, erroring (with the
@@ -512,28 +571,6 @@ fn parse_array(text: &str) -> Result<Vec<Value>, String> {
         return Err("array contained no documents".to_string());
     }
     Ok(items)
-}
-
-/// Parse JSONL/NDJSON text into documents, one per non-blank line. Errors name
-/// the 1-based line number on a parse failure or a non-object line.
-fn parse_jsonl(text: &str) -> Result<Vec<Value>, String> {
-    let mut docs = Vec::new();
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value =
-            serde_json::from_str(line).map_err(|e| format!("line {}: invalid JSON: {e}", i + 1))?;
-        if !value.is_object() {
-            return Err(format!("line {}: not a JSON object", i + 1));
-        }
-        docs.push(value);
-    }
-    if docs.is_empty() {
-        return Err("no documents found".to_string());
-    }
-    Ok(docs)
 }
 
 #[cfg(test)]
@@ -904,6 +941,54 @@ mod tests {
             }
             other => panic!("expected rows, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn seed_file_streams_multiple_batches() {
+        // More documents than one batch, written to a temp JSONL file, to drive
+        // the streaming multi-batch path (`SEED_BATCH` is 1000).
+        let n = SEED_BATCH * 2 + 5;
+        let mut content = String::new();
+        for i in 0..n {
+            content.push_str(&format!("{{\"_id\":\"{i}\",\"v\":{i}}}\n"));
+        }
+        let path = std::env::temp_dir().join("slate_seed_batches.jsonl");
+        std::fs::write(&path, content).unwrap();
+
+        let mut s = session();
+        let out = s
+            .execute(Command::SeedFile {
+                path: path.to_string_lossy().into_owned(),
+                collection: "batched".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            out,
+            Output::Loaded {
+                count: n as u64,
+                collection: "batched".to_string()
+            }
+        );
+        assert_eq!(run(&mut s, ".count"), Output::Count(n as u64));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn seed_file_line_numbers_account_for_leading_blanks() {
+        // Leading blank lines must not shift the reported line number — the bad
+        // document sits on line 4 of the file.
+        let mut s = session();
+        let err = s
+            .execute(Command::SeedFile {
+                path: fixture("leading_blanks.jsonl"),
+                collection: "lb".to_string(),
+            })
+            .unwrap_err();
+        assert!(
+            err.contains("line 4"),
+            "error should name the true line: {err}"
+        );
     }
 
     #[test]
