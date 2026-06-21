@@ -34,11 +34,11 @@ pub enum Plan {
         source: Node,
     },
 
-    /// Apply `mutation` to each document yielded by `source` and write it back.
-    /// Yields the mutated documents (unchanged documents are dropped).
+    /// Apply `assignments` to each document yielded by `source` and write it
+    /// back. Yields the mutated documents (unchanged documents are dropped).
     Update {
         collection: CollectionRef,
-        mutation: slate_mutation::Mutation,
+        assignments: Vec<slate_ast::Assignment>,
         source: Node,
     },
 

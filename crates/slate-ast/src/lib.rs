@@ -3,10 +3,12 @@
 //! The single intermediate representation that every query surface targets:
 //! `slate-sql` parses SQL text into it, `slate-query` translates a Mongo-style
 //! find into it, `slate-planner` lowers it to a physical plan, and `slate-eval`
-//! gives it meaning. It depends only on `bson` and the light `slate-mutation`
-//! leaf (whose [`Mutation`] a write [`Statement`] carries) — never on a query
-//! *surface* — so all of those share one expression language and one statement
-//! type without any front-end depending on a sibling.
+//! gives it meaning. It depends only on `bson` — never on a query *surface* or
+//! a semantics crate — so all of those share one expression language and one
+//! statement type without any front-end depending on a sibling. Writes are
+//! expressed *in* that language: an `UPDATE` is a list of [`Assignment`]s whose
+//! right-hand side is an ordinary [`Expression`] (so `$inc`/`$push` are just
+//! `n + 1` / `rpush(arr, x)`), not a separate mutation type.
 //!
 //! The shapes here intentionally leave room to grow (see the `Future:` notes)
 //! without reshaping existing variants:
@@ -16,7 +18,6 @@
 use std::collections::BTreeSet;
 
 use bson::{RawBson, RawDocumentBuf};
-use slate_mutation::Mutation;
 
 /// A literal scalar value as written in the source.
 ///
@@ -363,8 +364,11 @@ pub enum Statement {
         docs: Vec<RawBson>,
         mode: UpsertMode,
     },
-    /// Update the documents `query` selects by applying `mutation`.
-    Update { query: Query, mutation: Mutation },
+    /// Update the documents `query` selects by applying `assignments`.
+    Update {
+        query: Query,
+        assignments: Vec<Assignment>,
+    },
     /// Replace the documents `query` selects with `replacement` (pk preserved).
     Replace {
         query: Query,
@@ -392,6 +396,18 @@ pub enum UpsertMode {
     Replace,
     /// Field-merge the new document into the existing one.
     Merge,
+}
+
+/// One field assignment of a [`Statement::Update`]: write `value` to the dotted
+/// `path` on each matched document. `value` is an ordinary [`Expression`]
+/// evaluated against the current document, so the Mongo operators reduce to it:
+/// `$set` → a literal, `$inc` → `path + k`, `$push` → `rpush(path, v)`. A `value`
+/// that evaluates to *undefined* removes the field (so `$unset` is `= undefined`,
+/// and `$rename` desugars to two assignments).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub path: Vec<String>,
+    pub value: Expression,
 }
 
 #[cfg(test)]

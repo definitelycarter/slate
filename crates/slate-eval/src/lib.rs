@@ -15,12 +15,14 @@
 //! carries Cosmos's `undefined` vs `null` distinction.
 
 pub mod agg;
+pub mod apply;
 pub mod error;
 pub mod eval;
 pub mod functions;
 pub mod raweval;
 pub mod value;
 
+pub use apply::apply_assignments;
 pub use error::{EvalError, Result};
 pub use eval::compare_bson;
 pub use value::Value;

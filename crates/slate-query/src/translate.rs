@@ -12,8 +12,8 @@
 
 use bson::raw::{RawBsonRef, RawDocument};
 use slate_ast::{
-    BinOp, Expression, FromClause, FromSource, Literal, OrderByItem, Query, SelectClause,
-    SortDirection, UnaryOp,
+    Assignment, BinOp, Expression, FromClause, FromSource, Literal, OrderByItem, Query,
+    SelectClause, SortDirection, UnaryOp,
 };
 
 use crate::error::{Result, TranslateError};
@@ -320,6 +320,157 @@ fn translate_exists(field: &str, value: RawBsonRef) -> Result<Expression> {
 }
 
 /// Build the member-access path `c.a.b.c` for a dotted field.
+/// Translate a Mongo update document into a list of [`Assignment`]s — the write
+/// counterpart of [`translate_filter`]. Each operator reduces to "write an
+/// expression to a path": `$set` → a literal, `$inc` → `field + k`, `$push` →
+/// `rpush(field, v)`, `$unset` → assign `undefined` (which removes the field),
+/// `$rename` → set the new field from the old then unset the old. A bare
+/// (non-`$`) field is treated as an implicit `$set`. The primary-key check is
+/// the planner's job (it needs the catalog), so this is catalog-free.
+pub fn update_to_assignments(update: &RawDocument) -> Result<Vec<Assignment>> {
+    let mut out = Vec::new();
+    for entry in update.iter() {
+        let (key, value) = entry.map_err(malformed)?;
+        match key.as_str() {
+            "$set" => set_op(value, &mut out)?,
+            "$unset" => unset_op(value, &mut out)?,
+            "$inc" => inc_op(value, &mut out)?,
+            "$push" => array_op("rpush", value, &mut out)?,
+            "$lpush" => array_op("lpush", value, &mut out)?,
+            "$pop" => pop_op(value, &mut out)?,
+            "$rename" => rename_op(value, &mut out)?,
+            k if k.starts_with('$') => {
+                return Err(TranslateError::Unsupported(format!(
+                    "unknown update operator: {k}"
+                )));
+            }
+            // A bare field is an implicit `$set`.
+            field => out.push(Assignment {
+                path: split_path(field),
+                value: value_expr(value)?,
+            }),
+        }
+    }
+    if out.is_empty() {
+        return Err(TranslateError::Malformed("empty update document".into()));
+    }
+    Ok(out)
+}
+
+fn split_path(field: &str) -> Vec<String> {
+    field.split('.').map(String::from).collect()
+}
+
+/// The undefined value-word — assigning it removes the target field.
+fn undefined() -> Expression {
+    Expression::Identifier("undefined".into())
+}
+
+/// Any scalar/document/array operand as an `Expression::Value` (unlike a filter
+/// `literal`, an update value may be a whole document or array).
+fn value_expr(value: RawBsonRef) -> Result<Expression> {
+    let b = bson::Bson::try_from(value)
+        .map_err(|e| TranslateError::Malformed(format!("could not read update value: {e}")))?;
+    Ok(Expression::Value(b))
+}
+
+/// An operator's value as the field→operand sub-document it must be.
+fn op_subdoc<'a>(value: RawBsonRef<'a>, op: &str) -> Result<&'a RawDocument> {
+    match value {
+        RawBsonRef::Document(d) => Ok(d),
+        _ => Err(TranslateError::Malformed(format!(
+            "{op} value must be a document"
+        ))),
+    }
+}
+
+fn set_op(value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, "$set")?.iter() {
+        let (field, v) = entry.map_err(malformed)?;
+        out.push(Assignment {
+            path: split_path(field.as_str()),
+            value: value_expr(v)?,
+        });
+    }
+    Ok(())
+}
+
+fn unset_op(value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, "$unset")?.iter() {
+        let (field, _) = entry.map_err(malformed)?;
+        out.push(Assignment {
+            path: split_path(field.as_str()),
+            value: undefined(),
+        });
+    }
+    Ok(())
+}
+
+fn inc_op(value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, "$inc")?.iter() {
+        let (field, v) = entry.map_err(malformed)?;
+        // Type-preserving increment (Mongo `$inc`), not Cosmos `+` widening.
+        out.push(Assignment {
+            path: split_path(field.as_str()),
+            value: Expression::Function {
+                name: "inc".into(),
+                args: vec![path(field.as_str()), value_expr(v)?],
+            },
+        });
+    }
+    Ok(())
+}
+
+fn array_op(func: &str, value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, func)?.iter() {
+        let (field, v) = entry.map_err(malformed)?;
+        out.push(Assignment {
+            path: split_path(field.as_str()),
+            value: Expression::Function {
+                name: func.into(),
+                args: vec![path(field.as_str()), value_expr(v)?],
+            },
+        });
+    }
+    Ok(())
+}
+
+fn pop_op(value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, "$pop")?.iter() {
+        let (field, _) = entry.map_err(malformed)?;
+        out.push(Assignment {
+            path: split_path(field.as_str()),
+            value: Expression::Function {
+                name: "pop".into(),
+                args: vec![path(field.as_str())],
+            },
+        });
+    }
+    Ok(())
+}
+
+fn rename_op(value: RawBsonRef, out: &mut Vec<Assignment>) -> Result<()> {
+    for entry in op_subdoc(value, "$rename")?.iter() {
+        let (from, to) = entry.map_err(malformed)?;
+        let RawBsonRef::String(to) = to else {
+            return Err(TranslateError::Malformed(
+                "$rename target must be a string".into(),
+            ));
+        };
+        // Set the new field from the old's current value, then remove the old.
+        // (apply evaluates every RHS against the original doc, so order is moot.)
+        out.push(Assignment {
+            path: split_path(to),
+            value: path(from.as_str()),
+        });
+        out.push(Assignment {
+            path: split_path(from.as_str()),
+            value: undefined(),
+        });
+    }
+    Ok(())
+}
+
 fn path(field: &str) -> Expression {
     let mut expr = Expression::Identifier(ALIAS.into());
     for part in field.split('.') {

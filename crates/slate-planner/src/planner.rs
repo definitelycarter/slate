@@ -7,7 +7,7 @@
 //! the catalog state ([`PlanContext`]: the target collection, its index
 //! metadata, and its resolved hooks); it builds no `Node`/`Plan` trees itself.
 
-use slate_ast::{Expression, OrderByItem, SortDirection, Statement};
+use slate_ast::{Assignment, Expression, OrderByItem, SortDirection, Statement};
 use slate_vm::ResolvedHook;
 
 use crate::lower::lower_query;
@@ -73,11 +73,15 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
             })
         }
 
-        Statement::Update { query, mutation } => {
+        Statement::Update { query, assignments } => {
+            // The primary key is immutable — reject any assignment targeting it.
+            // (This is the check that used to live in `parse_mutation`; it needs
+            // the catalog's pk path, which only exists here at plan time.)
+            reject_pk_mutation(&assignments, &ctx.meta.pk_path)?;
             let source = wrap_before(ctx, "updating", write_source(query, ctx));
             let plan = Plan::Update {
                 collection: ctx.container.clone(),
-                mutation,
+                assignments,
                 source,
             };
             Ok(wrap_after(ctx, "updated", plan))
@@ -120,6 +124,19 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
 /// lowered to its `Scan → [Filter] → Project(c)` source tree.
 fn write_source(query: slate_ast::Query, ctx: &PlanContext) -> Node {
     lower_query(query, ctx.container.clone(), &ctx.meta, &[])
+}
+
+/// Reject any assignment whose target's first path segment is the primary key —
+/// the pk is immutable. (`a.b` targeting the pk root is rejected too.)
+fn reject_pk_mutation(assignments: &[Assignment], pk_path: &str) -> Result<(), PlanError> {
+    for a in assignments {
+        if a.path.first().map(String::as_str) == Some(pk_path) {
+            return Err(PlanError {
+                message: format!("cannot mutate primary key field '{pk_path}'"),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Wrap a write source with the collection's validators then before-triggers

@@ -15,4 +15,4 @@ mod translate;
 pub use error::TranslateError;
 pub use query::{DistinctOptions, FindOptions};
 pub use sort::{Sort, SortDirection};
-pub use translate::{ALIAS, find_to_query, translate_filter};
+pub use translate::{ALIAS, find_to_query, translate_filter, update_to_assignments};

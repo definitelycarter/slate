@@ -19,5 +19,4 @@ pub use slate_vm::pool::{RuntimeRegistry, VmPool};
 #[cfg(feature = "bench-internals")]
 pub mod bench {
     pub use crate::database::Database;
-    pub use slate_mutation::{Mutation, parse_mutation};
 }

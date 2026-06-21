@@ -119,14 +119,14 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Plan::Update {
                 collection,
-                mutation,
+                assignments,
                 source,
             } => {
                 let handle = self
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::mutate::execute(self.txn, handle, mutation, source)
+                nodes::mutate::execute(self.txn, handle, assignments, source)
             }
 
             Plan::Trigger {
@@ -709,26 +709,36 @@ mod write_path {
 
     #[test]
     fn update_mutates_matching_documents() {
-        // UPDATE SET age += 1 WHERE c.age > 40 → alan 41→42, grace 44→45.
-        use slate_mutation::{FieldMutation, Mutation, MutationOp};
+        // UPDATE SET age = c.age + 1 WHERE c.age > 40 → alan 41→42, grace 44→45.
+        use slate_ast::{Assignment, BinOp, Expression};
         let engine = seeded_people();
         write(
             &engine,
             Plan::Update {
                 collection: people_ref(),
-                mutation: Mutation {
-                    ops: vec![FieldMutation {
-                        field: "age".into(),
-                        op: MutationOp::Inc(bson::Bson::Int32(1)),
-                    }],
-                },
+                assignments: vec![Assignment {
+                    path: vec!["age".into()],
+                    value: Expression::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(Expression::Member {
+                            base: Box::new(Expression::Identifier("c".into())),
+                            field: "age".into(),
+                        }),
+                        rhs: Box::new(Expression::Value(bson::Bson::Int32(1))),
+                    },
+                }],
                 source: matched_docs("c.age > 40"),
             },
         );
-        let mut ages: Vec<i32> = scan_all(&engine)
+        // `Int + Int` normalizes to Int64, so read either width.
+        let mut ages: Vec<i64> = scan_all(&engine)
             .iter()
             .filter_map(|v| match v {
-                RawBson::Document(d) => d.get_i32("age").ok(),
+                RawBson::Document(d) => match d.get("age") {
+                    Ok(Some(bson::RawBsonRef::Int32(i))) => Some(i as i64),
+                    Ok(Some(bson::RawBsonRef::Int64(i))) => Some(i),
+                    _ => None,
+                },
                 _ => None,
             })
             .collect();

@@ -62,12 +62,8 @@ impl From<bson::error::Error> for DbError {
     }
 }
 
-impl From<slate_mutation::ParseError> for DbError {
-    fn from(e: slate_mutation::ParseError) -> Self {
-        DbError::InvalidQuery(e.to_string())
-    }
-}
-
+// `MutationError` reaches `DbError` via the executor's upsert-merge path
+// (`raw_merge`), surfaced as `ExecError::Mutation`.
 impl From<slate_mutation::MutationError> for DbError {
     fn from(e: slate_mutation::MutationError) -> Self {
         match e {

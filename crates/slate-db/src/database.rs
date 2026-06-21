@@ -447,12 +447,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let raw = bson::serialize_to_raw_document_buf(&update)?;
-        let handle = self.txn.collection(cf, collection)?;
-        let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
+        let assignments = slate_query::update_to_assignments(&raw)?;
 
         let query = self.write_query(&filter_raw, Some(1))?;
         let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Update { query, mutation }, ctx)
+        self.run_plan(slate_planner::Statement::Update { query, assignments }, ctx)
     }
 
     /// Update all documents matching the filter.
@@ -465,12 +464,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
         let raw = bson::serialize_to_raw_document_buf(&update)?;
-        let handle = self.txn.collection(cf, collection)?;
-        let mutation = slate_mutation::parse_mutation(&raw, handle.pk_path())?;
+        let assignments = slate_query::update_to_assignments(&raw)?;
 
         let query = self.write_query(&filter_raw, None)?;
         let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Update { query, mutation }, ctx)
+        self.run_plan(slate_planner::Statement::Update { query, assignments }, ctx)
     }
 
     /// Replace the first document matching the filter entirely (no merge).

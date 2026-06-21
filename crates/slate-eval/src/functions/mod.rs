@@ -65,6 +65,8 @@ mod intdiv;
 mod intmod;
 mod intmul;
 mod intsub;
+// Mutation ops (used by UPDATE assignments).
+mod inc;
 mod is_array;
 mod is_bool;
 mod is_defined;
@@ -80,10 +82,12 @@ mod length;
 mod log;
 mod log10;
 mod lower;
+mod lpush;
 mod ltrim;
 mod numberbin;
 mod objecttoarray;
 mod pi;
+mod pop;
 mod power;
 mod radians;
 mod regexmatch;
@@ -92,6 +96,7 @@ mod replicate;
 mod reverse;
 mod right;
 mod round;
+mod rpush;
 mod rtrim;
 mod setintersect;
 mod setunion;
@@ -182,6 +187,11 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "ARRAY_CONTAINS_ANY" => array_contains_any::eval(name, args),
         "ARRAY_CONCAT" => array_concat::eval(name, args),
         "ARRAY_SLICE" => array_slice::eval(name, args),
+        // Mutation ops (used by UPDATE assignments; pure functions).
+        "INC" => inc::eval(name, args),
+        "RPUSH" => rpush::eval(name, args),
+        "LPUSH" => lpush::eval(name, args),
+        "POP" => pop::eval(name, args),
         "CHOOSE" => choose::eval(name, args),
         "SETINTERSECT" => setintersect::eval(name, args),
         "SETUNION" => setunion::eval(name, args),
