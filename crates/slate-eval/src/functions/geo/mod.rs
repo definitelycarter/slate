@@ -23,7 +23,7 @@ mod metric;
 mod predicate;
 
 pub(crate) use metric::{area, distance};
-pub(crate) use predicate::within;
+pub(crate) use predicate::{intersects, within};
 
 /// A `[longitude, latitude]` position in degrees.
 pub(crate) type Coord = [f64; 2];
