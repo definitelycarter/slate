@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE SUBSTRING('hello', 1, 3)",
+  "result": [
+    "ell"
+  ]
+}

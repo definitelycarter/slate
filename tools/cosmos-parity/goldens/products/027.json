@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c ORDER BY c.category ASC, c.price DESC",
+  "result": [
+    "Premium Laptop",
+    "Wireless Mouse",
+    "Ergonomic Office Chair",
+    "LED Desk Lamp",
+    "Premium Notebook Set"
+  ]
+}

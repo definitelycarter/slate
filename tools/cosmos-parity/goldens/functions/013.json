@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE SQUARE(5)",
+  "result": [
+    25
+  ]
+}

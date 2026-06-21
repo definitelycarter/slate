@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE ARRAY_LENGTH(c.tags) FROM c",
+  "result": [
+    3,
+    2,
+    3,
+    2,
+    3
+  ]
+}

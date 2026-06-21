@@ -1,0 +1,9 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT DISTINCT VALUE c.category FROM c",
+  "result": [
+    "Electronics",
+    "Furniture",
+    "Stationery"
+  ]
+}

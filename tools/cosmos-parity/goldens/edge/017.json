@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE x FROM c JOIN x IN c.missing",
+  "result": []
+}

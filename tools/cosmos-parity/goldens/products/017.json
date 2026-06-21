@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE UPPER(c.category) FROM c",
+  "result": [
+    "ELECTRONICS",
+    "ELECTRONICS",
+    "FURNITURE",
+    "FURNITURE",
+    "STATIONERY"
+  ]
+}

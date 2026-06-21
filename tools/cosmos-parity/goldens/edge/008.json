@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.tags[99] FROM c",
+  "result": []
+}

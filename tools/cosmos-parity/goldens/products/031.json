@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE AVG(c.price) FROM c",
+  "result": [
+    360.99
+  ]
+}

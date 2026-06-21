@@ -1,0 +1,22 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id, ARRAY(SELECT VALUE i.productName FROM i IN c.items WHERE i.price > 100) AS pricey FROM c",
+  "result": [
+    {
+      "id": "order-001",
+      "pricey": [
+        "Premium Laptop"
+      ]
+    },
+    {
+      "id": "order-002",
+      "pricey": [
+        "Ergonomic Office Chair"
+      ]
+    },
+    {
+      "id": "order-003",
+      "pricey": []
+    }
+  ]
+}

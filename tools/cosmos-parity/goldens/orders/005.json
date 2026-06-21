@@ -1,0 +1,31 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id, i.productName, i.quantity FROM c JOIN i IN c.items",
+  "result": [
+    {
+      "id": "order-001",
+      "productName": "Premium Laptop",
+      "quantity": 1
+    },
+    {
+      "id": "order-001",
+      "productName": "Wireless Mouse",
+      "quantity": 1
+    },
+    {
+      "id": "order-002",
+      "productName": "Ergonomic Office Chair",
+      "quantity": 1
+    },
+    {
+      "id": "order-003",
+      "productName": "Premium Notebook Set",
+      "quantity": 2
+    },
+    {
+      "id": "order-003",
+      "productName": "Wireless Mouse",
+      "quantity": 1
+    }
+  ]
+}

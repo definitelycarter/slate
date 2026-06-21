@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE c.price BETWEEN 25 AND 60",
+  "result": [
+    "Wireless Mouse",
+    "LED Desk Lamp"
+  ]
+}

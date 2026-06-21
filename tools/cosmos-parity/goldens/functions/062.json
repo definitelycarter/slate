@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE CHOOSE(2, 'a', 'b', 'c')",
+  "result": [
+    "b"
+  ]
+}

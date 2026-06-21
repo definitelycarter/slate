@@ -1,0 +1,18 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.status AS status, COUNT(1) AS n FROM c GROUP BY c.status",
+  "result": [
+    {
+      "n": 1,
+      "status": "delivered"
+    },
+    {
+      "n": 1,
+      "status": "shipped"
+    },
+    {
+      "n": 1,
+      "status": "processing"
+    }
+  ]
+}

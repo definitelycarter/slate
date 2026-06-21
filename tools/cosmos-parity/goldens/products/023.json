@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE ARRAY_CONTAINS(c.tags, 'office')",
+  "result": [
+    "Ergonomic Office Chair",
+    "LED Desk Lamp"
+  ]
+}

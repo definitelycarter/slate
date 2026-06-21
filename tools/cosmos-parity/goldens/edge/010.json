@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.price + c.name FROM c",
+  "result": []
+}

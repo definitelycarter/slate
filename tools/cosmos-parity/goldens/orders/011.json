@@ -1,0 +1,7 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE MAX(c.totalAmount) FROM c",
+  "result": [
+    1329.98
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "error": true,
+  "query": "SELECT c.category, COUNT(1) FROM c"
+}

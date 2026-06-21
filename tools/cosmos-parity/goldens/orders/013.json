@@ -1,0 +1,18 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id, (SELECT VALUE COUNT(1) FROM i IN c.items) AS lineItems FROM c",
+  "result": [
+    {
+      "id": "order-001",
+      "lineItems": 2
+    },
+    {
+      "id": "order-002",
+      "lineItems": 1
+    },
+    {
+      "id": "order-003",
+      "lineItems": 2
+    }
+  ]
+}

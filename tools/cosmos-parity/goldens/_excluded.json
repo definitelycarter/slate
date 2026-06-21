@@ -1,0 +1,4 @@
+{
+  "description": "Queries deliberately NOT goldened because the Cosmos *emulator*'s output for them is known-WRONG (cosmos-parity SKILL §5). Pinning a known-wrong oracle as a committed golden is forbidden: goldens must encode correct Cosmos semantics, not emulator defects. The live differential (run.py) still exercises these against the emulator. As of this capture the curated queries/*.sql matrices contain NONE of the emulator-bug families, so this list is empty — those families (subquery as JOIN source, COUNT-subquery-in-WHERE, aggregate-in-SELECT-VALUE-subquery hoist, subquery as aggregate source, SUM-over-empty-filtered-subquery) appear only in the GENERATED gen_*.sql matrices, which are not goldened (no fixed oracle for a random query). If you add a curated query that hits one of those families, add it here with a category + reason instead of capturing the emulator's wrong answer.",
+  "queries": []
+}

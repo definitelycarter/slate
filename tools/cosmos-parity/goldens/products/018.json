@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE LENGTH(c.name) FROM c",
+  "result": [
+    14,
+    14,
+    22,
+    13,
+    20
+  ]
+}

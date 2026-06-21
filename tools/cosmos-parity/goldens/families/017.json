@@ -1,0 +1,18 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.id, (SELECT VALUE COUNT(1) FROM ch IN c.children) AS kids FROM c",
+  "result": [
+    {
+      "id": "AndersenFamily",
+      "kids": 1
+    },
+    {
+      "id": "WakefieldFamily",
+      "kids": 2
+    },
+    {
+      "id": "SmithFamily",
+      "kids": 0
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.id, ch.firstName FROM c JOIN ch IN c.children WHERE ch.grade > 4",
+  "result": [
+    {
+      "firstName": "Henriette Thaulow",
+      "id": "AndersenFamily"
+    },
+    {
+      "firstName": "Lisa",
+      "id": "WakefieldFamily"
+    }
+  ]
+}

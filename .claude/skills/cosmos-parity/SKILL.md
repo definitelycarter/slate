@@ -1,6 +1,6 @@
 ---
 name: cosmos-parity
-description: Use after changing Slate's query surface (planner, eval, SQL front-end, functions) and before declaring a query feature done. Runs the Cosmos parity checks — the hermetic corpus replay and the live-emulator differential — and covers normalization, divergence triage, the known-emulator-bug allowlist, and what the oracle can't cover.
+description: Use after changing Slate's query surface (planner, eval, SQL front-end, functions) and before declaring a query feature done. Runs the Cosmos parity checks — the hermetic golden replays (Azure-Samples corpus + slate's own matrices) and the live-emulator differential — and covers normalization, divergence triage, the known-emulator-bug allowlist, and what the oracle can't cover.
 ---
 
 # Cosmos parity in slate
@@ -13,26 +13,35 @@ before calling a query feature done.
 
 Depth lives in `tools/cosmos-parity/README.md`; this is the recipe.
 
-## 1. Two modes, two purposes
+## 1. Three modes, two purposes
 
 | Mode | Command | Oracle | Docker | Hermetic |
 |------|---------|--------|--------|----------|
-| **Corpus / golden replay** | `run_samples.py` | committed `result.json` (Azure-Samples) | no | **yes** |
+| **Corpus golden replay** | `run_samples.py` | committed `result.json` (Azure-Samples) | no | **yes** |
+| **Slate-matrix golden replay** | `cargo test -p slate-db --test cosmos_golden` | committed `goldens/` (captured from the emulator) | no | **yes** |
 | **Live emulator differential** | `run.py` | the running Cosmos emulator | yes | no |
 
-The corpus replay is the model to grow — deterministic, no Docker, runs anywhere.
-The live differential is the broad net: it catches divergences the corpus doesn't
-cover (every scalar function, generated subquery matrices, negative/edge cases),
-but it depends on a real emulator, so it's non-hermetic and not for CI gating.
+The two golden replays are the hermetic core — deterministic, no Docker, run
+anywhere (and in CI). The corpus replay diffs against Microsoft's authoritative
+`result.json`; the slate-matrix replay diffs slate's own curated `queries/*.sql`
+matrices against goldens we captured from the emulator (§7) and normalize in Rust
+at replay (§8). The live differential is the broad net: it catches divergences the
+goldens don't cover (every scalar function, generated subquery matrices,
+negative/edge cases over the live oracle), but it depends on a real emulator, so
+it's non-hermetic and not for CI gating.
 
-Both are the cross-engine successor to the now-removed in-repo v1↔v2 differential
-tests — the oracle is real Cosmos instead of the old v1 executor.
+All three are the cross-engine successor to the now-removed in-repo v1↔v2
+differential tests — the oracle is real Cosmos instead of the old v1 executor.
 
-## 2. Run the corpus replay (hermetic, do this first)
+## 2. Run the hermetic golden replays (do these first)
+
+Both are Docker-free and safe to gate on. The slate-matrix replay is just `cargo
+test`; the corpus replay needs a one-time pinned fetch.
 
 ```bash
-tools/cosmos-parity/samples_fetch.sh        # one-time: fetch corpus into .samples/ (gitignored)
-python3 tools/cosmos-parity/run_samples.py
+cargo test -p slate-db --test cosmos_golden    # slate's own curated matrices vs committed goldens/
+tools/cosmos-parity/samples_fetch.sh           # one-time: fetch corpus into .samples/ (gitignored)
+python3 tools/cosmos-parity/run_samples.py     # Azure-Samples corpus vs its result.json
 ```
 
 `samples_fetch.sh` fetches the Azure-Samples corpus **pinned to a specific commit
@@ -41,16 +50,19 @@ gitignored `.samples/`. The pin is what keeps the baseline reproducible: upstrea
 can't move the corpus underneath you. The fetch is idempotent (a no-op once
 pinned), so it's a safe one-time prerequisite, not a per-run cost.
 
-No emulator needed — each `.samples/scripts/<name>/` ships an authoritative
-`result.json`. The runner builds the `parity_samples` slate-cli example, runs each
-folder's `query.sql` in-process against a fresh in-memory DB (seeded from the
-folder's `seed.json`), normalizes, and diffs.
+No emulator needed for either. The corpus runner builds the `parity_samples`
+slate-cli example, runs each `.samples/scripts/<name>/query.sql` in-process against
+a fresh in-memory DB (seeded from the folder's `seed.json`), normalizes, and diffs
+against the folder's authoritative `result.json`. The slate-matrix replay
+(`cosmos_golden.rs`) does the same against the committed `goldens/` we captured from
+the emulator (§7–§8).
 
-**Current baseline: `111/117 match`.** The 6 remaining are all spatial functions
-(`ST_AREA`, `ST_DISTANCE`, `ST_INTERSECTS`, `ST_ISVALID`, `ST_ISVALIDDETAILED`,
-`ST_WITHIN`) — not yet implemented in slate, tracked as a real gap. If your change
-drops the count below 111, you introduced a regression; if it raises the count,
-note the new number here and in `tools/cosmos-parity/README.md`.
+**Current baselines:** corpus replay `111/117 match` — the 6 remaining are all
+spatial functions (`ST_AREA`, `ST_DISTANCE`, `ST_INTERSECTS`, `ST_ISVALID`,
+`ST_ISVALIDDETAILED`, `ST_WITHIN`), not yet implemented in slate, tracked as a real
+gap. Slate-matrix replay `214/216 match` (2 known gaps: `1/0`, `5%0`). If a change
+drops either count, you introduced a regression; if it raises one, note the new
+number here and in `tools/cosmos-parity/README.md`.
 
 ## 3. Run the live emulator differential (when Docker is available)
 
@@ -141,36 +153,70 @@ A scenario is a dataset file plus a query in a matrix:
    `SCHEMA`/`VOLUME` knobs in `gen.py` and re-run `python3 tools/cosmos-parity/gen.py`
    — it writes `queries/gen_<dataset>.sql`, which `run.py` auto-includes.
 
-## 7. Capture / refresh a golden
+## 7. Capture / refresh goldens
 
-Today the only goldens are the **corpus's own `result.json` files** — Microsoft's
-authoritative output, not committed here but fetched (pinned, gitignored) by
-`samples_fetch.sh`. To refresh the corpus, **bump the pinned `COMMIT` in
-`samples_fetch.sh`**, delete `.samples/`, re-run the fetch, then re-run
-`run_samples.py` and update the match count in this skill and the README. Slate's
-own matrices (`queries/*.sql`) have **no committed golden**; they diff live against
-the emulator via `run.py`.
+There are two committed golden sources, refreshed independently.
 
-Capturing goldens for slate's own scenarios is the **planned successor** (§8) — not
-yet built. Until it exists, slate-matrix parity is emulator-dependent (`run.py`).
+**Corpus goldens** are the `result.json` files — Microsoft's authoritative output,
+not committed here but fetched (pinned, gitignored) by `samples_fetch.sh`. To
+refresh: **bump the pinned `COMMIT` in `samples_fetch.sh`**, delete `.samples/`,
+re-run the fetch, then re-run `run_samples.py` and update the match count in this
+skill and the README.
 
-## 8. Planned successor — hermetic golden-replay under `cargo test` (NOT YET BUILT)
+**Slate-matrix goldens** live committed under `tools/cosmos-parity/goldens/<label>/<NNN>.json`
+— one per curated `queries/*.sql` query, each `{query, dataset, result | error}`
+holding Cosmos's **raw** output (system fields and all; normalization happens once
+in Rust at replay, §8). Capture them from the emulator (Docker required for capture
+only — replay is hermetic):
 
-The target is to fold slate's own matrices into a hermetic, Docker-free test, the
-way the corpus replay already is. Design (document only — no harness exists yet):
+```bash
+python3 tools/cosmos-parity/capture_goldens.py            # recreate emulator, capture
+python3 tools/cosmos-parity/capture_goldens.py --triage   # report only, write nothing
+```
 
-- **Capture step** (extend `run.py`): query the emulator, normalize, and commit
-  `<scenario>.expected.json` next to the dataset + query.
-- **Replay test** (e.g. `crates/slate-db/tests/cosmos_golden.rs`): load dataset +
-  query + golden, run slate in-process, **normalize both sides in Rust (one
-  implementation)**, and assert equal — so the normalization rules of §4 live in
-  one place, not duplicated across Python and Rust.
-- **Random/fuzz stays opt-in and out-of-process** (`run.py`): you can't pre-capture
-  a golden for a randomly generated query, so generated matrices keep using the
-  live emulator.
+The capture is **self-auditing**: it runs slate in-process alongside the emulator
+and refuses to silently pin a divergence. Two committed sidecars govern it:
 
-This is the successor to the removed v1↔v2 differential. When you build it, replace
-this section with the real commands.
+- `goldens/_excluded.json` — emulator-bug families (§5) we refuse to golden;
+  pinning a known-wrong oracle is forbidden. Skipped at capture, still exercised by
+  `run.py`. (Currently empty — none of those families appear in the curated
+  matrices; they live only in the generated `gen_*.sql`, which aren't goldened.)
+- `goldens/_known_gaps.json` — queries where the emulator is right but slate
+  diverges (a real gap, §5). The correct Cosmos golden *is* committed, but the
+  replay treats these as expected divergences (reports, doesn't assert), so the
+  suite stays green while the gap stays pinned.
+
+If capture finds a divergence that's on neither list, it prints it as
+`UNCLASSIFIED`, writes no golden, and exits non-zero — triage it (emulator bug →
+`_excluded.json`; real slate gap → `_known_gaps.json`) and re-run. When refreshing,
+re-run the replay (below) and update the match count here and in the README.
+
+Generated matrices (`gen_*.sql`) are **not** goldened — a randomly generated query
+has no fixed oracle, so they keep diffing live against the emulator via `run.py`.
+
+## 8. Hermetic golden-replay under `cargo test`
+
+Slate's own matrices replay hermetically (no Docker, no network) in
+`crates/slate-db/tests/cosmos_golden.rs`:
+
+```bash
+cargo test -p slate-db --test cosmos_golden
+```
+
+For each committed golden it loads the dataset into a fresh in-memory slate DB
+(`pk_path: "id"`), runs the query through the SQL API, and **normalizes BOTH sides
+with the one Rust normalizer in that file** — the single source of truth for the §4
+rules (strip `_`-system fields, sort unless `ORDER BY`, whole-floats == ints). The
+Python runners' `numify`/`strip`/`norm` mirror it for the live/corpus paths, but
+the §4 contract is enforced once, in Rust. **Current baseline: `214/216` curated
+queries matched, 2 reported as known slate gaps (`1/0`, `5%0` — Cosmos errors,
+slate drops the row), 0 emulator-bug exclusions.** If your change drops below 214 or
+adds a failure (a divergence not on a sidecar list), you introduced a regression or
+a new triage case; if it raises the match count (e.g. a known gap now matches), the
+test prints a nudge to promote it out of `_known_gaps.json` — do so and update the
+counts here and in the README.
+
+This is the successor to the removed v1↔v2 differential, folded into `cargo test`.
 
 ## 9. Coverage boundary — what the Cosmos oracle can never cover
 
@@ -206,7 +252,11 @@ Parity is a **result-equivalence** check on the query/CRUD surface, nothing more
   oracle structurally can't cover them (§9).
 - Reading a divergence as a real disagreement when it's just **float-vs-int or
   unsorted output** — that's what normalization (§4) handles.
-- Running only `run.py` and skipping the **hermetic** `run_samples.py` — the corpus
-  replay is the one that runs without Docker and should stay green (111/117).
-- Forgetting to update the **match count** here and in
-  `tools/cosmos-parity/README.md` when your change moves it.
+- Running only `run.py` and skipping the **hermetic** replays — `cargo test -p
+  slate-db --test cosmos_golden` (214/216) and `run_samples.py` (111/117) are the
+  ones that run without Docker and should stay green.
+- **Capturing a golden against an already-seeded emulator** — re-seeding errors on
+  duplicate ids. `capture_goldens.py` recreates the emulator by default for a clean
+  slate; only pass `--no-recreate` against a freshly recreated container.
+- Forgetting to update the **match counts** here and in
+  `tools/cosmos-parity/README.md` when your change moves them.

@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE CONTAINS(c.description, 'laptop')",
+  "result": [
+    "Premium Laptop"
+  ]
+}

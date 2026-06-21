@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE c.name LIKE '%Mouse'",
+  "result": [
+    "Wireless Mouse"
+  ]
+}

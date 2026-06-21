@@ -1,0 +1,23 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.id, ARRAY(SELECT VALUE ch.firstName FROM ch IN c.children) AS names FROM c",
+  "result": [
+    {
+      "id": "AndersenFamily",
+      "names": [
+        "Henriette Thaulow"
+      ]
+    },
+    {
+      "id": "WakefieldFamily",
+      "names": [
+        "Jesse",
+        "Lisa"
+      ]
+    },
+    {
+      "id": "SmithFamily",
+      "names": []
+    }
+  ]
+}

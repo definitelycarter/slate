@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE IS_DEFINED(c.price) FROM c",
+  "result": [
+    true,
+    true,
+    true,
+    true,
+    true
+  ]
+}

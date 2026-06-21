@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "error": true,
+  "query": "SELECT _id, (SELECT COUNT(1) FROM t) AS tags FROM c JOIN t IN c.tags"
+}

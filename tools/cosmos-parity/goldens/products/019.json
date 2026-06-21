@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE CONCAT(c.category, ': ', c.name) FROM c",
+  "result": [
+    "Electronics: Premium Laptop",
+    "Electronics: Wireless Mouse",
+    "Furniture: Ergonomic Office Chair",
+    "Furniture: LED Desk Lamp",
+    "Stationery: Premium Notebook Set"
+  ]
+}

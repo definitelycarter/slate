@@ -1,0 +1,16 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE OBJECTTOARRAY({'a': 1, 'b': 2})",
+  "result": [
+    [
+      {
+        "k": "a",
+        "v": 1
+      },
+      {
+        "k": "b",
+        "v": 2
+      }
+    ]
+  ]
+}

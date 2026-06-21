@@ -1,0 +1,7 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE c.id FROM c WHERE c.shippingAddress.state = 'WA'",
+  "result": [
+    "order-001"
+  ]
+}

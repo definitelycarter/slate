@@ -1,0 +1,26 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.id, p.firstName FROM c JOIN p IN c.parents",
+  "result": [
+    {
+      "firstName": "Thomas",
+      "id": "AndersenFamily"
+    },
+    {
+      "firstName": "Mary Kay",
+      "id": "AndersenFamily"
+    },
+    {
+      "firstName": "Robin",
+      "id": "WakefieldFamily"
+    },
+    {
+      "firstName": "Ben",
+      "id": "WakefieldFamily"
+    },
+    {
+      "firstName": "Joe",
+      "id": "SmithFamily"
+    }
+  ]
+}

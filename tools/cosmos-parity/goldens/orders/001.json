@@ -1,0 +1,9 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE c.shippingAddress.state FROM c",
+  "result": [
+    "WA",
+    "OR",
+    "CA"
+  ]
+}

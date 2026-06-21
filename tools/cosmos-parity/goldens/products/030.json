@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE SUM(c.price) FROM c",
+  "result": [
+    1804.95
+  ]
+}

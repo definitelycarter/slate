@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE STRINGJOIN(['a', 'b', 'c'], '-')",
+  "result": [
+    "a-b-c"
+  ]
+}

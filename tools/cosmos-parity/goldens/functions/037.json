@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE CONTAINS('hello', 'ell')",
+  "result": [
+    true
+  ]
+}

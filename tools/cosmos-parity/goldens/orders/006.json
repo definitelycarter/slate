@@ -1,0 +1,8 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE i.productName FROM c JOIN i IN c.items WHERE i.price > 100",
+  "result": [
+    "Premium Laptop",
+    "Ergonomic Office Chair"
+  ]
+}

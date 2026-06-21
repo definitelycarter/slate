@@ -1,0 +1,9 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c",
+  "result": [
+    "AndersenFamily",
+    "WakefieldFamily",
+    "SmithFamily"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id, (SELECT VALUE SUM(i.quantity) FROM i IN c.items) AS totalQty FROM c",
+  "result": [
+    {
+      "id": "order-001",
+      "totalQty": 2
+    },
+    {
+      "id": "order-002",
+      "totalQty": 1
+    },
+    {
+      "id": "order-003",
+      "totalQty": 3
+    }
+  ]
+}

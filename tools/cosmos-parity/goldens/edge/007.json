@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.tags[0] FROM c",
+  "result": [
+    "computer",
+    "accessory",
+    "furniture",
+    "lighting",
+    "stationery"
+  ]
+}

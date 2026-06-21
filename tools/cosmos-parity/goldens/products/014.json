@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE c.name LIKE 'Premium%'",
+  "result": [
+    "Premium Laptop",
+    "Premium Notebook Set"
+  ]
+}

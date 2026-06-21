@@ -1,0 +1,89 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT * FROM c",
+  "result": [
+    {
+      "_attachments": "attachments/",
+      "_etag": "e4cf892d-28b2-4f25-aebe-1c2d09ada67a",
+      "_rid": "AQAAAAIAAAAAAAAZ7qo9eNAAAAY=",
+      "_ts": 1782053066,
+      "category": "Electronics",
+      "description": "High-performance laptop with 16GB RAM",
+      "id": "prod-001",
+      "inStock": true,
+      "name": "Premium Laptop",
+      "price": 1299.99,
+      "tags": [
+        "computer",
+        "productivity",
+        "business"
+      ]
+    },
+    {
+      "_attachments": "attachments/",
+      "_etag": "c02651e3-f9fd-49f1-b9e2-8444229fcb0e",
+      "_rid": "AQAAAAIAAAAAAAAZ7qo9lOAAAAc=",
+      "_ts": 1782053067,
+      "category": "Electronics",
+      "description": "Ergonomic wireless mouse with precision tracking",
+      "id": "prod-002",
+      "inStock": true,
+      "name": "Wireless Mouse",
+      "price": 29.99,
+      "tags": [
+        "accessory",
+        "peripheral"
+      ]
+    },
+    {
+      "_attachments": "attachments/",
+      "_etag": "8255180b-74eb-4f32-bbb9-ba2493dfdd2d",
+      "_rid": "AQAAAAIAAAAAAAAZ7qo9ssAAAAg=",
+      "_ts": 1782053067,
+      "category": "Furniture",
+      "description": "Comfortable office chair with lumbar support",
+      "id": "prod-003",
+      "inStock": true,
+      "name": "Ergonomic Office Chair",
+      "price": 399.99,
+      "tags": [
+        "furniture",
+        "office",
+        "comfort"
+      ]
+    },
+    {
+      "_attachments": "attachments/",
+      "_etag": "40605350-d119-4967-be72-5c02a04a5112",
+      "_rid": "AQAAAAIAAAAAAAAZ7qo9z9AAAAk=",
+      "_ts": 1782053068,
+      "category": "Furniture",
+      "description": "Adjustable LED desk lamp with multiple brightness levels",
+      "id": "prod-004",
+      "inStock": false,
+      "name": "LED Desk Lamp",
+      "price": 49.99,
+      "tags": [
+        "lighting",
+        "office"
+      ]
+    },
+    {
+      "_attachments": "attachments/",
+      "_etag": "006b1367-e1e3-4c07-a0db-3588e493d9cf",
+      "_rid": "AQAAAAIAAAAAAAAZ7qo97fAAAAo=",
+      "_ts": 1782053068,
+      "category": "Stationery",
+      "description": "Set of 3 premium quality notebooks",
+      "id": "prod-005",
+      "inStock": true,
+      "name": "Premium Notebook Set",
+      "price": 24.99,
+      "tags": [
+        "stationery",
+        "writing",
+        "organization"
+      ]
+    }
+  ]
+}

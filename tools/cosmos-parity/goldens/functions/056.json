@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE ARRAY_CONTAINS([1, 2, 3], 2)",
+  "result": [
+    true
+  ]
+}

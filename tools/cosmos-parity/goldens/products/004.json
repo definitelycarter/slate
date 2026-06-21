@@ -1,0 +1,26 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.name AS product, c.price AS cost FROM c",
+  "result": [
+    {
+      "cost": 1299.99,
+      "product": "Premium Laptop"
+    },
+    {
+      "cost": 29.99,
+      "product": "Wireless Mouse"
+    },
+    {
+      "cost": 399.99,
+      "product": "Ergonomic Office Chair"
+    },
+    {
+      "cost": 49.99,
+      "product": "LED Desk Lamp"
+    },
+    {
+      "cost": 24.99,
+      "product": "Premium Notebook Set"
+    }
+  ]
+}

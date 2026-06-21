@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE IIF(c.inStock, 'available', 'sold out') FROM c",
+  "result": [
+    "available",
+    "available",
+    "available",
+    "sold out",
+    "available"
+  ]
+}

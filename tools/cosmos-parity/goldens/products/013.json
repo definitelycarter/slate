@@ -1,0 +1,9 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE NOT (c.category = 'Furniture')",
+  "result": [
+    "Premium Laptop",
+    "Wireless Mouse",
+    "Premium Notebook Set"
+  ]
+}

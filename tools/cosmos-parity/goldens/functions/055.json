@@ -1,0 +1,12 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE ARRAY_CONCAT([1, 2], [3, 4])",
+  "result": [
+    [
+      1,
+      2,
+      3,
+      4
+    ]
+  ]
+}

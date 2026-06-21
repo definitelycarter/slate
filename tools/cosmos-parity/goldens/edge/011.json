@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE UPPER(c.price) FROM c",
+  "result": []
+}

@@ -1,0 +1,44 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.name, ARRAY(SELECT VALUE UPPER(t) FROM t IN c.tags) AS upperTags FROM c",
+  "result": [
+    {
+      "name": "Premium Laptop",
+      "upperTags": [
+        "COMPUTER",
+        "PRODUCTIVITY",
+        "BUSINESS"
+      ]
+    },
+    {
+      "name": "Wireless Mouse",
+      "upperTags": [
+        "ACCESSORY",
+        "PERIPHERAL"
+      ]
+    },
+    {
+      "name": "Ergonomic Office Chair",
+      "upperTags": [
+        "FURNITURE",
+        "OFFICE",
+        "COMFORT"
+      ]
+    },
+    {
+      "name": "LED Desk Lamp",
+      "upperTags": [
+        "LIGHTING",
+        "OFFICE"
+      ]
+    },
+    {
+      "name": "Premium Notebook Set",
+      "upperTags": [
+        "STATIONERY",
+        "WRITING",
+        "ORGANIZATION"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE ENDSWITH('hello', 'lo')",
+  "result": [
+    true
+  ]
+}

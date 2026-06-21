@@ -1,0 +1,15 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT DISTINCT c.category FROM c",
+  "result": [
+    {
+      "category": "Electronics"
+    },
+    {
+      "category": "Furniture"
+    },
+    {
+      "category": "Stationery"
+    }
+  ]
+}

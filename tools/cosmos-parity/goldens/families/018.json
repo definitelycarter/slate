@@ -1,0 +1,7 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c WHERE EXISTS (SELECT VALUE p FROM p IN c.parents WHERE p.firstName = 'Ben')",
+  "result": [
+    "WakefieldFamily"
+  ]
+}

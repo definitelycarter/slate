@@ -1,0 +1,5 @@
+{
+  "dataset": "products.json",
+  "error": true,
+  "query": "SELECT c.price AS top FROM c"
+}

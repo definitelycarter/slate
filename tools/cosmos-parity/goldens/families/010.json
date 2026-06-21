@@ -1,0 +1,7 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c ORDER BY c.creationDate DESC OFFSET 1 LIMIT 1",
+  "result": [
+    "AndersenFamily"
+  ]
+}

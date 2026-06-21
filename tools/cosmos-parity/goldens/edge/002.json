@@ -1,0 +1,21 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.id, c.missing FROM c",
+  "result": [
+    {
+      "id": "prod-001"
+    },
+    {
+      "id": "prod-002"
+    },
+    {
+      "id": "prod-003"
+    },
+    {
+      "id": "prod-004"
+    },
+    {
+      "id": "prod-005"
+    }
+  ]
+}

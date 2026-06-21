@@ -1494,6 +1494,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "serde",
+ "serde_json",
  "slate-ast",
  "slate-engine",
  "slate-executor",

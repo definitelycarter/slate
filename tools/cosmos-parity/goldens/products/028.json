@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c ORDER BY c.price DESC OFFSET 1 LIMIT 2",
+  "result": [
+    "Ergonomic Office Chair",
+    "LED Desk Lamp"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT TOP 2 VALUE c.name FROM c ORDER BY c.price ASC",
+  "result": [
+    "Premium Notebook Set",
+    "Wireless Mouse"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE SETINTERSECT([1, 2, 3], [2, 3, 4])",
+  "result": [
+    [
+      2,
+      3
+    ]
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT DISTINCT VALUE c.inStock FROM c",
+  "result": [
+    true,
+    false
+  ]
+}

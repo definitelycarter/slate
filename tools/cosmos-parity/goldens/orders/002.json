@@ -1,0 +1,18 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id, c.shippingAddress.city AS city FROM c",
+  "result": [
+    {
+      "city": "Seattle",
+      "id": "order-001"
+    },
+    {
+      "city": "Portland",
+      "id": "order-002"
+    },
+    {
+      "city": "San Francisco",
+      "id": "order-003"
+    }
+  ]
+}

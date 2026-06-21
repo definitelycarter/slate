@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE 1 ?? 2",
+  "result": [
+    1
+  ]
+}

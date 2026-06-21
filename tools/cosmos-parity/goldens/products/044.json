@@ -1,0 +1,8 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t = 'office')",
+  "result": [
+    "Ergonomic Office Chair",
+    "LED Desk Lamp"
+  ]
+}

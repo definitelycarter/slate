@@ -1,0 +1,18 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.category AS category, COUNT(1) AS n FROM c GROUP BY c.category",
+  "result": [
+    {
+      "category": "Electronics",
+      "n": 2
+    },
+    {
+      "category": "Furniture",
+      "n": 2
+    },
+    {
+      "category": "Stationery",
+      "n": 1
+    }
+  ]
+}

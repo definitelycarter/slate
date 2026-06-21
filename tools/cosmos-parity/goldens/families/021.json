@@ -1,0 +1,5 @@
+{
+  "dataset": "families.json",
+  "error": true,
+  "query": "SELECT id FROM c"
+}

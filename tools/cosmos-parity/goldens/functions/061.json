@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE SETUNION([1, 2], [2, 3])",
+  "result": [
+    [
+      1,
+      2,
+      3
+    ]
+  ]
+}

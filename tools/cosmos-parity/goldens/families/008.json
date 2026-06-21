@@ -1,0 +1,7 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c WHERE ARRAY_CONTAINS(c.tags, 'a')",
+  "result": [
+    "AndersenFamily"
+  ]
+}

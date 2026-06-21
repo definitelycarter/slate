@@ -1,0 +1,11 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE i.productName FROM c JOIN i IN c.items",
+  "result": [
+    "Premium Laptop",
+    "Wireless Mouse",
+    "Ergonomic Office Chair",
+    "Premium Notebook Set",
+    "Wireless Mouse"
+  ]
+}

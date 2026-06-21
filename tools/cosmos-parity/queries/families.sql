@@ -34,8 +34,10 @@ SELECT VALUE c.id FROM c WHERE EXISTS (SELECT VALUE p FROM p IN c.parents WHERE 
 SELECT c.id, ARRAY(SELECT VALUE ch.firstName FROM ch IN c.children) AS names FROM c
 SELECT c.id, (SELECT VALUE COUNT(1) FROM ch IN c.children WHERE ch.grade > 4) AS older FROM c
 
-# ── Known divergences (kept as regression markers) ────────────────
-# Unqualified identifier (Cosmos: 400; slate: omits -> {}):
+# ── Former divergences, now in parity (kept as regression markers) ─
+# Unqualified identifier: now BOTH error (slate rejects it; Cosmos: 400). Goldened
+# as error.
 SELECT id FROM c
-# FROM <outer-alias> subquery (Cosmos: len=1 item-scoped; slate: re-scans -> 3):
+# FROM <outer-alias> item-scoped subquery: slate now matches Cosmos (both len=1).
+# Goldened as a result.
 SELECT c.id, (SELECT COUNT(1) AS len FROM t) AS x FROM c JOIN t IN c.tags

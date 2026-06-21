@@ -1,0 +1,10 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE ARRAY_SLICE([1, 2, 3, 4], 1, 2)",
+  "result": [
+    [
+      2,
+      3
+    ]
+  ]
+}

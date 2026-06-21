@@ -1,0 +1,9 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.address.city FROM c",
+  "result": [
+    "Seattle",
+    "NY",
+    "Tacoma"
+  ]
+}

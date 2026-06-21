@@ -1,0 +1,36 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.id, (SELECT COUNT(1) AS len FROM t) AS x FROM c JOIN t IN c.tags",
+  "result": [
+    {
+      "id": "AndersenFamily",
+      "x": {
+        "len": 1
+      }
+    },
+    {
+      "id": "AndersenFamily",
+      "x": {
+        "len": 1
+      }
+    },
+    {
+      "id": "AndersenFamily",
+      "x": {
+        "len": 1
+      }
+    },
+    {
+      "id": "WakefieldFamily",
+      "x": {
+        "len": 1
+      }
+    },
+    {
+      "id": "WakefieldFamily",
+      "x": {
+        "len": 1
+      }
+    }
+  ]
+}

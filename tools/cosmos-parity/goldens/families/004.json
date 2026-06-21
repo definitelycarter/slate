@@ -1,0 +1,21 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.address FROM c",
+  "result": [
+    {
+      "city": "Seattle",
+      "county": "King",
+      "state": "WA"
+    },
+    {
+      "city": "NY",
+      "county": "Manhattan",
+      "state": "NY"
+    },
+    {
+      "city": "Tacoma",
+      "county": "Pierce",
+      "state": "WA"
+    }
+  ]
+}

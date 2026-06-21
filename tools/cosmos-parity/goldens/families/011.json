@@ -1,0 +1,9 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE ch.grade FROM c JOIN ch IN c.children",
+  "result": [
+    5,
+    1,
+    8
+  ]
+}

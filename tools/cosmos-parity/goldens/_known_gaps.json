@@ -1,0 +1,15 @@
+{
+  "description": "Queries where the Cosmos emulator is RIGHT but slate diverges — real slate gaps (cosmos-parity SKILL §5 'real gap'). We DO commit the correct Cosmos golden for these (so the expectation is recorded), but the hermetic replay treats them as EXPECTED divergences: it reports them instead of asserting equality, so the suite stays green while the gap is pinned and visible. If slate is fixed to match the golden, the replay prints a notice to promote the scenario out of this list.",
+  "queries": [
+    {
+      "query": "SELECT VALUE 1 / 0",
+      "gap": "divide-by-zero",
+      "reason": "Cosmos raises 400 BadRequest; slate evaluates 1/0 to undefined and drops the row, returning []. Tracked in tools/cosmos-parity/README.md 'Remaining divergences > Real slate gaps'."
+    },
+    {
+      "query": "SELECT VALUE 5 % 0",
+      "gap": "modulo-by-zero",
+      "reason": "Cosmos raises 400 BadRequest; slate evaluates 5 % 0 to undefined and drops the row, returning []. Same family as divide-by-zero."
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE COUNT(1) FROM c",
+  "result": [
+    3
+  ]
+}

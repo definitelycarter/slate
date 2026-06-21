@@ -1,0 +1,26 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.id, c.price FROM c",
+  "result": [
+    {
+      "id": "prod-001",
+      "price": 1299.99
+    },
+    {
+      "id": "prod-002",
+      "price": 29.99
+    },
+    {
+      "id": "prod-003",
+      "price": 399.99
+    },
+    {
+      "id": "prod-004",
+      "price": 49.99
+    },
+    {
+      "id": "prod-005",
+      "price": 24.99
+    }
+  ]
+}

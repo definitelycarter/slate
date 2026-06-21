@@ -1,0 +1,29 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT DISTINCT VALUE c.tags FROM c",
+  "result": [
+    [
+      "computer",
+      "productivity",
+      "business"
+    ],
+    [
+      "accessory",
+      "peripheral"
+    ],
+    [
+      "furniture",
+      "office",
+      "comfort"
+    ],
+    [
+      "lighting",
+      "office"
+    ],
+    [
+      "stationery",
+      "writing",
+      "organization"
+    ]
+  ]
+}

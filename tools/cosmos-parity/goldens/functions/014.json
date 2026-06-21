@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE EXP(0)",
+  "result": [
+    1
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE FLOOR(4.8)",
+  "result": [
+    4
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE c.id FROM c WHERE EXISTS (SELECT VALUE i FROM i IN c.items WHERE i.quantity > 1)",
+  "result": [
+    "order-003"
+  ]
+}

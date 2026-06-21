@@ -1,0 +1,14 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT c.address.state AS state, COUNT(1) AS n FROM c GROUP BY c.address.state",
+  "result": [
+    {
+      "n": 2,
+      "state": "WA"
+    },
+    {
+      "n": 1,
+      "state": "NY"
+    }
+  ]
+}

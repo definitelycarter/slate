@@ -1,0 +1,7 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE IIF(1 > 2, 'yes', 'no')",
+  "result": [
+    "no"
+  ]
+}

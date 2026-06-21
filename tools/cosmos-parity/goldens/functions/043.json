@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE STRINGSPLIT('a,,b', ',')",
+  "result": [
+    [
+      "a",
+      "",
+      "b"
+    ]
+  ]
+}

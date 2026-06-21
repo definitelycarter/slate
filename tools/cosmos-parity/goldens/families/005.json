@@ -1,0 +1,8 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c WHERE c.isRegistered = true",
+  "result": [
+    "AndersenFamily",
+    "SmithFamily"
+  ]
+}

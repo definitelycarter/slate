@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE IS_DEFINED(c.missing) FROM c",
+  "result": [
+    false,
+    false,
+    false,
+    false,
+    false
+  ]
+}

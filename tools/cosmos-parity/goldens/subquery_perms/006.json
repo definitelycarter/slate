@@ -1,0 +1,36 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.id, (SELECT COUNT(1) FROM x IN c.tags) AS x FROM c",
+  "result": [
+    {
+      "id": "prod-001",
+      "x": {
+        "$1": 3
+      }
+    },
+    {
+      "id": "prod-002",
+      "x": {
+        "$1": 2
+      }
+    },
+    {
+      "id": "prod-003",
+      "x": {
+        "$1": 3
+      }
+    },
+    {
+      "id": "prod-004",
+      "x": {
+        "$1": 2
+      }
+    },
+    {
+      "id": "prod-005",
+      "x": {
+        "$1": 3
+      }
+    }
+  ]
+}

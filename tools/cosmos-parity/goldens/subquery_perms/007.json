@@ -1,0 +1,58 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.id, t FROM c JOIN t IN c.tags",
+  "result": [
+    {
+      "id": "prod-001",
+      "t": "computer"
+    },
+    {
+      "id": "prod-001",
+      "t": "productivity"
+    },
+    {
+      "id": "prod-001",
+      "t": "business"
+    },
+    {
+      "id": "prod-002",
+      "t": "accessory"
+    },
+    {
+      "id": "prod-002",
+      "t": "peripheral"
+    },
+    {
+      "id": "prod-003",
+      "t": "furniture"
+    },
+    {
+      "id": "prod-003",
+      "t": "office"
+    },
+    {
+      "id": "prod-003",
+      "t": "comfort"
+    },
+    {
+      "id": "prod-004",
+      "t": "lighting"
+    },
+    {
+      "id": "prod-004",
+      "t": "office"
+    },
+    {
+      "id": "prod-005",
+      "t": "stationery"
+    },
+    {
+      "id": "prod-005",
+      "t": "writing"
+    },
+    {
+      "id": "prod-005",
+      "t": "organization"
+    }
+  ]
+}

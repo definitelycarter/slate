@@ -1,0 +1,11 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.missing FROM c",
+  "result": [
+    {},
+    {},
+    {},
+    {},
+    {}
+  ]
+}

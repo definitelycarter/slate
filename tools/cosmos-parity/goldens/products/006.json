@@ -1,0 +1,10 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE c.name FROM c WHERE c.inStock = true",
+  "result": [
+    "Premium Laptop",
+    "Wireless Mouse",
+    "Ergonomic Office Chair",
+    "Premium Notebook Set"
+  ]
+}

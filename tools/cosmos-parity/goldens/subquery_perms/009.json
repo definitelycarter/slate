@@ -1,0 +1,44 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.id, ARRAY(SELECT VALUE t FROM t IN c.tags) AS allTags FROM c",
+  "result": [
+    {
+      "allTags": [
+        "computer",
+        "productivity",
+        "business"
+      ],
+      "id": "prod-001"
+    },
+    {
+      "allTags": [
+        "accessory",
+        "peripheral"
+      ],
+      "id": "prod-002"
+    },
+    {
+      "allTags": [
+        "furniture",
+        "office",
+        "comfort"
+      ],
+      "id": "prod-003"
+    },
+    {
+      "allTags": [
+        "lighting",
+        "office"
+      ],
+      "id": "prod-004"
+    },
+    {
+      "allTags": [
+        "stationery",
+        "writing",
+        "organization"
+      ],
+      "id": "prod-005"
+    }
+  ]
+}

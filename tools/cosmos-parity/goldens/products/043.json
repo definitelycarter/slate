@@ -1,0 +1,26 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT c.name, (SELECT VALUE COUNT(1) FROM t IN c.tags) AS tagCount FROM c",
+  "result": [
+    {
+      "name": "Premium Laptop",
+      "tagCount": 3
+    },
+    {
+      "name": "Wireless Mouse",
+      "tagCount": 2
+    },
+    {
+      "name": "Ergonomic Office Chair",
+      "tagCount": 3
+    },
+    {
+      "name": "LED Desk Lamp",
+      "tagCount": 2
+    },
+    {
+      "name": "Premium Notebook Set",
+      "tagCount": 3
+    }
+  ]
+}

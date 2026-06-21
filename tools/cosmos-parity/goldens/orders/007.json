@@ -1,0 +1,9 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT c.id FROM c JOIN i IN c.items WHERE i.quantity > 1",
+  "result": [
+    {
+      "id": "order-003"
+    }
+  ]
+}

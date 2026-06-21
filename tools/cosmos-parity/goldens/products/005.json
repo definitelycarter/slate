@@ -1,0 +1,26 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE { 'n': c.name, 'cheap': c.price < 50 } FROM c",
+  "result": [
+    {
+      "cheap": false,
+      "n": "Premium Laptop"
+    },
+    {
+      "cheap": true,
+      "n": "Wireless Mouse"
+    },
+    {
+      "cheap": false,
+      "n": "Ergonomic Office Chair"
+    },
+    {
+      "cheap": true,
+      "n": "LED Desk Lamp"
+    },
+    {
+      "cheap": true,
+      "n": "Premium Notebook Set"
+    }
+  ]
+}

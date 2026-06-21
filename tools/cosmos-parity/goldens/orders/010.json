@@ -1,0 +1,7 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE AVG(c.totalAmount) FROM c",
+  "result": [
+    603.3133333333334
+  ]
+}

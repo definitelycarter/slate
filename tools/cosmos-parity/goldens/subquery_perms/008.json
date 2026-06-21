@@ -1,0 +1,19 @@
+{
+  "dataset": "products.json",
+  "query": "SELECT VALUE t FROM c JOIN t IN c.tags",
+  "result": [
+    "computer",
+    "productivity",
+    "business",
+    "accessory",
+    "peripheral",
+    "furniture",
+    "office",
+    "comfort",
+    "lighting",
+    "office",
+    "stationery",
+    "writing",
+    "organization"
+  ]
+}

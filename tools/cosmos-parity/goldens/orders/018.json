@@ -1,0 +1,9 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE c.id FROM c ORDER BY c.totalAmount DESC",
+  "result": [
+    "order-001",
+    "order-002",
+    "order-003"
+  ]
+}

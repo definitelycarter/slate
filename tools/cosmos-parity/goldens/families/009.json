@@ -1,0 +1,9 @@
+{
+  "dataset": "families.json",
+  "query": "SELECT VALUE c.id FROM c ORDER BY c.creationDate ASC",
+  "result": [
+    "WakefieldFamily",
+    "AndersenFamily",
+    "SmithFamily"
+  ]
+}

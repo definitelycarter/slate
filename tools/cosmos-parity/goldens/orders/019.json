@@ -1,0 +1,9 @@
+{
+  "dataset": "orders.json",
+  "query": "SELECT VALUE c.status FROM c ORDER BY c.orderDate ASC",
+  "result": [
+    "delivered",
+    "shipped",
+    "processing"
+  ]
+}
