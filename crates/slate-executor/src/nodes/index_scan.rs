@@ -4,16 +4,27 @@
 //! the matching entries' doc-IDs. Pair with [`super::key_lookup`] to fetch the
 //! documents.
 //!
-//! ## Numeric cross-type scans
+//! ## Post-filter: keeping the index identical to a scan
 //!
-//! `Int32`, `Int64`, and `Double` encode into *different* sortable index keys,
-//! so a typed `Eq`/`Range` scan over a numeric bound misses or over-includes
-//! values stored as a different numeric type (e.g. a SQL `Int64` literal `40`
-//! against an `Int32`-stored field). For a numeric predicate we therefore scan
-//! the whole field and post-filter each entry with [`slate_eval::compare_bson`]
-//! — the same coercing comparator `WHERE` uses, so the index path can't drift
-//! from a residual filter. This trades index selectivity for correctness; a
-//! type-aware multi-probe that keeps selectivity is future work.
+//! The index stores every value in one sortable keyspace with no type tag in
+//! the key. A non-numeric `Eq` needs no post-filter here: the engine's
+//! `scan_index` matches the value exactly (length and type), so prefix-sharing
+//! values (`"omega"` for `Eq("om")`) and same-bytes-different-type values never
+//! reach us.
+//!
+//! A `Range`, by contrast, scans a byte range and can sweep in entries of other
+//! types whose sortable bytes fall in range (e.g. a `> "m"` string scan reaching
+//! `Int32`/`DateTime` entries that sort after strings). Those are post-filtered
+//! with [`slate_eval::compare_bson`] — the same coercing, type-bracketed
+//! comparator `WHERE` uses — so the index can't drift from a scan.
+//!
+//! Numeric bounds additionally need a *full* scan: `Int32`, `Int64`, and
+//! `Double` encode into different sortable keys, so a typed probe would miss a
+//! value stored as a different numeric type (e.g. a SQL `Int64` literal `40`
+//! against an `Int32`-stored field); these scan the whole field and lean on the
+//! same `compare_bson` post-filter. Non-numeric ranges keep a selective typed
+//! scan. A type-aware multi-probe that keeps selectivity for numerics is future
+//! work.
 
 use std::cmp::Ordering;
 
@@ -24,8 +35,12 @@ use slate_planner::{CollectionRef, IndexScanRange, ScanDirection};
 
 use crate::{ExecError, ValueIter};
 
-/// A numeric predicate matched by a full field scan + coercing post-filter.
-enum NumericFilter {
+/// A bounded predicate matched with the same coercing, type-bracketed
+/// comparator `WHERE` uses, so the index path returns exactly what a residual
+/// filter would. Built only for cases a byte scan can over-return: numeric `Eq`
+/// (cross-numeric-type) and any `Range` (cross-type sweep). Non-numeric `Eq` is
+/// already exact at the engine and needs none.
+enum CoercingFilter {
     Eq(Bson),
     Range {
         lower: Option<(Bson, bool)>,
@@ -33,28 +48,22 @@ enum NumericFilter {
     },
 }
 
-impl NumericFilter {
-    /// Build one when `range` compares against a numeric bound, else `None`
-    /// (typed scans are correct for strings, dates, etc.).
+impl CoercingFilter {
+    /// Build the post-filter for a predicate, or `None` when the scan is already
+    /// exact (`Full`, and non-numeric `Eq`).
     fn for_range(range: &IndexScanRange) -> Option<Self> {
-        let is_num = |b: &Bson| matches!(b, Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_));
         match range {
-            IndexScanRange::Eq(v) if is_num(v) => Some(Self::Eq(v.clone())),
-            IndexScanRange::Range { lower, upper }
-                if lower.as_ref().is_some_and(|(v, _)| is_num(v))
-                    || upper.as_ref().is_some_and(|(v, _)| is_num(v)) =>
-            {
-                Some(Self::Range {
-                    lower: lower.clone(),
-                    upper: upper.clone(),
-                })
-            }
-            _ => None,
+            IndexScanRange::Eq(v) if is_numeric(v) => Some(Self::Eq(v.clone())),
+            IndexScanRange::Range { lower, upper } => Some(Self::Range {
+                lower: lower.clone(),
+                upper: upper.clone(),
+            }),
+            IndexScanRange::Full | IndexScanRange::Eq(_) => None,
         }
     }
 
     /// Whether a stored index value satisfies the predicate. A non-comparable
-    /// stored value (non-numeric, or `compare_bson` → `None`) is excluded.
+    /// stored value (cross-type, i.e. `compare_bson` → `None`) is excluded.
     fn keeps(&self, stored: &Bson) -> bool {
         let within = |bound: &Option<(Bson, bool)>, want_below: bool| match bound {
             None => true,
@@ -66,8 +75,26 @@ impl NumericFilter {
             },
         };
         match self {
-            NumericFilter::Eq(v) => compare_bson(stored, v) == Some(Ordering::Equal),
-            NumericFilter::Range { lower, upper } => within(lower, false) && within(upper, true),
+            CoercingFilter::Eq(v) => compare_bson(stored, v) == Some(Ordering::Equal),
+            CoercingFilter::Range { lower, upper } => within(lower, false) && within(upper, true),
+        }
+    }
+}
+
+fn is_numeric(b: &Bson) -> bool {
+    matches!(b, Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_))
+}
+
+/// Numeric bounds need a full scan: `Int32`/`Int64`/`Double` encode to
+/// different sortable keys, so a typed probe misses cross-numeric-type matches.
+/// Non-numeric bounds keep a selective typed scan.
+fn needs_full_scan(range: &IndexScanRange) -> bool {
+    match range {
+        IndexScanRange::Full => false,
+        IndexScanRange::Eq(v) => is_numeric(v),
+        IndexScanRange::Range { lower, upper } => {
+            lower.as_ref().is_some_and(|(v, _)| is_numeric(v))
+                || upper.as_ref().is_some_and(|(v, _)| is_numeric(v))
         }
     }
 }
@@ -82,10 +109,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
 
-    let numeric_filter = NumericFilter::for_range(range);
+    let post_filter = CoercingFilter::for_range(range);
 
-    let engine_range = if numeric_filter.is_some() {
-        IndexRange::Full // scan all, post-filter (see module docs)
+    let engine_range = if needs_full_scan(range) {
+        IndexRange::Full // numeric cross-type: scan all, post-filter (see module docs)
     } else {
         match range {
             IndexScanRange::Full => IndexRange::Full,
@@ -115,8 +142,9 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 }
             };
 
-            // Numeric cross-type post-filter (Eq and Range).
-            if let Some(ref filter) = numeric_filter {
+            // Numeric Eq / any Range: coercing, type-bracketed post-filter that
+            // drops cross-type entries the byte scan sweeps in (see module docs).
+            if let Some(ref filter) = post_filter {
                 let stored = match entry.value() {
                     Ok(v) => v,
                     Err(e) => {

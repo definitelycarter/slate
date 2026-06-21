@@ -278,12 +278,20 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
         let field_prefix =
             KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
-        let eq_encoded = match &range {
-            IndexRange::Eq(val) => BsonValue::from_bson(val).map(|bv| bv.bytes.into_owned()),
+        // For `Eq`, the seek prefix is `field + sortable(value)`. A bare prefix
+        // scan would also match *longer* values that share that prefix (e.g.
+        // `Eq("om")` sweeping in `"omega"`), and values of another type that
+        // encode to identical bytes. Carry the encoded (tag, bytes) so the scan
+        // can keep only entries whose value matches exactly, in both length and
+        // type.
+        let eq_match: Option<(ElementType, Vec<u8>)> = match &range {
+            IndexRange::Eq(val) => {
+                BsonValue::from_bson(val).map(|bv| (bv.tag, bv.bytes.into_owned()))
+            }
             _ => None,
         };
-        let prefix = match &eq_encoded {
-            Some(bytes) => {
+        let prefix = match &eq_match {
+            Some((_, bytes)) => {
                 KeyPrefix::IndexValue(Cow::Borrowed(collection), Cow::Borrowed(field), bytes)
                     .encode()
             }
@@ -340,6 +348,16 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                                     )));
                                 }
                             };
+
+                        // Eq: keep only exact value matches (reject longer
+                        // prefix-sharing values and same-bytes-different-type).
+                        if let Some((want_tag, want_bytes)) = &eq_match {
+                            if entry.value_bytes() != want_bytes.as_slice()
+                                || entry.element_type() != Some(*want_tag)
+                            {
+                                continue;
+                            }
+                        }
 
                         if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {
                             let value_bytes = entry.value_bytes();

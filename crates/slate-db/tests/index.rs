@@ -757,6 +757,139 @@ fn unique_index_rejects_duplicate_through_db_api() {
     );
 }
 
+// ── Index ⇄ scan parity guard ────────────────────────────────
+//
+// An indexed field must return exactly what a full collection scan returns:
+// same matches, no cross-type leakage, and a sibling collection sharing the
+// column family must not be wiped. Regression guard for two bugs found
+// together — the memory backend's `create_cf` data-loss (sibling collections)
+// and the non-numeric index range cross-type over-return.
+
+fn seed_k(
+    db: &slate_db::Database<slate_store::MemoryStore>,
+    name: &str,
+    docs: Vec<bson::Document>,
+    indexed: bool,
+) {
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: name.to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_many(DEFAULT_CF, name, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
+    if indexed {
+        txn.create_index(DEFAULT_CF, name, "k").unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+fn find_ids(
+    db: &slate_db::Database<slate_store::MemoryStore>,
+    name: &str,
+    filter: bson::Document,
+) -> Vec<String> {
+    let txn = db.begin(true).unwrap();
+    let mut ids: Vec<String> = txn
+        .find(DEFAULT_CF, name, &filter, FindOptions::default())
+        .unwrap()
+        .iter_raw()
+        .unwrap()
+        .map(|r| r.unwrap().get_str("_id").unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn indexed_field_matches_scan_for_heterogeneous_values() {
+    use bson::DateTime;
+    let (db, _dir) = temp_db();
+    let dt = |m: i64| Bson::DateTime(DateTime::from_millis(m));
+    let docs = || {
+        vec![
+            doc! { "_id": "s_alpha", "k": "alpha" },
+            doc! { "_id": "s_omega", "k": "omega" },
+            doc! { "_id": "i_100", "k": 100_i32 },
+            doc! { "_id": "i_5", "k": 5_i32 },
+            doc! { "_id": "date", "k": dt(1_700_000_000_000) },
+            doc! { "_id": "flag", "k": true },
+            doc! { "_id": "no_k", "other": 1_i32 },
+        ]
+    };
+    // Same data, one indexed on "k", one not — created as siblings in one CF.
+    seed_k(&db, "idx", docs(), true);
+    seed_k(&db, "noidx", docs(), false);
+
+    let queries = vec![
+        doc! { "k": "omega" },        // string eq
+        doc! { "k": { "$gt": "m" } }, // string range (cross-type bait)
+        doc! { "k": { "$lt": "m" } },
+        doc! { "k": 100_i32 },           // numeric eq
+        doc! { "k": { "$gte": 5_i32 } }, // numeric range
+        doc! { "k": { "$gt": 4_i32, "$lt": 101_i32 } },
+        doc! { "k": true }, // bool eq
+    ];
+    for q in queries {
+        assert_eq!(
+            find_ids(&db, "idx", q.clone()),
+            find_ids(&db, "noidx", q.clone()),
+            "index/scan divergence for query {q:?}"
+        );
+    }
+}
+
+#[test]
+fn sibling_collection_index_survives_new_collection() {
+    // Regression: creating a second collection used to wipe the first's records
+    // and index, because both live in one column family separated by key-prefix.
+    let (db, _dir) = temp_db();
+    seed_k(
+        &db,
+        "first",
+        vec![
+            doc! { "_id": "a", "k": "apple" },
+            doc! { "_id": "b", "k": "banana" },
+        ],
+        true,
+    );
+    assert_eq!(find_ids(&db, "first", doc! { "k": "apple" }), vec!["a"]);
+
+    seed_k(
+        &db,
+        "second",
+        vec![doc! { "_id": "c", "k": "cherry" }],
+        true,
+    );
+
+    // First collection's index must still resolve after the sibling is created.
+    assert_eq!(find_ids(&db, "first", doc! { "k": "apple" }), vec!["a"]);
+    assert_eq!(find_ids(&db, "second", doc! { "k": "cherry" }), vec!["c"]);
+}
+
+#[test]
+fn indexed_eq_is_exact_not_a_prefix_match() {
+    // Regression: a non-numeric indexed Eq used to prefix-match, so Eq("om")
+    // wrongly returned "omega". The engine now matches the value exactly.
+    let (db, _dir) = temp_db();
+    seed_k(
+        &db,
+        "c",
+        vec![
+            doc! { "_id": "om", "k": "om" },
+            doc! { "_id": "omega", "k": "omega" },
+            doc! { "_id": "alpha", "k": "alpha" },
+        ],
+        true,
+    );
+    assert_eq!(find_ids(&db, "c", doc! { "k": "om" }), vec!["om"]);
+    assert_eq!(find_ids(&db, "c", doc! { "k": "omega" }), vec!["omega"]);
+    assert!(find_ids(&db, "c", doc! { "k": "al" }).is_empty());
+}
+
 #[test]
 fn unique_index_shows_in_list_and_allows_distinct() {
     let (db, _dir) = temp_db();

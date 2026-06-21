@@ -273,6 +273,13 @@ impl IndexEntry {
         &self.key[self.value_start..self.doc_id_start]
     }
 
+    /// The indexed value's BSON element type, read O(1) from the metadata tag
+    /// byte (no value decode). `from_raw` guarantees non-empty metadata.
+    #[inline]
+    pub(crate) fn element_type(&self) -> Option<bson::spec::ElementType> {
+        bson::spec::ElementType::from(self.metadata[0])
+    }
+
     /// O(1) TTL expiry check on the metadata bytes.
     #[inline]
     pub(crate) fn is_expired(&self, now_millis: i64) -> bool {
