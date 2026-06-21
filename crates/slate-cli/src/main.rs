@@ -18,7 +18,9 @@ use slate_db::{Database, DatabaseBuilder};
 use slate_store::{BackupStore, Store};
 
 use slate_cli::format::fmt_duration;
-use slate_cli::{Command, CompletionState, Feed, InputBuffer, Output, Session, SlateCompleter};
+use slate_cli::{
+    Command, CompletionState, Feed, InputBuffer, Output, Session, SlateCompleter, history_entry,
+};
 
 const USAGE: &str = "\
 slate — interactive Slate shell
@@ -204,7 +206,7 @@ fn run<S: Store + BackupStore>(db: Database<S>) -> Result<(), String> {
                     Feed::More => continue, // keep buffering at the `...>` prompt
                 };
                 if !statement.trim().is_empty() {
-                    let _ = rl.add_history_entry(statement.as_str());
+                    let _ = rl.add_history_entry(history_entry(&statement));
                 }
                 let command = match Command::parse(&statement) {
                     Ok(cmd) => cmd,

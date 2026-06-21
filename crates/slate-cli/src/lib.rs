@@ -18,5 +18,5 @@ pub mod session;
 
 pub use command::Command;
 pub use completion::{CompletionState, SlateCompleter};
-pub use input::{Feed, InputBuffer};
+pub use input::{Feed, InputBuffer, history_entry};
 pub use session::{Output, Session};

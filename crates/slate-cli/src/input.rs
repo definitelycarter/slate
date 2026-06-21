@@ -85,6 +85,18 @@ fn strip_terminator(stmt: &str) -> String {
         .to_string()
 }
 
+/// The history entry for a completed statement. SQL gets its `;` terminator
+/// re-appended — [`InputBuffer`] strips it before parsing, but a recalled entry
+/// should run as-is rather than re-open at the `...>` prompt. Meta-commands take
+/// no terminator and are stored verbatim.
+pub fn history_entry(statement: &str) -> String {
+    if statement.trim_start().starts_with('.') {
+        statement.to_string()
+    } else {
+        format!("{statement};")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +154,15 @@ mod tests {
         assert!(!b.is_pending());
         // After cancelling, a dot-command runs cleanly again.
         assert_eq!(b.push(".help"), Feed::Ready(".help".to_string()));
+    }
+
+    #[test]
+    fn history_entry_re_terminates_sql_but_not_dot_commands() {
+        // SQL is stored with the `;` back so a recalled entry runs as-is.
+        assert_eq!(history_entry("SELECT * FROM c"), "SELECT * FROM c;");
+        assert_eq!(history_entry("SELECT *\nFROM c"), "SELECT *\nFROM c;");
+        // Meta-commands are verbatim — no terminator.
+        assert_eq!(history_entry(".schema sample"), ".schema sample");
     }
 
     #[test]
