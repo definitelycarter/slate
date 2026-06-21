@@ -29,6 +29,11 @@ pub(crate) fn execute<'a>(
     })))
 }
 
+// In a build with no script runtime compiled in (e.g. wasm32), `RuntimeKind`
+// is uninhabited, so `runtime_kind` and the dispatch below are unreachable and
+// the locals feeding them are unused. Mirrors the same allow on `VmPool`'s impl
+// in `slate-vm`.
+#[allow(unreachable_code, unused_variables)]
 fn run_validators(
     pool: &VmPool,
     validators: &[ResolvedHook],
