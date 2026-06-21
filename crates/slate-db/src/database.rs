@@ -8,7 +8,7 @@ use slate_query::{DistinctOptions, FindOptions};
 use slate_store::{BackupStore, Store};
 use slate_vm::pool::VmPool;
 
-use crate::collection::CollectionConfig;
+use crate::collection::{CollectionConfig, CollectionSchema};
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
@@ -670,6 +670,25 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn list_indexes(&self, cf: &str, collection: &str) -> Result<Vec<String>, DbError> {
         let handle = self.txn.collection(cf, collection)?;
         Ok(handle.indexes().to_vec())
+    }
+
+    /// Read a collection's catalog metadata: its key paths and indexed fields
+    /// (with the unique subset called out). Read-only; intended for schema
+    /// introspection rather than planning.
+    pub fn collection_schema(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Result<CollectionSchema, DbError> {
+        let handle = self.txn.collection(cf, collection)?;
+        Ok(CollectionSchema {
+            cf: handle.cf_name().to_string(),
+            name: handle.name().to_string(),
+            pk_path: handle.pk_path().to_string(),
+            ttl_path: handle.ttl_path().to_string(),
+            indexes: handle.indexes().to_vec(),
+            unique_indexes: handle.unique_indexes().to_vec(),
+        })
     }
 
     // ── Collection operations ───────────────────────────────────

@@ -37,6 +37,9 @@ pub enum Command {
     ListIndexes,
     /// Count documents in the current collection, optionally filtered.
     Count(Option<Value>),
+    /// Show a collection's schema (key paths, indexes, count). `None` targets
+    /// the active collection.
+    Schema(Option<String>),
     /// Load a small sample collection and make it current.
     Seed,
     /// A SQL statement to run against the current collection.
@@ -73,6 +76,13 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "drop" => Ok(Command::Drop(name_arg(args, "drop")?)),
         "index" => Ok(Command::CreateIndex(name_arg(args, "index")?)),
         "indexes" => Ok(Command::ListIndexes),
+        "schema" => {
+            if args.trim().is_empty() {
+                Ok(Command::Schema(None))
+            } else {
+                Ok(Command::Schema(Some(name_arg(args, "schema")?)))
+            }
+        }
         "seed" => Ok(Command::Seed),
         "insert" => {
             let [doc] = exactly(
@@ -233,6 +243,16 @@ mod tests {
             Command::CreateIndex("email".to_string())
         );
         assert_eq!(Command::parse(".indexes").unwrap(), Command::ListIndexes);
+    }
+
+    #[test]
+    fn schema_arg_is_optional() {
+        assert_eq!(Command::parse(".schema").unwrap(), Command::Schema(None));
+        assert_eq!(
+            Command::parse(".schema users").unwrap(),
+            Command::Schema(Some("users".to_string()))
+        );
+        assert!(Command::parse(".schema a b").is_err());
     }
 
     #[test]

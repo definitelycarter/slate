@@ -35,10 +35,30 @@ pub enum Output {
     Collections(Vec<(String, String)>),
     /// Indexed fields of the current collection.
     Indexes(Vec<String>),
+    /// A collection's schema (key paths, indexes, document count).
+    Schema(SchemaReport),
     /// Show the help text.
     Help,
     /// Leave the shell.
     Quit,
+}
+
+/// One indexed field in a [`SchemaReport`], flagged unique or not.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub field: String,
+    pub unique: bool,
+}
+
+/// A collection's schema for `.schema`: its key paths, indexes, and live
+/// document count.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SchemaReport {
+    pub collection: String,
+    pub pk_path: String,
+    pub ttl_path: String,
+    pub indexes: Vec<IndexEntry>,
+    pub count: u64,
 }
 
 /// An interactive session over one [`Database`].
@@ -78,6 +98,7 @@ impl<S: Store> Session<S> {
             Command::CreateIndex(field) => self.create_index(field),
             Command::ListIndexes => self.list_indexes(),
             Command::Count(filter) => self.count(filter),
+            Command::Schema(name) => self.schema(name),
             Command::Seed => self.seed(),
             Command::Sql(sql) => self.sql(&sql),
         }
@@ -198,6 +219,36 @@ impl<S: Store> Session<S> {
         let indexes = txn.list_indexes(DEFAULT_CF, collection).map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(Output::Indexes(indexes))
+    }
+
+    fn schema(&self, name: Option<String>) -> Result<Output, String> {
+        let collection = match &name {
+            Some(n) => n.as_str(),
+            None => self.require_collection()?,
+        };
+        let txn = self.db.begin(true).map_err(es)?;
+        let schema = txn.collection_schema(DEFAULT_CF, collection).map_err(es)?;
+        let count = txn.count(DEFAULT_CF, collection, json!({})).map_err(es)?;
+        txn.rollback().map_err(es)?;
+
+        // Move each index field into an entry, flagging the ones in the unique
+        // set — no clone, since `indexes` and `unique_indexes` are distinct
+        // fields of the snapshot.
+        let indexes = schema
+            .indexes
+            .into_iter()
+            .map(|field| {
+                let unique = schema.unique_indexes.iter().any(|u| u == &field);
+                IndexEntry { field, unique }
+            })
+            .collect();
+        Ok(Output::Schema(SchemaReport {
+            collection: schema.name,
+            pk_path: schema.pk_path,
+            ttl_path: schema.ttl_path,
+            indexes,
+            count,
+        }))
     }
 
     fn count(&self, filter: Option<Value>) -> Result<Output, String> {
@@ -393,6 +444,53 @@ mod tests {
             }
             other => panic!("expected collections, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn schema_reports_paths_indexes_and_count() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(
+            &mut s,
+            r#".insert [{"_id":"1","email":"a@x"},{"_id":"2","email":"b@x"}]"#,
+        );
+        run(&mut s, ".index email");
+        match run(&mut s, ".schema people") {
+            Output::Schema(report) => {
+                assert_eq!(report.collection, "people");
+                assert_eq!(report.pk_path, "_id");
+                assert_eq!(report.ttl_path, "ttl");
+                assert_eq!(report.count, 2);
+                assert!(
+                    report
+                        .indexes
+                        .iter()
+                        .any(|ix| ix.field == "email" && !ix.unique),
+                    "expected a non-unique email index: {:?}",
+                    report.indexes
+                );
+            }
+            other => panic!("expected schema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_without_arg_uses_active_collection() {
+        let mut s = session();
+        run(&mut s, ".seed");
+        match run(&mut s, ".schema") {
+            Output::Schema(report) => {
+                assert_eq!(report.collection, "sample");
+                assert_eq!(report.count, 4);
+            }
+            other => panic!("expected schema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_needs_a_collection() {
+        let mut s = session();
+        assert!(s.execute(Command::parse(".schema").unwrap()).is_err());
     }
 
     #[test]

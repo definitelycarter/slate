@@ -48,6 +48,7 @@ Commands:
     .count [filter]             count documents (optionally filtered)
     .index <field>              create an index on a field
     .indexes                    list indexes on the active collection
+    .schema [collection]        show key paths, indexes, and document count
 
 Anything else is run as SQL against the active collection, where `c` is the
 row. End a statement with `;` — it may span multiple lines (`...>` continues it,
@@ -286,6 +287,21 @@ fn print_output(output: &Output, elapsed: Duration) {
             } else {
                 for field in fields {
                     println!("{field}");
+                }
+            }
+        }
+        Output::Schema(s) => {
+            println!("collection `{}`", s.collection);
+            println!("  pk:    {}", s.pk_path);
+            println!("  ttl:   {}", s.ttl_path);
+            println!("  count: {}", s.count);
+            if s.indexes.is_empty() {
+                println!("  indexes: (none)");
+            } else {
+                println!("  indexes:");
+                for ix in &s.indexes {
+                    let mark = if ix.unique { "  [unique]" } else { "" };
+                    println!("    {}{mark}", ix.field);
                 }
             }
         }

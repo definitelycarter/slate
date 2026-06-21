@@ -412,8 +412,8 @@ actually running scripts on wasm32.
 `slate-cli` ships a native REPL (`cargo run -p slate-cli`) so the database can be
 probed without writing a throwaway binary. Lines beginning with `.` are
 meta-commands (`.create`, `.use`, `.insert`, `.update`, `.delete`, `.count`,
-`.index`, `.indexes`, `.collections`, `.drop`, `.seed`); anything else runs as
-SQL against the active collection. It opens an in-memory database by default, or
+`.index`, `.indexes`, `.schema`, `.collections`, `.drop`, `.seed`); anything
+else runs as SQL against the active collection. It opens an in-memory database by default, or
 a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
 Input history persists to `~/.slate_history` across sessions, and every query or
 command result is annotated with its execution time. SQL statements are

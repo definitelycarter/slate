@@ -7,7 +7,7 @@ pub(crate) mod hooks;
 pub(crate) mod runtime;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
-pub use collection::CollectionConfig;
+pub use collection::{CollectionConfig, CollectionSchema};
 pub use cursor::{Cursor, CursorIter, RawCursorIter, RawValuesIter, ValuesIter};
 pub use database::{Database, DatabaseBuilder, Transaction as DatabaseTransaction};
 pub use error::DbError;

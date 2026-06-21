@@ -16,3 +16,18 @@ impl Default for CollectionConfig {
         }
     }
 }
+
+/// A read-only snapshot of a collection's catalog metadata: its key paths and
+/// the fields it indexes. Returned by
+/// [`Transaction::collection_schema`](crate::DatabaseTransaction::collection_schema)
+/// for introspection (`unique_indexes` is the subset of `indexes` that enforce
+/// uniqueness).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionSchema {
+    pub cf: String,
+    pub name: String,
+    pub pk_path: String,
+    pub ttl_path: String,
+    pub indexes: Vec<String>,
+    pub unique_indexes: Vec<String>,
+}
