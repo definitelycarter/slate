@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Rebuild the slate-wasm playground bundle committed under
-# book/theme/playground/pkg.
+# book/src/playground/pkg.
 #
 # The book embeds a prebuilt wasm bundle so that `mdbook build` — locally and in
 # CI — needs no wasm toolchain. Run this whenever crates/slate-wasm changes, then
@@ -21,7 +21,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-OUT="book/theme/playground/pkg"
+# Lives under src/ (not theme/) because mdbook only copies static assets from
+# the source tree into the build output — see book/theme/playground/README.md.
+OUT="book/src/playground/pkg"
 
 if ! command -v wasm-pack >/dev/null 2>&1; then
   echo "error: wasm-pack not found — install it from" >&2

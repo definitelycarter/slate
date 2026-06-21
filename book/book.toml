@@ -2,3 +2,10 @@
 title = "macos-example"
 authors = ["definitelycarter"]
 language = "en"
+
+[output.html]
+# Query playground: inject the widget on every page. It upgrades ```slate-sql
+# and ```slate-find code blocks into runnable cells (see theme/playground/).
+# The served payload (wasm bundle + dataset) lives under src/playground/.
+additional-css = ["theme/playground/playground.css"]
+additional-js = ["theme/playground/playground.js"]
