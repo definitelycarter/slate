@@ -5,10 +5,8 @@ mod kv;
 mod traits;
 mod validate;
 
-pub use encoding::skip_bson_value;
 pub use error::{EncodingError, EngineError};
 pub use kv::{DEFAULT_CF, KvEngine};
-pub use slate_rawbson::{RawField, RawFieldLoc};
 pub use traits::{
     Catalog, CollectionHandle, CreateCollectionOptions, Engine, EngineTransaction, FunctionEntry,
     FunctionKind, IndexEntry, IndexOptions, IndexRange, IndexSpec, runtime_tag,
