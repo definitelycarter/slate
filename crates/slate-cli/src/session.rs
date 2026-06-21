@@ -207,13 +207,18 @@ impl<S: BackupStore> Session<S> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
         let affected = match value {
-            Value::Array(items) => txn
-                .insert_many(DEFAULT_CF, collection, items)
-                .map_err(es)?
-                .drain()
-                .map_err(es)?,
+            Value::Array(items) => {
+                let docs = items
+                    .into_iter()
+                    .map(to_bson_document)
+                    .collect::<Result<Vec<_>, _>>()?;
+                txn.insert_many(DEFAULT_CF, collection, docs)
+                    .map_err(es)?
+                    .drain()
+                    .map_err(es)?
+            }
             object @ Value::Object(_) => txn
-                .insert_one(DEFAULT_CF, collection, object)
+                .insert_one(DEFAULT_CF, collection, to_bson_document(object)?)
                 .map_err(es)?
                 .drain()
                 .map_err(es)?,
@@ -440,7 +445,7 @@ impl<S: BackupStore> Session<S> {
         // Insert one bounded batch, draining it so per-document errors (such as a
         // duplicate `_id`) surface here. Scoped before the `commit` below so its
         // borrow of `txn` is released in time.
-        let flush = |batch: &[Value]| -> Result<u64, String> {
+        let flush = |batch: &[bson::Document]| -> Result<u64, String> {
             if batch.is_empty() {
                 return Ok(0);
             }
@@ -460,7 +465,13 @@ impl<S: BackupStore> Session<S> {
                 reader
                     .read_to_string(&mut text)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                let docs = parse_array(&text)?;
+                let docs = parse_array(&text)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        to_bson_document(v).map_err(|e| format!("array element {i}: {e}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut count = 0u64;
                 for chunk in docs.chunks(SEED_BATCH) {
                     count += flush(chunk)?;
@@ -471,7 +482,7 @@ impl<S: BackupStore> Session<S> {
             // only one batch of parsed documents is held at a time.
             Some(b'{') => {
                 let mut count = 0u64;
-                let mut batch: Vec<Value> = Vec::with_capacity(SEED_BATCH);
+                let mut batch: Vec<bson::Document> = Vec::with_capacity(SEED_BATCH);
                 for (i, line) in reader.lines().enumerate() {
                     let line = line.map_err(|e| {
                         format!("{}: read error on line {}: {e}", path.display(), i + 1)
@@ -485,7 +496,9 @@ impl<S: BackupStore> Session<S> {
                     if !value.is_object() {
                         return Err(format!("line {}: not a JSON object", i + 1));
                     }
-                    batch.push(value);
+                    let doc =
+                        to_bson_document(value).map_err(|e| format!("line {}: {e}", i + 1))?;
+                    batch.push(doc);
                     if batch.len() >= SEED_BATCH {
                         count += flush(&batch)?;
                         batch.clear();
@@ -540,6 +553,20 @@ fn seed_docs() -> Vec<Value> {
 
 /// Documents per `insert_many` batch when loading a file.
 const SEED_BATCH: usize = 1000;
+
+/// Coerce a JSON value into a BSON document, interpreting MongoDB **extended
+/// JSON** — both canonical (`{"$date":{"$numberLong":"…"}}`) and relaxed
+/// (`{"$oid":"…"}`, `{"$date":"…"}`) — so a `mongoexport` dump keeps its real
+/// types (dates, ObjectIds, …) instead of being stored as nested `$`-keyed
+/// sub-documents. This is what makes `.insert` and `.seed` round-trip Mongo data
+/// faithfully; a plain serde serialization would not. Errors on non-objects and
+/// on malformed extended JSON (e.g. a `$oid` that isn't 24 hex chars).
+fn to_bson_document(value: Value) -> Result<bson::Document, String> {
+    match Bson::try_from(value).map_err(es)? {
+        Bson::Document(doc) => Ok(doc),
+        _ => Err("expected a JSON object".to_string()),
+    }
+}
 
 /// Peek the first non-whitespace byte of `reader` without consuming it, so the
 /// format-specific reader still sees the whole stream (and JSONL line numbers
@@ -1008,6 +1035,71 @@ mod tests {
                 assert!(!pairs.iter().any(|(_, n)| n == "broken"))
             }
             other => panic!("expected collections, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_interprets_extended_json_types() {
+        let mut s = session();
+        run(&mut s, ".create events");
+        run(
+            &mut s,
+            r#".insert {"_id":"1","at":{"$date":{"$numberLong":"1256616000000"}}}"#,
+        );
+        match run(&mut s, "SELECT VALUE c.at FROM c") {
+            Output::Rows(rows) => {
+                assert_eq!(rows.len(), 1);
+                // A real BSON DateTime renders back as a relaxed-extjson ISO
+                // string, not the canonical nested `$numberLong` it was loaded
+                // from — proving the type was interpreted, not stored verbatim.
+                assert!(
+                    rows[0].contains("2009-10"),
+                    "expected an ISO date: {}",
+                    rows[0]
+                );
+                assert!(
+                    !rows[0].contains("$numberLong"),
+                    "date was not converted: {}",
+                    rows[0]
+                );
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seed_file_interprets_extended_json() {
+        let mut s = session();
+        s.execute(Command::parse(&format!(".seed {}", fixture("events.jsonl"))).unwrap())
+            .unwrap();
+        // The `$oid` `_id`s round-trip as ObjectIds and the `$date`s as real
+        // dates, so a date-ordered projection comes back as ISO strings.
+        match run(&mut s, "SELECT VALUE c.at FROM c ORDER BY c.at") {
+            Output::Rows(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert!(
+                    rows.iter().all(|r| !r.contains("$numberLong")),
+                    "dates were not converted: {rows:?}"
+                );
+                assert!(
+                    rows[0].contains("2009-10"),
+                    "expected an ISO date: {}",
+                    rows[0]
+                );
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+        // `_id` is a genuine ObjectId, rendered in relaxed `$oid` form.
+        match run(&mut s, "SELECT VALUE c._id FROM c ORDER BY c._id") {
+            Output::Rows(rows) => {
+                assert!(
+                    rows[0].contains("$oid"),
+                    "expected an ObjectId: {}",
+                    rows[0]
+                );
+                assert!(rows[0].contains("0123456789abcdef01234567"));
+            }
+            other => panic!("expected rows, got {other:?}"),
         }
     }
 }
