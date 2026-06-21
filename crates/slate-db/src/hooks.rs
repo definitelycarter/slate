@@ -5,8 +5,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use slate_engine::{Catalog, EngineError, FunctionKind};
 
-// `ResolvedHook` and `runtime_kind` now live in `slate-vm` (shared with v2).
-pub use slate_vm::{ResolvedHook, runtime_kind};
+// `ResolvedHook` now lives in `slate-vm` (shared with the executor).
+pub use slate_vm::ResolvedHook;
 
 fn hash_source(source: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

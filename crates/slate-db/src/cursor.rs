@@ -6,27 +6,23 @@ use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
 use crate::error::DbError;
-use crate::executor::{Executor, RawIter};
-use crate::planner::plan::Plan;
 use slate_vm::pool::VmPool;
 
 type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 
-/// A prepared plan from either query engine.
-enum Prepared<Cf: Clone> {
-    V1(Plan<Cf>),
-    V2(slate_planner::Plan),
-}
+/// The streamed unit out of execution: a value (`Some`), an undefined row
+/// (`None`, dropped at the output boundary), or an error.
+type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<bson::RawBson>, DbError>> + 'a>;
 
 /// A prepared query that can be iterated or executed.
 ///
-/// Owns a pre-built plan (from either engine) and a reference to the
-/// transaction. Call [`.iter()`](Cursor::iter) for deserialized iteration,
+/// Owns a pre-built plan and a reference to the transaction. Call
+/// [`.iter()`](Cursor::iter) for deserialized iteration,
 /// [`.iter_raw()`](Cursor::iter_raw) for raw BSON documents, or
 /// [`.drain()`](Cursor::drain) to consume all rows and return a count.
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
-    plan: Prepared<<KvTxn<'db, S> as EngineTransaction>::Cf>,
+    plan: slate_planner::Plan,
     pool: Option<&'txn VmPool>,
     /// SQL `@`-parameter values, supplied by `query_with_params`. Owned here and
     /// shared into the executor (by `Rc`) at execution time.
@@ -36,31 +32,18 @@ pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn KvTxn<'db, S>,
-        plan: Plan<<KvTxn<'db, S> as EngineTransaction>::Cf>,
-        pool: Option<&'txn VmPool>,
-    ) -> Self {
-        Self {
-            txn,
-            plan: Prepared::V1(plan),
-            pool,
-            params: None,
-        }
-    }
-
-    pub(crate) fn new_v2(
-        txn: &'txn KvTxn<'db, S>,
         plan: slate_planner::Plan,
         pool: Option<&'txn VmPool>,
     ) -> Self {
         Self {
             txn,
-            plan: Prepared::V2(plan),
+            plan,
             pool,
             params: None,
         }
     }
 
-    pub(crate) fn new_v2_with_params(
+    pub(crate) fn new_with_params(
         txn: &'txn KvTxn<'db, S>,
         plan: slate_planner::Plan,
         pool: Option<&'txn VmPool>,
@@ -68,35 +51,28 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     ) -> Self {
         Self {
             txn,
-            plan: Prepared::V2(plan),
+            plan,
             pool,
             params: Some(params),
         }
     }
 
-    /// Execute the plan on the appropriate engine, normalizing both to a
-    /// `RawIter` of `Result<Option<RawBson>, DbError>`.
+    /// Execute the plan, streaming `Result<Option<RawBson>, DbError>`.
     fn execute(self) -> Result<RawIter<'txn>, DbError> {
-        match self.plan {
-            Prepared::V1(plan) => Executor::new(self.txn, self.pool).execute(plan),
-            Prepared::V2(plan) => {
-                // Inject `$now` (epoch ms, captured when the txn began from the
-                // engine's injectable clock) so the SQL `GETCURRENT*` functions
-                // resolve against it — consistent across the txn and wasm-clean
-                // (no syscall in the evaluator). Threaded via the existing params
-                // channel, so it reaches every evaluating node.
-                let mut doc: bson::Document = match &self.params {
-                    Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
-                    None => bson::Document::new(),
-                };
-                doc.insert("$now", self.txn.now_millis());
-                let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
-                let iter =
-                    slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
-                        .execute(plan)?;
-                Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
-            }
-        }
+        // Inject `$now` (epoch ms, captured when the txn began from the engine's
+        // injectable clock) so the SQL `GETCURRENT*` functions resolve against
+        // it — consistent across the txn and wasm-clean (no syscall in the
+        // evaluator). Threaded via the existing params channel, so it reaches
+        // every evaluating node.
+        let mut doc: bson::Document = match &self.params {
+            Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
+            None => bson::Document::new(),
+        };
+        doc.insert("$now", self.txn.now_millis());
+        let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
+        let iter = slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
+            .execute(self.plan)?;
+        Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
     }
 
     /// Consume the cursor and return a streaming iterator that deserializes each document into `T`.

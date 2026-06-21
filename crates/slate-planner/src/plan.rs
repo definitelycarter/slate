@@ -14,7 +14,7 @@ use slate_vm::ResolvedHook;
 ///
 /// Mutations are applied lazily as the executor's result stream is consumed —
 /// the affected documents flow out, so the caller must drain the stream (e.g.
-/// `execute_collect`) for the writes to happen, exactly as v1 does.
+/// `execute_collect`) for the writes to happen.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     /// A read query producing a stream of values.
@@ -143,10 +143,8 @@ pub enum IndexScanRange {
 /// Future work: the write path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
-    /// Literal source — caller-provided raw values, streamed in order.
-    ///
-    /// The general form of v1's `Values(Vec<RawDocumentBuf>)`: the elements are
-    /// arbitrary raw values, not necessarily documents.
+    /// Literal source — caller-provided raw values, streamed in order. The
+    /// elements are arbitrary raw values, not necessarily documents.
     Values(Vec<RawBson>),
 
     /// Full scan of a collection — yields each live document as a value.

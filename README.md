@@ -38,7 +38,7 @@ slate/
   └── slate-cli              → `slate`, an interactive shell (REPL) over the public API
 ```
 
-The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the **v2** query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor. It is the default; the original in-crate engine remains selectable as `QueryEngine::V1` during a soak before removal.
+The `slate-ast` … `slate-executor` crates (plus `slate-mutation`) are the query stack: two surfaces — a MongoDB `find` and a CosmosDB-style SQL — lower to one shared AST, planner, and executor, so they can't drift.
 
 ## Quick Start
 

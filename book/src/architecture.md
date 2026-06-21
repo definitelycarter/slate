@@ -15,16 +15,16 @@ slate/
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort DTOs + filter→AST translation
   ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy raw evaluators)
-  ├── slate-planner          → v2 logical planning: AST → Plan/Node IR (sargability, index choice)
-  ├── slate-executor         → v2 physical execution: streams a Plan against a transaction
+  ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
+  ├── slate-executor         → Physical execution: streams a Plan against a transaction
   ├── slate-mutation         → Field-level document mutation engine ($set/$inc/$unset → ops)
   ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
-  ├── slate-db               → Database layer: public API + v2 wiring (and the legacy v1 planner/executor)
+  ├── slate-db               → Database layer: public API + query-stack wiring
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly
 ```
 
-The query stack (`slate-ast` … `slate-executor`, plus `slate-mutation`) is the **v2** engine, the default since reads were routed through it. The original in-crate planner/executor still lives in `slate-db` as `QueryEngine::V1` — a selectable fallback and the differential oracle during the soak before it is removed. See [Roadmap — Query Engine v2](roadmap.md).
+The query stack (`slate-ast` … `slate-executor`, plus `slate-mutation`) is the engine: both query surfaces lower to one shared AST, planner, and executor, so they can't drift. See [Roadmap — Query Engine](roadmap.md).
 
 ## Tier 1: Storage Layer (`slate-store`)
 
@@ -393,7 +393,7 @@ column family, so the pair `(cf, name)` is the unique identity.
 
 ### Overview
 
-The database layer composes the query stack (Tier 2) over `slate-engine` and exposes the user-facing `Database`/`Transaction` API. It translates a request through a front-end, lowers it with `slate-planner`, and runs it with `slate-executor`; storage operations (record reads, writes, scans, index lookups) are delegated to `slate-engine`'s `EngineTransaction` trait. `DatabaseBuilder::query_engine` selects the engine — `QueryEngine::V2` (default) uses this stack; `QueryEngine::V1` is the legacy in-crate planner/executor, kept as a fallback for not-yet-translatable filters and as the differential oracle (see [Roadmap](roadmap.md)).
+The database layer composes the query stack (Tier 2) over `slate-engine` and exposes the user-facing `Database`/`Transaction` API. It translates a request through a front-end, lowers it with `slate-planner`, and runs it with `slate-executor`; storage operations (record reads, writes, scans, index lookups) are delegated to `slate-engine`'s `EngineTransaction` trait.
 
 ### Document Model
 

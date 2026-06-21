@@ -2,7 +2,7 @@
 
 ## Overview
 
-Queries are executed as a two-tier plan tree. `slate-planner` analyzes filter conditions and available indexes to build an execution plan (a tree of `Node`s); `slate-executor` runs it lazily — records that fail a filter are never fully deserialized. This is the **v2** engine, the default; `QueryEngine::V1` selects the legacy in-crate planner/executor (see [Architecture](architecture.md)).
+Queries are executed as a two-tier plan tree. `slate-planner` analyzes filter conditions and available indexes to build an execution plan (a tree of `Node`s); `slate-executor` runs it lazily — records that fail a filter are never fully deserialized (see [Architecture](architecture.md)).
 
 ```
 Value tier:      Limit (skip/take on the result stream)

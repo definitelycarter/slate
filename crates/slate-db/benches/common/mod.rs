@@ -6,7 +6,6 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::bench::Database;
-use slate_db::bench::RawIter;
 use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder};
 use slate_store::MemoryStore;
 
@@ -40,29 +39,15 @@ pub fn generate_docs(n: usize) -> Vec<RawDocumentBuf> {
         .collect()
 }
 
-pub fn consume_rows(iter: RawIter) -> usize {
-    iter.count()
-}
-
-/// A builder honoring env toggles for A/B timing. Reads default to **v2** (the
-/// builder default); set `SLATE_V1=1` to force the old engine for comparison
-/// (e.g. `SLATE_V1=1 cargo bench --bench query ... --save-baseline v1`).
-/// `SLATE_V2=1` forces v2 explicitly.
 pub fn db_builder() -> DatabaseBuilder {
-    let mut b = DatabaseBuilder::new();
-    if std::env::var_os("SLATE_V1").is_some() {
-        b = b.query_engine(slate_db::QueryEngine::V1);
-    } else if std::env::var_os("SLATE_V2").is_some() {
-        b = b.query_engine(slate_db::QueryEngine::V2);
-    }
-    b
+    DatabaseBuilder::new()
 }
 
 /// Create a seeded MemoryStore-backed Engine with `n` documents and indexes
 /// on `status` and `contacts_count`.
 pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "test".into(),
         ..Default::default()
@@ -131,7 +116,7 @@ pub fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
 
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
-    let mut txn = engine.begin(false).unwrap();
+    let txn = engine.begin(false).unwrap();
     txn.create_collection(&CollectionConfig {
         name: "bench".into(),
         ..Default::default()

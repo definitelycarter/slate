@@ -77,8 +77,8 @@ impl From<slate_mutation::MutationError> for DbError {
     }
 }
 
-impl From<crate::parser::FilterParseError> for DbError {
-    fn from(e: crate::parser::FilterParseError) -> Self {
+impl From<slate_query::TranslateError> for DbError {
+    fn from(e: slate_query::TranslateError) -> Self {
         DbError::InvalidQuery(e.to_string())
     }
 }
