@@ -260,12 +260,16 @@ impl<'a> Transaction for MemoryTransaction<'a> {
 
     fn create_cf(&self, name: &str) -> Result<(), StoreError> {
         self.check_writable()?;
-        let _ = self.store.create_cf(name);
+        // Create the CF in the backing store if absent (idempotent); existing
+        // data is preserved.
+        self.store.create_cf(name)?;
         let mut snap_ref = self.snapshot.borrow_mut();
         let snap = snap_ref.as_mut().ok_or(StoreError::TransactionConsumed)?;
-        snap.data
-            .entry(name.to_string())
-            .or_insert_with(|| Arc::new(ColumnFamily::new()));
+        // Load the CF's committed data into the snapshot. Inserting a blank CF
+        // here would shadow a sibling collection sharing this column family and
+        // overwrite it on commit (column families are keyed only by name-prefix,
+        // so multiple collections coexist in one CF).
+        snap.ensure(self.store, name)?;
         self.dirty.borrow_mut().insert(name.to_string());
         Ok(())
     }

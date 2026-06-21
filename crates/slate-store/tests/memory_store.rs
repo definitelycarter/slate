@@ -475,6 +475,36 @@ fn multi_get_returns_matching_values() {
     assert_eq!(&**results[3].as_ref().unwrap(), b"v3");
 }
 
+// ── create_cf must not clobber committed data ────────────────
+
+#[test]
+fn create_cf_on_existing_preserves_committed_data() {
+    // Regression: a transaction's create_cf used to insert a blank CF into the
+    // snapshot, shadowing committed data and wiping it on commit. Engine
+    // collections share one column family (separated by key-prefix), so the
+    // second collection's create_cf would delete the first's rows. create_cf
+    // must be idempotent over an existing, populated CF.
+    let store = mem_store();
+
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"existing", b"value").unwrap();
+    txn.commit().unwrap();
+
+    // A later writer re-creates the same CF (as a second collection would) and
+    // adds its own key. The original key must survive.
+    let txn = store.begin(false).unwrap();
+    txn.create_cf(CF).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"sibling", b"value2").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(&*txn.get(&cf, b"existing").unwrap().unwrap(), b"value");
+    assert_eq!(&*txn.get(&cf, b"sibling").unwrap().unwrap(), b"value2");
+}
+
 // ── Backup ──────────────────────────────────────────────────
 
 #[test]
