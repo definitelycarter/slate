@@ -4,13 +4,14 @@
 Loads the SAME fixture documents into both engines, runs every query against
 each, normalizes the results, and reports where they agree or diverge.
 
-For a clean, idempotent run the emulator is restarted first (its data is
-in-memory — no volume is mounted), then each dataset is loaded into its own
-Cosmos container. The slate side runs entirely in-process via the
-`parity_dump` example.
+For a clean, idempotent run the `slate-cosmos` emulator container is recreated
+first (its data lives in the container layer — no volume is mounted), then each
+dataset is loaded into its own Cosmos container. The slate side runs entirely
+in-process via the `parity_dump` example.
 
 Prereqs:
-  - The Cosmos emulator running as a container named `slate-cosmos`.
+  - Docker running. The script pulls the emulator image on first use and
+    creates/recreates the `slate-cosmos` container itself — no manual setup.
   - `cargo` available to build the slate side.
 
 Usage:
