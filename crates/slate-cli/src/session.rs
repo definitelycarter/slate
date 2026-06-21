@@ -28,6 +28,8 @@ pub enum Output {
     Message(String),
     /// A write affected `n` documents.
     Affected(u64),
+    /// A bulk file load: `count` documents loaded into `collection`.
+    Loaded { count: u64, collection: String },
     /// A count result.
     Count(u64),
     /// Rendered query result rows (already JSON-formatted).
@@ -405,10 +407,45 @@ impl<S: BackupStore> Session<S> {
         )))
     }
 
-    /// Bulk-load a dataset file into `collection`. Placeholder until the loader
-    /// lands; for now this records the command surface only.
-    fn seed_file(&mut self, _path: String, _collection: String) -> Result<Output, String> {
-        Err("`.seed <path>` is not implemented yet".to_string())
+    /// Bulk-load a dataset file into `collection`, creating the collection if it
+    /// does not exist and making it current. The whole load runs in one write
+    /// transaction so a bad document (e.g. a duplicate `_id`) rolls back the
+    /// import instead of leaving it half-applied.
+    fn seed_file(&mut self, path: String, collection: String) -> Result<Output, String> {
+        let docs = load_documents(std::path::Path::new(&path))?;
+
+        let exists = self
+            .db
+            .list_collections()
+            .map_err(es)?
+            .iter()
+            .any(|(_, n)| n == &collection);
+
+        let txn = self.db.begin(false).map_err(es)?;
+        if !exists {
+            txn.create_collection(&CollectionConfig {
+                name: collection.clone(),
+                ..Default::default()
+            })
+            .map_err(es)?;
+        }
+
+        // Insert in bounded batches so a huge file isn't one giant `insert_many`,
+        // draining each batch to surface per-document errors as they happen.
+        let mut count = 0u64;
+        for chunk in docs.chunks(SEED_BATCH) {
+            count += txn
+                .insert_many(DEFAULT_CF, &collection, chunk.iter())
+                .map_err(es)?
+                .drain()
+                .map_err(es)?;
+        }
+        txn.commit().map_err(es)?;
+
+        // A clone so the name can both become the active collection and be
+        // reported back in the output.
+        self.current = Some(collection.clone());
+        Ok(Output::Loaded { count, collection })
     }
 
     fn backup(&self, dest: String) -> Result<Output, String> {
@@ -433,6 +470,70 @@ fn seed_docs() -> Vec<Value> {
         json!({ "_id": "4", "name": "edsger", "age": 52, "city": "Austin",
                 "tags": ["algorithms"] }),
     ]
+}
+
+/// Documents per `insert_many` batch when loading a file.
+const SEED_BATCH: usize = 1000;
+
+/// Read a dataset file and parse it into a list of JSON documents, auto-detecting
+/// the format from the first non-whitespace byte: `[` is a single JSON array of
+/// documents, `{` is JSONL/NDJSON (one document per line, blank lines skipped —
+/// `mongoexport`'s default). On a malformed document the error names its position
+/// (array index or 1-based line number) and the load stops rather than importing
+/// part of the file.
+fn load_documents(path: &std::path::Path) -> Result<Vec<Value>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    match text.trim_start().as_bytes().first() {
+        Some(b'[') => parse_array(&text),
+        Some(b'{') => parse_jsonl(&text),
+        Some(_) => Err(format!(
+            "{}: expected a JSON array (starting with `[`) or JSONL (one `{{...}}` per line)",
+            path.display()
+        )),
+        None => Err(format!("{} is empty", path.display())),
+    }
+}
+
+/// Parse a whole-file JSON array into its document elements, erroring (with the
+/// element index) on anything that is not a JSON object.
+fn parse_array(text: &str) -> Result<Vec<Value>, String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let items = match value {
+        Value::Array(items) => items,
+        _ => return Err("expected a JSON array of documents".to_string()),
+    };
+    for (i, item) in items.iter().enumerate() {
+        if !item.is_object() {
+            return Err(format!("array element {i} is not a JSON object"));
+        }
+    }
+    if items.is_empty() {
+        return Err("array contained no documents".to_string());
+    }
+    Ok(items)
+}
+
+/// Parse JSONL/NDJSON text into documents, one per non-blank line. Errors name
+/// the 1-based line number on a parse failure or a non-object line.
+fn parse_jsonl(text: &str) -> Result<Vec<Value>, String> {
+    let mut docs = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(line).map_err(|e| format!("line {}: invalid JSON: {e}", i + 1))?;
+        if !value.is_object() {
+            return Err(format!("line {}: not a JSON object", i + 1));
+        }
+        docs.push(value);
+    }
+    if docs.is_empty() {
+        return Err("no documents found".to_string());
+    }
+    Ok(docs)
 }
 
 #[cfg(test)]
@@ -741,5 +842,87 @@ mod tests {
         run(&mut s, ".seed");
         run(&mut s, ".seed");
         assert_eq!(run(&mut s, ".count"), Output::Count(4));
+    }
+
+    /// Absolute path to a checked-in test fixture.
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn seed_file_loads_jsonl_and_is_queryable() {
+        let mut s = session();
+        // Drive it through the parser so the file-stem collection name and the
+        // whole-loader path are both exercised end to end.
+        let out = s
+            .execute(Command::parse(&format!(".seed {}", fixture("movies.jsonl"))).unwrap())
+            .unwrap();
+        assert_eq!(
+            out,
+            Output::Loaded {
+                count: 3,
+                collection: "movies".to_string()
+            }
+        );
+        // The loaded collection becomes active and the documents are visible.
+        assert_eq!(s.current(), Some("movies"));
+        assert_eq!(run(&mut s, ".count"), Output::Count(3));
+        match run(
+            &mut s,
+            "SELECT VALUE c.title FROM c WHERE c.year < 1940 ORDER BY c.year",
+        ) {
+            Output::Rows(rows) => assert_eq!(
+                rows,
+                vec!["\"Metropolis\"".to_string(), "\"Modern Times\"".to_string()]
+            ),
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seed_file_loads_json_array_and_is_queryable() {
+        let mut s = session();
+        let out = s
+            .execute(Command::SeedFile {
+                path: fixture("cities.json"),
+                collection: "cities".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            out,
+            Output::Loaded {
+                count: 2,
+                collection: "cities".to_string()
+            }
+        );
+        match run(&mut s, "SELECT VALUE c.name FROM c ORDER BY c.name") {
+            Output::Rows(rows) => {
+                assert_eq!(
+                    rows,
+                    vec!["\"Austin\"".to_string(), "\"London\"".to_string()]
+                )
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seed_file_reports_a_malformed_line_position() {
+        let mut s = session();
+        let err = s
+            .execute(Command::SeedFile {
+                path: fixture("malformed.jsonl"),
+                collection: "broken".to_string(),
+            })
+            .unwrap_err();
+        assert!(err.contains("line 2"), "error should name the line: {err}");
+        // The import stopped before touching the database — nothing was created.
+        assert_eq!(s.current(), None);
+        match run(&mut s, ".collections") {
+            Output::Collections(pairs) => {
+                assert!(!pairs.iter().any(|(_, n)| n == "broken"))
+            }
+            other => panic!("expected collections, got {other:?}"),
+        }
     }
 }

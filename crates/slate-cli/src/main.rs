@@ -286,6 +286,10 @@ fn print_output(output: &Output, elapsed: Duration) {
         Output::Help => print!("{HELP}"),
         Output::Message(msg) => println!("{msg}"),
         Output::Affected(n) => println!("({n} affected, {took})"),
+        Output::Loaded { count, collection } => {
+            let plural = if *count == 1 { "" } else { "s" };
+            println!("loaded {count} document{plural} into `{collection}` in {took}");
+        }
         Output::Count(n) => println!("{n} ({took})"),
         Output::Rows(rows) => {
             for row in rows {
