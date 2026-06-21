@@ -29,6 +29,9 @@ SELECT c.category, COUNT(1) FROM c
 # ── Reserved word as an alias (TOP) ───────────────────────────────
 SELECT c.price AS top FROM c
 
+# ── Alias on a VALUE projection (no key to name) ──────────────────
+SELECT VALUE c.price AS p FROM c
+
 # ── Unknown function / wrong arity ────────────────────────────────
 SELECT VALUE NOPE(1)
 SELECT VALUE ABS()

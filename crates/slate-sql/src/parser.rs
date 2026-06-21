@@ -201,7 +201,16 @@ impl Parser {
     /// `<expr> [AS <key>], ...`.
     fn parse_select(&mut self) -> Result<SelectClause> {
         if self.matches(&Token::Value) {
-            return Ok(SelectClause::Value(self.parse_expr()?));
+            let expr = self.parse_expr()?;
+            // `SELECT VALUE <expr>` yields a bare value stream with no key, so an
+            // alias is meaningless — Cosmos rejects it, and so do we (with a
+            // clearer message than the downstream end-of-input failure).
+            if self.peek() == &Token::As {
+                return Err(SqlError::Parse {
+                    message: "SELECT VALUE does not take an AS alias".into(),
+                });
+            }
+            return Ok(SelectClause::Value(expr));
         }
         if self.matches(&Token::Star) {
             return Ok(SelectClause::Star);
@@ -1216,6 +1225,16 @@ mod tests {
             q.select,
             SelectClause::Value(ScalarExpr::Function { ref name, .. }) if name == "EXISTS"
         ));
+    }
+
+    #[test]
+    fn select_value_rejects_an_alias() {
+        // A VALUE stream has no key, so `AS` is invalid — matching Cosmos.
+        assert!(
+            parse_err("SELECT VALUE c.x AS y FROM c")
+                .to_string()
+                .contains("VALUE")
+        );
     }
 
     #[test]
