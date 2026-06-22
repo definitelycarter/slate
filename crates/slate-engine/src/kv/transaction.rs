@@ -279,6 +279,19 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
         let field_prefix =
             KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+
+        // An `Eq` against a value the (sparse) index cannot hold — null, or any
+        // non-scalar — matches no entry. Short-circuit to an empty scan; otherwise
+        // the unencodable bound below falls through to a full, unfiltered field
+        // scan (and the exact-match filter is skipped), wrongly returning every
+        // entry. The planner already declines to push such predicates, but the
+        // read path must be correct for any caller.
+        if let IndexRange::Eq(val) = &range
+            && BsonValue::from_bson(val).is_none()
+        {
+            return Ok(Box::new(std::iter::empty()));
+        }
+
         // For `Eq`, the seek prefix is `field + sortable(value)`. A bare prefix
         // scan would also match *longer* values that share that prefix (e.g.
         // `Eq("om")` sweeping in `"omega"`), and values of another type that

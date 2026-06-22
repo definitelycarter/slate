@@ -753,3 +753,45 @@ fn cached_handle_gone_after_drop_collection() {
     assert!(txn.collection(DEFAULT_CF, "c").is_err());
     txn.rollback().unwrap();
 }
+
+/// Regression: an `Eq` against a value the sparse index cannot hold (null, or a
+/// non-scalar) matches no entries — it must NOT degrade to a full, unfiltered
+/// field scan and return every entry (the `= null` "returned the complement" bug).
+#[test]
+fn scan_index_eq_unencodable_value_is_empty() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "c", "x").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+    for (id, x) in [("a", 1i32), ("b", 2), ("c", 3)] {
+        txn.put(&handle, &bson::rawdoc! { "_id": id, "x": x })
+            .unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+    assert_eq!(count_index(&txn, &handle, "x"), 3); // sanity: three entries
+
+    let count_eq = |v: &bson::Bson| {
+        txn.scan_index(&handle, "x", IndexRange::Eq(v), false)
+            .unwrap()
+            .count()
+    };
+    // Unencodable values match nothing — not the whole field.
+    assert_eq!(
+        count_eq(&bson::Bson::Null),
+        0,
+        "Eq(null) must match nothing"
+    );
+    assert_eq!(
+        count_eq(&bson::Bson::Array(vec![bson::Bson::Int32(1)])),
+        0,
+        "Eq(non-scalar) must match nothing"
+    );
+    // A real value still matches exactly.
+    assert_eq!(count_eq(&bson::Bson::Int32(2)), 1);
+    txn.rollback().unwrap();
+}
