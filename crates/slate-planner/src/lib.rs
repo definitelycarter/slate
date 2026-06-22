@@ -27,6 +27,7 @@
 //! `Distinct` — with expression types and the evaluator coming from `slate-sql`
 //! so there is exactly one of each across find and SQL.
 
+pub mod explain;
 pub mod lower;
 pub mod plan;
 pub mod planner;
