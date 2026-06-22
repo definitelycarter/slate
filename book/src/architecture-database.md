@@ -28,8 +28,7 @@ let doc = doc! {
 The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
 
 ```rust
-use slate_db::{DatabaseBuilder, DEFAULT_CF, CollectionConfig};
-use slate_query::FindOptions;
+use slate_db::{DatabaseBuilder, DEFAULT_CF, CollectionConfig, FindOptions};
 
 let db = DatabaseBuilder::new().open(store)?;
 

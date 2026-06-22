@@ -78,8 +78,7 @@ slate(sample)> .insert {"_id":"5","name":"linus","city":"Helsinki"}
 
 ```rust
 use bson::{doc, rawdoc};
-use slate_db::{DatabaseBuilder, DEFAULT_CF};
-use slate_query::FindOptions;
+use slate_db::{DatabaseBuilder, DEFAULT_CF, FindOptions};
 use slate_store::RocksStore; // or RedbStore for pure-Rust (no C deps)
 
 let store = RocksStore::open("/tmp/slate-data")?;

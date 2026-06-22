@@ -110,7 +110,7 @@ for row in cursor.iter_raw()? {
 
 ```rust
 use bson::rawdoc;
-use slate_query::FindOptions;
+use slate_db::FindOptions;
 
 let cursor = txn.find(DEFAULT_CF, "accounts",
     rawdoc! { "status": "active" }, FindOptions::default())?;

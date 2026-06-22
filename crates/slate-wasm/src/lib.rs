@@ -1,6 +1,5 @@
 use bson::{Document, RawDocumentBuf};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, DbError};
-use slate_query::FindOptions;
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, DbError, FindOptions};
 use slate_store::MemoryStore;
 use wasm_bindgen::prelude::*;
 

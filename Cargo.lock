@@ -1601,7 +1601,6 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "slate-db",
- "slate-query",
  "slate-store",
  "uniffi",
 ]
@@ -1626,7 +1625,6 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "slate-db",
- "slate-query",
  "slate-store",
  "wasm-bindgen",
  "wasm-bindgen-test",

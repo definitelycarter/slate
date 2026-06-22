@@ -16,7 +16,6 @@ rocksdb = ["slate-store/rocksdb"]
 uniffi = { version = "0.29", features = ["cli"] }
 slate-db = { path = "../slate-db" }
 slate-store = { path = "../slate-store", default-features = false }
-slate-query = { path = "../slate-query" }
 bson = { workspace = true }
 
 [[bin]]

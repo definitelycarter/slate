@@ -13,7 +13,7 @@ pub use database::{Database, DatabaseBuilder, Transaction as DatabaseTransaction
 pub use error::DbError;
 pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};
 pub use slate_engine::{DEFAULT_CF, FunctionKind};
-pub use slate_query::DistinctOptions;
+pub use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 pub use slate_vm::VmError;
 pub use slate_vm::pool::{RuntimeRegistry, VmPool};
 

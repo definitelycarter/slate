@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use bson::RawDocumentBuf;
 use slate_db::{
-    CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, DEFAULT_CF,
+    CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, FindOptions,
+    DEFAULT_CF,
 };
-use slate_query::FindOptions;
 
 use crate::error::SlateError;
 
