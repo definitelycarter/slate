@@ -195,6 +195,228 @@ fn scan_prefix_rev_no_matches() {
     assert!(entries.is_empty());
 }
 
+// ── scan_range ──────────────────────────────────────────────
+
+fn seeded_range_store() -> (RedbStore, tempfile::TempDir) {
+    let (store, dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    // Out-of-range keys on both sides to prove the bounds clamp the scan.
+    txn.put(&cf, b"j:z", b"0").unwrap();
+    txn.put(&cf, b"k:a", b"1").unwrap();
+    txn.put(&cf, b"k:b", b"2").unwrap();
+    txn.put(&cf, b"k:c", b"3").unwrap();
+    txn.put(&cf, b"k:d", b"4").unwrap();
+    txn.put(&cf, b"k:e", b"5").unwrap();
+    txn.put(&cf, b"l:a", b"6").unwrap();
+    txn.commit().unwrap();
+    (store, dir)
+}
+
+#[test]
+fn scan_range_half_open() {
+    // [k:b, k:d) → k:b, k:c (k:d excluded).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:d".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(keys, vec![b"k:b".to_vec(), b"k:c".to_vec()]);
+}
+
+#[test]
+fn scan_range_inclusive_end() {
+    // [k:b, k:d] → k:b, k:c, k:d (k:d included).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..=b"k:d".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![b"k:b".to_vec(), b"k:c".to_vec(), b"k:d".to_vec()]
+    );
+}
+
+#[test]
+fn scan_range_unbounded_start() {
+    // k:c.. → k:c, k:d, k:e, l:a (start inclusive, no upper bound).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:c".to_vec().., false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"k:c".to_vec(),
+            b"k:d".to_vec(),
+            b"k:e".to_vec(),
+            b"l:a".to_vec(),
+        ]
+    );
+}
+
+#[test]
+fn scan_range_unbounded_end() {
+    // ..k:c → j:z, k:a, k:b (end exclusive, no lower bound).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, ..b"k:c".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![b"j:z".to_vec(), b"k:a".to_vec(), b"k:b".to_vec()]
+    );
+}
+
+#[test]
+fn scan_range_full() {
+    // .. → every key, ascending (including the out-of-`k:` sentinels).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, .., false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"j:z".to_vec(),
+            b"k:a".to_vec(),
+            b"k:b".to_vec(),
+            b"k:c".to_vec(),
+            b"k:d".to_vec(),
+            b"k:e".to_vec(),
+            b"l:a".to_vec(),
+        ]
+    );
+}
+
+#[test]
+fn scan_range_reverse_descending() {
+    // [k:b, k:e) reversed → k:d, k:c, k:b (same set, descending).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:e".to_vec(), true)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![b"k:d".to_vec(), b"k:c".to_vec(), b"k:b".to_vec()]
+    );
+}
+
+#[test]
+fn scan_range_reverse_inclusive_end() {
+    // [k:b, k:d] reversed → k:d, k:c, k:b (inclusive end is the first yielded).
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..=b"k:d".to_vec(), true)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![b"k:d".to_vec(), b"k:c".to_vec(), b"k:b".to_vec()]
+    );
+}
+
+#[test]
+fn scan_range_empty_range() {
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    // start == end → nothing, both directions.
+    let entries: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:b".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(entries.is_empty());
+    let entries_rev: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:b".to_vec(), true)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(entries_rev.is_empty());
+}
+
+#[test]
+fn scan_range_covers_no_keys() {
+    let (store, _dir) = seeded_range_store();
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    // Range past all keys.
+    let entries: Vec<_> = txn
+        .scan_range(&cf, b"m:x".to_vec()..b"m:z".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn scan_range_write_path_sees_own_writes() {
+    // Exercise the eager write-path collection (collect_range_write): scan a
+    // range over uncommitted writes within an open write transaction.
+    let (store, _dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"k:a", b"1").unwrap();
+    txn.put(&cf, b"k:b", b"2").unwrap();
+    txn.put(&cf, b"k:c", b"3").unwrap();
+    txn.put(&cf, b"k:d", b"4").unwrap();
+    txn.put(&cf, b"k:e", b"5").unwrap();
+
+    // [k:b, k:d) → k:b, k:c (k:d excluded), ascending.
+    let keys: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:d".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(keys, vec![b"k:b".to_vec(), b"k:c".to_vec()]);
+
+    // Same range, reverse.
+    let keys_rev: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..b"k:d".to_vec(), true)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(keys_rev, vec![b"k:c".to_vec(), b"k:b".to_vec()]);
+
+    // Inclusive end on the write path: [k:b, k:d] → k:b, k:c, k:d.
+    let keys_incl: Vec<_> = txn
+        .scan_range(&cf, b"k:b".to_vec()..=b"k:d".to_vec(), false)
+        .unwrap()
+        .map(|r| r.unwrap().0)
+        .collect();
+    assert_eq!(
+        keys_incl,
+        vec![b"k:b".to_vec(), b"k:c".to_vec(), b"k:d".to_vec()]
+    );
+}
+
 #[test]
 fn read_only_rejects_put() {
     let (store, _dir) = temp_store();

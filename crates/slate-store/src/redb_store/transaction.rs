@@ -1,8 +1,33 @@
+use std::ops::{Bound, RangeBounds};
+
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
 use crate::store::{Transaction, increment_prefix};
 
+/// Eagerly-collected `(key, value)` entries returned by the write-path helpers.
+type Entries = Vec<(Vec<u8>, Vec<u8>)>;
+
+/// Borrow a `RangeBounds<Vec<u8>>` as the `&[u8]`-keyed bounds redb wants for a
+/// `range` over a `&[u8]` table. The returned bounds borrow from `range`.
+fn range_as_byte_bounds<R: RangeBounds<Vec<u8>>>(range: &R) -> (Bound<&[u8]>, Bound<&[u8]>) {
+    let start = match range.start_bound() {
+        Bound::Included(b) => Bound::Included(b.as_slice()),
+        Bound::Excluded(b) => Bound::Excluded(b.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(b) => Bound::Included(b.as_slice()),
+        Bound::Excluded(b) => Bound::Excluded(b.as_slice()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    (start, end)
+}
+
+// redb's `WriteTransaction` is much larger than the other variants, but a redb
+// transaction is heap-lived and not created in hot loops, so the size gap is
+// not worth an extra box + indirection on every access.
+#[allow(clippy::large_enum_variant)]
 enum Inner {
     Read(redb::ReadTransaction),
     Write(redb::WriteTransaction),
@@ -50,7 +75,7 @@ impl<'db> RedbTransaction<'db> {
         cf: &str,
         prefix: &[u8],
         reverse: bool,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+    ) -> Result<Entries, StoreError> {
         let cf = cf.to_string();
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
         let upper = increment_prefix(prefix);
@@ -59,6 +84,46 @@ impl<'db> RedbTransaction<'db> {
             .open_table(def)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
         collect_from_readable(&table, prefix, upper.as_deref(), reverse)
+    }
+
+    /// Eagerly collect entries in `range` for write transactions (where lazy
+    /// iteration isn't possible due to table handle lifetime constraints). A
+    /// plain range — no prefix filter, so it's correct for ranges whose keys
+    /// don't share a common prefix.
+    fn collect_range_write<R: RangeBounds<Vec<u8>>>(
+        txn: &redb::WriteTransaction,
+        cf: &str,
+        range: R,
+        reverse: bool,
+    ) -> Result<Entries, StoreError> {
+        let cf = cf.to_string();
+        let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf);
+
+        let table = txn
+            .open_table(def)
+            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        let range = table
+            .range::<&[u8]>(range_as_byte_bounds(&range))
+            .map_err(|e| StoreError::Storage(e.to_string()))?;
+
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = if reverse {
+            range
+                .rev()
+                .map(|entry| {
+                    let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                    Ok((k.value().to_vec(), v.value().to_vec()))
+                })
+                .collect::<Result<_, StoreError>>()?
+        } else {
+            range
+                .map(|entry| {
+                    let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                    Ok((k.value().to_vec(), v.value().to_vec()))
+                })
+                .collect::<Result<_, StoreError>>()?
+        };
+
+        Ok(entries)
     }
 }
 
@@ -211,6 +276,46 @@ impl<'db> Transaction for RedbTransaction<'db> {
         }
     }
 
+    fn scan_range<'a, R: RangeBounds<Vec<u8>>>(
+        &'a self,
+        cf: &Self::Cf,
+        range: R,
+        reverse: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
+        match &self.inner {
+            Inner::Read(txn) => {
+                let cf_str = cf.to_string();
+                let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(&cf_str);
+                let table = txn
+                    .open_table(def)
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                // The table is keyed `&[u8]`, so borrow the `Vec<u8>` bounds as
+                // byte-slice bounds for the range query.
+                let range = table
+                    .range::<&[u8]>(range_as_byte_bounds(&range))
+                    .map_err(|e| StoreError::Storage(e.to_string()))?;
+                // `.rev()` changes the iterator type, so each arm is boxed separately.
+                if reverse {
+                    Ok(Box::new(range.rev().map(|entry| {
+                        let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                        Ok((k.value().to_vec(), v.value().to_vec()))
+                    })))
+                } else {
+                    Ok(Box::new(range.map(|entry| {
+                        let (k, v) = entry.map_err(|e| StoreError::Storage(e.to_string()))?;
+                        Ok((k.value().to_vec(), v.value().to_vec()))
+                    })))
+                }
+            }
+            Inner::Write(txn) => {
+                let entries = Self::collect_range_write(txn, cf, range, reverse)?;
+                Ok(Box::new(entries.into_iter().map(Ok)))
+            }
+            Inner::Consumed => Err(StoreError::TransactionConsumed),
+        }
+    }
+
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
         self.check_writable()?;
         let def: TableDefinition<'_, &[u8], &[u8]> = TableDefinition::new(cf);
@@ -345,7 +450,7 @@ fn collect_from_readable<T: ReadableTable<&'static [u8], &'static [u8]>>(
     prefix: &[u8],
     upper: Option<&[u8]>,
     reverse: bool,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+) -> Result<Entries, StoreError> {
     let range = if let Some(upper) = upper {
         table.range::<&[u8]>(prefix..upper)
     } else {

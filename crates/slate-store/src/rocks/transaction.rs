@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use rocksdb::{
@@ -133,6 +134,90 @@ impl<'db> Transaction for RocksTransaction<'db> {
                     .map_err(|e| StoreError::Storage(e.to_string()))
             }),
         ))
+    }
+
+    fn scan_range<'a, R: RangeBounds<Vec<u8>>>(
+        &'a self,
+        cf: &Self::Cf,
+        range: R,
+        reverse: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
+    {
+        // RocksDB iterators take a seek point + direction, not a RangeBounds, so
+        // resolve the bounds to owned `Vec<u8>`s captured into the closures.
+        let lo = range.start_bound().cloned();
+        let hi = range.end_bound().cloned();
+        let txn = self.txn()?;
+
+        if reverse {
+            // Seek descending from the upper bound; the start bound stops us.
+            let mode = match &hi {
+                Bound::Included(e) | Bound::Excluded(e) => {
+                    IteratorMode::From(e.as_slice(), Direction::Reverse)
+                }
+                Bound::Unbounded => IteratorMode::End,
+            };
+            let iter = txn.iterator_cf(&cf.handle, mode);
+            // Drop an excluded upper-bound key (the seek lands exactly on it).
+            let hi_excluded = match hi {
+                Bound::Excluded(e) => Some(e),
+                _ => None,
+            };
+            let mapped = iter
+                .skip_while(move |item| match item {
+                    Ok((key, _)) => hi_excluded
+                        .as_ref()
+                        .is_some_and(|e| key.as_ref() == e.as_slice()),
+                    Err(_) => false,
+                })
+                .take_while(move |item| match item {
+                    Ok((key, _)) => match &lo {
+                        Bound::Included(s) => key.as_ref() >= s.as_slice(),
+                        Bound::Excluded(s) => key.as_ref() > s.as_slice(),
+                        Bound::Unbounded => true,
+                    },
+                    Err(_) => true,
+                })
+                .map(|item| {
+                    item.map(|(k, v)| (k.into_vec(), v.into_vec()))
+                        .map_err(|e| StoreError::Storage(e.to_string()))
+                });
+            Ok(Box::new(mapped))
+        } else {
+            // Seek ascending from the lower bound; the end bound stops us.
+            let mode = match &lo {
+                Bound::Included(s) | Bound::Excluded(s) => {
+                    IteratorMode::From(s.as_slice(), Direction::Forward)
+                }
+                Bound::Unbounded => IteratorMode::Start,
+            };
+            let iter = txn.iterator_cf(&cf.handle, mode);
+            // Drop an excluded lower-bound key (the seek lands exactly on it).
+            let lo_excluded = match lo {
+                Bound::Excluded(s) => Some(s),
+                _ => None,
+            };
+            let mapped = iter
+                .skip_while(move |item| match item {
+                    Ok((key, _)) => lo_excluded
+                        .as_ref()
+                        .is_some_and(|s| key.as_ref() == s.as_slice()),
+                    Err(_) => false,
+                })
+                .take_while(move |item| match item {
+                    Ok((key, _)) => match &hi {
+                        Bound::Included(e) => key.as_ref() <= e.as_slice(),
+                        Bound::Excluded(e) => key.as_ref() < e.as_slice(),
+                        Bound::Unbounded => true,
+                    },
+                    Err(_) => true,
+                })
+                .map(|item| {
+                    item.map(|(k, v)| (k.into_vec(), v.into_vec()))
+                        .map_err(|e| StoreError::Storage(e.to_string()))
+                });
+            Ok(Box::new(mapped))
+        }
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {

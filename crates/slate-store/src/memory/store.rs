@@ -114,7 +114,9 @@ impl BackupStore for MemoryStore {
 }
 
 /// Convert RangeBounds<Vec<u8>> to concrete bounds for OrdMap::range.
-fn range_to_ord_bounds(range: &impl RangeBounds<Vec<u8>>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+pub(crate) fn range_to_ord_bounds(
+    range: &impl RangeBounds<Vec<u8>>,
+) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     let start = match range.start_bound() {
         Bound::Included(b) => Bound::Included(b.clone()),
         Bound::Excluded(b) => Bound::Excluded(b.clone()),

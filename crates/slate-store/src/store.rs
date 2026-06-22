@@ -61,6 +61,17 @@ pub trait Transaction {
         cf: &Self::Cf,
         prefix: &[u8],
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
+    /// Scan the key `range` within a column family, in the given direction.
+    ///
+    /// Yields every `(key, value)` whose key falls in `range`, ascending when
+    /// `reverse` is false and descending when true — `reverse` only flips order
+    /// over the same set. Bound style mirrors `Store::delete_range`.
+    fn scan_range<'a, R: RangeBounds<Vec<u8>>>(
+        &'a self,
+        cf: &Self::Cf,
+        range: R,
+        reverse: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>;
 
     // Writes
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError>;

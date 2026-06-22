@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ops::{Bound, RangeBounds};
 use std::sync::{Arc, MutexGuard};
 
 use imbl::ordmap::RangedIter;
@@ -7,7 +8,7 @@ use imbl::ordmap::RangedIter;
 use crate::error::StoreError;
 use crate::store::{Store, Transaction, increment_prefix};
 
-use super::store::{ColumnFamily, MemoryStore};
+use super::store::{ColumnFamily, MemoryStore, range_to_ord_bounds};
 
 // ── Lazy prefix iterator ─────────────────────────────────────
 
@@ -78,6 +79,54 @@ impl Iterator for PrefixIter {
         if !k.starts_with(&self.prefix) {
             return None;
         }
+        Some(Ok((k.clone(), v.clone())))
+    }
+}
+
+/// Lazily iterates over an `OrdMap` key range without collecting into a Vec.
+///
+/// Owns the `Arc<ColumnFamily>` to keep the map alive while iterating.
+/// Uses `unsafe` to extend the `RangedIter` lifetime — safe because the OrdMap
+/// is heap-allocated behind the Arc and won't be dropped while this struct exists.
+/// The `(Bound, Bound)` range does the filtering, so no prefix check is needed.
+struct RangeIter {
+    _data: Arc<ColumnFamily>,
+    iter: RangedIter<'static, Vec<u8>, Vec<u8>>,
+    reverse: bool,
+}
+
+impl RangeIter {
+    fn new(
+        data: Arc<ColumnFamily>,
+        bounds: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+        reverse: bool,
+    ) -> Self {
+        // SAFETY: `data` is heap-allocated via Arc and won't be dropped or moved
+        // while this struct exists. The RangedIter borrows from the OrdMap inside
+        // the Arc. We transmute the lifetime to 'static.
+        let iter: RangedIter<'static, Vec<u8>, Vec<u8>> = unsafe {
+            std::mem::transmute::<
+                RangedIter<'_, Vec<u8>, Vec<u8>>,
+                RangedIter<'static, Vec<u8>, Vec<u8>>,
+            >(data.range(bounds))
+        };
+        Self {
+            _data: data,
+            iter,
+            reverse,
+        }
+    }
+}
+
+impl Iterator for RangeIter {
+    type Item = Result<(Vec<u8>, Vec<u8>), StoreError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (k, v) = if self.reverse {
+            self.iter.next_back()?
+        } else {
+            self.iter.next()?
+        };
         Some(Ok((k.clone(), v.clone())))
     }
 }
@@ -222,6 +271,20 @@ impl<'a> Transaction for MemoryTransaction<'a> {
         let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
         let data = Arc::clone(snap_ref.get_cf(&cf.name)?);
         Ok(Box::new(PrefixIter::reverse(data, prefix.to_vec())))
+    }
+
+    fn scan_range<'b, R: RangeBounds<Vec<u8>>>(
+        &'b self,
+        cf: &Self::Cf,
+        range: R,
+        reverse: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b>, StoreError>
+    {
+        let snap = self.snapshot.borrow();
+        let snap_ref = snap.as_ref().ok_or(StoreError::TransactionConsumed)?;
+        let data = Arc::clone(snap_ref.get_cf(&cf.name)?);
+        let bounds = range_to_ord_bounds(&range);
+        Ok(Box::new(RangeIter::new(data, bounds, reverse)))
     }
 
     fn put(&self, cf: &Self::Cf, key: &[u8], value: &[u8]) -> Result<(), StoreError> {
