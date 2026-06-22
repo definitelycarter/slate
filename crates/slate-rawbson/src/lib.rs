@@ -177,6 +177,12 @@ impl<'a> RawField<'a> {
                 );
                 Some(RawBsonRef::Int64(v))
             }
+            ElementType::Decimal128 => {
+                let bytes: [u8; 16] = self.bytes[self.value_start..self.value_start + 16]
+                    .try_into()
+                    .ok()?;
+                Some(RawBsonRef::Decimal128(bson::Decimal128::from_bytes(bytes)))
+            }
             _ => None,
         }
     }

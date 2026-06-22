@@ -21,7 +21,8 @@ use bson::{Bson, RawBson};
 
 use crate::error::{EvalError, Result};
 use crate::eval::{
-    Num, Scalar, and3, arith, as_number, cmp_pred, compare_scalar, or3, scalar_of_bson,
+    Num, Scalar, and3, arith, as_number, cmp_pred, compare_scalar, decimal_to_f64, or3,
+    scalar_of_bson,
 };
 use crate::value::Value;
 use slate_ast::{BinOp, Expression, Literal, UnaryOp};
@@ -530,6 +531,7 @@ fn scalar_of_raw(r: RawBsonRef<'_>) -> Option<Scalar<'_>> {
         RawBsonRef::Int32(i) => Scalar::Num(Num::Int(i as i64)),
         RawBsonRef::Int64(i) => Scalar::Num(Num::Int(i)),
         RawBsonRef::Double(f) => Scalar::Num(Num::Float(f)),
+        RawBsonRef::Decimal128(d) => Scalar::Num(Num::Float(decimal_to_f64(&d)?)),
         RawBsonRef::String(s) => Scalar::Str(s),
         RawBsonRef::Boolean(b) => Scalar::Bool(b),
         RawBsonRef::Null => Scalar::Null,
@@ -556,6 +558,7 @@ fn raw_as_number(r: RawBsonRef<'_>) -> Option<Num> {
         RawBsonRef::Int32(i) => Some(Num::Int(i as i64)),
         RawBsonRef::Int64(i) => Some(Num::Int(i)),
         RawBsonRef::Double(f) => Some(Num::Float(f)),
+        RawBsonRef::Decimal128(d) => Some(Num::Float(decimal_to_f64(&d)?)),
         _ => None,
     }
 }

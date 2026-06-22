@@ -18,7 +18,7 @@
 
 use bson::Bson;
 
-use crate::eval::order_bson;
+use crate::eval::{decimal_to_f64, order_bson};
 use crate::value::Value;
 
 /// The aggregate functions the planner recognizes in a `SELECT`/`HAVING`.
@@ -185,6 +185,7 @@ fn num_f64(b: &Bson) -> Option<f64> {
         Bson::Int32(i) => Some(*i as f64),
         Bson::Int64(i) => Some(*i as f64),
         Bson::Double(f) => Some(*f),
+        Bson::Decimal128(d) => decimal_to_f64(d),
         _ => None,
     }
 }

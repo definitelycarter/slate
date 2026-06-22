@@ -307,6 +307,7 @@ pub(crate) fn scalar_of_bson(b: &Bson) -> Option<Scalar<'_>> {
         Bson::Int32(i) => Scalar::Num(Num::Int(*i as i64)),
         Bson::Int64(i) => Scalar::Num(Num::Int(*i)),
         Bson::Double(f) => Scalar::Num(Num::Float(*f)),
+        Bson::Decimal128(d) => Scalar::Num(Num::Float(decimal_to_f64(d)?)),
         Bson::String(s) => Scalar::Str(s),
         Bson::Boolean(x) => Scalar::Bool(*x),
         Bson::Null => Scalar::Null,
@@ -361,7 +362,7 @@ fn type_rank(b: &Bson) -> u8 {
     match b {
         Bson::Null => 0,
         Bson::Boolean(_) => 1,
-        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) => 2,
+        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => 2,
         Bson::String(_) => 3,
         Bson::DateTime(_) => 4,
         Bson::Array(_) => 5,
@@ -382,8 +383,26 @@ pub(crate) fn as_number(b: &Bson) -> Option<Num> {
         Bson::Int32(i) => Some(Num::Int(*i as i64)),
         Bson::Int64(i) => Some(Num::Int(*i)),
         Bson::Double(f) => Some(Num::Float(*f)),
+        Bson::Decimal128(d) => Some(Num::Float(decimal_to_f64(d)?)),
         _ => None,
     }
+}
+
+/// Read a `Decimal128` as an `f64` so it joins slate's single f64 number tower
+/// (matching Cosmos's one-number model): comparisons, arithmetic, and
+/// aggregates treat a stored decimal by its `f64` value. Exact within f64's
+/// ~15-17 significant digits — which covers realistic money/measurement data —
+/// and only diverges in the low bits beyond that. The stored `Decimal128` is
+/// never mutated, so `find` still round-trips it losslessly; only *computed*
+/// SQL results are f64.
+///
+/// Goes via the canonical string because `bson::Decimal128` exposes no numeric
+/// accessor. That allocates per value; if a decimal column ever shows up in a
+/// hot aggregate, a decimal crate (or manual coefficient/exponent decode) would
+/// avoid it. `None` only if the canonical form fails to parse (defensive —
+/// valid decimals always parse; `NaN`/`Infinity` parse to their f64 forms).
+pub(crate) fn decimal_to_f64(d: &bson::Decimal128) -> Option<f64> {
+    d.to_string().parse::<f64>().ok()
 }
 
 pub(crate) fn num_f64(n: &Num) -> f64 {
