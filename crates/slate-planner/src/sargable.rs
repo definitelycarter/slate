@@ -487,14 +487,22 @@ fn as_atom(expr: &Expression, alias: &str) -> Option<(String, BinOp, Bson)> {
     if !is_comparison(*op) {
         return None;
     }
-    if let (Some(path), Some(lit)) = (path_of(lhs.as_ref(), alias), as_literal(rhs.as_ref())) {
-        Some((path, *op, lit))
+    let (path, op, lit) = if let (Some(path), Some(lit)) =
+        (path_of(lhs.as_ref(), alias), as_literal(rhs.as_ref()))
+    {
+        (path, *op, lit)
     } else if let (Some(lit), Some(path)) = (as_literal(lhs.as_ref()), path_of(rhs.as_ref(), alias))
     {
-        Some((path, flip(*op), lit))
+        (path, flip(*op), lit)
     } else {
-        None
-    }
+        return None;
+    };
+    // A sparse index stores only scalar non-null values (`is_indexable_scalar`), so a
+    // comparison against a null / non-scalar literal can never be answered from it —
+    // e.g. `x = null` would scan an index that by construction holds no nulls,
+    // returning the wrong rows (the complement). Not sargable → falls back to a
+    // Filter, which evaluates it correctly.
+    is_indexable_scalar(&lit).then_some((path, op, lit))
 }
 
 // ── Mongo idiom recognition ─────────────────────────────────────
@@ -559,7 +567,11 @@ fn as_multikey_eq(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
     if !matches!(base.as_ref(), Expression::Identifier(a) if a == alias) {
         return None;
     }
-    Some((index_path.clone(), as_literal(value)?))
+    let value = as_literal(value)?;
+    // Same sparse-index reasoning as `scalar_needle`/`as_atom`: a null/non-scalar
+    // element is never indexed, so `{x.[]: null}` can't be answered from the element
+    // index. Not sargable → Filter.
+    is_indexable_scalar(&value).then_some((index_path.clone(), value))
 }
 
 /// The value of a primary-key equality on `pk` — a plain `Eq` atom or the Mongo
