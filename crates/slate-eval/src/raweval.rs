@@ -489,6 +489,13 @@ fn eval_binop<'a>(op: BinOp, l: RawValue<'a>, r: RawValue<'a>) -> RawValue<'a> {
 fn build_object<'a>(fields: &'a [(String, Expression)], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     // Build the result directly in raw form: each field value is appended as
     // raw bytes, so the projected document needs no Bson round-trip on output.
+    //
+    // This re-validates each key per call. The hot projection path doesn't reach
+    // here — `compile`/`Compiled::Object` validates keys once into [`ObjKey`] and
+    // appends by reference (see [`append_field`]). This interpreter path only
+    // runs for the uncompiled callers (`eval`), i.e. object literals in
+    // `ORDER BY` / `GROUP BY` / `JOIN … IN` expressions, which are rare; routing
+    // those nodes through `compile` would remove the per-call key validation.
     let mut doc = RawDocumentBuf::new();
     for (k, v) in fields {
         // Undefined fields are omitted (Cosmos behavior).

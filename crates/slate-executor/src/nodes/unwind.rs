@@ -4,7 +4,7 @@
 //! one row per element, extending the environment with `{alias: element}`. A
 //! non-array or undefined `array` yields no rows (inner-join semantics).
 
-use bson::raw::{BindRawBsonRef, CString, RawBsonRef, RawDocumentBuf};
+use bson::raw::{BindRawBsonRef, CStr, CString, RawBsonRef, RawDocumentBuf};
 use bson::{Bson, RawBson};
 use slate_ast::Expression;
 use slate_eval::EvalError;
@@ -20,9 +20,22 @@ pub(crate) fn execute<'a>(
     source: ValueIter<'a>,
     params: env::Params,
 ) -> ValueIter<'a> {
+    // The unwind alias is stable for the whole stream, so validate it into a
+    // `CString` once and append it by reference for every emitted row rather than
+    // re-allocating it per element. A rejected alias (interior NUL — vanishingly
+    // rare) aborts the stream with the same error.
+    let alias_key = match CString::try_from(alias.as_str()) {
+        Ok(key) => key,
+        Err(e) => {
+            let err = ExecError::Eval(EvalError {
+                message: format!("invalid binding alias '{alias}': {e}"),
+            });
+            return Box::new(std::iter::once(Err(err)));
+        }
+    };
     Box::new(source.flat_map(move |item| {
         let rows: Box<dyn Iterator<Item = Result<Option<RawBson>, ExecError>>> = match item {
-            Ok(Some(row)) => match expand(&row, &alias, &array, env::params_doc(&params)) {
+            Ok(Some(row)) => match expand(&row, &alias_key, &array, env::params_doc(&params)) {
                 Ok(rows) => Box::new(rows.into_iter().map(|r| Ok(Some(r)))),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             },
@@ -33,15 +46,23 @@ pub(crate) fn execute<'a>(
     }))
 }
 
-/// Produce the extended environment rows for one input row.
+/// Produce the extended environment rows for one input row. `alias_key` is the
+/// unwind alias, validated once by the caller.
 fn expand(
     row: &RawBson,
-    alias: &str,
+    alias_key: &CStr,
     array: &Expression,
     params: Option<&bson::RawDocument>,
 ) -> Result<Vec<RawBson>, ExecError> {
     let bindings = env::bindings_of(row)?;
     let renv = env::raw_env(&bindings, params);
+
+    // Validate the existing binding keys into `CString`s once for this row, so
+    // each emitted element reuses them by reference instead of re-validating.
+    let keyed: Vec<(CString, RawBsonRef)> = bindings
+        .iter()
+        .map(|(k, v)| Ok((cstring(k)?, *v)))
+        .collect::<Result<_, ExecError>>()?;
 
     let mut out = Vec::new();
     // Each output row is `{<existing bindings>, alias: <element>}`, built by
@@ -53,7 +74,7 @@ fn expand(
                 let elem = elem.map_err(|e| EvalError {
                     message: format!("could not read array element: {e}"),
                 })?;
-                out.push(extend_env(&bindings, alias, elem)?);
+                out.push(extend_env(&keyed, alias_key, elem));
             }
         }
         // Computed array (e.g. from an object/function): elements are owned.
@@ -62,7 +83,7 @@ fn expand(
                 let raw = RawBson::try_from(item).map_err(|e| EvalError {
                     message: format!("could not encode unwound element: {e}"),
                 })?;
-                out.push(extend_env(&bindings, alias, raw)?);
+                out.push(extend_env(&keyed, alias_key, raw));
             }
         }
         // A constructed array kept in raw form — an array literal (`[…]`) or a
@@ -72,7 +93,7 @@ fn expand(
                 let elem = elem.map_err(|e| EvalError {
                     message: format!("could not read array element: {e}"),
                 })?;
-                out.push(extend_env(&bindings, alias, elem)?);
+                out.push(extend_env(&keyed, alias_key, elem));
             }
         }
         _ => {}
@@ -80,20 +101,21 @@ fn expand(
     Ok(out)
 }
 
-/// Build one extended environment document: the existing `bindings` plus
-/// `alias -> elem`. `elem` may be a borrowed `RawBsonRef` or an owned `RawBson`
-/// (both bind into the buffer).
+/// Build one extended environment document: the existing `keyed` bindings plus
+/// `alias_key -> elem`. `elem` may be a borrowed `RawBsonRef` or an owned
+/// `RawBson` (both bind into the buffer). Keys are pre-validated, so this cannot
+/// fail.
 fn extend_env(
-    bindings: &[(&str, RawBsonRef<'_>)],
-    alias: &str,
+    keyed: &[(CString, RawBsonRef<'_>)],
+    alias_key: &CStr,
     elem: impl BindRawBsonRef,
-) -> Result<RawBson, ExecError> {
+) -> RawBson {
     let mut doc = RawDocumentBuf::new();
-    for (k, v) in bindings {
-        doc.append(cstring(k)?, *v);
+    for (k, v) in keyed {
+        doc.append(k, *v);
     }
-    doc.append(cstring(alias)?, elem);
-    Ok(RawBson::Document(doc))
+    doc.append(alias_key, elem);
+    RawBson::Document(doc)
 }
 
 fn cstring(s: &str) -> Result<CString, ExecError> {

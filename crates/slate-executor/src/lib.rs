@@ -33,6 +33,7 @@ pub mod bench;
 
 use std::rc::Rc;
 
+use bson::raw::CString;
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, EngineTransaction};
 use slate_eval::EvalError;
@@ -308,12 +309,18 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
+                // The slot name is stable across every outer row, so validate it
+                // into a `CString` once here rather than rebuilding it per row in
+                // `augment`.
+                let key = CString::try_from(slot.as_str()).map_err(|e| EvalError {
+                    message: format!("invalid subquery slot '{slot}': {e}"),
+                })?;
                 let mut out: Vec<RawBson> = Vec::new();
                 for item in source {
                     let Some(row) = item? else { continue };
                     let sub = self.execute_node((*subplan).clone(), Some(&row))?;
                     let value = nodes::subquery::reduce(sub, kind)?;
-                    out.push(nodes::subquery::augment(row, &slot, value)?);
+                    out.push(nodes::subquery::augment(row, &key, value)?);
                 }
                 Box::new(out.into_iter().map(|v| Ok(Some(v))))
             }

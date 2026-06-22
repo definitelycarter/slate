@@ -8,17 +8,27 @@ use bson::RawBson;
 use bson::raw::{CString, RawDocumentBuf};
 use slate_eval::EvalError;
 
-use crate::ValueIter;
+use crate::{ExecError, ValueIter};
 
 /// Wrap each value from `source` as `{alias: value}`.
 pub(crate) fn execute<'a>(alias: String, source: ValueIter<'a>) -> ValueIter<'a> {
+    // The alias is stable for the whole stream, so validate it into a `CString`
+    // once and append it by reference per row rather than re-allocating it for
+    // every value. A rejected alias (interior NUL — vanishingly rare) aborts the
+    // stream with the same error.
+    let key = match CString::try_from(alias.as_str()) {
+        Ok(key) => key,
+        Err(e) => {
+            let err = ExecError::Eval(EvalError {
+                message: format!("invalid binding alias '{alias}': {e}"),
+            });
+            return Box::new(std::iter::once(Err(err)));
+        }
+    };
     Box::new(source.map(move |item| {
         let Some(value) = item? else {
             return Ok(None);
         };
-        let key = CString::try_from(alias.as_str()).map_err(|e| EvalError {
-            message: format!("invalid binding alias '{alias}': {e}"),
-        })?;
         let mut doc = RawDocumentBuf::new();
         doc.append(&key, value);
         Ok(Some(RawBson::Document(doc)))

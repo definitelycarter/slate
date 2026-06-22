@@ -5,7 +5,7 @@
 //! row stream to the slot value, and attach that value to the outer row.
 
 use bson::RawBson;
-use bson::raw::{CString, RawArrayBuf};
+use bson::raw::{CStr, RawArrayBuf};
 use slate_ast::SubqueryKind;
 use slate_eval::EvalError;
 
@@ -45,12 +45,12 @@ pub(crate) fn reduce(iter: ValueIter, kind: SubqueryKind) -> Result<Option<RawBs
     }
 }
 
-/// Attach the subquery result to the outer environment row under `slot`. An
-/// undefined result (`None`) is omitted, matching how undefined is dropped from
-/// documents elsewhere.
+/// Attach the subquery result to the outer environment row under `key` (the slot
+/// name, validated once by the caller). An undefined result (`None`) is omitted,
+/// matching how undefined is dropped from documents elsewhere.
 pub(crate) fn augment(
     row: RawBson,
-    slot: &str,
+    key: &CStr,
     value: Option<RawBson>,
 ) -> Result<RawBson, ExecError> {
     let RawBson::Document(mut doc) = row else {
@@ -60,9 +60,6 @@ pub(crate) fn augment(
         .into());
     };
     if let Some(value) = value {
-        let key = CString::try_from(slot).map_err(|e| EvalError {
-            message: format!("invalid subquery slot '{slot}': {e}"),
-        })?;
         doc.append(key, value);
     }
     Ok(RawBson::Document(doc))
