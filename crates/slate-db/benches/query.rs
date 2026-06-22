@@ -335,6 +335,39 @@ fn bench_query_array_match(c: &mut Criterion) {
     group.finish();
 }
 
+/// `ARRAY_CONTAINS(c.tags, "rare")` over a `tags.[]` multikey index versus the
+/// same query with no index (full scan). Pins the increment-A win: a selective
+/// containment test should beat the full scan on an array-valued corpus.
+fn bench_query_array_contains(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_array_contains");
+    let sql = "SELECT VALUE c FROM c WHERE ARRAY_CONTAINS(c.tags, \"rare\")";
+    for n in [1_000, 10_000] {
+        let indexed = array_tags_engine(n, true);
+        let unindexed = array_tags_engine(n, false);
+        group.bench_with_input(BenchmarkId::new("multikey_index", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = indexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("full_scan", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = unindexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 // ── Distinct Benchmarks ─────────────────────────────────────
 
 fn bench_distinct_indexed_low(c: &mut Criterion) {
@@ -550,6 +583,7 @@ criterion_group!(
     bench_query_point_lookup,
     bench_query_projection,
     bench_query_array_match,
+    bench_query_array_contains,
     bench_distinct_indexed_low,
     bench_distinct_indexed_high,
     bench_distinct_non_indexed,

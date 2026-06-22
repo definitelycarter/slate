@@ -73,11 +73,16 @@ full function/operator/subquery surface audited against `file:line` — defines 
 single doctrine and a unified `sargable() -> IndexAccess` recogniser (validated to
 cover the Eq/Range/Merge/Multikey/Spatial families). Increments, in order:
 
-- **Recogniser refactor + A — multikey containment** (`ARRAY_CONTAINS`/`_ANY`/`_ALL`
-  → multikey `Eq`/`Merge`), landed together. A also closes a latent dedup bug: a
-  `.[]` Eq scan emits one doc-id per matching element and nothing below a lone
-  `IndexScan → KeyLookup` de-duplicates, so a multikey pushdown must route doc-ids
-  through the `IndexMerge` dedup.
+- **Recogniser refactor + A — multikey containment — Done.** The ad-hoc `as_*`
+  helpers are now one `sargable() -> Option<(IndexAccess, Residual)>` entry point
+  that `plan_source` lowers (one arm per shape: `Scan`/`Multikey`/`Merge`). SQL
+  `ARRAY_CONTAINS`/`_ANY`/`_ALL` over a `.[]` index plan as multikey index access
+  (`_ANY` → `Merge(Or)`, `_ALL` → `Merge(And)`), with the predicate retained as a
+  recheck and the index name derived (`tags` → `tags.[]`). A also closed a latent
+  dedup bug: a `.[]` Eq scan emits one doc-id per matching element and nothing
+  below a lone `IndexScan → KeyLookup` de-duplicates, so every `Multikey` access
+  now routes its doc-ids through a dedup before `KeyLookup` (fixing the same
+  duplicate-row bug in the Mongo `{tags.[]: v}` / `MultikeyEq` form too).
 - **B — prefix range** (`STARTSWITH` / `LIKE 'pre%'` → string `Range [pre, pre⁺)`
   via a new `IndexScanRange::StringPrefix`). The proof holds (no UTF-8 byte is
   `0xFF`, so the last-byte increment never carries). B was **gated on the

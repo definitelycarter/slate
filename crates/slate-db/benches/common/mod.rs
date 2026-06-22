@@ -114,6 +114,49 @@ pub fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
         .collect()
 }
 
+/// Seed an array-valued `tags` corpus for the multikey-containment benchmark.
+/// Each doc carries 2–4 common tags plus a selective `"rare"` tag on ~1% of
+/// documents. With `indexed`, a `tags.[]` multikey index is created so
+/// `ARRAY_CONTAINS(c.tags, "rare")` plans as a multikey `IndexScan`; without it
+/// the same query full-scans — the before/after the bench contrasts.
+pub fn array_tags_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
+    let engine = db_builder().open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "bench".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    if indexed {
+        txn.create_index(DEFAULT_CF, "bench", "tags.[]").unwrap();
+    }
+    let mut rng = StdRng::seed_from_u64(7);
+    let docs: Vec<bson::Document> = (0..n)
+        .map(|i| {
+            let tag_count = rng.gen_range(2..=4);
+            let mut tags: Vec<&str> = (0..tag_count)
+                .map(|_| TAGS[rng.gen_range(0..TAGS.len())])
+                .collect();
+            if rng.gen_ratio(1, 100) {
+                tags.push("rare");
+            }
+            bson::doc! {
+                "_id": format!("rec-{i}"),
+                "name": format!("Company-{i}"),
+                "tags": tags,
+            }
+        })
+        .collect();
+    for chunk in docs.chunks(1000) {
+        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
+            .unwrap()
+            .drain()
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();

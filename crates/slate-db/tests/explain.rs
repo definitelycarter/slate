@@ -79,6 +79,76 @@ fn unindexed_predicate_stays_a_filtered_scan() {
     );
 }
 
+/// A collection whose `tags.[]` multikey index lets `ARRAY_CONTAINS` push down.
+fn seeded_tags() -> Database<MemoryStore> {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "posts".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.create_index(DEFAULT_CF, "posts", "tags.[]").unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "posts",
+        vec![
+            bson::doc! { "_id": "1", "tags": ["rust", "db"] },
+            bson::doc! { "_id": "2", "tags": ["go", "api"] },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+    db
+}
+
+fn explain_tags(db: &Database<MemoryStore>, sql: &str) -> String {
+    let txn = db.begin(true).unwrap();
+    let plan = txn.explain(DEFAULT_CF, "posts", sql).unwrap();
+    txn.rollback().unwrap();
+    plan
+}
+
+#[test]
+fn array_contains_over_multikey_index_plans_as_index_scan() {
+    // SQL `ARRAY_CONTAINS(c.tags, 'x')` over a `tags.[]` index reaches the
+    // multikey element index — an IndexScan on `tags.[]`, not a full scan — with
+    // the original predicate retained as a residual recheck.
+    let plan = explain_tags(
+        &seeded_tags(),
+        "SELECT VALUE c FROM c WHERE ARRAY_CONTAINS(c.tags, \"rust\")",
+    );
+    assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
+    assert!(
+        plan.contains("posts.tags.[]"),
+        "index scan should name the multikey field: {plan}"
+    );
+    assert!(
+        plan.contains("Filter ARRAY_CONTAINS(c.tags, \"rust\")"),
+        "the original predicate should be retained as a recheck: {plan}"
+    );
+}
+
+#[test]
+fn array_contains_three_arg_partial_stays_a_filtered_scan() {
+    // The 3-arg partial form matches more than the indexed elements, so it is
+    // not pushed down: a full scan gated by the filter, no IndexScan.
+    let plan = explain_tags(
+        &seeded_tags(),
+        "SELECT VALUE c FROM c WHERE ARRAY_CONTAINS(c.tags, \"rust\", true)",
+    );
+    assert!(
+        !plan.contains("IndexScan"),
+        "the 3-arg partial form must not use the index: {plan}"
+    );
+    assert!(
+        plan.contains("Filter ARRAY_CONTAINS(c.tags, \"rust\", true)"),
+        "expected the residual filter: {plan}"
+    );
+}
+
 #[test]
 fn references_to_parameters_are_rejected_like_query() {
     // `explain` binds no parameters (matching `query`), so a query that names an

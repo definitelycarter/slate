@@ -725,6 +725,7 @@ SELECT VALUE ARRAY_CONCAT(["backpacks", "daypacks"], ["hippacks"])
 Tests whether an array contains a value, comparing elements with numeric coercion and optionally matching objects by subset.
 - **Returns:** Boolean; with a third argument of `true`, objects match partially (an element matches when it contains all of `value`'s fields, recursively).
 - **Example:** `ARRAY_CONTAINS(["a", 7], 7)` → `true`
+- **Index-accelerated** when the array argument is a field path with a multikey (`.[]`) index and the needle is a scalar literal: `ARRAY_CONTAINS(c.tags, "x")` over a `tags.[]` index plans as a multikey `IndexScan`, not a full scan. The 3-arg `partial` form is not accelerated (it matches more than the indexed elements). See [Plan Scenarios](./plan-scenarios.md).
 
 ```slate-sql
 SELECT VALUE ARRAY_CONTAINS(["a", 7], 7)
@@ -734,6 +735,7 @@ SELECT VALUE ARRAY_CONTAINS(["a", 7], 7)
 Tests whether an array contains every one of the given values.
 - **Returns:** Boolean; a missing defined value gives `false`, but if all defined values are present and any argument is `undefined` the result is undefined (requires at least 2 args).
 - **Example:** `ARRAY_CONTAINS_ALL([1, 2, 3, 4], 2, 3, 4, 5)` → `false`
+- **Index-accelerated** over a multikey (`.[]`) index when every needle is a scalar literal: it plans as an `IndexMerge(And)` of per-value element scans (the intersection of their doc-id sets). See [Plan Scenarios](./plan-scenarios.md).
 
 ```slate-sql
 SELECT VALUE ARRAY_CONTAINS_ALL([1, 2, 3, 4], 2, 3, 4, 5)
@@ -743,6 +745,7 @@ SELECT VALUE ARRAY_CONTAINS_ALL([1, 2, 3, 4], 2, 3, 4, 5)
 Tests whether an array contains any one of the given values.
 - **Returns:** Boolean; a present value gives `true`, but if no defined value is present and any argument is `undefined` the result is undefined (requires at least 2 args).
 - **Example:** `ARRAY_CONTAINS_ANY([1, 2, 3, 4], 2, 3, 4, 5)` → `true`
+- **Index-accelerated** over a multikey (`.[]`) index when every needle is a scalar literal: it plans as an `IndexMerge(Or)` of per-value element scans (the union of their doc-id sets). See [Plan Scenarios](./plan-scenarios.md).
 
 ```slate-sql
 SELECT VALUE ARRAY_CONTAINS_ANY([1, 2, 3, 4], 2, 3, 4, 5)

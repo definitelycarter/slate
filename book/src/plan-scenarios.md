@@ -308,9 +308,27 @@ Filter(tags = "renewal_due" OR ARRAY_CONTAINS(tags, "renewal_due"))
   └── Scan
 ```
 
-The Mongo `{tags: v}` form lowers to the implicit-equality idiom `tags = v OR ARRAY_CONTAINS(tags, v)`: it matches when `tags` equals `v` *or* is an array containing `v`. The evaluator iterates array elements, delegating each to the shared scalar comparison (so cross-type coercion works within elements) — matching MongoDB's behavior without `$elemMatch`.
+The Mongo `{tags: v}` form lowers to the implicit-equality idiom `tags = v OR ARRAY_CONTAINS(tags, v)`: it matches when `tags` equals `v` *or* is an array containing `v`. The evaluator iterates array elements, delegating each to the shared scalar comparison (so cross-type coercion works within elements) — matching MongoDB's behavior without `$elemMatch`. With **no** `.[]` index on `tags`, this stays a `Scan`: a scalar index holds no array entries, so the `ARRAY_CONTAINS` branch can't be served from one. To reach an array index, see scenario 20. Sorting on array fields has no meaningful scalar ordering and is unsupported.
 
-For an **explicit** multikey path (`tags.[]`, `items.[].sku`), the front-end emits a `MultikeyEq` the planner can match to a `.[]` index. Sorting on array fields has no meaningful scalar ordering and is unsupported.
+---
+
+### 20. Multikey Index Access — `ARRAY_CONTAINS` over a `.[]` Index
+
+**Query:** `SELECT VALUE c FROM c WHERE ARRAY_CONTAINS(c.tags, "renewal_due")` (with a `tags.[]` index)
+
+```
+Filter(ARRAY_CONTAINS(tags, "renewal_due"))
+  └── KeyLookup
+        └── Distinct
+              └── IndexScan(tags.[] = "renewal_due")
+```
+
+The `tags.[]` multikey index has one entry per array element, so a containment test becomes an element `IndexScan`. Two details make this correct:
+
+- **Dedup.** A document whose array has the value more than once (`tags: ["db", "db"]`) yields its doc-id once per matching element, and `KeyLookup` doesn't deduplicate — so a `Distinct` collapses the id stream before the lookup, or the same document would return as two rows. (Every multikey access deduplicates this way, which also fixes the same latent bug in the Mongo `{tags.[]: v}` / `MultikeyEq` form.)
+- **Retained recheck.** The predicate stays as a residual `Filter`: the element index is a conservative superset (numeric needles scan cross-type, then the recheck keeps it exact), never a false negative.
+
+The index name is derived — SQL carries the bare path `tags`, matched against the registered `tags.[]` index. The Mongo `{tags.[]: v}` form (a `MultikeyEq`) lowers to the identical deduped `IndexScan`. The set forms fan out per value: `ARRAY_CONTAINS_ANY(c.tags, "a", "b")` is an `IndexMerge(Or)` of per-value element scans (union), and `ARRAY_CONTAINS_ALL` an `IndexMerge(And)` (intersection). A non-scalar or non-literal needle, or the 3-arg `partial` form, is not sargable and stays a `Scan`.
 
 ---
 
