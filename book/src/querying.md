@@ -113,6 +113,16 @@ Two deliberate differences from a Mongo `find` projection:
 
 **Subqueries.** A subquery ranges over an *in-document array* (`FROM x IN <array>`), never another container, so it's a per-row sub-pipeline rather than a second scan. Three forms are supported: a scalar `(SELECT …)` (its single value, or undefined), `EXISTS (…)` (a boolean), and `ARRAY (…)` (the rows collected into an array). They appear in `SELECT` and `WHERE`, may be **correlated** (referencing the outer row, e.g. `(SELECT VALUE COUNT(1) FROM t IN c.tags)`) or uncorrelated (a literal source), and may nest to any depth — e.g. `WHERE EXISTS (SELECT VALUE t FROM t IN c.tags WHERE t.key = "fabric")`. (A subquery as a `JOIN` source isn't supported yet.)
 
+### Numbers and comparison
+
+slate evaluates all numbers — `Int32`, `Int64`, `Double`, and `Decimal128` (`$numberDecimal`) — in one `f64` tower, matching Cosmos's single JSON number model. A stored decimal is therefore fully queryable: `SELECT c.price`, `WHERE c.price > 100`, `ORDER BY c.price`, and aggregates all work. The contract:
+
+- **The stored value is preserved.** A projected decimal comes back as the original `Decimal128`, and `find` round-trips it byte-for-byte — only *computed* results are ever `f64`.
+- **`SUM`/`AVG` return a double; `MIN`/`MAX` return the original `Decimal128`.**
+- **Comparison and sort use the `f64` value** — exact for realistic magnitudes, diverging only beyond ~15–17 significant digits.
+
+Comparison is **per-domain**: numbers compare to numbers, strings to strings, dates to dates; values from different domains are not order-comparable, so a `WHERE` over them matches nothing. One gotcha follows from that: a stored `$date` is a real BSON `DateTime`, so `WHERE c.when > "2024-01-01"` compares a date against a *string* and returns no rows — compare dates to dates. (Cosmos stores dates as ISO strings, which is why the string form appears to work there.)
+
 ### Iterating results
 
 A `Cursor` — from `find` or `query` — exposes:
