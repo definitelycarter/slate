@@ -275,6 +275,19 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         Ok(Cursor::new_with_params(&self.txn, plan, self.pool, params))
     }
 
+    /// Explain a query: lower it to a physical plan and render that plan as an
+    /// indented operator tree, without running it.
+    ///
+    /// Lowering is exactly what [`query`](Self::query) does — same parse, same
+    /// planner, same index choice — so the tree shows the plan the query would
+    /// actually run. Like `query`, this binds no parameters, so a `sql` that
+    /// references an `@parameter` is rejected (the plan shape never depends on a
+    /// parameter's value, only on its presence in the query text).
+    pub fn explain(&self, cf: &str, collection: &str, sql: &str) -> Result<String, DbError> {
+        let plan = self.lower_sql(cf, collection, sql, None)?;
+        Ok(plan.explain())
+    }
+
     /// Parse and lower a SQL string into a plan (shared by `query` and
     /// `query_with_params`).
     ///
