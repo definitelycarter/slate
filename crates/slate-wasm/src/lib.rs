@@ -113,7 +113,7 @@ impl SlateDb {
         // `f64` in `[0, 1)`, matching what slate's evaluator expects.
         let db = DatabaseBuilder::new()
             .with_clock(|| js_sys::Date::now() as i64)
-            .with_rand(|| js_sys::Math::random())
+            .with_rand(js_sys::Math::random)
             .open(store)
             .map_err(to_js_err)?;
         Ok(SlateDb { db })
