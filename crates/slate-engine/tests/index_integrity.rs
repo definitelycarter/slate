@@ -563,6 +563,75 @@ fn many_docs_exact_index_count() {
     txn.rollback().unwrap();
 }
 
+// ── String index: scan count == full-scan count ─────────────
+// Regression for the variable-width value/doc_id boundary bug. A string index
+// could silently undercount when a value's bytes plus the doc_id admitted more
+// than one valid split. Adversarial values *and* doc_ids (bytes that resemble a
+// length-prefixed doc-id header, embedded NULs) must still decode exactly.
+
+#[test]
+fn string_index_eq_scan_count_matches_full_scan() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "c", "status").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+
+    // Values whose bytes embed `\x02\x00..` / `\x07\x00..` (String / ObjectId
+    // tag + length headers), plus an empty value.
+    let statuses = [
+        "active",
+        "inactive",
+        "pending\x02\x00\x00",
+        "x\x07\x00\x0c",
+        "",
+        "done",
+    ];
+
+    let n = 600usize;
+    let mut expected: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for i in 0..n {
+        let status = statuses[i % statuses.len()];
+        *expected.entry(status).or_default() += 1;
+        // doc ids embed adversarial bytes too, and stay unique via `i`.
+        let id = format!("id\x02\x00{i}\x00\x07{i}");
+        let doc = bson::rawdoc! { "_id": id.as_str(), "status": status };
+        txn.put(&handle, &doc).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+
+    // Full index scan: exactly one entry per document.
+    assert_eq!(count_index(&txn, &handle, "status"), n);
+
+    // Each value's Eq scan returns exactly the documents with that value, every
+    // entry decodes back to that value, and the parts sum to the whole — i.e. no
+    // undercount and no mis-decode.
+    let mut summed = 0usize;
+    for status in statuses {
+        let val = bson::Bson::String(status.to_string());
+        let entries: Vec<_> = txn
+            .scan_index(&handle, "status", IndexRange::Eq(&val), false)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), expected[status], "status {status:?}");
+        for e in &entries {
+            assert_eq!(
+                e.value().unwrap(),
+                bson::RawBson::String(status.to_string()),
+                "value decode for status {status:?}"
+            );
+        }
+        summed += entries.len();
+    }
+    assert_eq!(summed, n);
+    txn.rollback().unwrap();
+}
+
 #[test]
 fn many_docs_delete_half_exact_count() {
     let engine = engine();

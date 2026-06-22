@@ -22,7 +22,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     }
 
     /// Delete all keys under a prefix.
-    fn delete_prefix(
+    pub(crate) fn delete_prefix(
         &self,
         cf: &<S::Txn<'a> as Transaction>::Cf,
         prefix: &[u8],

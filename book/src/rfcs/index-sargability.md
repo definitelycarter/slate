@@ -68,15 +68,17 @@ false positives for free. It can never *add* a row the index dropped. So the
 doctrine holds only while the index is a true *superset* — it may over-return, but
 must never under-return. Two engine facts bear on this:
 
-1. **The variable-width string boundary is a known, deferred bug.** An `i` key is
+1. **The variable-width string boundary — fixed (was a gating bug).** An `i` key is
    `i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}` with *no delimiter* between
-   value and doc_id. Fixed-width values derive their length from the type byte, but
-   **strings locate the boundary by guessing** (`split_trailing_doc_id`), which is
-   ambiguous and can mis-decode entries — observed: a `status = "active"` index
-   scan undercounting a full scan by 3 on a 52k corpus (`book/src/roadmap.md:24-45`).
-   An undercount is a **false negative**, which the recheck cannot repair. This
-   gates every string-keyed pushdown (increments B and C, and the string-valued
-   slice of A).
+   value and doc_id. Fixed-width values derive their length from the type byte;
+   **strings used to locate the boundary by guessing** (`split_trailing_doc_id`),
+   which was ambiguous and could mis-decode entries — observed: a `status = "active"`
+   index scan undercounting a full scan by 3 on a 52k corpus. An undercount is a
+   **false negative**, which the recheck cannot repair, so it gated every
+   string-keyed pushdown (B and C, and the string-valued slice of A). **This is now
+   fixed**: string keys carry a trailing `u32` value-length suffix, so the boundary
+   is exact (`book/src/roadmap.md` §"Index Key Value/Doc-Id Boundary"). The gate on
+   B/C is lifted.
 2. **Multikey scans must de-duplicate doc-ids.** A `.[]` Eq scan emits one entry
    per matching element, so `tags: ["db","db"]` yields the doc-id twice. `KeyLookup`
    fetches one document per incoming id with no dedup (`key_lookup.rs:21-42`), and a
@@ -297,11 +299,11 @@ byte-compares each entry's full `value_bytes` against the bound's bytes
    string" — lower bound only, the recheck does the rest.
 
 The pushdown is therefore *exact* on a correct string index, not merely a superset
-— but we retain the recheck regardless, because of the string-boundary caveat
-(§Current state). **B is gated on that boundary fix:** it is a false-negative bug,
-which the recheck cannot mask. B should land after (or together with) the
-deterministic variable-width boundary (roadmap: store the value length, or
-length-suffix the doc_id).
+— but we retain the recheck regardless, for the same robustness reasons it exists
+elsewhere. **B was gated on the variable-width boundary fix** (a false-negative bug
+the recheck cannot mask); that fix has landed (string keys carry a `u32`
+value-length suffix), so **the gate is lifted** and B can build on a correct string
+index.
 
 **Representation.** `pre⁺` may not be valid UTF-8 (incrementing a `0xBF`
 continuation byte yields `0xC0`, an invalid lead byte), so the planner cannot
@@ -439,10 +441,10 @@ feature.
    encoding change, and its dedup requirement also closes a latent `MultikeyEq` bug.
    *Size: small–moderate.*
 2. **The variable-width string-boundary fix** (roadmap §"Index Key Value/Doc-Id
-   Boundary") is a **prerequisite for B and C**, because string pushdowns can
-   false-negative and the recheck can't repair that. It is an encoding change with a
-   re-index migration, so it is its own change — but B/C must not ship before it.
-   *Size: moderate (encoding + migration).*
+   Boundary") was a **prerequisite for B and C**, because string pushdowns can
+   false-negative and the recheck can't repair that. **Now landed** — string keys
+   carry a `u32` value-length suffix, versioned with a reindex-from-records migration
+   — so the B/C prerequisite is satisfied. *Size: moderate (encoding + migration).*
 3. **B (prefix range).** `STARTSWITH` primary + LIKE-regex-prefix secondary, on a
    new `IndexScanRange::StringPrefix`. The highest-frequency win after A. *Size:
    small–moderate (one range variant + two recogniser arms + the executor byte-bound
@@ -454,8 +456,9 @@ feature.
 
 Land the **recogniser refactor + increment A** first (A is fully understood and
 gives the refactor its proving case, and its dedup work fixes a latent multikey
-bug). Sequence **B and C after the variable-width string-boundary fix**, since their
-soundness depends on it (false negatives, which the recheck cannot mask). Keep
+bug). **B and C** depended on the variable-width string-boundary fix for soundness
+(false negatives, which the recheck cannot mask); that fix has landed, so they are
+now unblocked. Keep
 indexes **sparse** — the null family stays `Filter` — pending a workload that
 justifies a dense *partial* index. Treat **function-of-field / expression indexes**
 as out of scope absent a dedicated RFC. Do **not** add Cosmos metrics capture: the

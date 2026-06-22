@@ -123,6 +123,10 @@ impl DatabaseBuilder {
             None => Arc::new(KvEngine::new(store)),
         };
 
+        // Upgrade any index entries written by an older encoding before serving
+        // transactions — an un-migrated string index would silently undercount.
+        engine.migrate_index_encoding()?;
+
         // Resolve the `RAND()` source: an injected one wins; otherwise the native
         // build falls back to the seeded PRNG. With the `runtime` feature off
         // (the wasm build) and no injected source, `RAND()` stays undefined —

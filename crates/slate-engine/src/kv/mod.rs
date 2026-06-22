@@ -1,4 +1,5 @@
 mod catalog;
+mod migrate;
 mod transaction;
 
 pub use transaction::KvTransaction;

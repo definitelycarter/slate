@@ -44,13 +44,11 @@ impl IndexRecord {
         }
         // Validate and compute offsets via a scoped borrow.
         let (field_start, value_start, doc_id_start) = {
-            // `decode_index` validates the `i` tag and parses collection/field; the
-            // value/doc_id boundary it returns is derived by an ambiguous scan, so
-            // we recompute the value length from the type byte (see `index_value_len`).
-            let (key, _) = Key::decode_index(&key_bytes)?;
-            let Key::Index(collection, field, _) = &key else {
-                return None;
-            };
+            // Parse only the collection/field (the `i` tag is validated here); the
+            // value/doc_id boundary needs the metadata type byte, so it is resolved
+            // separately via `index_value_len` (fixed-width length or the trailing
+            // variable-width suffix) — never an ambiguous scan.
+            let (collection, field) = super::key::parse_index_collection_field(&key_bytes)?;
             let field_start = 2 + collection.len() + 1;
             let value_start = field_start + field.len() + 1;
             let value_len = super::key::index_value_len(metadata[0], &key_bytes[value_start..])?;
@@ -73,7 +71,6 @@ impl IndexRecord {
         value: &BsonValue<'_>,
         ttl_millis: Option<i64>,
     ) -> Self {
-        let val_bytes: &[u8] = &value.bytes;
         let metadata = match ttl_millis {
             Some(millis) => {
                 let mut m = Vec::with_capacity(9);
@@ -84,11 +81,13 @@ impl IndexRecord {
             None => vec![value.tag as u8],
         };
 
-        let index_key = Key::encode_index_key(collection, field, val_bytes, doc_id);
+        let index_key = Key::encode_index_key(collection, field, value, doc_id);
 
         let field_start = 2 + collection.len() + 1;
         let value_start = field_start + field.len() + 1;
-        let doc_id_start = value_start + val_bytes.len();
+        // The doc_id sits immediately after the value bytes; any variable-width
+        // length suffix is appended *after* the doc_id, so it doesn't shift this.
+        let doc_id_start = value_start + value.bytes.len();
 
         IndexRecord {
             index_key,
@@ -259,7 +258,12 @@ mod tests {
         value_bytes: &[u8],
         doc_id: &BsonValue<'_>,
     ) -> Vec<u8> {
-        Key::encode_index_key(collection, field, value_bytes, doc_id)
+        // These helpers exercise string (variable-width) values.
+        let value = BsonValue {
+            tag: ElementType::String,
+            bytes: Cow::Borrowed(value_bytes),
+        };
+        Key::encode_index_key(collection, field, &value, doc_id)
     }
 
     fn str_id(s: &str) -> BsonValue<'static> {
@@ -366,6 +370,58 @@ mod tests {
         let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
         let raw = record.value_bson().unwrap();
         assert_eq!(raw, bson::RawBson::String("Alice".into()));
+    }
+
+    #[test]
+    fn from_pair_decodes_string_with_docid_like_bytes() {
+        // The string's bytes embed `\x00` and a sequence that parses as a valid
+        // length-prefixed doc_id (`[0x02][0x00][0x00]` = String, len 0) — exactly
+        // the collision the old backward scan could mis-split. The trailing value
+        // length suffix makes the boundary unambiguous.
+        let doc_id = str_id("user-42");
+        let value_bytes: &[u8] = b"active\x02\x00\x00\x00trailing";
+        let key_bytes = make_index_key("status", "state", value_bytes, &doc_id);
+        let metadata = vec![ElementType::String as u8];
+
+        let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
+        assert_eq!(record.value_bytes(), value_bytes);
+        assert_eq!(record.doc_id().unwrap(), doc_id);
+    }
+
+    #[test]
+    fn from_pair_decodes_string_with_oid_id_with_null_bytes() {
+        // ObjectId doc_id whose tail bytes resemble a short length-prefixed value,
+        // paired with a string value — both decode exactly.
+        let oid =
+            bson::oid::ObjectId::from_bytes([0x08, 0x00, 0x00, 0x02, 0x00, 0x00, 0, 0, 0, 0, 0, 0]);
+        let doc_id = BsonValue {
+            tag: ElementType::ObjectId,
+            bytes: Cow::Owned(oid.bytes().to_vec()),
+        };
+        let value_bytes: &[u8] = b"omega";
+        let key_bytes = make_index_key("k", "f", value_bytes, &doc_id);
+        let metadata = vec![ElementType::String as u8];
+
+        let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
+        assert_eq!(record.value_bytes(), value_bytes);
+        assert_eq!(record.doc_id().unwrap(), doc_id);
+        assert_eq!(
+            record.value_bson().unwrap(),
+            bson::RawBson::String("omega".into())
+        );
+    }
+
+    #[test]
+    fn from_pair_decodes_empty_string_value() {
+        // A zero-length string value: the suffix records length 0, value_bytes is
+        // empty, and the doc_id still decodes.
+        let doc_id = str_id("d1");
+        let key_bytes = make_index_key("k", "f", b"", &doc_id);
+        let metadata = vec![ElementType::String as u8];
+
+        let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
+        assert_eq!(record.value_bytes(), b"");
+        assert_eq!(record.doc_id().unwrap(), doc_id);
     }
 
     #[test]
