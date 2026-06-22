@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use bson::raw::RawDocument;
 use bson::spec::ElementType;
 
@@ -84,12 +82,7 @@ impl IndexRecord {
             None => vec![value.tag as u8],
         };
 
-        let index_key = Key::Index(
-            Cow::Borrowed(collection),
-            Cow::Borrowed(field),
-            doc_id.clone(),
-        )
-        .encode_index(val_bytes);
+        let index_key = Key::encode_index_key(collection, field, val_bytes, doc_id);
 
         let field_start = 2 + collection.len() + 1;
         let value_start = field_start + field.len() + 1;
@@ -264,12 +257,7 @@ mod tests {
         value_bytes: &[u8],
         doc_id: &BsonValue<'_>,
     ) -> Vec<u8> {
-        Key::Index(
-            Cow::Borrowed(collection),
-            Cow::Borrowed(field),
-            doc_id.clone(),
-        )
-        .encode_index(value_bytes)
+        Key::encode_index_key(collection, field, value_bytes, doc_id)
     }
 
     fn str_id(s: &str) -> BsonValue<'static> {

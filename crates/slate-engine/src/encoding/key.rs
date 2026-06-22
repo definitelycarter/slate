@@ -94,7 +94,8 @@ impl<'a> Key<'a> {
     /// - `Record`: `r\x00{collection}\x00[doc_id_encoded]`
     /// - `Index` (no value): `i\x00{collection}\x00{field}\x00\x00[doc_id_encoded]`
     ///
-    /// For `Index` keys with value bytes, use [`encode_index`](Key::encode_index).
+    /// For `Index` keys with value bytes, use
+    /// [`encode_index_key`](Key::encode_index_key).
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Key::Collection(cf, name) => {
@@ -157,19 +158,26 @@ impl<'a> Key<'a> {
         }
     }
 
-    /// Encode an `Index` key with the given encoded value bytes.
+    /// Encode an `Index` key from borrowed parts into `buf`.
+    ///
+    /// Takes the parts directly rather than a `Key::Index` enum, so it never
+    /// clones the `doc_id` (building the enum would require an owned
+    /// `BsonValue`). The caller supplies the buffer, which is cleared first;
+    /// reuse one `buf` across a batch to amortize the allocation.
     ///
     /// Layout: `i\x00{collection}\x00{field}\x00{value_bytes}[doc_id_encoded]`
     ///
     /// Note: no separator between value_bytes and doc_id — the doc_id is
     /// length-prefixed so we know exactly where it starts.
-    ///
-    /// Panics if `self` is not an `Index` variant.
-    pub fn encode_index(&self, value_bytes: &[u8]) -> Vec<u8> {
-        let Key::Index(collection, field, doc_id) = self else {
-            panic!("encode_index called on non-Index key");
-        };
-        let mut buf = Vec::with_capacity(
+    pub fn encode_index_key_into(
+        buf: &mut Vec<u8>,
+        collection: &str,
+        field: &str,
+        value_bytes: &[u8],
+        doc_id: &BsonValue<'_>,
+    ) {
+        buf.clear();
+        buf.reserve(
             2 + collection.len() + 1 + field.len() + 1 + value_bytes.len() + 3 + doc_id.bytes.len(),
         );
         buf.push(INDEX_TAG);
@@ -179,7 +187,19 @@ impl<'a> Key<'a> {
         buf.extend_from_slice(field.as_bytes());
         buf.push(SEP);
         buf.extend_from_slice(value_bytes);
-        doc_id.write_length_prefixed(&mut buf);
+        doc_id.write_length_prefixed(buf);
+    }
+
+    /// Allocating convenience over
+    /// [`encode_index_key_into`](Key::encode_index_key_into).
+    pub fn encode_index_key(
+        collection: &str,
+        field: &str,
+        value_bytes: &[u8],
+        doc_id: &BsonValue<'_>,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        Self::encode_index_key_into(&mut buf, collection, field, value_bytes, doc_id);
         buf
     }
 
@@ -198,8 +218,8 @@ impl<'a> Key<'a> {
 
     /// Encode a unique-index key: `u\x00{collection}\x00{field}\x00{value_bytes}`.
     ///
-    /// Unlike [`encode_index`](Key::encode_index), the doc_id is **not** part of
-    /// the key — a unique index holds at most one entry per value. The owning
+    /// Unlike [`encode_index_key`](Key::encode_index_key), the doc_id is **not**
+    /// part of the key — a unique index holds at most one entry per value. The owning
     /// doc_id is stored in the entry's value instead. Because there is no
     /// doc_id suffix, the value bytes run to the end of the key, so embedded
     /// `\x00` bytes in the value are unambiguous.
@@ -439,6 +459,15 @@ mod tests {
         }
     }
 
+    /// Helper: encode an `Index` key from a `Key::Index` value, routing through
+    /// the production [`Key::encode_index_key`] encoder.
+    fn encode_index(key: &Key<'_>, value_bytes: &[u8]) -> Vec<u8> {
+        let Key::Index(collection, field, doc_id) = key else {
+            panic!("encode_index test helper called on non-Index key");
+        };
+        Key::encode_index_key(collection, field, value_bytes, doc_id)
+    }
+
     #[test]
     fn collection_key_roundtrip() {
         let key = Key::Collection(Cow::Borrowed("default_cf"), Cow::Borrowed("users"));
@@ -484,7 +513,7 @@ mod tests {
             str_id("doc-123"),
         );
         let value_bytes = b"alice@example.com";
-        let bytes = key.encode_index(value_bytes);
+        let bytes = encode_index(&key, value_bytes);
         let decoded = Key::decode(&bytes).unwrap();
         assert_eq!(decoded, key);
     }
@@ -498,7 +527,7 @@ mod tests {
         );
         // Encoded integer that may contain \x00 bytes
         let value_bytes: &[u8] = &[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A];
-        let bytes = key.encode_index(value_bytes);
+        let bytes = encode_index(&key, value_bytes);
         let decoded = Key::decode(&bytes).unwrap();
         assert_eq!(decoded, key);
     }
@@ -511,7 +540,7 @@ mod tests {
         ];
         let key = Key::Index(Cow::Borrowed("users"), Cow::Borrowed("email"), oid_id(&oid));
         let value_bytes = b"test@example.com";
-        let bytes = key.encode_index(value_bytes);
+        let bytes = encode_index(&key, value_bytes);
         let decoded = Key::decode(&bytes).unwrap();
         assert_eq!(decoded, key);
     }
@@ -524,7 +553,7 @@ mod tests {
             str_id("doc-1"),
         );
         let value_bytes: &[u8] = &[0x80, 0x00, 0x00, 0x19]; // encoded 25
-        let encoded = key.encode_index(value_bytes);
+        let encoded = encode_index(&key, value_bytes);
 
         let (parsed_key, parsed_value) = Key::decode_index(&encoded).unwrap();
         assert_eq!(parsed_key, key);
