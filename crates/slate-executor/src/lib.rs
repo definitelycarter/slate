@@ -55,6 +55,11 @@ pub struct Executor<'a, T> {
     /// Query `@`-parameters, shared (by `Rc`) into each evaluating node so they
     /// outlive this executor — the result stream borrows only the transaction.
     params: Option<Rc<RawDocumentBuf>>,
+    /// Random source backing `RAND()`, shared (by `Rc`) into each evaluating
+    /// node like `params`. `None` makes `RAND()` undefined. Injected by the
+    /// database (a seeded PRNG natively; `Math.random` on wasm); see
+    /// [`Executor::with_rand`].
+    rand: nodes::env::Rand,
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
@@ -65,6 +70,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             txn,
             pool: None,
             params: None,
+            rand: None,
         }
     }
 
@@ -74,6 +80,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             txn,
             pool,
             params: None,
+            rand: None,
         }
     }
 
@@ -84,7 +91,19 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         pool: Option<&'a VmPool>,
         params: Option<Rc<RawDocumentBuf>>,
     ) -> Self {
-        Self { txn, pool, params }
+        Self {
+            txn,
+            pool,
+            params,
+            rand: None,
+        }
+    }
+
+    /// Attach the random source backing `RAND()` (see [`Executor::rand`]). The
+    /// closure owns its PRNG state, so the executor only ever *calls* it.
+    pub fn with_rand(mut self, rand: Option<Rc<dyn Fn() -> f64>>) -> Self {
+        self.rand = rand;
+        self
     }
 
     /// Execute a plan into a streaming iterator. For write plans, the mutations
@@ -216,7 +235,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::unwind::execute(alias, array, source, self.params.clone())
+                nodes::unwind::execute(alias, array, source, self.params.clone(), self.rand.clone())
             }
 
             Node::Project {
@@ -225,7 +244,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::project::execute(expr, binding, source, self.params.clone())
+                nodes::project::execute(
+                    expr,
+                    binding,
+                    source,
+                    self.params.clone(),
+                    self.rand.clone(),
+                )
             }
 
             Node::Filter {
@@ -234,7 +259,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::filter::execute(predicate, binding, source, self.params.clone())
+                nodes::filter::execute(
+                    predicate,
+                    binding,
+                    source,
+                    self.params.clone(),
+                    self.rand.clone(),
+                )
             }
 
             Node::Sort {
@@ -243,7 +274,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::sort::execute(keys, binding, source, self.params.clone())?
+                nodes::sort::execute(
+                    keys,
+                    binding,
+                    source,
+                    self.params.clone(),
+                    self.rand.clone(),
+                )?
             }
 
             Node::Limit { skip, take, source } => {
@@ -269,6 +306,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     binding,
                     source,
                     self.params.clone(),
+                    self.rand.clone(),
                 )?
             }
 

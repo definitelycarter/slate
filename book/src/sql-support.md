@@ -60,13 +60,28 @@ aggregates always emits one row per group, so `COUNT` over an empty set is `0`. 
 the [Function Reference](./functions.md#aggregate-functions) for the per-function
 skip/poison/type rules.
 
+## Non-deterministic functions
+
+`GETCURRENTTIMESTAMP()` (with the `GETCURRENTDATETIME`/`GETCURRENTTICKS` variants)
+and `RAND()` can't be answered from the row data, so they read from sources the
+host injects when it opens the database — there is no syscall in the evaluator,
+which keeps the query path wasm-clean. They differ in shape:
+
+- **The clock** is a *static* value: captured once per transaction and threaded
+  through as the `$now` parameter, so every `GETCURRENT*` call in a query agrees.
+  Injected via `DatabaseBuilder::with_clock` (native default: `SystemTime::now()`).
+- **`RAND()`** returns a *fresh* `Double` in `[0, 1)` on every call — it takes a
+  *callable*, not a value — so two `RAND()`s in one query need not agree. Injected
+  via `DatabaseBuilder::with_rand` (native default: a seeded PRNG behind the
+  `runtime` feature; absent any source, `RAND()` is undefined). `RAND()` is a
+  deliberate non-Cosmos extension, so it is not part of the parity corpus.
+
 ## Not yet supported
 
 The parser accepts any `IDENT(...)` as a function call, so unimplemented functions
 surface as an eval-time "unknown function" error rather than a parse error. Notable
 gaps (tracked in the [Roadmap](./roadmap.md)):
 
-- **`RAND`** — non-deterministic; needs the transaction's RNG.
 - **`DOCUMENTID`** — returns the configured pk value.
 - **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`, `ORDER BY RANK`: needs a full-text index + BM25 scoring.
 - **Vector** — `VECTORDISTANCE`: needs a vector index.

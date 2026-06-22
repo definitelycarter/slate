@@ -166,7 +166,7 @@ mod tests {
             RawBson::Document(rawdoc! { "team": "b" }),
             RawBson::Document(rawdoc! { "team": "a" }),
         ];
-        let projected = project::execute(sv("c.team"), RowBinding::Env, bind_c(docs), None);
+        let projected = project::execute(sv("c.team"), RowBinding::Env, bind_c(docs), None, None);
         let out = collect(execute(projected, true)).unwrap();
         assert_eq!(
             out,

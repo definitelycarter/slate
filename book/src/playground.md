@@ -152,3 +152,41 @@ An empty filter matches everything:
 families
 {}
 ```
+
+## Non-deterministic sources (the wasm host)
+
+Two SQL functions can't be answered from the data alone: `GETCURRENTTIMESTAMP()`
+needs a clock, and `RAND()` needs a random source. The native build supplies
+both from the OS, but those defaults sit behind slate-db's `runtime` feature,
+which is deliberately turned **off** in the wasm build so the `getrandom`/OS
+entropy machinery never reaches `wasm32-unknown-unknown`. Instead the wasm host
+— exactly the one running this playground — injects both from JavaScript when it
+opens the database:
+
+```rust
+use slate_db::DatabaseBuilder;
+use slate_store::MemoryStore;
+
+let db = DatabaseBuilder::new()
+    // Clock: a *static* value captured once per transaction (epoch millis).
+    .with_clock(|| js_sys::Date::now() as i64)
+    // Rand: a *callable* — a fresh f64 in [0, 1) on every RAND() call.
+    .with_rand(|| js_sys::Math::random())
+    .open(MemoryStore::new())?;
+```
+
+The two differ in shape, and you can see it in a single query. The clock is the
+same for every row (it's threaded in once, as the `$now` parameter), while
+`RAND()` is drawn afresh per call:
+
+```slate-sql
+SELECT c.name, RAND() AS roll, GETCURRENTTIMESTAMP() AS asOf
+FROM products c
+```
+
+`asOf` is identical down every row; `roll` is a different number each time. A
+bare `SELECT VALUE RAND()` works too — a single draw:
+
+```slate-sql
+SELECT VALUE RAND() FROM products c
+```

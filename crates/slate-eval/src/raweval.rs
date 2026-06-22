@@ -99,15 +99,35 @@ impl<'a> RawValue<'a> {
 }
 
 /// The bindings visible to a raw expression: alias → bound raw value, plus
-/// optional query parameters (`@name`) as a raw document.
+/// optional query parameters (`@name`) as a raw document and an optional random
+/// source for `RAND()`.
 pub struct RawEnv<'a> {
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
     params: Option<&'a RawDocument>,
+    /// Injected random source backing `RAND()`. Unlike the clock — a *static*
+    /// value threaded once per transaction as the `$now` param — `RAND()` must
+    /// produce a fresh value per call, so it takes a *callable* rather than a
+    /// param value. The closure owns its mutable PRNG state behind interior
+    /// mutability, so the evaluator stays a pure caller (no new mutable state in
+    /// eval itself); each call returns a value in `[0, 1)`. `None` (the default)
+    /// makes `RAND()` undefined, mirroring how an absent `$now` makes the clock
+    /// functions undefined.
+    rng: Option<&'a dyn Fn() -> f64>,
 }
 
 impl<'a> RawEnv<'a> {
     pub fn new(bindings: &'a [(&'a str, RawBsonRef<'a>)], params: Option<&'a RawDocument>) -> Self {
-        Self { bindings, params }
+        Self {
+            bindings,
+            params,
+            rng: None,
+        }
+    }
+
+    /// Attach the injected random source backing `RAND()` (see [`RawEnv::rng`]).
+    pub fn with_rng(mut self, rng: Option<&'a dyn Fn() -> f64>) -> Self {
+        self.rng = rng;
+        self
     }
 
     fn lookup(&self, name: &str) -> RawValue<'a> {
@@ -210,6 +230,9 @@ fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RawEnv<'a>) -> Re
     if args.is_empty() && crate::functions::is_current_time(name) {
         return current_time(name, env);
     }
+    if args.is_empty() && name.eq_ignore_ascii_case("RAND") {
+        return Ok(rand_value(env));
+    }
 
     let mut vals = Vec::with_capacity(args.len());
     for a in args {
@@ -229,6 +252,17 @@ fn current_time<'a>(name: &str, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
     Ok(RawValue::from_value(crate::functions::current_time(
         name, now_ms,
     )))
+}
+
+/// Resolve `RAND()` from the random source the executor threads in. Each call
+/// draws a *fresh* value in `[0, 1)` (the source owns the PRNG state), so two
+/// `RAND()` calls in one query need not agree — unlike the clock. Undefined if
+/// no source is injected, mirroring `current_time` when `$now` is absent.
+fn rand_value<'a>(env: &RawEnv<'a>) -> RawValue<'a> {
+    match env.rng {
+        Some(rng) => RawValue::Owned(Bson::Double(rng())),
+        None => RawValue::Undefined,
+    }
 }
 
 fn is_null(v: &RawValue) -> bool {
@@ -939,6 +973,9 @@ pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'
             if args.is_empty() && crate::functions::is_current_time(name) {
                 return current_time(name, env);
             }
+            if args.is_empty() && name.eq_ignore_ascii_case("RAND") {
+                return Ok(rand_value(env));
+            }
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 vals.push(eval_compiled(a, env)?.into_value()?);
@@ -1116,5 +1153,46 @@ mod tests {
         ] {
             assert_agree(src, &doc);
         }
+    }
+
+    /// `RAND()` draws from the injected source — a *fresh* value per call — and
+    /// is undefined when no source is injected. Exercised over both the
+    /// interpreter and the compiled path. (`RAND` is non-deterministic, so it is
+    /// deliberately absent from the `raw_matches_owned` differential.)
+    #[test]
+    fn rand_uses_injected_source() {
+        let expr = parse_expr("RAND()");
+        let raw_doc = RawDocumentBuf::new();
+        let cref = RawBsonRef::Document(&raw_doc);
+        let rbinds = [("c", cref)];
+
+        // A fixed sequence stands in for the PRNG; each `RAND()` call advances it.
+        let seq = [0.25_f64, 0.5, 0.75];
+        let idx = std::cell::Cell::new(0);
+        let source = || {
+            let i = idx.get();
+            idx.set(i + 1);
+            seq[i]
+        };
+
+        // No source → undefined.
+        assert!(
+            eval(&expr, &RawEnv::new(&rbinds, None))
+                .unwrap()
+                .is_undefined()
+        );
+
+        // Injected source → consecutive draws, via the interpreter…
+        let env = RawEnv::new(&rbinds, None).with_rng(Some(&source));
+        for want in seq {
+            let got = eval(&expr, &env).unwrap().into_value().unwrap();
+            assert_eq!(got, Value::Defined(bson::Bson::Double(want)));
+        }
+
+        // …and via the compiled path (rewind the source first).
+        idx.set(0);
+        let prog = compile(&expr, Some("c"));
+        let got = eval_compiled(&prog, &env).unwrap().into_value().unwrap();
+        assert_eq!(got, Value::Defined(bson::Bson::Double(seq[0])));
     }
 }

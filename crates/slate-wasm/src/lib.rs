@@ -106,8 +106,14 @@ impl SlateDb {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Result<SlateDb, JsError> {
         let store = MemoryStore::new();
+        // Inject the host's non-deterministic sources from JS: the wasm build has
+        // no native clock or PRNG (those live behind slate-db's `runtime`
+        // feature, kept out of wasm so `getrandom` never reaches it). `RAND()`
+        // takes a callable (a fresh draw per call); `Math.random()` is already an
+        // `f64` in `[0, 1)`, matching what slate's evaluator expects.
         let db = DatabaseBuilder::new()
             .with_clock(|| js_sys::Date::now() as i64)
+            .with_rand(|| js_sys::Math::random())
             .open(store)
             .map_err(to_js_err)?;
         Ok(SlateDb { db })

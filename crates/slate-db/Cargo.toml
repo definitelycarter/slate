@@ -5,7 +5,11 @@ edition = "2024"
 
 [features]
 default = ["lua", "runtime"]
-runtime = []
+# `runtime` pulls in the native, OS-dependent pieces (background TTL sweep, and
+# the default seeded PRNG behind `RAND()`). It is deliberately OFF in the wasm
+# build (`default-features = false`) so `rand`/`getrandom` never reach
+# wasm32-unknown-unknown — the wasm host injects its own sources instead.
+runtime = ["dep:rand"]
 bench-internals = []
 lua = ["slate-vm/lua"]
 js = ["slate-vm/js"]
@@ -23,6 +27,10 @@ serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
 regex = "1"
 arc-swap = "1.8.2"
+# Native default random source for `RAND()` (a seeded `SmallRng`). Optional and
+# gated by `runtime` so it is excluded from the wasm build; `small_rng` selects
+# the lightweight non-crypto PRNG.
+rand = { version = "0.8", features = ["small_rng"], optional = true }
 
 
 [dev-dependencies]

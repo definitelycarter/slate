@@ -19,6 +19,7 @@ pub(crate) fn execute<'a>(
     array: Expression,
     source: ValueIter<'a>,
     params: env::Params,
+    rand: env::Rand,
 ) -> ValueIter<'a> {
     // The unwind alias is stable for the whole stream, so validate it into a
     // `CString` once and append it by reference for every emitted row rather than
@@ -35,7 +36,13 @@ pub(crate) fn execute<'a>(
     };
     Box::new(source.flat_map(move |item| {
         let rows: Box<dyn Iterator<Item = Result<Option<RawBson>, ExecError>>> = match item {
-            Ok(Some(row)) => match expand(&row, &alias_key, &array, env::params_doc(&params)) {
+            Ok(Some(row)) => match expand(
+                &row,
+                &alias_key,
+                &array,
+                env::params_doc(&params),
+                env::rand_fn(&rand),
+            ) {
                 Ok(rows) => Box::new(rows.into_iter().map(|r| Ok(Some(r)))),
                 Err(e) => Box::new(std::iter::once(Err(e))),
             },
@@ -53,9 +60,10 @@ fn expand(
     alias_key: &CStr,
     array: &Expression,
     params: Option<&bson::RawDocument>,
+    rand: Option<&dyn Fn() -> f64>,
 ) -> Result<Vec<RawBson>, ExecError> {
     let bindings = env::bindings_of(row)?;
-    let renv = env::raw_env(&bindings, params);
+    let renv = env::raw_env(&bindings, params, rand);
 
     // Validate the existing binding keys into `CString`s once for this row, so
     // each emitted element reuses them by reference instead of re-validating.
@@ -148,11 +156,12 @@ mod tests {
     /// `SELECT VALUE { "who": c.name, "tag": t } FROM c JOIN t IN c.tags`
     fn join_project(docs: Vec<RawBson>) -> Vec<RawBson> {
         let bound = bind::execute("c".into(), values::execute(docs));
-        let unwound = execute("t".into(), sv("c.tags"), bound, None);
+        let unwound = execute("t".into(), sv("c.tags"), bound, None, None);
         let projected = project::execute(
             sv(r#"{ "who": c.name, "tag": t }"#),
             RowBinding::Env,
             unwound,
+            None,
             None,
         );
         collect(projected).unwrap()

@@ -19,12 +19,19 @@ pub(crate) fn execute<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
     params: env::Params,
+    rand: env::Rand,
 ) -> ValueIter<'a> {
     // Compile the predicate once; the per-row closure evaluates the resolved
     // form (see `raweval::compile`).
     let program = raweval::compile(&predicate, env::sole_alias(&binding));
     Box::new(source.filter_map(move |item| {
-        match keep_row(item, &binding, &program, env::params_doc(&params)) {
+        match keep_row(
+            item,
+            &binding,
+            &program,
+            env::params_doc(&params),
+            env::rand_fn(&rand),
+        ) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept
             Ok(None) => None,                         // dropped
             Err(e) => Some(Err(e)),                   // surface the error
@@ -39,6 +46,7 @@ fn keep_row(
     binding: &RowBinding,
     program: &Compiled,
     params: Option<&bson::RawDocument>,
+    rand: Option<&dyn Fn() -> f64>,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -47,7 +55,7 @@ fn keep_row(
     // Evaluate the predicate against bindings that borrow from `row`; the
     // borrow ends before we move `row` through. Only `Some(true)` keeps the
     // row (3-valued rule: false *or* undefined drops it).
-    let keep = env::with_env(&row, binding, params, |renv| {
+    let keep = env::with_env(&row, binding, params, rand, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.as_bool() == Some(true))
     })?;
 
@@ -77,7 +85,8 @@ mod tests {
         collect(project::execute(
             sv("c"),
             RowBinding::Env,
-            execute(pred(pred_src), RowBinding::Env, bind_c(docs), None),
+            execute(pred(pred_src), RowBinding::Env, bind_c(docs), None, None),
+            None,
             None,
         ))
         .unwrap()
@@ -118,7 +127,14 @@ mod tests {
         let projected = project::execute(
             sv("c.name"),
             RowBinding::Env,
-            execute(pred("c.age > 40"), RowBinding::Env, bind_c(people()), None),
+            execute(
+                pred("c.age > 40"),
+                RowBinding::Env,
+                bind_c(people()),
+                None,
+                None,
+            ),
+            None,
             None,
         );
         assert_eq!(

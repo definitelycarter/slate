@@ -112,12 +112,12 @@ pub fn filter<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> ValueIter<'a> {
-    nodes::filter::execute(predicate, binding, source, None)
+    nodes::filter::execute(predicate, binding, source, None, None)
 }
 
 /// `Project` — evaluate `expr` against each row environment.
 pub fn project<'a>(expr: Expression, binding: RowBinding, source: ValueIter<'a>) -> ValueIter<'a> {
-    nodes::project::execute(expr, binding, source, None)
+    nodes::project::execute(expr, binding, source, None, None)
 }
 
 /// `Sort` — blocking buffer-and-sort by `keys`.
@@ -126,7 +126,7 @@ pub fn sort<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::sort::execute(keys, binding, source, None)
+    nodes::sort::execute(keys, binding, source, None, None)
 }
 
 /// `Limit` — skip `skip` rows, then take at most `take`.
@@ -141,7 +141,7 @@ pub fn distinct<'a>(source: ValueIter<'a>, flatten: bool) -> ValueIter<'a> {
 
 /// `Unwind` — emit one row per element of `array`, extending the environment.
 pub fn unwind<'a>(alias: String, array: Expression, source: ValueIter<'a>) -> ValueIter<'a> {
-    nodes::unwind::execute(alias, array, source, None)
+    nodes::unwind::execute(alias, array, source, None, None)
 }
 
 /// `KeyLookup` — point-read the full document for each incoming ID (or doc pk).
@@ -172,5 +172,5 @@ pub fn aggregate<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::aggregate::execute(group_keys, aggregates, binding, source, None)
+    nodes::aggregate::execute(group_keys, aggregates, binding, source, None, None)
 }

@@ -21,9 +21,21 @@ use crate::ExecError;
 /// nodes of one pipeline. `None` means the query had no parameters.
 pub(crate) type Params = Option<Rc<RawDocumentBuf>>;
 
+/// The injected random source backing `RAND()`, shared (by `Rc`) across the
+/// evaluating nodes of one pipeline so it outlives this executor. `None` means
+/// no source was injected, so `RAND()` is undefined. The closure owns its
+/// mutable PRNG state, so cloning the `Rc` into each node keeps the *same*
+/// stream — a fresh draw per call across the whole pipeline.
+pub(crate) type Rand = Option<Rc<dyn Fn() -> f64>>;
+
 /// Borrow the parameter document for passing to the evaluator.
 pub(crate) fn params_doc(params: &Params) -> Option<&RawDocument> {
     params.as_deref().map(|b| &**b)
+}
+
+/// Borrow the random source as a plain `&dyn Fn` for passing to the evaluator.
+pub(crate) fn rand_fn(rand: &Rand) -> Option<&dyn Fn() -> f64> {
+    rand.as_deref()
 }
 
 /// Borrow the top-level `(alias, value)` bindings out of an environment row.
@@ -55,12 +67,13 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
 }
 
 /// Build a raw evaluation environment over already-extracted bindings, with the
-/// query's `@`-parameters (if any) visible to the expression.
+/// query's `@`-parameters and random source (if any) visible to the expression.
 pub(crate) fn raw_env<'a>(
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
     params: Option<&'a RawDocument>,
+    rand: Option<&'a dyn Fn() -> f64>,
 ) -> RawEnv<'a> {
-    RawEnv::new(bindings, params)
+    RawEnv::new(bindings, params).with_rng(rand)
 }
 
 /// The sole `FROM` alias when the node reads bare rows ([`RowBinding::Alias`]),
@@ -83,16 +96,17 @@ pub(crate) fn with_env<R>(
     row: &RawBson,
     binding: &RowBinding,
     params: Option<&RawDocument>,
+    rand: Option<&dyn Fn() -> f64>,
     f: impl FnOnce(&RawEnv) -> Result<R, ExecError>,
 ) -> Result<R, ExecError> {
     match binding {
         RowBinding::Alias(alias) => {
             let binds = [(alias.as_str(), row.as_raw_bson_ref())];
-            f(&RawEnv::new(&binds, params))
+            f(&RawEnv::new(&binds, params).with_rng(rand))
         }
         RowBinding::Env => {
             let binds = bindings_of(row)?;
-            f(&RawEnv::new(&binds, params))
+            f(&RawEnv::new(&binds, params).with_rng(rand))
         }
     }
 }

@@ -365,6 +365,8 @@ Runtime blockers (compile succeeds, but these panic at runtime on wasm32):
 
 - ~~**`SystemTime::now()`** — `KvEngine::with_clock()` escape hatch already exists~~
 - ~~**`std::thread::spawn`** — sweep is gated behind `#[cfg(feature = "runtime")]`~~
+- ~~**`RAND()` RNG** — the default seeded PRNG is gated behind `runtime`; the wasm
+  host injects `Math.random` via `DatabaseBuilder::with_rand()` (mirrors `with_clock`)~~
 - **`getrandom`** — needs `features = ["js"]` for `crypto.getRandomValues()` entropy
   (used by bson for ObjectId generation)
 
@@ -678,7 +680,9 @@ the [SQL Reference](./sql-support.md) and [Function Reference](./functions.md)).
 Remaining gaps:
 
 - **`HAVING`** and **`ARRAY_AGG`/`COLLECT`** aggregation extensions.
-- **`RAND`** (needs the transaction RNG) and **`DOCUMENTID`** scalar functions.
+- **`DOCUMENTID`** scalar function (returns the configured pk value). `RAND()` is
+  done — a fresh `[0, 1)` draw per call from an injected source (see the
+  [SQL Reference](./sql-support.md#non-deterministic-functions)).
 - **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`,
   `ORDER BY RANK`: needs a full-text index + BM25 scoring.
 - **Vector** — `VECTORDISTANCE`: needs a vector index.

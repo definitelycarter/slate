@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use slate_engine::{EngineTransaction, KvEngine};
 use slate_store::Store;
 
+use crate::database::RandFn;
 use crate::error::DbError;
 use slate_vm::pool::VmPool;
 
@@ -27,6 +28,8 @@ pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     /// SQL `@`-parameter values, supplied by `query_with_params`. Owned here and
     /// shared into the executor (by `Rc`) at execution time.
     params: Option<RawDocumentBuf>,
+    /// Random source for `RAND()`, inherited from the transaction.
+    rand: Option<RandFn>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
@@ -34,12 +37,14 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         txn: &'txn KvTxn<'db, S>,
         plan: slate_planner::Plan,
         pool: Option<&'txn VmPool>,
+        rand: Option<RandFn>,
     ) -> Self {
         Self {
             txn,
             plan,
             pool,
             params: None,
+            rand,
         }
     }
 
@@ -48,12 +53,14 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         plan: slate_planner::Plan,
         pool: Option<&'txn VmPool>,
         params: RawDocumentBuf,
+        rand: Option<RandFn>,
     ) -> Self {
         Self {
             txn,
             plan,
             pool,
             params: Some(params),
+            rand,
         }
     }
 
@@ -71,6 +78,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         doc.insert("$now", self.txn.now_millis());
         let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
         let iter = slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
+            .with_rand(crate::database::rand_rc(&self.rand))
             .execute(self.plan)?;
         Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
     }

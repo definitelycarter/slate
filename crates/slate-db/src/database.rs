@@ -13,11 +13,48 @@ use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
 
+/// The injected random source backing the SQL `RAND()` function: a callable
+/// returning a fresh value in `[0, 1)` per call. Shared (`Arc`) so it outlives
+/// each transaction; `Send + Sync` so the database stays thread-safe. Unlike the
+/// clock (a *static* per-transaction value), `RAND()` needs a *different* value
+/// per call, so the source owns its mutable PRNG state behind interior
+/// mutability and the evaluator only ever calls it.
+pub(crate) type RandFn = Arc<dyn Fn() -> f64 + Send + Sync>;
+
+/// Bridge the thread-safe `Arc` random source (shared across the database) into
+/// the executor's single-threaded `Rc` channel. The wrapper closure just
+/// forwards the call; `None` (no source) leaves `RAND()` undefined.
+pub(crate) fn rand_rc(rand: &Option<RandFn>) -> Option<std::rc::Rc<dyn Fn() -> f64>> {
+    rand.as_ref().map(|arc| {
+        let arc = Arc::clone(arc);
+        std::rc::Rc::new(move || arc()) as std::rc::Rc<dyn Fn() -> f64>
+    })
+}
+
+/// The native default random source: a per-thread seeded [`SmallRng`]. Gated by
+/// the `runtime` feature so the `rand`/`getrandom` dependency never reaches the
+/// wasm build — there the host injects `Math.random` via [`DatabaseBuilder::with_rand`].
+///
+/// [`SmallRng`]: rand::rngs::SmallRng
+#[cfg(feature = "runtime")]
+fn default_rand() -> f64 {
+    use rand::{Rng, SeedableRng, rngs::SmallRng};
+    use std::cell::RefCell;
+
+    thread_local! {
+        // Seeded from OS entropy once per thread; the state lives in the
+        // thread-local, so this closure captures nothing and stays `Send + Sync`.
+        static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_entropy());
+    }
+    RNG.with(|rng| rng.borrow_mut().gen_range(0.0..1.0))
+}
+
 // ── DatabaseBuilder ────────────────────────────────────────
 
 pub struct DatabaseBuilder {
     pool: Option<VmPool>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    rand: Option<RandFn>,
     #[cfg(feature = "runtime")]
     sweep_interval: Option<std::time::Duration>,
 }
@@ -33,6 +70,7 @@ impl DatabaseBuilder {
         Self {
             pool: None,
             clock: None,
+            rand: None,
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
@@ -55,6 +93,19 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Inject the random source backing the SQL `RAND()` function — a callable
+    /// returning a value in `[0, 1)`, called afresh per `RAND()` evaluation.
+    ///
+    /// The parallel of [`with_clock`](Self::with_clock): required on platforms
+    /// without the native default PRNG (e.g. wasm32, where the host passes
+    /// `js_sys::Math::random`), and the escape hatch for determinism — inject a
+    /// fixed sequence in tests. Without it, the native build defaults to a seeded
+    /// per-thread PRNG; absent any source, `RAND()` evaluates to undefined.
+    pub fn with_rand(mut self, rand: impl Fn() -> f64 + Send + Sync + 'static) -> Self {
+        self.rand = Some(Arc::new(rand));
+        self
+    }
+
     /// Enable background TTL sweep at the given interval.
     #[cfg(feature = "runtime")]
     pub fn with_sweep(mut self, interval: std::time::Duration) -> Self {
@@ -70,6 +121,18 @@ impl DatabaseBuilder {
         let engine = match self.clock {
             Some(clock) => Arc::new(KvEngine::with_clock(store, move || clock())),
             None => Arc::new(KvEngine::new(store)),
+        };
+
+        // Resolve the `RAND()` source: an injected one wins; otherwise the native
+        // build falls back to the seeded PRNG. With the `runtime` feature off
+        // (the wasm build) and no injected source, `RAND()` stays undefined —
+        // but the wasm host always injects `Math.random`, so it never is.
+        let rand: Option<RandFn> = match self.rand {
+            Some(r) => Some(r),
+            #[cfg(feature = "runtime")]
+            None => Some(Arc::new(default_rand)),
+            #[cfg(not(feature = "runtime"))]
+            None => None,
         };
 
         // Load initial hook snapshot if scripting is enabled.
@@ -92,6 +155,7 @@ impl DatabaseBuilder {
             engine,
             pool: self.pool,
             registry,
+            rand,
             #[cfg(feature = "runtime")]
             ttl_handle,
         })
@@ -104,6 +168,8 @@ pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
     pool: Option<VmPool>,
     registry: Option<HookRegistry>,
+    /// Random source for `RAND()`, threaded into each transaction's cursors.
+    rand: Option<RandFn>,
     #[cfg(feature = "runtime")]
     ttl_handle: Option<crate::runtime::sweep::TtlHandle>,
 }
@@ -128,6 +194,7 @@ impl<S: Store> Database<S> {
             pool: self.pool.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
+            rand: self.rand.clone(),
             hooks_dirty: Cell::new(false),
         })
     }
@@ -169,6 +236,8 @@ pub struct Transaction<'db, S: Store + 'db> {
     pool: Option<&'db VmPool>,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
+    /// Random source for `RAND()`, handed to each cursor this transaction opens.
+    rand: Option<RandFn>,
     hooks_dirty: Cell<bool>,
 }
 
@@ -249,7 +318,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         sql: &str,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = self.lower_sql(cf, collection, sql, None)?;
-        Ok(Cursor::new(&self.txn, plan, self.pool))
+        Ok(Cursor::new(&self.txn, plan, self.pool, self.rand.clone()))
     }
 
     /// Execute a SQL query with values for its `@name` parameters.
@@ -272,7 +341,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let params = bson::serialize_to_raw_document_buf(&params)?;
         let plan = self.lower_sql(cf, collection, sql, Some(&params))?;
-        Ok(Cursor::new_with_params(&self.txn, plan, self.pool, params))
+        Ok(Cursor::new_with_params(
+            &self.txn,
+            plan,
+            self.pool,
+            params,
+            self.rand.clone(),
+        ))
     }
 
     /// Explain a query: lower it to a physical plan and render that plan as an
@@ -436,7 +511,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         ctx: slate_planner::PlanContext,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = slate_planner::plan(stmt, &ctx)?;
-        Ok(Cursor::new(&self.txn, plan, self.pool))
+        Ok(Cursor::new(&self.txn, plan, self.pool, self.rand.clone()))
     }
 
     /// Find the first document matching a filter.
@@ -627,7 +702,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         // Distinct yields bare scalar values, not documents, so run the plan
         // directly and gather them rather than going through `Cursor` (which
         // expects documents).
-        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool).execute(plan)?;
+        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool)
+            .with_rand(rand_rc(&self.rand))
+            .execute(plan)?;
         let mut arr = bson::RawArrayBuf::new();
         for item in iter {
             if let Some(value) = item.map_err(DbError::from)? {

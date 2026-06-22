@@ -25,13 +25,20 @@ pub(crate) fn execute<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
     params: env::Params,
+    rand: env::Rand,
 ) -> Result<ValueIter<'a>, ExecError> {
     let mut rows: Vec<(Vec<Value>, RawBson)> = Vec::new();
     for item in source {
         // Undefined upstream rows are dropped (they'd be dropped at the
         // output boundary anyway).
         let Some(row) = item? else { continue };
-        let key_values = eval_keys(&row, &binding, &keys, env::params_doc(&params))?;
+        let key_values = eval_keys(
+            &row,
+            &binding,
+            &keys,
+            env::params_doc(&params),
+            env::rand_fn(&rand),
+        )?;
         rows.push((key_values, row));
     }
 
@@ -46,8 +53,9 @@ fn eval_keys(
     binding: &RowBinding,
     keys: &[OrderByItem],
     params: Option<&bson::RawDocument>,
+    rand: Option<&dyn Fn() -> f64>,
 ) -> Result<Vec<Value>, ExecError> {
-    env::with_env(row, binding, params, |renv| {
+    env::with_env(row, binding, params, rand, |renv| {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // Sort keys are buffered, so they materialize to owned `Value`; the
@@ -93,8 +101,22 @@ mod tests {
 
     /// Sort `docs` (bound to `c`) and recover the documents via `SELECT VALUE c`.
     fn sorted(order_src: &str, docs: Vec<RawBson>) -> Vec<RawBson> {
-        let sorted = execute(order_by(order_src), RowBinding::Env, bind_c(docs), None).unwrap();
-        collect(project::execute(sv("c"), RowBinding::Env, sorted, None)).unwrap()
+        let sorted = execute(
+            order_by(order_src),
+            RowBinding::Env,
+            bind_c(docs),
+            None,
+            None,
+        )
+        .unwrap();
+        collect(project::execute(
+            sv("c"),
+            RowBinding::Env,
+            sorted,
+            None,
+            None,
+        ))
+        .unwrap()
     }
 
     fn people() -> Vec<RawBson> {

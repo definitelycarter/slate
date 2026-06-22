@@ -19,6 +19,7 @@ pub(crate) fn execute<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
     params: env::Params,
+    rand: env::Rand,
 ) -> ValueIter<'a> {
     // Identity fast path: `SELECT VALUE c` in single-binding mode projects the
     // whole bound row, so pass it straight through — no eval, no copy. This is
@@ -33,9 +34,15 @@ pub(crate) fn execute<'a>(
     // Otherwise compile the projection once; the per-row closure evaluates the
     // resolved form (see `raweval::compile`).
     let program = raweval::compile(&expr, env::sole_alias(&binding));
-    Box::new(
-        source.map(move |item| project_row(item, &binding, &program, env::params_doc(&params))),
-    )
+    Box::new(source.map(move |item| {
+        project_row(
+            item,
+            &binding,
+            &program,
+            env::params_doc(&params),
+            env::rand_fn(&rand),
+        )
+    }))
 }
 
 fn project_row(
@@ -43,6 +50,7 @@ fn project_row(
     binding: &RowBinding,
     program: &Compiled,
     params: Option<&bson::RawDocument>,
+    rand: Option<&dyn Fn() -> f64>,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -51,7 +59,7 @@ fn project_row(
     // Evaluate against bindings borrowing from `row`. `into_raw` copies the
     // result out (a `Ref` is a single byte copy, not a decode + re-encode), so
     // the row's borrow can end here.
-    env::with_env(&row, binding, params, |renv| {
+    env::with_env(&row, binding, params, rand, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.into_raw()?)
     })
 }
@@ -67,7 +75,14 @@ mod tests {
 
     /// Project `expr_src` over a bound (`{c: doc}`) source of `docs`.
     fn project(expr_src: &str, docs: Vec<RawBson>) -> Vec<RawBson> {
-        collect(execute(sv(expr_src), RowBinding::Env, bind_c(docs), None)).unwrap()
+        collect(execute(
+            sv(expr_src),
+            RowBinding::Env,
+            bind_c(docs),
+            None,
+            None,
+        ))
+        .unwrap()
     }
 
     fn people() -> Vec<RawBson> {
@@ -117,6 +132,7 @@ mod tests {
             RowBinding::Alias("c".into()),
             values::execute(people()),
             None,
+            None,
         ))
         .unwrap();
         assert_eq!(out, people());
@@ -129,6 +145,7 @@ mod tests {
             sv("c.name"),
             RowBinding::Alias("c".into()),
             values::execute(people()),
+            None,
             None,
         ))
         .unwrap();
