@@ -48,15 +48,31 @@ so it is deferred to its own change.
 
 Several predicates that could be answered from an index instead full-scan, and the
 "can this use an index?" recognisers are added one function at a time. The
-[Index Sargability RFC](./rfcs/index-sargability.md) defines a single sargability
-doctrine + recogniser and audits every predicate shape (comparison, `IN`/`BETWEEN`,
-`ARRAY_CONTAINS`/`_ANY`/`_ALL`, `STARTSWITH`/`LIKE 'pre%'`, the null family, negation,
-function-of-field). Increments: **A** multikey containment (`ARRAY_CONTAINS`), **B**
-prefix range (`STARTSWITH`/`LIKE`), **C** `STRINGEQUALS`→`Eq`, over a unified
-`sargable() -> IndexAccess` recogniser. Indexes stay **sparse** (so `IS_NULL` /
-`IS_DEFINED` remain Filters) pending a deliberate dense-index decision. A spike
-(`tasks/index-sargability-spike.md`) completes the audit against the full
-function/operator/subquery surface and evaluates the Cosmos query-metrics oracle.
+[Index Sargability RFC](./rfcs/index-sargability.md) — now **decided**, with the
+full function/operator/subquery surface audited against `file:line` — defines a
+single doctrine and a unified `sargable() -> IndexAccess` recogniser (validated to
+cover the Eq/Range/Merge/Multikey/Spatial families). Increments, in order:
+
+- **Recogniser refactor + A — multikey containment** (`ARRAY_CONTAINS`/`_ANY`/`_ALL`
+  → multikey `Eq`/`Merge`), landed together. A also closes a latent dedup bug: a
+  `.[]` Eq scan emits one doc-id per matching element and nothing below a lone
+  `IndexScan → KeyLookup` de-duplicates, so a multikey pushdown must route doc-ids
+  through the `IndexMerge` dedup.
+- **B — prefix range** (`STARTSWITH` / `LIKE 'pre%'` → string `Range [pre, pre⁺)`
+  via a new `IndexScanRange::StringPrefix`). The proof holds (no UTF-8 byte is
+  `0xFF`, so the last-byte increment never carries), but B is **gated on the
+  variable-width string-boundary fix above** — a string undercount is a false
+  negative, which the residual recheck cannot repair.
+- **C — `STRINGEQUALS` → `Eq`** (trivial; rides the same string path, same gate).
+
+Decided non-goals / no-ops: indexes stay **sparse** (`IS_NULL` / `IS_DEFINED` /
+`$exists` remain Filters — revisit only via a dense *partial* index for a proven
+hot path); **function-of-field / expression indexes** are out of scope absent a
+dedicated RFC; **Cosmos query-metrics capture is not worth wiring up** (the
+emulator treats index policy as a no-op and reports no index-utilization metrics,
+and a pushdown is invisible to results anyway). `EXISTS(… FROM e IN c.arr WHERE
+e = v)` stays a Filter — its array is an in-document unwind, not a collection
+index — with an `EXISTS → ARRAY_CONTAINS` rewrite noted as a future optimisation.
 
 ## Collect Node (Plan Materialization Barrier)
 
