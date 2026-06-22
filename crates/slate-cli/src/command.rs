@@ -58,6 +58,8 @@ pub enum Command {
     SeedFile { path: String, collection: String },
     /// Back up the database to a directory (persistent backends only).
     Backup(String),
+    /// Show the physical plan for a query without running it.
+    Explain(String),
     /// A SQL statement to run against the current collection.
     Sql(String),
 }
@@ -126,6 +128,15 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
                 return Err(".backup requires a destination path".to_string());
             }
             Ok(Command::Backup(path.to_string()))
+        }
+        "explain" => {
+            // The whole remaining line is the query (like `.backup`'s path) —
+            // it contains spaces and its own syntax, so it is not tokenized.
+            let query = args.trim();
+            if query.is_empty() {
+                return Err(".explain requires a query".to_string());
+            }
+            Ok(Command::Explain(query.to_string()))
         }
         "insert" => {
             let [doc] = exactly(
@@ -444,6 +455,16 @@ mod tests {
                 collection: "2024_sales".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn explain_takes_the_whole_query() {
+        // The remaining line is one query, spaces and all — not tokenized.
+        assert_eq!(
+            Command::parse(r#".explain SELECT VALUE c.name FROM c WHERE c.name = "x""#).unwrap(),
+            Command::Explain(r#"SELECT VALUE c.name FROM c WHERE c.name = "x""#.to_string())
+        );
+        assert!(Command::parse(".explain").is_err());
     }
 
     #[test]

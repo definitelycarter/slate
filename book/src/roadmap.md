@@ -59,7 +59,8 @@ For `Or`, both sides still need collection (full union).
 
 - **Plan legibility** — materialization is visible in the plan tree
 - **Reusable** — any node needing a materialized input wraps its child in `Collect`
-- **EXPLAIN** — `Collect` nodes tell the user where memory grows
+- **EXPLAIN** — `Collect` nodes would surface those materialization points in
+  the plan tree EXPLAIN already prints (see _Plan Inspection_ below)
 - **Future stages** — natural boundary for spill-to-disk, distributed execution, caching
 
 ### Performance note
@@ -68,6 +69,23 @@ This is primarily a **composability win**, not a performance win. The same work 
 either way. The real performance opportunity is the asymmetric `IndexMerge(And)` path,
 which is an algorithm change that could be implemented with or without `Collect` as a
 plan node.
+
+---
+
+## Plan Inspection (EXPLAIN) — Done
+
+`Plan::explain()` (`slate-planner`) renders a lowered plan as an indented
+operator tree — one line per node, the operator plus the decisions that define
+it (an `IndexScan`'s field and bounds, a `Filter`'s predicate, a `Sort`'s keys),
+children indented below their parent. `Transaction::explain(cf, collection, sql)`
+(`slate-db`) lowers a query the same way `query` does and returns that rendering,
+and the REPL exposes it as `.explain <query>`.
+
+There is **no SQL `EXPLAIN` keyword** — plan inspection is a library/REPL affair,
+so the SQL grammar stays free of a reserved word. The rendering is *logical*: it
+shows the shape the planner settled on, with no cost estimates or row counts. The
+future `Collect` node (above) would make materialization points explicit in this
+same output.
 
 ---
 

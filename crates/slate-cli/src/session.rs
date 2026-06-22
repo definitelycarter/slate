@@ -38,6 +38,8 @@ pub enum Output {
     Count(u64),
     /// Rendered query result rows (already JSON-formatted).
     Rows(Vec<String>),
+    /// A rendered query plan tree (from `.explain`).
+    Plan(String),
     /// `(cf, name)` pairs for every collection.
     Collections(Vec<(String, String)>),
     /// Indexed fields of the current collection.
@@ -143,6 +145,7 @@ impl<S: BackupStore> Session<S> {
             Command::Seed => self.seed(),
             Command::SeedFile { path, collection } => self.seed_file(path, collection),
             Command::Backup(dest) => self.backup(dest),
+            Command::Explain(query) => self.explain(&query),
             Command::Sql(sql) => self.sql(&sql),
         }
     }
@@ -384,6 +387,23 @@ impl<S: BackupStore> Session<S> {
         };
         txn.rollback().map_err(es)?;
         Ok(Output::Rows(rows))
+    }
+
+    /// Lower a query to its physical plan and render the plan tree, without
+    /// running it. Collection resolution matches [`sql`](Self::sql): a FROM-less
+    /// query (`SELECT VALUE 1`) needs no active collection, while one with a
+    /// `FROM` does.
+    fn explain(&self, query: &str) -> Result<Output, String> {
+        let needs_collection = matches!(slate_sql::parse(query), Ok(q) if q.from.is_some());
+        let collection = if needs_collection {
+            self.require_collection()?
+        } else {
+            self.current.as_deref().unwrap_or("")
+        };
+        let txn = self.db.begin(true).map_err(es)?;
+        let plan = txn.explain(DEFAULT_CF, collection, query).map_err(es)?;
+        txn.rollback().map_err(es)?;
+        Ok(Output::Plan(plan))
     }
 
     fn seed(&mut self) -> Result<Output, String> {
@@ -882,6 +902,69 @@ mod tests {
         assert!(
             err.contains("backup") || err.contains("in-memory"),
             "unexpected backup error: {err}"
+        );
+    }
+
+    #[test]
+    fn explain_indexed_eq_shows_index_scan_tree() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(&mut s, ".index name");
+        run(&mut s, r#".insert {"_id":"1","name":"ada"}"#);
+        match run(
+            &mut s,
+            r#".explain SELECT VALUE c.name FROM c WHERE c.name = "ada""#,
+        ) {
+            Output::Plan(plan) => {
+                // The sargable equality on the indexed field plans to an index
+                // scan resolved by a key lookup.
+                assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
+                assert!(plan.contains("KeyLookup"), "expected a key lookup: {plan}");
+            }
+            other => panic!("expected a plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_unindexed_predicate_is_a_filtered_scan() {
+        let mut s = session();
+        run(&mut s, ".create people");
+        run(&mut s, r#".insert {"_id":"1","age":36}"#);
+        match run(
+            &mut s,
+            ".explain SELECT VALUE c.age FROM c WHERE c.age = 36",
+        ) {
+            Output::Plan(plan) => {
+                assert!(
+                    !plan.contains("IndexScan"),
+                    "an unindexed predicate must not index-scan: {plan}"
+                );
+                assert!(plan.contains("Scan"), "expected a scan: {plan}");
+                assert!(
+                    plan.contains("Filter c.age = 36"),
+                    "expected the residual filter: {plan}"
+                );
+            }
+            other => panic!("expected a plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_from_less_query_needs_no_collection() {
+        // Like running `SELECT VALUE 1`, explaining it works on a fresh session.
+        let mut s = session();
+        match run(&mut s, ".explain SELECT VALUE 1 + 1") {
+            Output::Plan(plan) => assert!(!plan.is_empty(), "expected a plan tree"),
+            other => panic!("expected a plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_with_from_requires_a_collection() {
+        let mut s = session();
+        assert!(
+            s.execute(Command::parse(".explain SELECT VALUE c.name FROM c").unwrap())
+                .is_err()
         );
     }
 

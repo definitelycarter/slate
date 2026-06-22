@@ -173,6 +173,7 @@ cargo run -p slate-cli -- --rocksdb /tmp/slate   # or persist
 slate> .seed
 slate(sample)> SELECT c.city, COUNT(1) AS n
           ...> FROM c GROUP BY c.city;
+slate(sample)> .explain SELECT VALUE c.name FROM c WHERE c.city = 'London'
 slate(sample)> .schema sample
 slate(sample)> .backup /tmp/snapshot      # rocksdb/redb only
 ```

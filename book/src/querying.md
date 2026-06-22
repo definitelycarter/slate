@@ -163,6 +163,8 @@ A unique index keeps its regular value-first `i` entry, so it serves index scans
 
 The planner's source selection — when a filter becomes an `IndexScan`, an `IndexMerge`, or falls back to a `Scan` — is catalogued with 19 worked examples (plus a full pipeline and limit placement) in **[Plan Scenarios](./plan-scenarios.md)**.
 
+To see the plan a specific query lowers to, use `.explain <query>` in the `slate-cli` shell (or `Transaction::explain(cf, collection, sql)` in the library). It prints the chosen plan as an indented operator tree — the same lowering `query` uses, so the tree reflects what would actually run — without executing it. There is no SQL `EXPLAIN` keyword; plan inspection is a shell/library affair.
+
 ## Distinct Queries
 
 Distinct queries find the unique values of a single field. v2 builds a `Scan`-based pipeline and adds `Project` → `Distinct` to extract and deduplicate the values.

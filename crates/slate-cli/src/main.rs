@@ -60,6 +60,7 @@ Commands:
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
     .backup <dir>               back up the database (rocksdb/redb only)
+    .explain <query>            show a query's plan without running it
 
 Anything else is run as SQL against the active collection, where `c` is the
 row. End a statement with `;` — it may span multiple lines (`...>` continues it,
@@ -301,6 +302,7 @@ fn print_output(output: &Output, elapsed: Duration) {
                 if rows.len() == 1 { "" } else { "s" }
             );
         }
+        Output::Plan(plan) => println!("{plan}"),
         Output::Collections(pairs) => {
             if pairs.is_empty() {
                 println!("(no collections)");

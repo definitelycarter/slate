@@ -42,6 +42,7 @@ const COMMAND_NAMES: &[&str] = &[
     "indexes",
     "schema",
     "backup",
+    "explain",
 ];
 
 /// A snapshot of what the completer needs, refreshed by the REPL between
