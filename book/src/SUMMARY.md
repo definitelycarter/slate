@@ -15,3 +15,7 @@
 - [Swift / Apple Platforms](./swift.md)
 - [Benchmarks](./benchmarks.md)
 - [Roadmap](./roadmap.md)
+
+# RFCs
+
+- [Spatial Index](./rfcs/spatial-index.md)
