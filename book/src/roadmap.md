@@ -44,6 +44,20 @@ value length in the entry metadata, or length-suffix the doc_id so it can be rea
 back-to-front. Either is an index-key encoding change and needs a re-index migration,
 so it is deferred to its own change.
 
+## Index Sargability (predicate pushdown)
+
+Several predicates that could be answered from an index instead full-scan, and the
+"can this use an index?" recognisers are added one function at a time. The
+[Index Sargability RFC](./rfcs/index-sargability.md) defines a single sargability
+doctrine + recogniser and audits every predicate shape (comparison, `IN`/`BETWEEN`,
+`ARRAY_CONTAINS`/`_ANY`/`_ALL`, `STARTSWITH`/`LIKE 'pre%'`, the null family, negation,
+function-of-field). Increments: **A** multikey containment (`ARRAY_CONTAINS`), **B**
+prefix range (`STARTSWITH`/`LIKE`), **C** `STRINGEQUALS`→`Eq`, over a unified
+`sargable() -> IndexAccess` recogniser. Indexes stay **sparse** (so `IS_NULL` /
+`IS_DEFINED` remain Filters) pending a deliberate dense-index decision. A spike
+(`tasks/index-sargability-spike.md`) completes the audit against the full
+function/operator/subquery surface and evaluates the Cosmos query-metrics oracle.
+
 ## Collect Node (Plan Materialization Barrier)
 
 ### Concept

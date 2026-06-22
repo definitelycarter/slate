@@ -19,3 +19,4 @@
 # RFCs
 
 - [Spatial Index](./rfcs/spatial-index.md)
+- [Index Sargability](./rfcs/index-sargability.md)
