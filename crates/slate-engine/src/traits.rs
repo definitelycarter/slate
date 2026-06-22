@@ -257,8 +257,12 @@ impl IndexEntry {
             return None;
         }
         let tail = &key[field_prefix_len..];
-        let (value_portion, _) = crate::encoding::key::split_trailing_doc_id(tail)?;
-        let doc_id_start = field_prefix_len + value_portion.len();
+        // Derive the value length from its type (the metadata tag) rather than
+        // guessing the value/doc_id boundary by scanning — the scan mis-splits a
+        // sortable numeric encoding whose bytes resemble a length-prefixed doc_id
+        // header, which made every numeric/date index scan fail to decode its value.
+        let value_len = crate::encoding::key::index_value_len(metadata[0], tail)?;
+        let doc_id_start = field_prefix_len + value_len;
         Some(IndexEntry {
             key,
             metadata,

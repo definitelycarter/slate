@@ -70,6 +70,53 @@ fn create_and_use_index() {
 }
 
 #[test]
+fn numeric_index_scans_decode_without_crashing() {
+    // Regression: an index on a numeric field used to crash at scan time with
+    // "malformed value in index key" — the sortable numeric encoding embeds bytes
+    // the value/doc_id boundary scan mis-read. ObjectId `_id`s give varied doc_id
+    // byte patterns that exercise the boundary; index-scan results must match the
+    // expected counts.
+    let (db, _dir) = temp_db();
+    create_collection(&db, COLLECTION);
+
+    fn det_oid(i: u32) -> bson::oid::ObjectId {
+        let mut b = [0u8; 12];
+        b[0..4].copy_from_slice(&i.to_be_bytes());
+        b[4..8].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+        b[8..12].copy_from_slice(&(i ^ 0x5bd1_e995).to_be_bytes());
+        bson::oid::ObjectId::from_bytes(b)
+    }
+
+    let txn = db.begin(false).unwrap();
+    let docs: Vec<_> = (0u32..300)
+        .map(|i| doc! { "_id": det_oid(i), "priority": (i % 3 + 1) as i32 })
+        .collect();
+    txn.insert_many(DEFAULT_CF, COLLECTION, docs)
+        .unwrap()
+        .drain()
+        .unwrap();
+    txn.create_index(DEFAULT_CF, COLLECTION, "priority")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let count = |filter: bson::RawDocumentBuf| {
+        let txn = db.begin(true).unwrap();
+        let n = txn
+            .find(DEFAULT_CF, COLLECTION, filter, FindOptions::default())
+            .unwrap()
+            .drain()
+            .unwrap();
+        txn.rollback().unwrap();
+        n
+    };
+
+    // 300 docs, priority cycles 1,2,3 -> 100 each.
+    assert_eq!(count(rawdoc! { "priority": 3 }), 100); // eq (was a crash)
+    assert_eq!(count(rawdoc! { "priority": { "$gt": 1 } }), 200); // range
+    assert_eq!(count(rawdoc! { "priority": { "$gte": 2 } }), 200);
+}
+
+#[test]
 fn drop_index() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);

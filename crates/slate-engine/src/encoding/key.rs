@@ -66,6 +66,31 @@ pub(crate) fn split_trailing_doc_id(bytes: &[u8]) -> Option<(&[u8], BsonValue<'_
     None
 }
 
+/// The byte length of an index entry's value.
+///
+/// `type_byte` is the entry's BSON element type (from its metadata); `tail` is the
+/// bytes from the value onward (`{value_bytes}{doc_id_lp}`). Fixed-width types have
+/// a length fixed by their type; variable-width types (strings) fall back to
+/// locating the trailing length-prefixed doc_id. Deriving the length from the type
+/// avoids the ambiguous backward scan, which mis-splits the sortable encoding of a
+/// number whose bytes resemble a length-prefixed doc_id header — the bug that made
+/// numeric/date index scans fail to decode their value.
+pub(crate) fn index_value_len(type_byte: u8, tail: &[u8]) -> Option<usize> {
+    use bson::spec::ElementType;
+    let len = match ElementType::from(type_byte) {
+        Some(ElementType::Int32) => 4,
+        Some(ElementType::Int64 | ElementType::Double | ElementType::DateTime) => 8,
+        Some(ElementType::ObjectId) => 12,
+        Some(ElementType::Boolean) => 1,
+        // Variable-width (String, …): locate the trailing doc_id.
+        _ => split_trailing_doc_id(tail)?.0.len(),
+    };
+    if len > tail.len() {
+        return None;
+    }
+    Some(len)
+}
+
 /// Structured key for engine storage operations.
 ///
 /// - `Collection(cf, name)` — collection metadata in `_sys_`

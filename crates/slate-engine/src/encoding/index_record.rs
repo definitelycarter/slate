@@ -44,15 +44,17 @@ impl IndexRecord {
         }
         // Validate and compute offsets via a scoped borrow.
         let (field_start, value_start, doc_id_start) = {
-            let (key, value_bytes) = Key::decode_index(&key_bytes)?;
+            // `decode_index` validates the `i` tag and parses collection/field; the
+            // value/doc_id boundary it returns is derived by an ambiguous scan, so
+            // we recompute the value length from the type byte (see `index_value_len`).
+            let (key, _) = Key::decode_index(&key_bytes)?;
             let Key::Index(collection, field, _) = &key else {
                 return None;
             };
-            (
-                2 + collection.len() + 1,
-                2 + collection.len() + 1 + field.len() + 1,
-                2 + collection.len() + 1 + field.len() + 1 + value_bytes.len(),
-            )
+            let field_start = 2 + collection.len() + 1;
+            let value_start = field_start + field.len() + 1;
+            let value_len = super::key::index_value_len(metadata[0], &key_bytes[value_start..])?;
+            (field_start, value_start, value_start + value_len)
         };
         Some(IndexRecord {
             index_key: key_bytes,
@@ -364,6 +366,27 @@ mod tests {
         let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
         let raw = record.value_bson().unwrap();
         assert_eq!(raw, bson::RawBson::String("Alice".into()));
+    }
+
+    #[test]
+    fn value_bson_reconstructs_int32_with_oid_id() {
+        // Regression: the sortable encoding of an i32 embeds bytes the boundary scan
+        // mis-read, so value_bson() returned None ("malformed value in index key").
+        // from_pair must derive the value length from the type byte. An ObjectId _id
+        // exercises the value/doc_id boundary; the number round-trips intact.
+        let oid = bson::oid::ObjectId::from_bytes([0x07; 12]);
+        let doc_id = BsonValue {
+            tag: ElementType::ObjectId,
+            bytes: Cow::Owned(oid.bytes().to_vec()),
+        };
+        let value = BsonValue::from_bson(&bson::Bson::Int32(3)).unwrap();
+
+        let (key_bytes, metadata) =
+            IndexRecord::encode("nba", "priority", &doc_id, &value, None).into_parts();
+
+        let record = IndexRecord::from_pair(key_bytes, metadata).unwrap();
+        assert_eq!(record.value_bson().unwrap(), bson::RawBson::Int32(3));
+        assert_eq!(record.doc_id().unwrap(), doc_id);
     }
 
     #[test]

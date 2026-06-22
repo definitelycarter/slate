@@ -21,6 +21,29 @@ Planned successor: a hermetic golden-replay test suite — capture Cosmos result
 offline, commit them, and replay in-process — so the Cosmos oracle runs under
 `cargo test` without Docker.
 
+## Index Key Value/Doc-Id Boundary (variable-width)
+
+An `i` index key is `i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}` with no
+delimiter between the value and the length-prefixed doc_id. For **fixed-width**
+value types the decoder now derives the value length from the entry's type byte
+(`index_value_len`), so the boundary is unambiguous — this fixed numeric/date index
+scans, which previously crashed with `malformed value in index key` when a sortable
+number's bytes happened to resemble a length-prefixed doc_id header.
+
+**Variable-width** values (strings) still locate the boundary by scanning backwards
+for a parseable trailing doc_id (`split_trailing_doc_id`). That scan is ambiguous —
+the value bytes plus the doc_id can admit more than one valid split, so a string
+index can silently mis-decode a few entries (observed: a `status = "active"` index
+scan undercounting a full scan by 3 on a 52k corpus). The loud numeric case is
+fixed; the silent string case is not.
+
+### Planned fix
+
+Make the variable-width boundary deterministic rather than guessed: either store the
+value length in the entry metadata, or length-suffix the doc_id so it can be read
+back-to-front. Either is an index-key encoding change and needs a re-index migration,
+so it is deferred to its own change.
+
 ## Collect Node (Plan Materialization Barrier)
 
 ### Concept
