@@ -36,7 +36,7 @@ fn decode_i64_sortable(b: [u8; 8]) -> i64 {
 }
 
 #[inline]
-fn encode_f64_sortable(f: f64) -> [u8; 8] {
+pub(crate) fn encode_f64_sortable(f: f64) -> [u8; 8] {
     let bits = f.to_bits();
     let encoded = if (bits & 0x8000_0000_0000_0000) != 0 {
         !bits // negative: flip all bits
@@ -47,7 +47,7 @@ fn encode_f64_sortable(f: f64) -> [u8; 8] {
 }
 
 #[inline]
-fn decode_f64_sortable(b: [u8; 8]) -> f64 {
+pub(crate) fn decode_f64_sortable(b: [u8; 8]) -> f64 {
     let encoded = u64::from_be_bytes(b);
     let bits = if (encoded & 0x8000_0000_0000_0000) != 0 {
         encoded ^ 0x8000_0000_0000_0000 // was positive

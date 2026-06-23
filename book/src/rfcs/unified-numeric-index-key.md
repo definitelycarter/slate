@@ -1,5 +1,10 @@
 # RFC: Unified Numeric Index Key
 
+> **Status: decided — scheme A (project to `f64`).** The encoder + property tests
+> have landed and are green in `crates/slate-engine/src/encoding/numeric_key.rs`
+> (the spike). Wiring it into the index read/write path and retiring the executor
+> special-case (Phase 2) is the remaining work.
+
 ## Problem
 
 Index keys store a value's *sortable bytes* with **no type tag in the key** (the
@@ -13,11 +18,11 @@ encode_i64_sortable(5)   = (5 ^ 0x8000_…).to_be_bytes()     = [80, 00, 00, 00,
 encode_f64_sortable(5.0) = flip(0x4014_…)                   = [C0, 14, 00, 00, 00, 00, 00, 00]
 ```
 
-Cosmos/Mongo semantics require `5 == 5L == 5.0` — all three must match
-`WHERE x = 5`. But a tight `Eq` seek lands on exactly one of those byte strings
-and misses the other two. So the executor's `needs_full_scan` routes **every
-numeric `Eq` and numeric-bounded `Range`** to `IndexRange::Full` + a
-`CoercingFilter` that re-compares *every entry in the field* with `compare_bson`.
+`5 == 5L == 5.0` must all match `WHERE x = 5`. But a tight `Eq` seek lands on
+exactly one of those byte strings and misses the other two. So the executor's
+`needs_full_scan` routes **every numeric `Eq` and numeric-bounded `Range`** to
+`IndexRange::Full` + a `CoercingFilter` that re-compares *every entry in the
+field* with `compare_bson`.
 
 The cost: **a numeric equality loses all selectivity** — `WHERE score = 5` reads
 the entire `score` index, not just the `5`s. Strings and bools (one encoding
@@ -38,192 +43,166 @@ each) keep the tight seek; numerics are the exception, and they're a common one.
   for record reconstruction and boundary resolution.
 - **The executor special-case**: `needs_full_scan` (numeric → `true`) →
   `IndexRange::Full` + `CoercingFilter::{Eq,Range}` → per-row `compare_bson`
-  recheck. The engine's `scan_index` therefore never sees a numeric `Eq`/`Range`
-  — only the executor's full-scan-plus-recheck.
+  recheck. The engine's `scan_index` therefore never sees a numeric `Eq`/`Range`.
 
-## Proposal
+## Decision: key by the `f64` projection
 
-Encode every number into a **single order-preserving canonical key** so that all
-numeric types collapse onto one number line:
+The index is required to return the same rows as a full scan + `compare_bson` —
+its own doc says so (*"re-exported so the index scan's cross-type post-filter
+agrees with evaluation rather than re-deriving its own numeric rules"*). And
+`compare_bson` compares **every** numeric type by projecting through `as f64`:
 
-1. **Equal values produce identical comparison bytes** — `Int32(5)`, `Int64(5)`,
-   `Double(5.0)` all encode to the *same* key bytes.
-2. **Byte order is numeric order** — a byte range is a numeric range.
-
-Then a numeric `Eq` is a tight seek (it lands all three types at once) and a
-numeric `Range` is an exact byte range — numerics rejoin the string/bool
-tight-seek path, and the executor's numeric special-case **disappears** (see
-[The payoff](#the-payoff-what-it-deletes)).
-
-The **type tag (already stored)** reconstructs the original BSON type for
-*covered* reads. Crucially, reconstruction is needed **only when the index is the
-source of a returned value** — i.e. covered projections (and covered aggregates /
-`ORDER BY` value emission). On the common non-covered path the index yields
-doc-ids, the *record* supplies the values, and the tag is never read. So the tag
-is **write-always, read-only-when-covered**.
-
-This is exactly WiredTiger's KeyString design: a unified numeric comparison key
-plus separate **"type bits"** for round-tripping. slate already has the type-bits
-half; this RFC adds the unified-key half.
-
-## Why "widen to the largest type" doesn't work
-
-The intuitive version — "store every number as decimal128, it's the largest
-(16 B), and cast back via the type tag" — **is unsound**, and it's worth being
-precise about why, because it shapes the whole design.
-
-decimal128 is the largest *physical* type, but it is **not a lossless superset of
-`double`**. The two use different mantissa radices:
-
-- `double` represents `m × 2^e` (53-bit binary mantissa).
-- `decimal128` represents `m × 10^e` (34-decimal-digit mantissa).
-
-Neither set contains the other. The double nearest to `0.1` is exactly
-
-```
-0.1000000000000000055511151231257827021181583404541015625   (55 significant digits)
+```rust
+// slate-eval  eval.rs
+(Scalar::Num(x), Scalar::Num(y)) => num_f64(x).partial_cmp(&num_f64(y)),   // :322
+Num::Int(i) => *i as f64,                                                   // :410
 ```
 
-which **exceeds decimal128's 34 digits** — casting it to decimal128 *rounds*, so
-the round-trip is lossy and two distinct doubles can collide. Conversely, decimal
-`0.1` (exact, `1 × 10⁻¹`) is *not* an exact double. So there is **no physical type
-to cast into** without losing values or ordering.
+This is deliberate, not incidental: `decimal_to_f64`'s comment calls it *"slate's
+single f64 number tower (matching Cosmos's one-number model)."* Arithmetic
+(`Add`/`Sub`/`Mul → Double`) and the `SUM`/`AVG` accumulators are f64 too. So
+`compare_bson` already reports `Int64(2⁵³)` and `Int64(2⁵³+1)` as **equal** (they
+share an `f64`).
 
-The fix is an order-preserving **encoding**, not a **cast**. And here the
-restricted scope is a gift: the currently-indexed numerics `{Int32, Int64,
-Double}` are **all dyadic rationals** (`k / 2ʲ` — integers are `j = 0`, doubles
-are `m × 2^e`). A common *exact* total order over dyadic rationals exists. The
-*only* type that breaks it is decimal128 (base-10, non-dyadic) — and it's already
-excluded from indexing. So scoping decimal128 out isn't a compromise; it's what
-makes a clean unified key possible at all.
+That **decides the encoding**: the canonical key is the **`f64` projection** of
+the value — `encode_f64_sortable(value as f64)` — an 8-byte, fixed-width,
+suffix-free key on which all numeric types collapse:
 
-## Encoding options
+1. **Equal values (under the f64 oracle) produce identical bytes** — `Int32(5)`,
+   `Int64(5)`, `Double(5.0)`, and even `Int64(2⁵³)`/`Int64(2⁵³+1)` share one key.
+2. **Byte order is numeric (f64) order** — a byte range is a numeric range.
 
-| | scheme | exact? | size | notes |
-|---|---|---|---|---|
-| **A** | all numbers → `double` (8 B) | ❌ lossy for `i64 > 2⁵³` | 8 B fixed | the *Cosmos number model*; abandons BSON int/long fidelity |
-| **B** | fixed-width canonical (sign · biased-exponent · significand) | ✅ for `i64 ∪ double` | ~9–10 B fixed | simplest; no length suffix; uniform |
-| **C** | variable-length canonical (self-delimiting, Mongo-style) | ✅ | 1–10 B | compact for small ints (the common case); intricate; must self-delimit |
+Then numeric `Eq` is a tight seek (it lands all types at once), numeric `Range` is
+an exact byte range, and the executor's numeric special-case disappears (see
+[The payoff](#the-payoff)). The **type tag (already stored)** reconstructs the
+original BSON type for *covered* reads only; the non-covered path uses the index
+for doc-ids and never reads it. (Mongo's KeyString is the same shape — a collapsed
+numeric comparison key + separate "type bits"; slate already had the type-bits
+half.)
 
-**A** is the radical alternative: adopt Cosmos's "a number is a double" model and
-the problem evaporates (one type, one encoding). It's the cleanest code but a
-real semantic change — `Int64` values past 2⁵³ stop round-tripping. Flagged for
-discussion against the existing *number-model* parity question; **not** the
-recommendation here, since slate is otherwise BSON-faithful.
+**Validated by the spike** (`numeric_key.rs`): a boundary-corpus property test plus
+a 100k-pair SplitMix64 fuzz confirm `encode(a).cmp(encode(b))` and `encode(a) ==
+encode(b)` reproduce `compare_bson`'s order and equality across cross-type `5`s,
+signed zero, the 2⁵³ boundary, type extremes, and infinities. Two edges surfaced
+and are handled: **`-0.0` normalises to `+0.0`** (they compare equal, so must
+share a key) and **`NaN` is not keyed** (`compare_bson` treats it as incomparable,
+so it can never match a sargable predicate).
 
-**B** normalizes each value to `(sign, exponent, significand)` with equal values
-sharing a representation, then lays them out big-endian with the usual sign/order
-flips. `i64` needs up to 63 significand bits (8 B) and exponent 0; `double` needs
-an 11-bit exponent — together ≈ 9–10 B fixed, with the sign folded into the high
-bit. Fixed width keeps the **no-length-suffix** property.
+## Why not an exact (BSON-faithful) key?
 
-**C** keeps small integers small (often *cheaper* than today's 4-byte `i32`) but
-must be self-delimiting or carry the `u32` suffix (`+4 B`), which erodes the win.
+An earlier draft proposed an *exact* `i64 ∪ double` canonical order (so `2⁵³` and
+`2⁵³+1` stay distinct, Mongo-style). Two reasons that's the wrong target here:
 
-Recommendation: **B for v1** (uniform, suffix-free, easy to property-test), **C
-as a follow-up** if index size on small-int fields proves to matter.
+1. **It would contradict the oracle.** The index cannot be more precise than the
+   `compare_bson` it must agree with. An exact key would distinguish values
+   `compare_bson` calls equal, so the index would return different rows than a
+   full scan. Making an exact key *correct* means first making `compare_bson`
+   exact — a whole-engine number-model change (comparison **and** arithmetic) that
+   diverges from the f64 one-number model slate deliberately adopted. That's a
+   separate, deliberate project, not an index feature.
+2. **Even on its own terms, "widen to the largest physical type" is unsound.**
+   decimal128 (16 B) is the largest type but is *not* a lossless superset of
+   `double`: the two use different mantissa radices (`m × 2^e` vs `m × 10^e`), so
+   neither set contains the other. The double nearest `0.1` is
+   `0.10000000000000000555…` (55 significant digits, past decimal128's 34); decimal
+   `0.1` is not an exact double. There is no physical type to cast into without
+   losing values. (An exact *encoding* over the dyadic rationals `{i32,i64,double}`
+   — all `k/2ʲ` — is possible, but moot: the f64 projection is simpler and is what
+   the oracle demands.)
 
-## Storage cost analysis
+## Storage cost
 
-Value-bytes only (the prefix `i\0{collection}\0{field}\0` and the
-length-prefixed doc-id are unchanged, and typically dominate the entry at
-~20–40 B):
+Scheme A keys every number as the 8-byte f64 sortable form. Value-bytes only (the
+prefix `i\0{collection}\0{field}\0` and the length-prefixed doc-id are unchanged
+and dominate the entry at ~20–40 B):
 
-| type | today | **B** (~10 B fixed) | **C** (variable) |
-|---|---|---|---|
-| `Int32` | 4 B | 10 B (**+6**) | 1–5 B (small ints often **< 4**) |
-| `Int64` | 8 B | 10 B (**+2**) | 1–9 B |
-| `Double` | 8 B | 10 B (**+2**) | 3–10 B |
-| `Decimal128` | *not indexed* | out of scope | out of scope |
+| type | today | scheme A |
+|---|---|---|
+| `Int32` | 4 B | 8 B (**+4**) |
+| `Int64` | 8 B | 8 B (unchanged size; bytes re-derived from the f64) |
+| `Double` | 8 B | 8 B (unchanged) |
+| `Decimal128` | *not indexed* | not indexed (could join later — already f64 in `compare_bson`) |
 
-Because the value is a *minority* of each entry (prefix + doc-id dominate), even
-the worst case — an `Int32`-heavy field under scheme **B** — grows total index
-size by roughly **10–20 %**, and `Int64`/`Double` fields by low single digits.
-Scheme **C** is roughly neutral-to-smaller on typical small-int fields. No new
-per-entry suffix under **B** (fixed width). The metadata/TTL layout is untouched.
+The only growth is `Int32` fields, +4 B on the value — a fraction of the entry,
+and zero for `Int64`/`Double`. The metadata/TTL layout is untouched.
 
-**Migration is a full reindex** — rebuild every collection's `i` entries from the
-records under a version bump, identical in shape to the string-boundary migration
-(records are the source of truth, atomic, rolls back on failure, never
-half-migrated). Unique (`u`) entries use the same value encoding and migrate the
-same way.
+**No migration.** With no users yet there is nothing to preserve: change the
+encoding and rebuild/recreate indexes. (If that ever changes, the string-boundary
+reindex path — rebuild `i` entries from records under a version bump — is the
+precedent.)
 
-## The payoff (what it deletes)
+## The payoff
 
 This isn't only a numeric-`Eq` speedup; it **removes** machinery:
 
 - `needs_full_scan` numeric branch → gone. Numeric `Eq` becomes a tight seek.
 - `CoercingFilter::{Eq,Range}` and the per-row `compare_bson` recheck → gone.
-  Numeric `Range` becomes an exact byte range over the unified order.
+  Numeric `Range` becomes an exact byte range over the unified f64 order.
 - The engine's `scan_index` already handles tight `Eq` + exact `Range`; numerics
   simply start flowing through it like strings and bools.
 
-So the special case that opened this whole investigation doesn't get *optimized*
-— it **stops existing**. Net: less executor code, one scan path for all scalar
-types, and selectivity restored on the single most common index predicate.
+So the special case that opened this investigation doesn't get *optimized* — it
+**stops existing**. Net: less executor code, one scan path for all scalar types,
+and selectivity restored on the single most common index predicate.
 
 ## Round-tripping / covered reads
 
 The only consumers that reconstruct a number *from the key* are **covered**:
 
 - **Covered projection** (`SELECT score FROM nba WHERE score = 5`, `score`
-  indexed) — the value comes from the index, so decode the canonical bytes and
-  read the **type tag** to emit `Int32(5)` vs `Double(5.0)` (the comparison bytes
-  are deliberately type-collapsed and can't self-identify — that's *why* the tag
-  rides separately).
+  indexed) — the value comes from the index, so decode the f64 and read the
+  **type tag** to emit `Int32(5)` vs `Double(5.0)`.
 - **Covered aggregates / `ORDER BY` value emission** — same.
 
-**Non-covered scans never reconstruct** — they use the index for doc-ids, fetch
-records, and return original BSON. The tag is untouched. (Strings already follow
-this: covered reads strip the length suffix; non-covered ignore it.)
+Reconstruction is **f64-precision**: exact for every value `|v| ≤ 2⁵³`, and
+f64-rounded for larger `Int64` (the key already lost those low bits at write
+time). This is the same line the f64 tower already draws everywhere else — `find` /
+`SELECT *` stay exact because they read the **record**; computed and now covered
+positions are f64. **Non-covered scans never reconstruct** — they use the index
+for doc-ids, fetch records, and return original BSON.
 
 ## Cosmos / Mongo, for reference only
 
 - **Mongo (WiredTiger KeyString)** — collapses all numerics into one
   order-preserving comparison key (`5`, `5L`, `5.0` → identical bytes) and stores
-  separate *type bits* for reconstruction. It does **not** multi-probe; `x = 5` is
-  a single seek. slate's type-tag-in-metadata is already the type-bits half.
-- **Cosmos** — models every number as IEEE-754 `double` (JSON/JS semantics).
-  *One* numeric type means no cross-type problem, no multi-probe, one seek. This
-  is scheme **A**, and the open *number-model* parity question.
+  separate *type bits* for reconstruction. It keeps numbers **exact** (i64 and
+  double compared exactly), which is why KeyString is intricate. slate is *not*
+  matching this — its comparator is f64.
+- **Cosmos** — models every number as IEEE-754 `double`. This is what slate's eval
+  layer independently is. We are not adopting f64 *for Cosmos parity* — slate
+  already chose it in `compare_bson`/arithmetic; the index is just catching up.
 
-## Open questions
+## Resolved questions & remaining scope
 
-1. **decimal128.** Keep it excluded (recommended for v1), or define cross-radix
-   (base-2 vs base-10) equality/order? `double 0.1` and `decimal 0.1` are
-   *different real numbers*; Mongo has documented edge cases here. Out of scope
-   until there's a demand.
-2. **NaN / ±Infinity.** Where do they sit in the order, and is `NaN == NaN`
-   inside an index? (compare_bson's current answer is the oracle to match.)
-3. **Signed zero.** `-0.0`, `+0.0`, and `Int(0)` must collapse to one key.
-4. **Fixed (B) vs variable (C).** Storage vs simplicity; decide via the spike's
-   size measurement on a real numeric corpus.
-5. **DateTime** stays on its own `i64` encoding — semantically a timestamp, not a
-   member of the numeric line. Do not fold it in.
-6. **Unique index.** A unified key makes cross-type numeric uniqueness automatic
-   (`5` conflicts with `5.0`). Confirm that's the desired semantic (Mongo says
-   yes) and that `u` entries migrate cleanly.
-7. **Migration/versioning** mechanics — reuse the string-boundary reindex path
-   and bump the index-encoding version.
+- **NaN** — resolved: *not keyed* (`compare_bson` says incomparable).
+- **Signed zero** — resolved: `-0.0` normalises to `+0.0` (and `Int(0)` shares it).
+- **Fixed vs variable encoding** — moot: scheme A is fixed 8 B.
+- **decimal128** — excluded for now; it already projects to f64 in `compare_bson`,
+  so it could join the index later with no new machinery.
+- **DateTime** — stays on its own `i64` encoding (a timestamp, not a member of the
+  numeric line). Do not fold it in.
+- **Unique index** — a unified key makes cross-type numeric uniqueness automatic
+  (`5` conflicts with `5.0`), which matches the f64 tower. Confirm `u` entries
+  re-derive the same way during Phase 2.
+- **Exact large-int covered reads** — open *only if* slate ever needs exact
+  `Int64 > 2⁵³` in computed/covered positions; that's the engine-wide
+  exact-number project (rework `compare_bson` + arithmetic), not this index.
 
-## Minimal v1 scope
+**v1 scope:** `{Int32, Int64, Double}`; decimal128 excluded; key =
+`encode_f64_sortable(value as f64)`; retire the executor numeric special-case;
+covered reads decode via the type tag (f64-precision); no migration (rebuild
+indexes).
 
-- `{Int32, Int64, Double}` only; decimal128 stays excluded.
-- Scheme **B** (fixed-width canonical, suffix-free); **C** deferred.
-- Retire `needs_full_scan` numeric branch + `CoercingFilter` + the numeric
-  recheck; numerics flow through the engine's tight `Eq` / exact `Range` path.
-- Covered reads decode via the existing type tag; non-covered unchanged.
-- Reindex migration + version bump (string-boundary precedent).
+## Spike — done
 
-## Spike
+Landed in `crates/slate-engine/src/encoding/numeric_key.rs`:
+`encode_numeric_index` / `decode_numeric_index` plus six tests — cross-type
+collapse, oracle-matched byte order & collapse over the boundary corpus, exact
+round-trip within 2⁵³, documented f64-rounding beyond it, NaN/non-numeric not
+keyed, and a 100k-pair fuzz against the f64 oracle. All green. Findings
+(`-0.0`→`+0.0`, NaN excluded, +4 B on `Int32`) are folded above.
 
-Before committing to the byte format, prototype scheme **B** for
-`{i32, i64, double}` and **property-test it against `compare_bson` as the oracle**:
-
-- *order-preservation* — `encode(a) < encode(b)  ⇔  compare_bson(a, b) == Less`,
-- *collapse* — `compare_bson(a, b) == Equal  ⇔  encode(a) == encode(b)` (covers
-  `5 == 5L == 5.0`, `-0.0 == 0`, the 2⁵³ boundary),
-- *round-trip* — `decode(encode(v), tag) == v` for every type,
-
-across a generated corpus spanning the `i64`/`double` exactness boundary, then
-**measure index-size delta** on a numeric-heavy collection to settle B-vs-C.
+**Remaining: Phase 2** — wire `encode_numeric_index` into the index write path and
+`decode_numeric_index` into covered reads, route numeric `Eq`/`Range` through the
+engine's tight-seek path, and delete the executor's `needs_full_scan` numeric
+branch + `CoercingFilter` + recheck.
