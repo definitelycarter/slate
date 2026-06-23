@@ -1,6 +1,6 @@
-use bson::raw::{RawDocument, RawDocumentBuf};
+use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
+use slate_rawbson::RawField;
 
-use super::skip_bson_value;
 use crate::error::{EncodingError, EngineError};
 
 // ── Wire format ───────────────────────────────────────────────
@@ -175,63 +175,13 @@ impl TryFrom<Record> for RawDocumentBuf {
 
 /// Extract a DateTime field's millis from a raw BSON document.
 ///
-/// Supports dot-paths (e.g. `"meta.expires_at"`) by scanning into nested
-/// documents. Only depends on [`skip_bson_value`] which lives in this crate.
+/// Supports dot-paths (e.g. `"meta.expires_at"`) via the leaf `slate-rawbson`
+/// scanner; yields `None` unless the resolved leaf is a `DateTime`.
 fn extract_datetime_millis(doc: &RawDocument, path: &str) -> Option<i64> {
-    resolve_datetime(doc.as_bytes(), 0, path)
-}
-
-/// Walk a dot-path through raw BSON bytes, returning millis if the leaf is DateTime.
-fn resolve_datetime(bytes: &[u8], base: usize, path: &str) -> Option<i64> {
-    let (field, rest) = match path.split_once('.') {
-        Some((first, rest)) => (first, Some(rest)),
-        None => (path, None),
-    };
-    let target = field.as_bytes();
-
-    if base + 4 > bytes.len() {
-        return None;
+    match RawField::get_value(doc.as_bytes(), path)? {
+        RawBsonRef::DateTime(dt) => Some(dt.timestamp_millis()),
+        _ => None,
     }
-    let doc_len = i32::from_le_bytes(bytes[base..base + 4].try_into().ok()?) as usize;
-    let doc_end = base + doc_len;
-    let mut pos = base + 4;
-
-    while pos < doc_end {
-        let type_byte = bytes[pos];
-        if type_byte == 0x00 {
-            break;
-        }
-        pos += 1;
-
-        let name_start = pos;
-        while pos < doc_end && bytes[pos] != 0x00 {
-            pos += 1;
-        }
-        if pos >= doc_end {
-            return None;
-        }
-        let name = &bytes[name_start..pos];
-        pos += 1; // null terminator
-
-        let value_start = pos;
-        let element_end = skip_bson_value(type_byte, bytes, pos)?;
-
-        if name == target {
-            return match rest {
-                // Nested path — descend into embedded document (type 0x03)
-                Some(rest) if type_byte == 0x03 => resolve_datetime(bytes, value_start, rest),
-                // Leaf — extract DateTime millis (type 0x09)
-                None if type_byte == 0x09 => {
-                    let ms =
-                        i64::from_le_bytes(bytes[value_start..value_start + 8].try_into().ok()?);
-                    Some(ms)
-                }
-                _ => None,
-            };
-        }
-        pos = element_end;
-    }
-    None
 }
 
 #[cfg(test)]

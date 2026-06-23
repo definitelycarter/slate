@@ -8,7 +8,6 @@ pub use index_record::IndexRecord;
 pub use key::{Key, KeyPrefix};
 pub use record::Record;
 
-// The raw BSON skip primitive now lives in the leaf `slate-rawbson` crate,
-// re-exported here so `super::skip_bson_value` / `slate_engine::skip_bson_value`
-// keep resolving for existing engine and downstream callers.
-pub use slate_rawbson::skip_bson_value;
+// Raw byte-level BSON primitives (skip_bson_value, RawField, for_each_path_value,
+// raw_merge) live in the leaf `slate-rawbson` crate; this module imports them
+// directly where needed rather than re-exporting.

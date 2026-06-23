@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use bson::raw::{RawBsonRef, RawDocument};
 use bson::spec::ElementType;
+use slate_rawbson::{RawField, for_each_path_value};
 
 /// Length-prefixed header size: 1 type byte + 2 length bytes.
 const LP_HEADER: usize = 3;
@@ -159,35 +160,13 @@ impl<'a> BsonValue<'a> {
     ///
     /// Supports dotted paths for nested documents (e.g. `"address.city"`).
     /// For array multi-key fields (containing `[]`), use [`extract_all`].
+    ///
+    /// Resolution runs through [`RawField::get_value`] (the leaf `slate-rawbson`
+    /// byte scanner), which returns `None` for a missing field or a `Null` leaf;
+    /// types that aren't valid index/key values then drop out via
+    /// [`from_raw_bson_ref`](Self::from_raw_bson_ref).
     pub fn extract(doc: &'a RawDocument, field: &str) -> Option<Self> {
-        if !field.contains('.') {
-            return match doc.get(field) {
-                Ok(Some(val)) => Self::from_raw_bson_ref(val),
-                _ => None,
-            };
-        }
-
-        // Walk dotted path through nested documents
-        let mut segments = field.split('.');
-        let first = segments.next()?;
-        let mut current = match doc.get(first) {
-            Ok(Some(val)) => val,
-            _ => return None,
-        };
-
-        for seg in segments {
-            match current {
-                RawBsonRef::Document(d) => {
-                    current = match d.get(seg) {
-                        Ok(Some(val)) => val,
-                        _ => return None,
-                    };
-                }
-                _ => return None,
-            }
-        }
-
-        Self::from_raw_bson_ref(current)
+        RawField::get_value(doc.as_bytes(), field).and_then(Self::from_raw_bson_ref)
     }
 
     /// Construct from a known type tag and raw value bytes.
@@ -389,66 +368,17 @@ pub fn extract_all(doc: &RawDocument, field: &str) -> Vec<BsonValue<'static>> {
         };
     }
 
-    let segments: Vec<&str> = field.split('.').collect();
+    // Multikey path: the `[]` array fan-out traversal lives in `slate-rawbson`;
+    // here we only map each visited raw value onto the index/key value model and
+    // own it. Types that aren't valid index values are dropped by
+    // `from_raw_bson_ref`.
     let mut results = Vec::new();
-    collect_from_doc(doc, &segments, 0, &mut results);
+    for_each_path_value(doc, field, &mut |value| {
+        if let Some(bv) = BsonValue::from_raw_bson_ref(value) {
+            results.push(bv.into_owned());
+        }
+    });
     results
-}
-
-fn collect_from_doc(
-    doc: &RawDocument,
-    segments: &[&str],
-    idx: usize,
-    out: &mut Vec<BsonValue<'static>>,
-) {
-    if idx >= segments.len() {
-        return;
-    }
-    let seg = segments[idx];
-    if seg == "[]" {
-        return;
-    }
-    if let Ok(Some(value)) = doc.get(seg) {
-        collect_from_value(value, segments, idx + 1, out);
-    }
-}
-
-fn collect_from_value(
-    value: RawBsonRef<'_>,
-    segments: &[&str],
-    idx: usize,
-    out: &mut Vec<BsonValue<'static>>,
-) {
-    if idx >= segments.len() {
-        // Terminal: try to convert to BsonValue
-        match value {
-            RawBsonRef::Array(arr) => {
-                for v in arr.into_iter().flatten() {
-                    if let Some(bv) = BsonValue::from_raw_bson_ref(v) {
-                        out.push(bv.into_owned());
-                    }
-                }
-            }
-            _ => {
-                if let Some(bv) = BsonValue::from_raw_bson_ref(value) {
-                    out.push(bv.into_owned());
-                }
-            }
-        }
-        return;
-    }
-
-    let seg = segments[idx];
-    if seg == "[]" {
-        // Traverse array elements
-        if let RawBsonRef::Array(arr) = value {
-            for v in arr.into_iter().flatten() {
-                collect_from_value(v, segments, idx + 1, out);
-            }
-        }
-    } else if let RawBsonRef::Document(d) = value {
-        collect_from_doc(d, segments, idx, out);
-    }
 }
 
 #[cfg(test)]

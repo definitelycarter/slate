@@ -335,6 +335,71 @@ fn resolve_path(bytes: &[u8], base: usize, path: &str) -> Option<FieldLoc> {
     resolve_path(bytes, loc.value_start, rest)
 }
 
+// ── Multikey path traversal ─────────────────────────────────────
+
+/// Visit every value reachable by `path` within `doc`, invoking `f` for each.
+///
+/// `path` is dot-separated. A `[]` segment iterates the array at that position,
+/// fanning out across its elements (e.g. `"tags.[]"`, `"items.[].sku"`). At the
+/// terminal position a reached array is fanned out — each element is visited —
+/// while any other value is visited directly. Missing fields, type mismatches,
+/// and a leading `[]` yield nothing.
+///
+/// Values are borrowed from `doc`; the caller owns any mapping or collection.
+/// This is the raw traversal behind the engine's multikey (array) index
+/// extraction — it yields raw `RawBsonRef`s and leaves type filtering to the
+/// caller's closure.
+pub fn for_each_path_value(doc: &RawDocument, path: &str, f: &mut impl FnMut(RawBsonRef<'_>)) {
+    let segments: Vec<&str> = path.split('.').collect();
+    walk_doc(doc, &segments, 0, f);
+}
+
+fn walk_doc<F: FnMut(RawBsonRef<'_>)>(doc: &RawDocument, segments: &[&str], idx: usize, f: &mut F) {
+    if idx >= segments.len() {
+        return;
+    }
+    let seg = segments[idx];
+    if seg == "[]" {
+        return;
+    }
+    if let Ok(Some(value)) = doc.get(seg) {
+        walk_value(value, segments, idx + 1, f);
+    }
+}
+
+fn walk_value<F: FnMut(RawBsonRef<'_>)>(
+    value: RawBsonRef<'_>,
+    segments: &[&str],
+    idx: usize,
+    f: &mut F,
+) {
+    if idx >= segments.len() {
+        // Terminal: fan out a reached array, otherwise visit the value directly.
+        match value {
+            RawBsonRef::Array(arr) => {
+                for v in arr.into_iter().flatten() {
+                    f(v);
+                }
+            }
+            _ => f(value),
+        }
+        return;
+    }
+
+    let seg = segments[idx];
+    if seg == "[]" {
+        // Array marker: the current value must be the array to iterate.
+        if let RawBsonRef::Array(arr) = value {
+            for v in arr.into_iter().flatten() {
+                walk_value(v, segments, idx + 1, f);
+            }
+        }
+    } else if let RawBsonRef::Document(d) = value {
+        // Plain segment with depth remaining: descend into the sub-document.
+        walk_doc(d, segments, idx, f);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +846,87 @@ mod tests {
             let field = RawField::get_path(bytes, path).unwrap();
             assert_eq!(field.value(), expected, "mismatch for path '{}'", path);
         }
+    }
+
+    // ── for_each_path_value ───────────────────────────────────
+
+    /// Collect integer values reached by `path` (both Int32 and Int64).
+    fn ints(doc: &bson::RawDocumentBuf, path: &str) -> Vec<i64> {
+        let mut out = Vec::new();
+        for_each_path_value(doc, path, &mut |v| match v {
+            RawBsonRef::Int32(n) => out.push(n as i64),
+            RawBsonRef::Int64(n) => out.push(n),
+            _ => {}
+        });
+        out
+    }
+
+    /// Collect string values reached by `path`.
+    fn strs(doc: &bson::RawDocumentBuf, path: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for_each_path_value(doc, path, &mut |v| {
+            if let RawBsonRef::String(s) = v {
+                out.push(s.to_string());
+            }
+        });
+        out
+    }
+
+    #[test]
+    fn path_value_single_field() {
+        let doc = rawdoc! { "a": 1_i32, "b": 2_i32 };
+        assert_eq!(ints(&doc, "a"), vec![1]);
+    }
+
+    #[test]
+    fn path_value_nested_document() {
+        let doc = rawdoc! { "a": { "b": { "c": 99_i32 } } };
+        assert_eq!(ints(&doc, "a.b.c"), vec![99]);
+    }
+
+    #[test]
+    fn path_value_array_fan_out() {
+        let doc = rawdoc! { "tags": ["x", "y", "z"] };
+        assert_eq!(strs(&doc, "tags.[]"), vec!["x", "y", "z"]);
+    }
+
+    #[test]
+    fn path_value_nested_array_of_documents() {
+        let doc = rawdoc! { "items": [ { "sku": "A1" }, { "sku": "B2" } ] };
+        assert_eq!(strs(&doc, "items.[].sku"), vec!["A1", "B2"]);
+    }
+
+    #[test]
+    fn path_value_terminal_array_fans_out() {
+        // `a.[].b` where each `b` is itself an array: the terminal array is
+        // fanned out, so every leaf integer is visited.
+        let doc = rawdoc! { "a": [ { "b": [1_i32, 2_i32] }, { "b": [3_i32] } ] };
+        assert_eq!(ints(&doc, "a.[].b"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn path_value_missing_field_yields_nothing() {
+        let doc = rawdoc! { "a": 1_i32 };
+        assert!(ints(&doc, "x.[]").is_empty());
+    }
+
+    #[test]
+    fn path_value_marker_on_non_array_yields_nothing() {
+        let doc = rawdoc! { "a": 1_i32 };
+        assert!(ints(&doc, "a.[]").is_empty());
+    }
+
+    #[test]
+    fn path_value_leading_marker_yields_nothing() {
+        let doc = rawdoc! { "a": 1_i32 };
+        assert!(ints(&doc, "[]").is_empty());
+    }
+
+    #[test]
+    fn path_value_plain_array_terminal_fans_out() {
+        // A trailing plain segment that resolves to an array also fans out at the
+        // terminal position (no `[]` marker required once traversal is underway).
+        let doc = rawdoc! { "outer": [ { "vals": [7_i32, 8_i32] } ] };
+        assert_eq!(ints(&doc, "outer.[].vals"), vec![7, 8]);
     }
 }

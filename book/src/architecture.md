@@ -9,7 +9,7 @@ A layered system: a key-value storage backend, an engine layer for key encoding 
 ```
 slate/
   ├── slate-store            → Store/Transaction traits, RocksDB + redb + MemoryStore impls (feature-gated)
-  ├── slate-rawbson          → Fast raw byte-level BSON field scanner + document merge (shared leaf, no deps but bson)
+  ├── slate-rawbson          → Fast raw byte-level BSON field scanner + path traversal (incl. multikey arrays) + document merge (shared leaf, no deps but bson)
   ├── slate-engine           → Storage engine: BSON key encoding, TTL, indexes, catalog, record format
   ├── slate-ast              → Shared query AST — the single IR every query surface targets
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort DTOs + filter→AST translation
