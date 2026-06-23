@@ -228,6 +228,11 @@ pub enum IndexRange<'a> {
         lower: Option<(&'a bson::Bson, bool)>,
         upper: Option<(&'a bson::Bson, bool)>,
     },
+    /// All entries whose value bytes start with this string's UTF-8 bytes — a
+    /// prefix scan for `STARTSWITH` / `LIKE 'pre%'`. Like `Range`, a conservative
+    /// superset: it can sweep in cross-type values whose sortable bytes share the
+    /// prefix, which the caller's recheck drops.
+    Prefix(&'a str),
 }
 
 /// A raw index scan entry with lazy decoding.

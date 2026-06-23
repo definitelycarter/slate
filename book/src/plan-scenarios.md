@@ -330,6 +330,20 @@ The `tags.[]` multikey index has one entry per array element, so a containment t
 
 The index name is derived — SQL carries the bare path `tags`, matched against the registered `tags.[]` index. The Mongo `{tags.[]: v}` form (a `MultikeyEq`) lowers to the identical deduped `IndexScan`. The set forms fan out per value: `ARRAY_CONTAINS_ANY(c.tags, "a", "b")` is an `IndexMerge(Or)` of per-value element scans (union), and `ARRAY_CONTAINS_ALL` an `IndexMerge(And)` (intersection). A non-scalar or non-literal needle, or the 3-arg `partial` form, is not sargable and stays a `Scan`.
 
+### 21. String Prefix & Equality — `STARTSWITH` / `LIKE` / `STRINGEQUALS` over a string index
+
+**Query:** `SELECT VALUE c FROM c WHERE STARTSWITH(c.name, "al")` (with a `name` index)
+
+```
+Filter(STARTSWITH(name, "al"))
+  └── KeyLookup
+        └── IndexScan(name starts with "al")
+```
+
+A scalar string index is ordered by raw UTF-8 bytes, and a string prefix is exactly a byte prefix, so `STARTSWITH(c.name, "al")` becomes a half-open range scan `[al, al⁺)` — `al⁺` is the prefix with its last byte incremented (never a carry, since no UTF-8 byte is `0xFF`). The predicate stays a residual `Filter`: the byte range is exact for strings but can sweep in cross-type values whose sortable bytes share the prefix, which the recheck drops. `LIKE 'al%'` lowers to `REGEXMATCH(c.name, "^al.*$")` and reaches the same prefix range by extracting the anchored literal run (`^al…` → `"al"`); its wildcard tail past the prefix is applied by the recheck. The 3-arg `ignoreCase` `STARTSWITH`, a leading-wildcard `LIKE '%al'`, and a case-insensitive `(?i)` regex have no usable prefix and stay a `Scan`.
+
+`STRINGEQUALS(c.name, "x")` (2-arg) is plain string equality, so it plans as a tight `Eq` `IndexScan` — identical to `c.name = "x"`, and *consumed* (no recheck) since a string `Eq` seek is exact.
+
 ---
 
 ## Full Pipeline Example

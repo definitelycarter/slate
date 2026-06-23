@@ -403,6 +403,71 @@ fn bench_query_string_equals(c: &mut Criterion) {
     group.finish();
 }
 
+/// `STARTSWITH(c.name, "Company-99")` over a scalar `name` index versus the same
+/// query with no index (full scan). Pins the increment-B win: a prefix predicate
+/// becomes a `[pre, pre⁺)` range scan instead of a `Scan → Filter`.
+fn bench_query_string_startswith(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_string_startswith");
+    let sql = r#"SELECT VALUE c FROM c WHERE STARTSWITH(c.name, "Company-99")"#;
+    for n in [1_000, 10_000] {
+        let indexed = string_index_engine(n, true);
+        let unindexed = string_index_engine(n, false);
+        group.bench_with_input(BenchmarkId::new("indexed", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = indexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("full_scan", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = unindexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
+/// `c.name LIKE "Company-99%"` — the same prefix range as `STARTSWITH`, reached
+/// via the LIKE → anchored-regex desugaring.
+fn bench_query_string_like(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_string_like");
+    let sql = r#"SELECT VALUE c FROM c WHERE c.name LIKE "Company-99%""#;
+    for n in [1_000, 10_000] {
+        let indexed = string_index_engine(n, true);
+        let unindexed = string_index_engine(n, false);
+        group.bench_with_input(BenchmarkId::new("indexed", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = indexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("full_scan", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = unindexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 // ── Distinct Benchmarks ─────────────────────────────────────
 
 fn bench_distinct_indexed_low(c: &mut Criterion) {
@@ -671,6 +736,8 @@ criterion_group!(
     bench_query_array_match,
     bench_query_array_contains,
     bench_query_string_equals,
+    bench_query_string_startswith,
+    bench_query_string_like,
     bench_distinct_indexed_low,
     bench_distinct_indexed_high,
     bench_distinct_non_indexed,

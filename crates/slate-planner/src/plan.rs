@@ -127,6 +127,12 @@ pub enum IndexScanRange {
         lower: Option<(Bson, bool)>,
         upper: Option<(Bson, bool)>,
     },
+    /// All strings with a given (non-empty) prefix — `STARTSWITH(x, "pre")` /
+    /// `LIKE 'pre%'`. Lowered to a byte-level half-open range `[pre, pre⁺)`,
+    /// where `pre⁺` is the prefix with its final byte incremented. That upper
+    /// bound may not be valid UTF-8, so it can't be expressed as a `Bson::String`
+    /// `Range` bound — hence its own variant.
+    StringPrefix(String),
 }
 
 /// A node in the plan tree.

@@ -126,6 +126,19 @@ fn resolve_index_scan(
             };
             ((lo, hi), None)
         }
+        IndexRange::Prefix(prefix) => {
+            // A string's index value is its raw UTF-8 bytes (no length prefix in
+            // the value portion of the key), so the prefix bytes seek straight in:
+            // every entry whose key continues `i\0coll\0field\0{prefix}…` shares
+            // the prefix. `upper_after` stops just past them (the final prefix byte
+            // + 1 — never a carry, as no UTF-8 byte is 0xFF). No exact-match: every
+            // prefix-sharing value is a wanted candidate; the executor's residual
+            // recheck drops cross-type byte coincidences. Empty prefixes never
+            // reach here — the planner keeps those a full scan.
+            let start = value_key(prefix.as_bytes());
+            let end = upper_after(&start);
+            ((Bound::Included(start), end), None)
+        }
     };
 
     Ok(ResolvedScan {

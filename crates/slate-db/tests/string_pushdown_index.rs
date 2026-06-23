@@ -136,3 +136,102 @@ fn string_equals_3arg_stays_full_scan() {
         "3-arg STRINGEQUALS should full-scan: {plan}"
     );
 }
+
+// ── Increment B: STARTSWITH / LIKE → prefix range ───────────────
+
+#[test]
+fn string_prefix_indexed_matches_full_scan() {
+    let indexed = seed(true);
+    let plain = seed(false);
+    for sql in [
+        // `alp` shares a prefix across alpha/alphabet/alpine but not Alpha/beta.
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alp\")",
+        // `alpha` is itself a prefix of `alphabet` — the lower bound must include
+        // the exact value, and `alpine` must fall outside the upper bound.
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alpha\")",
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"Alp\")",
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"beta\")",
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"missing\")",
+        "SELECT VALUE c._id FROM c WHERE c.name LIKE \"alp%\"",
+        "SELECT VALUE c._id FROM c WHERE c.name LIKE \"al_ha\"",
+        "SELECT VALUE c._id FROM c WHERE c.name LIKE \"% pine\"",
+        "SELECT VALUE c._id FROM c WHERE REGEXMATCH(c.name, \"^alp\")",
+    ] {
+        assert_eq!(
+            ids(&indexed, sql),
+            ids(&plain, sql),
+            "indexed and full-scan disagree on `{sql}`"
+        );
+    }
+}
+
+#[test]
+fn string_prefix_results_are_exact() {
+    let db = seed(true);
+    // `alp`: the three lowercase `alp…`, never the capitalised `Alpha` or `beta`,
+    // and never the non-string `name`.
+    assert_eq!(
+        ids(
+            &db,
+            "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alp\")"
+        ),
+        vec!["alpha", "alphabet", "alpine"]
+    );
+    // `alpha` (exact value) is included via the inclusive lower bound; `alphabet`
+    // shares the prefix; `alpine` is correctly excluded by the upper bound.
+    assert_eq!(
+        ids(
+            &db,
+            "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alpha\")"
+        ),
+        vec!["alpha", "alphabet"]
+    );
+    // LIKE's wildcard tail past the prefix is applied by the recheck: `al_ha`
+    // matches only the 5-char `alpha`, not the longer `alphabet`.
+    assert_eq!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.name LIKE \"al_ha\""),
+        vec!["alpha"]
+    );
+}
+
+#[test]
+fn startswith_uses_index_scan() {
+    let plan = explain(
+        &seed(true),
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alp\")",
+    );
+    assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
+    assert!(plan.contains("KeyLookup"), "expected a key lookup: {plan}");
+    assert!(
+        plan.contains("things.name"),
+        "index scan should name the indexed field: {plan}"
+    );
+    assert!(
+        plan.contains("starts with"),
+        "index scan should show a prefix bound: {plan}"
+    );
+}
+
+#[test]
+fn like_prefix_uses_index_scan() {
+    let plan = explain(
+        &seed(true),
+        "SELECT VALUE c._id FROM c WHERE c.name LIKE \"alp%\"",
+    );
+    assert!(
+        plan.contains("IndexScan") && plan.contains("things.name"),
+        "LIKE prefix should plan as an index scan: {plan}"
+    );
+}
+
+#[test]
+fn startswith_3arg_stays_full_scan() {
+    let plan = explain(
+        &seed(true),
+        "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alp\", true)",
+    );
+    assert!(
+        plan.contains("Scan") && !plan.contains("IndexScan"),
+        "3-arg STARTSWITH should full-scan: {plan}"
+    );
+}

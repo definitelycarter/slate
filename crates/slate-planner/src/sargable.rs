@@ -238,6 +238,20 @@ fn sargable(
         ));
     }
 
+    // `STARTSWITH(x, "pre")` / `LIKE 'pre%'` (an anchored-prefix REGEXMATCH) → a
+    // half-open `[pre, pre⁺)` range on a scalar string index. Retained: the byte
+    // range can sweep cross-type entries whose sortable bytes share the prefix
+    // (and a `LIKE` pattern's tail past the prefix), which the recheck drops.
+    if let Some((field, prefix)) = as_string_prefix(pred, alias) {
+        return meta.indexes.contains(&field).then_some((
+            IndexAccess::Scan {
+                field,
+                range: IndexScanRange::StringPrefix(prefix),
+            },
+            Residual::Retained,
+        ));
+    }
+
     // A bare comparison atom on a scalar index → point/range scan. At the
     // conjunct level `plan_source` routes atoms through `field_index_scan`
     // (range-bound combining); this arm serves the OR-branch recursion above.
@@ -581,6 +595,59 @@ fn as_string_eq(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
     let field = path_of(&args[0], alias)?;
     let value = as_literal(&args[1])?;
     matches!(value, Bson::String(_)).then_some((field, value))
+}
+
+/// Recognise the two prefix-predicate shapes over `alias.<path>`, returning the
+/// field path and the non-empty literal prefix:
+///
+/// - `STARTSWITH(x, "pre")` — 2-arg, case-sensitive (the 3-arg `ignoreCase` form
+///   a case-sensitive index can't bound).
+/// - `REGEXMATCH(x, "^pre…")` — the anchored-literal form `LIKE 'pre%'` desugars
+///   to before the planner (`%`→`.*`, `_`→`.`, `^…$`-anchored, case-sensitive).
+///
+/// Both feed the same `StringPrefix` range — see the RFC's prefix-range proof.
+fn as_string_prefix(expr: &Expression, alias: &str) -> Option<(String, String)> {
+    let Expression::Function { name, args } = expr else {
+        return None;
+    };
+    let (field, prefix) = match name.to_ascii_uppercase().as_str() {
+        "STARTSWITH" if args.len() == 2 => {
+            let field = path_of(&args[0], alias)?;
+            let Bson::String(p) = as_literal(&args[1])? else {
+                return None;
+            };
+            (field, p)
+        }
+        "REGEXMATCH" if args.len() == 2 => {
+            let field = path_of(&args[0], alias)?;
+            let Bson::String(pat) = as_literal(&args[1])? else {
+                return None;
+            };
+            (field, regex_literal_prefix(&pat)?)
+        }
+        _ => return None,
+    };
+    // An empty prefix means "every string" — a full scan, not an index range.
+    (!prefix.is_empty()).then_some((field, prefix))
+}
+
+/// The leading literal prefix of an anchored regex (`^pre.*$` → `"pre"`), or
+/// `None` when the pattern is not `^`-anchored or has no literal prefix (`^.*…`,
+/// or a leading `(?i)` case-insensitive flag — which never starts with `^`).
+/// Stops at the first *unescaped* regex metacharacter; `\<meta>` contributes the
+/// literal character (matching `like_to_regex`'s escaping). A trailing lone `\`
+/// disqualifies (returns `None`).
+fn regex_literal_prefix(pattern: &str) -> Option<String> {
+    let mut chars = pattern.strip_prefix('^')?.chars();
+    let mut prefix = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => prefix.push(chars.next()?),
+            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => break,
+            other => prefix.push(other),
+        }
+    }
+    (!prefix.is_empty()).then_some(prefix)
 }
 
 /// Recognize a [`Expression::MultikeyEq`] on `alias` — explicit multikey
@@ -936,5 +1003,104 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    // ── Increment B: STARTSWITH / LIKE → prefix range ───────────
+
+    fn assert_prefix(sql: &str, prefix: &str) {
+        let (access, residual) = recognise(sql, &["name"]).expect("sargable");
+        assert_eq!(
+            access,
+            IndexAccess::Scan {
+                field: "name".into(),
+                range: IndexScanRange::StringPrefix(prefix.into()),
+            },
+            "`{sql}`"
+        );
+        // The byte range can over-return (cross-type, LIKE tail) → keep the recheck.
+        assert_eq!(residual, Residual::Retained, "`{sql}`");
+    }
+
+    #[test]
+    fn startswith_is_a_prefix_range_retained() {
+        assert_prefix("SELECT VALUE c FROM c WHERE STARTSWITH(c.name, 'al')", "al");
+    }
+
+    #[test]
+    fn like_prefix_is_a_prefix_range() {
+        // `LIKE 'al%'` desugars to REGEXMATCH(c.name, "^al.*$") before the planner.
+        assert_prefix("SELECT VALUE c FROM c WHERE c.name LIKE 'al%'", "al");
+    }
+
+    #[test]
+    fn like_escaped_metachar_in_prefix() {
+        // `LIKE 'a.b%'`: the `.` is a LIKE literal, escaped to `\.` in the regex,
+        // so the extracted prefix keeps the literal dot.
+        assert_prefix("SELECT VALUE c FROM c WHERE c.name LIKE 'a.b%'", "a.b");
+    }
+
+    #[test]
+    fn anchored_regexmatch_is_a_prefix_range() {
+        assert_prefix(
+            "SELECT VALUE c FROM c WHERE REGEXMATCH(c.name, '^al')",
+            "al",
+        );
+    }
+
+    #[test]
+    fn startswith_without_index_is_not_sargable() {
+        assert!(recognise("SELECT VALUE c FROM c WHERE STARTSWITH(c.name, 'al')", &[]).is_none());
+    }
+
+    #[test]
+    fn startswith_ignore_case_is_not_sargable() {
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STARTSWITH(c.name, 'al', true)",
+                &["name"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn startswith_empty_prefix_is_not_sargable() {
+        // The empty prefix matches every string — a full scan, not an index range.
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STARTSWITH(c.name, '')",
+                &["name"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn like_leading_wildcard_is_not_sargable() {
+        // `LIKE '%al'` → REGEXMATCH(c.name, "^.*al$") has no literal prefix.
+        assert!(recognise("SELECT VALUE c FROM c WHERE c.name LIKE '%al'", &["name"]).is_none());
+    }
+
+    #[test]
+    fn case_insensitive_regex_is_not_sargable() {
+        // `(?i)` prefixes the anchor, so the pattern isn't `^`-anchored → no prefix.
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE REGEXMATCH(c.name, '(?i)^al')",
+                &["name"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn regex_literal_prefix_extraction() {
+        assert_eq!(regex_literal_prefix("^abc.*$").as_deref(), Some("abc"));
+        assert_eq!(regex_literal_prefix("^a\\.b.*$").as_deref(), Some("a.b"));
+        assert_eq!(regex_literal_prefix("^abc$").as_deref(), Some("abc"));
+        assert_eq!(regex_literal_prefix("^.*x$"), None); // empty literal run
+        assert_eq!(regex_literal_prefix("abc"), None); // not anchored
+        assert_eq!(regex_literal_prefix("(?i)^ad"), None); // case-insensitive
+        assert_eq!(regex_literal_prefix("^\\"), None); // trailing lone backslash
     }
 }

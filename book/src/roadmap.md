@@ -83,12 +83,16 @@ cover the Eq/Range/Merge/Multikey/Spatial families). Increments, in order:
   below a lone `IndexScan → KeyLookup` de-duplicates, so every `Multikey` access
   now routes its doc-ids through a dedup before `KeyLookup` (fixing the same
   duplicate-row bug in the Mongo `{tags.[]: v}` / `MultikeyEq` form too).
-- **B — prefix range** (`STARTSWITH` / `LIKE 'pre%'` → string `Range [pre, pre⁺)`
-  via a new `IndexScanRange::StringPrefix`). The proof holds (no UTF-8 byte is
-  `0xFF`, so the last-byte increment never carries). B was **gated on the
-  variable-width string-boundary fix above** — a string undercount is a false
-  negative, which the residual recheck cannot repair — and **that gate is now
-  lifted** (the boundary fix has landed); B is ready to build.
+- **B — prefix range — Done.** `STARTSWITH(x, "pre")` and `LIKE 'pre%'` (an
+  anchored-prefix `REGEXMATCH`) plan as a `[pre, pre⁺)` string range via a new
+  `IndexScanRange::StringPrefix`, lowered through the engine's new
+  `IndexRange::Prefix`. The proof holds (no UTF-8 byte is `0xFF`, so the last-byte
+  increment never carries); the bound bytes reuse the `Eq` resolution with the
+  exact-match dropped. Retained recheck (the byte range can sweep cross-type
+  coincidences and a `LIKE` tail). End-to-end −95–97% (`STARTSWITH`) and −98.8%
+  (`LIKE`, which had been paying a per-row regex eval) at 10k rows. This was gated
+  on the variable-width string-boundary fix above (a string undercount is a false
+  negative the recheck can't repair); that fix had landed, lifting the gate.
 - **C — `STRINGEQUALS` → `Eq` — Done.** The 2-arg, case-sensitive `STRINGEQUALS(x, lit)`
   plans as a tight `Eq` seek on a scalar string index (`consumed` — exact after the
   boundary fix, like `x = 'lit'`); the 3-arg `ignoreCase` form and non-string literals

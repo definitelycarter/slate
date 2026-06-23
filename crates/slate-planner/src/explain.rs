@@ -258,6 +258,7 @@ fn bounds(range: &IndexScanRange) -> String {
                 parts.join(", ")
             }
         }
+        IndexScanRange::StringPrefix(p) => format!("starts with {p:?}"),
     }
 }
 

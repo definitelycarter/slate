@@ -48,7 +48,11 @@ impl CoercingFilter {
                 lower: lower.clone(),
                 upper: upper.clone(),
             }),
-            IndexScanRange::Full | IndexScanRange::Eq(_) => None,
+            // `Eq`/`Full` are exact at the engine; `StringPrefix` is exact for
+            // string values (the byte range admits exactly the prefix-sharing
+            // strings) — its only over-return is cross-type byte coincidences,
+            // which the plan's retained `STARTSWITH`/`LIKE` recheck drops.
+            IndexScanRange::Full | IndexScanRange::Eq(_) | IndexScanRange::StringPrefix(_) => None,
         }
     }
 
@@ -87,6 +91,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             lower: lower.as_ref().map(|(v, incl)| (v, *incl)),
             upper: upper.as_ref().map(|(v, incl)| (v, *incl)),
         },
+        IndexScanRange::StringPrefix(prefix) => IndexRange::Prefix(prefix.as_str()),
     };
     let reverse = matches!(direction, ScanDirection::Reverse);
 

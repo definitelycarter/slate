@@ -1,11 +1,9 @@
 # RFC: Index Sargability (predicate pushdown)
 
-> **Status: in progress.** The unified recogniser refactor + **increment A**
-> (multikey containment) have shipped (`dfeafa9`, hardened by `07a508f`/`9cb5f89`),
-> and the variable-width string-boundary fix that gated **B/C** has landed
-> (`0cea567`). **Increment C (`STRINGEQUALS` → `Eq`) has shipped**; **increment B
-> (prefix range) remains** — unblocked and fully designed below, buildable with no
-> further design.
+> **Status: shipped.** The unified recogniser refactor and all three increments
+> have landed: **A** (multikey containment, `dfeafa9`, hardened by
+> `07a508f`/`9cb5f89`), then **C** (`STRINGEQUALS` → `Eq`) and **B** (prefix range),
+> on top of the variable-width string-boundary fix that gated B/C (`0cea567`).
 > The decided non-goals (sparse nulls, expression indexes, Cosmos metrics,
 > EXISTS-rewrite) stand. The spike (`tasks/index-sargability-spike.md`) audited the
 > full function/operator/subquery surface against `file:line` and resolved every
@@ -285,9 +283,16 @@ with the recogniser refactor (`dfeafa9`), to which A gave its second real case.
 
 ## B — prefix range
 
+> **Shipped.** `STARTSWITH(x, "pre")` (primary) and `LIKE 'pre%'` / anchored-prefix
+> `REGEXMATCH` (secondary) lower to a new `IndexScanRange::StringPrefix`, resolved
+> through the engine's new `IndexRange::Prefix` to a byte-level `[pre, pre⁺)`
+> range. Retained recheck. The byte bounds reuse the existing `Eq` resolution
+> (same value-key prefix, `increment_key` for the exclusive upper) with the
+> exact-match dropped — so all the byte math already existed.
+
 `STARTSWITH(x, 'pre')` and `LIKE 'pre%'` → a half-open string range
 `[pre, pre⁺)` on the `x` index, with the original predicate retained as the recheck.
-Today both full-scan (confirmed by `.explain`).
+Before this, both full-scanned (confirmed by `.explain`).
 
 ### The prefix-range proof
 
@@ -466,10 +471,11 @@ feature.
    false-negative and the recheck can't repair that. **Now landed** — string keys
    carry a `u32` value-length suffix, versioned with a reindex-from-records migration
    — so the B/C prerequisite is satisfied. *Size: moderate (encoding + migration).*
-3. **B (prefix range).** `STARTSWITH` primary + LIKE-regex-prefix secondary, on a
-   new `IndexScanRange::StringPrefix`. The highest-frequency win after A. *Size:
-   small–moderate (one range variant + two recogniser arms + the executor byte-bound
-   lowering).*
+3. **B (prefix range) — done.** `STARTSWITH` primary + LIKE-regex-prefix secondary,
+   on a new `IndexScanRange::StringPrefix` lowered through the engine's new
+   `IndexRange::Prefix`. The highest-frequency win after A. *Size: small–moderate,
+   as estimated (one IR variant + one engine variant + two recogniser arms; the
+   byte bounds reuse the existing `Eq` resolution with the exact-match dropped).*
 4. **C (`STRINGEQUALS` → `Eq`) — done.** Trivial as predicted, once the recogniser
    was in place; one arm + the string-literal/2-arg guardrails. Consumed (the
    string `Eq` seek is exact after the boundary fix). *Size: tiny.*
@@ -480,8 +486,8 @@ The **recogniser refactor + increment A** have shipped (`dfeafa9`) — A gave th
 refactor its proving case, and its dedup work fixed a latent multikey
 duplicate-row bug. **B and C** depended on the variable-width string-boundary fix
 for soundness (false negatives, which the recheck cannot mask); that fix has landed
-(`0cea567`). **C has shipped** (a consumed `Eq` seek); **B (prefix range) is the
-remaining work**. Keep
+(`0cea567`). **Both C (a consumed `Eq` seek) and B (the prefix range) have now
+shipped** — all of A–C are done. Keep
 indexes **sparse** — the null family stays `Filter` — pending a workload that
 justifies a dense *partial* index. Treat **function-of-field / expression indexes**
 as out of scope absent a dedicated RFC. Do **not** add Cosmos metrics capture: the

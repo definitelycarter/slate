@@ -540,6 +540,7 @@ SELECT VALUE LTRIM("AdventureWorks", "Adventure")
 ### `REGEXMATCH(str, pattern[, modifiers])`
 Reports whether a string matches a regular expression.
 - **Returns:** Boolean; undefined for an unknown modifier or invalid pattern. The optional modifiers string accepts `i`, `m`, `s`, and `x`.
+- **Index-accelerated** when the pattern has a `^`-anchored literal prefix and is case-sensitive: the prefix becomes a `[pre, pre⁺)` range `IndexScan` with the full pattern rechecked. This is how `LIKE 'pre%'` is accelerated — it desugars to `REGEXMATCH(x, "^pre.*$")`. A non-anchored or case-insensitive (`i`) pattern stays a full scan. See [Plan Scenarios](./plan-scenarios.md).
 - **Example:** `REGEXMATCH("abcd", "ABC", "i")` → `true`
 
 ```slate-sql
@@ -594,6 +595,7 @@ SELECT VALUE RTRIM("AdventureWorks", "Works")
 ### `STARTSWITH(str, prefix[, ignoreCase])`
 Reports whether a string starts with a prefix.
 - **Returns:** Boolean; the optional third argument enables case-insensitive search.
+- **Index-accelerated** (2-arg, case-sensitive) over a scalar string index: `STARTSWITH(c.name, "pre")` plans as a `[pre, pre⁺)` prefix-range `IndexScan`, not a full scan. The 3-arg `ignoreCase` form is not accelerated (a case-sensitive index can't bound it). See [Plan Scenarios](./plan-scenarios.md).
 - **Example:** `STARTSWITH("Hello", "HE", true)` → `true`
 
 ```slate-sql
@@ -603,6 +605,7 @@ SELECT VALUE STARTSWITH("Hello", "HE", true)
 ### `STRINGEQUALS(str1, str2[, ignoreCase])`
 Reports whether two strings are equal.
 - **Returns:** Boolean; the optional third argument enables case-insensitive comparison.
+- **Index-accelerated** (2-arg, case-sensitive) over a scalar string index: `STRINGEQUALS(c.name, "x")` plans as a tight `Eq` `IndexScan`, exactly like `c.name = "x"`. The 3-arg `ignoreCase` form is not accelerated. See [Plan Scenarios](./plan-scenarios.md).
 - **Example:** `STRINGEQUALS("AdventureWorks", "adventureworks", true)` → `true`
 
 ```slate-sql
