@@ -304,8 +304,7 @@ impl IndexEntry {
     pub fn value(&self) -> Result<RawBson, EngineError> {
         let tag = bson::spec::ElementType::from(self.metadata[0])
             .ok_or_else(|| EngineError::InvalidKey("unknown type byte in index metadata".into()))?;
-        crate::encoding::bson_value::BsonValue::from_parts(tag, self.value_bytes())
-            .to_raw_bson()
+        crate::encoding::numeric_key::decode_index_value(tag, self.value_bytes())
             .ok_or_else(|| EngineError::InvalidKey("malformed value in index key".into()))
     }
 }

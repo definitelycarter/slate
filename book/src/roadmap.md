@@ -100,7 +100,7 @@ and a pushdown is invisible to results anyway). `EXISTS(… FROM e IN c.arr WHER
 e = v)` stays a Filter — its array is an in-document unwind, not a collection
 index — with an `EXISTS → ARRAY_CONTAINS` rewrite noted as a future optimisation.
 
-## Unified Numeric Index Key
+## Unified Numeric Index Key — Done
 
 ### Concept
 
@@ -125,14 +125,19 @@ numerics rejoin the string/bool tight-seek path. The type tag (already stored in
 metadata) reconstructs the original BSON type, and only for *covered* projections; the
 common non-covered path never reads it.
 
-### Open questions / scope
+### Outcome
 
-Scoped to `{Int32, Int64, Double}` (all dyadic rationals, so a clean common order exists);
-**decimal128 stays excluded** — it is base-10, *not* a lossless superset of `double`, so
-"widen to the largest type" is unsound. Adopting Cosmos's all-numbers-are-`double` model is
-the radical alternative (loses `i64 > 2⁵³` fidelity). Needs a reindex migration
-(string-boundary precedent). NaN/±Inf/−0.0 ordering, fixed-vs-variable encoding, and
-cross-type unique-index semantics are the open questions.
+Shipped **scheme A** — project every number to `f64` and reuse the existing sortable
+transform (`encode_f64_sortable`). The spike found this is the *only* oracle-consistent
+choice, not the "radical" one: `compare_bson` already compares all numerics via `as f64`
+(slate's documented f64 number tower), so an exact `i64 ∪ double` key would have
+contradicted the engine's own equality. Numeric `Eq` is **−93%** at 10k rows (full scan →
+tight seek); `needs_full_scan` + the numeric `CoercingFilter` are gone. Scoped to
+`{Int32, Int64, Double}`; **decimal128 stays excluded** (base-10, not a lossless superset
+of `double`). No migration (pre-users — indexes rebuild). NaN is not keyed, `-0.0`
+normalises to `+0.0`. Two follow-ups deferred — unique-index numeric values stay per-type,
+and an `into_index_value` micro-opt — tracked in the
+[RFC's Deferred work](./rfcs/unified-numeric-index-key.md#deferred-work).
 
 ## Collect Node (Plan Materialization Barrier)
 

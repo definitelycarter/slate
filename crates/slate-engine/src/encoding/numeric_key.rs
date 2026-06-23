@@ -24,30 +24,33 @@ use bson::spec::ElementType;
 
 use super::bson_value::{decode_f64_sortable, encode_f64_sortable};
 
-/// Project a numeric value onto the f64 number tower for index keying.
-///
-/// `None` for non-numeric values and for `NaN` (which `compare_bson` reports as
-/// incomparable — a `NaN` can never match a sargable `Eq`/`Range`, so it is not
-/// keyed). `-0.0` is normalised to `+0.0` so it shares a key with `+0.0` / `0`,
-/// which it compares equal to.
-fn numeric_index_f64(value: &Bson) -> Option<f64> {
-    let f = match value {
+/// Normalise and encode an `f64` as the 8-byte index key. `None` for `NaN`
+/// (incomparable under `compare_bson` → can never match a sargable predicate, so
+/// it is not keyed); `-0.0` collapses to `+0.0` (they compare equal). The write
+/// and read paths funnel through this one chokepoint, so a stored key and a seek
+/// key for the same value are always byte-identical.
+pub(crate) fn encode_index_f64(f: f64) -> Option<[u8; 8]> {
+    if f.is_nan() {
+        return None;
+    }
+    let f = if f == 0.0 { 0.0 } else { f }; // -0.0 → +0.0
+    Some(encode_f64_sortable(f))
+}
+
+/// Project a numeric `Bson` onto the f64 number tower; `None` for non-numeric.
+fn numeric_to_f64(value: &Bson) -> Option<f64> {
+    Some(match value {
         Bson::Int32(i) => *i as f64,
         Bson::Int64(i) => *i as f64,
         Bson::Double(f) => *f,
         _ => return None,
-    };
-    if f.is_nan() {
-        return None;
-    }
-    // `-0.0 == +0.0`, so they must encode identically.
-    Some(if f == 0.0 { 0.0 } else { f })
+    })
 }
 
-/// The 8-byte order-preserving index key for a numeric value, or `None` if the
-/// value is not an indexable number (see [`numeric_index_f64`]).
+/// The 8-byte index key for a numeric `Bson` bound, or `None` if non-numeric or
+/// `NaN`. Used by the read path to seek the key matching a query value.
 pub(crate) fn encode_numeric_index(value: &Bson) -> Option<[u8; 8]> {
-    numeric_index_f64(value).map(encode_f64_sortable)
+    encode_index_f64(numeric_to_f64(value)?)
 }
 
 /// Reconstruct the original-typed value from a numeric index key and its stored
@@ -64,6 +67,26 @@ pub(crate) fn decode_numeric_index(key: [u8; 8], tag: ElementType) -> Option<Bso
         ElementType::Double => Bson::Double(f),
         _ => return None,
     })
+}
+
+/// Decode an index *value* (key bytes + metadata tag) back to `RawBson`.
+///
+/// Numeric tags decode the 8-byte f64 key (the unified numeric key) and cast to
+/// the stored type — f64-precision, exact within 2^53. Every other type decodes
+/// per-type via [`BsonValue::to_raw_bson`]. Distinct from doc_id decoding, which
+/// is always per-type — a doc_id is never f64-projected.
+pub(crate) fn decode_index_value(tag: ElementType, bytes: &[u8]) -> Option<bson::RawBson> {
+    match tag {
+        ElementType::Int32 | ElementType::Int64 | ElementType::Double => {
+            let f = decode_f64_sortable(bytes.try_into().ok()?);
+            Some(match tag {
+                ElementType::Int32 => bson::RawBson::Int32(f as i32),
+                ElementType::Int64 => bson::RawBson::Int64(f as i64),
+                _ => bson::RawBson::Double(f),
+            })
+        }
+        _ => super::bson_value::BsonValue::from_parts(tag, bytes).to_raw_bson(),
+    }
 }
 
 #[cfg(test)]

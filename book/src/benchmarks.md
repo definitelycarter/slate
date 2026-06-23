@@ -56,6 +56,7 @@ Results from a single collection (10,000 records). Times are consistent across a
 | Full scan (no filter) | ~1.3ms | 10,000 | Single key per record |
 | status = 'active' (indexed) | ~1.8ms | ~5,000 | IndexScan → lazy filter |
 | status = 'active' projection [status] (index-covered) | ~0.8ms | ~5,000 | IndexScan → Projection, no ReadRecord |
+| contacts_count = 50 (indexed numeric) | ~0.04ms | ~100 | IndexScan tight seek — cross-type via unified f64 key |
 | product_recommendation1 = 'ProductA' | ~1.6ms | ~3,300 | Scan + lazy filter, ~67% rejected without deserializing |
 | status + rec1 + rec2 (AND) | ~2ms | ~550 | IndexScan + lazy filter, ~89% rejected |
 | status='active' + sort + skip/take(50) | ~6.3ms | 50 | IndexScan → Sort → Limit |

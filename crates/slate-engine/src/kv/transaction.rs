@@ -27,16 +27,30 @@ fn unscannable_bson_type(value: &bson::Bson) -> &'static str {
         Bson::Document(_) => "object",
         Bson::Binary(_) => "binary",
         Bson::Decimal128(_) => "decimal128",
+        Bson::Double(f) if f.is_nan() => "NaN",
         _ => "non-scalar",
     }
 }
 
+/// How an `Eq` recheck constrains a candidate entry's type tag.
+enum ExactTag {
+    /// Non-numeric `Eq`: the tag must equal this exact type — distinct types can
+    /// share sortable bytes, so the tag disambiguates.
+    Exact(ElementType),
+    /// Numeric `Eq`: the f64 key collapses Int32/Int64/Double, so any numeric tag
+    /// matches — but a byte-coincident `DateTime` (also an 8-byte value) must
+    /// not, since `compare_bson` treats number vs DateTime as incomparable.
+    Numeric,
+}
+
 /// What an index scan resolves to: the byte range to seek (a `(Bound, Bound)`
 /// pair that `scan_range` consumes as `RangeBounds<Vec<u8>>`), the per-entry
-/// exact-match for `Eq`, and the field-prefix length for decoding entries.
+/// `Eq` exact-match, and the field-prefix length for decoding entries.
 struct ResolvedScan {
     range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
-    exact: Option<(ElementType, Vec<u8>)>,
+    /// `Eq` exact-match: the value bytes plus a type-tag constraint. `None` for
+    /// `Range`/`Full` (a `Range` is a conservative superset the executor refines).
+    exact: Option<(ExactTag, Vec<u8>)>,
     field_prefix_len: usize,
 }
 
@@ -78,10 +92,20 @@ fn resolve_index_scan(
         }
         IndexRange::Eq(value) => {
             let bv = encode_index_value(value, field)?;
+            // A numeric Eq accepts any numeric tag (the f64 key already collapses
+            // Int32/Int64/Double); a non-numeric Eq must match its exact tag.
+            let exact_tag = if is_numeric_tag(bv.tag) {
+                ExactTag::Numeric
+            } else {
+                ExactTag::Exact(bv.tag)
+            };
             let value_bytes = bv.bytes.into_owned();
             let start = value_key(&value_bytes);
             let end = upper_after(&start);
-            ((Bound::Included(start), end), Some((bv.tag, value_bytes)))
+            (
+                (Bound::Included(start), end),
+                Some((exact_tag, value_bytes)),
+            )
         }
         IndexRange::Range { lower, upper } => {
             // Resolve the upper first (a borrow of `field_prefix` when unbounded)
@@ -114,10 +138,23 @@ fn resolve_index_scan(
 /// Encode a value as index-key bytes, or `UnscannableBound` if the sparse index
 /// can't hold it (null / non-scalar). Shared by `Eq` and `Range` resolution.
 fn encode_index_value(value: &bson::Bson, field: &str) -> Result<BsonValue<'static>, EngineError> {
-    BsonValue::from_bson(value).ok_or_else(|| EngineError::UnscannableBound {
-        field: field.to_string(),
-        value_type: unscannable_bson_type(value),
-    })
+    // Project numerics onto the f64 index key so the seek bound matches stored
+    // entries (the write path does the same); non-numerics pass through. `None`
+    // covers null / non-scalar (unencodable) and NaN (incomparable).
+    BsonValue::from_bson(value)
+        .and_then(BsonValue::into_index_value)
+        .ok_or_else(|| EngineError::UnscannableBound {
+            field: field.to_string(),
+            value_type: unscannable_bson_type(value),
+        })
+}
+
+/// Whether `tag` is one of the numeric types unified onto the f64 index key.
+fn is_numeric_tag(tag: ElementType) -> bool {
+    matches!(
+        tag,
+        ElementType::Int32 | ElementType::Int64 | ElementType::Double
+    )
 }
 
 /// The exclusive successor of a byte key: its last non-`0xFF` byte incremented,
@@ -429,16 +466,21 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 if entry.is_expired(ttl) {
                     continue;
                 }
-                // Eq only: the byte range seeks the value prefix but can't filter by
-                // type (not in the key) or string length, so drop same-bytes-
-                // different-type and longer prefix-sharing entries. Ranges and Full
-                // need none — `scan_range` bounds them (and the executor's
-                // `compare_bson` recheck refines ranges).
-                if let Some((want_tag, want_bytes)) = &exact
-                    && (entry.value_bytes() != want_bytes.as_slice()
-                        || entry.element_type() != Some(*want_tag))
-                {
-                    continue;
+                // Eq only: the byte range seeks the value prefix but can't filter
+                // by type or string length, so the recheck drops longer
+                // prefix-sharing entries (value-bytes) and type mismatches (tag).
+                // A numeric Eq accepts any numeric tag (cross-type collapse) but
+                // not a byte-coincident DateTime; a non-numeric Eq wants its exact
+                // tag. Ranges/Full need none — `scan_range` bounds them (and the
+                // executor's `compare_bson` recheck refines ranges).
+                if let Some((want_tag, want_bytes)) = &exact {
+                    let tag_ok = match want_tag {
+                        ExactTag::Exact(t) => entry.element_type() == Some(*t),
+                        ExactTag::Numeric => entry.element_type().is_some_and(is_numeric_tag),
+                    };
+                    if entry.value_bytes() != want_bytes.as_slice() || !tag_ok {
+                        continue;
+                    }
                 }
                 return Some(Ok(entry));
             }

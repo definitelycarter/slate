@@ -814,3 +814,51 @@ fn scan_index_unencodable_bound_errors() {
     assert_eq!(n, 1);
     txn.rollback().unwrap();
 }
+
+/// A numeric `Eq` collapses across `Int32`/`Int64`/`Double` (the unified f64
+/// index key): probing with any numeric type returns every entry holding that
+/// value, regardless of its stored numeric type. A different value matches only
+/// its own.
+#[test]
+fn scan_index_numeric_eq_collapses_cross_type() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "c", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "c", "x").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+    // `x` is 5 stored as three different numeric types, plus a 7.
+    txn.put(&handle, &bson::rawdoc! { "_id": "i32", "x": 5i32 })
+        .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "i64", "x": 5i64 })
+        .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "f64", "x": 5.0f64 })
+        .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "other", "x": 7i32 })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "c").unwrap();
+
+    // Probing with any numeric type finds all three 5s.
+    for probe in [
+        bson::Bson::Int32(5),
+        bson::Bson::Int64(5),
+        bson::Bson::Double(5.0),
+    ] {
+        let n = txn
+            .scan_index(&handle, "x", IndexRange::Eq(&probe), false)
+            .unwrap()
+            .count();
+        assert_eq!(n, 3, "Eq({probe:?}) should match all three 5s");
+    }
+    // …and 7 matches only itself.
+    let seven = bson::Bson::Double(7.0);
+    let n = txn
+        .scan_index(&handle, "x", IndexRange::Eq(&seven), false)
+        .unwrap()
+        .count();
+    assert_eq!(n, 1);
+    txn.rollback().unwrap();
+}

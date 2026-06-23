@@ -289,6 +289,30 @@ impl<'a> BsonValue<'a> {
             bytes: Cow::Owned(self.bytes.into_owned()),
         }
     }
+
+    /// Re-key a numeric value onto the f64 number tower for index storage (the
+    /// unified numeric index key): `Int32`/`Int64`/`Double` are projected to the
+    /// 8-byte f64 key — the tag is kept for covered-read reconstruction — `NaN`
+    /// drops out (`None`), and every other type (incl. `DateTime`) is unchanged.
+    /// Index-write only; doc_ids never pass through here.
+    pub(crate) fn into_index_value(self) -> Option<BsonValue<'a>> {
+        let f = match self.tag {
+            ElementType::Int32 if self.bytes.len() == 4 => {
+                decode_i32_sortable(self.bytes[..4].try_into().ok()?) as f64
+            }
+            ElementType::Int64 if self.bytes.len() == 8 => {
+                decode_i64_sortable(self.bytes[..8].try_into().ok()?) as f64
+            }
+            ElementType::Double if self.bytes.len() == 8 => {
+                decode_f64_sortable(self.bytes[..8].try_into().ok()?)
+            }
+            _ => return Some(self),
+        };
+        Some(BsonValue {
+            tag: self.tag,
+            bytes: Cow::Owned(super::numeric_key::encode_index_f64(f)?.to_vec()),
+        })
+    }
 }
 
 impl std::fmt::Display for BsonValue<'_> {

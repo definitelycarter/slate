@@ -457,6 +457,55 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
 
 // ── Range filter benchmarks ─────────────────────────────────
 
+/// Numeric `Eq` on the indexed `Int32` field `contacts_count` (values `0..100`,
+/// so `= 50` matches ~1% of rows). Today numeric `Eq` is not sargable as a tight
+/// seek — it routes to a full scan + `CoercingFilter` — so this measures the
+/// full-scan cost the unified numeric key is meant to turn into a seek.
+fn bench_query_indexed_eq_numeric(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_eq_numeric");
+    for n in [1_000, 10_000] {
+        let engine = realistic_seeded_engine(n);
+        let filter = rawdoc! { "contacts_count": 50 };
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.find(DEFAULT_CF, "bench", filter.clone(), FindOptions::default())
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
+/// Covered numeric projection: numeric `Eq` projecting only `contacts_count`, so
+/// the value is served from the index — exercises numeric-key decode under the
+/// unified key.
+fn bench_query_indexed_eq_numeric_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_eq_numeric_proj");
+    for n in [1_000, 10_000] {
+        let engine = realistic_seeded_engine(n);
+        let filter = rawdoc! { "contacts_count": 50 };
+        let options = FindOptions {
+            columns: Some(vec!["contacts_count".into()]),
+            ..FindOptions::default()
+        };
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.find(DEFAULT_CF, "bench", filter.clone(), options.clone())
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_query_indexed_range(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_indexed_range");
     for n in [1_000, 10_000] {
@@ -572,6 +621,8 @@ criterion_group!(
     bench_query_scan,
     bench_query_indexed_eq,
     bench_query_indexed_eq_projection,
+    bench_query_indexed_eq_numeric,
+    bench_query_indexed_eq_numeric_projection,
     bench_query_multi_field_and,
     bench_query_or_indexed,
     bench_query_sql,

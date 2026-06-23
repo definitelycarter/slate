@@ -112,9 +112,13 @@ impl IndexRecord {
         let mut entries = Vec::new();
         for field in indexes {
             for val in bson_value::extract_all(doc, field) {
-                entries.push(IndexRecord::encode(
-                    collection, field, doc_id, &val, ttl_millis,
-                ));
+                // Re-key numerics onto the f64 number tower (unified numeric
+                // index key); a NaN value yields no entry.
+                if let Some(val) = val.into_index_value() {
+                    entries.push(IndexRecord::encode(
+                        collection, field, doc_id, &val, ttl_millis,
+                    ));
+                }
             }
         }
         entries
@@ -159,7 +163,7 @@ impl IndexRecord {
     /// Reconstructs the value from the type tag (metadata) and raw bytes (key).
     pub fn value_bson(&self) -> Option<bson::RawBson> {
         let tag = ElementType::from(self.type_byte())?;
-        BsonValue::from_parts(tag, self.value_bytes()).to_raw_bson()
+        super::numeric_key::decode_index_value(tag, self.value_bytes())
     }
 
     // ── TTL ─────────────────────────────────────────────────────
@@ -435,7 +439,11 @@ mod tests {
             tag: ElementType::ObjectId,
             bytes: Cow::Owned(oid.bytes().to_vec()),
         };
-        let value = BsonValue::from_bson(&bson::Bson::Int32(3)).unwrap();
+        // The index-write path projects numerics onto the 8-byte f64 key.
+        let value = BsonValue::from_bson(&bson::Bson::Int32(3))
+            .unwrap()
+            .into_index_value()
+            .unwrap();
 
         let (key_bytes, metadata) =
             IndexRecord::encode("nba", "priority", &doc_id, &value, None).into_parts();

@@ -1,9 +1,9 @@
 # RFC: Unified Numeric Index Key
 
-> **Status: decided — scheme A (project to `f64`).** The encoder + property tests
-> have landed and are green in `crates/slate-engine/src/encoding/numeric_key.rs`
-> (the spike). Wiring it into the index read/write path and retiring the executor
-> special-case (Phase 2) is the remaining work.
+> **Status: implemented — scheme A (project to `f64`).** The encoder + property
+> tests (the spike) and the full index-path integration (Phase 2) have landed and
+> are green; numeric `Eq`/`Range` are now tight seeks. Two follow-ups were
+> deliberately deferred — see [Deferred work](#deferred-work).
 
 ## Problem
 
@@ -181,9 +181,9 @@ for doc-ids, fetch records, and return original BSON.
   so it could join the index later with no new machinery.
 - **DateTime** — stays on its own `i64` encoding (a timestamp, not a member of the
   numeric line). Do not fold it in.
-- **Unique index** — a unified key makes cross-type numeric uniqueness automatic
-  (`5` conflicts with `5.0`), which matches the f64 tower. Confirm `u` entries
-  re-derive the same way during Phase 2.
+- **Unique index** — see [Deferred work](#deferred-work): unique (`u`) entries were
+  **left per-type** in Phase 2, so cross-type numeric uniqueness does *not* collapse
+  yet (`Int32(5)` and `Double(5.0)` are still allowed to coexist).
 - **Exact large-int covered reads** — open *only if* slate ever needs exact
   `Int64 > 2⁵³` in computed/covered positions; that's the engine-wide
   exact-number project (rework `compare_bson` + arithmetic), not this index.
@@ -193,16 +193,40 @@ for doc-ids, fetch records, and return original BSON.
 covered reads decode via the type tag (f64-precision); no migration (rebuild
 indexes).
 
-## Spike — done
+## Implementation
 
-Landed in `crates/slate-engine/src/encoding/numeric_key.rs`:
-`encode_numeric_index` / `decode_numeric_index` plus six tests — cross-type
-collapse, oracle-matched byte order & collapse over the boundary corpus, exact
-round-trip within 2⁵³, documented f64-rounding beyond it, NaN/non-numeric not
-keyed, and a 100k-pair fuzz against the f64 oracle. All green. Findings
-(`-0.0`→`+0.0`, NaN excluded, +4 B on `Int32`) are folded above.
+**Spike** (`crates/slate-engine/src/encoding/numeric_key.rs`): `encode_index_f64`
+plus the `Bson`/`RawBson` decode helpers, and six tests — cross-type collapse,
+oracle-matched byte order & collapse over the boundary corpus, exact round-trip
+within 2⁵³, documented f64-rounding beyond it, NaN/non-numeric not keyed, and a
+100k-pair fuzz against the f64 oracle.
 
-**Remaining: Phase 2** — wire `encode_numeric_index` into the index write path and
-`decode_numeric_index` into covered reads, route numeric `Eq`/`Range` through the
-engine's tight-seek path, and delete the executor's `needs_full_scan` numeric
-branch + `CoercingFilter` + recheck.
+**Phase 2 — done.** *Write side:* `extract_all`'s regular (`i`) entries project
+numerics to the f64 key via `BsonValue::into_index_value`, `fixed_value_len(Int32)`
+is now 8, and the index-value decode (`IndexEntry::value`) is split from the
+per-type doc_id decode. *Read side:* `encode_index_value` projects numeric bounds
+to f64, numeric `Eq` rechecks value-bytes with **no tag** (the f64 key already
+collapses the numeric types, which must all match), and the executor's
+`needs_full_scan` + numeric `CoercingFilter` are deleted — numerics now flow
+through the tight-seek path. Measured: numeric `Eq` **−93%** at 10k rows
+(592.7 µs → 41.8 µs), covered numeric `Eq` −90%, numeric ranges −9–13%; no
+regressions.
+
+## Deferred work
+
+Two items were intentionally left out of Phase 2, to be picked up separately:
+
+- **Unique-index numeric values stay per-type.** Only the regular (`i`) index
+  projects numerics to f64; unique (`u`) entries still encode per-type, with the
+  type byte folded into the key. So cross-type numeric uniqueness does **not**
+  collapse — a unique index currently allows both `Int32(5)` and `Double(5.0)`.
+  Whether it *should* (i.e. `5` conflicts with `5.0`, matching the f64 tower's
+  equality) is a real semantic decision with its own edge — *within*-type
+  collisions past 2⁵³ (`Int64(2⁵³)` would then conflict with `Int64(2⁵³+1)`) — so it
+  was kept separate from the sargability win. To adopt it: project `u` values
+  through `into_index_value` too, and settle the type-byte question.
+- **`into_index_value` decode-then-reencode.** The write path builds a per-type
+  `BsonValue` (`from_raw_bson_ref`) and then decodes it back to a number to
+  re-encode as the f64 key — three steps where one would do. Negligible per insert,
+  but a micro-opt could project straight from `RawBsonRef` into the f64 key,
+  skipping the intermediate per-type encode.

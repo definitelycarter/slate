@@ -61,8 +61,11 @@ pub(crate) fn parse_index_collection_field(key: &[u8]) -> Option<(&str, &str)> {
 /// variable-width types (whose length is recorded in a trailing suffix).
 fn fixed_value_len(tag: ElementType) -> Option<usize> {
     match tag {
-        ElementType::Int32 => Some(4),
-        ElementType::Int64 | ElementType::Double | ElementType::DateTime => Some(8),
+        // Int32/Int64/Double all index as the 8-byte f64 key (unified numeric
+        // index key); DateTime keeps its own 8-byte i64 encoding.
+        ElementType::Int32 | ElementType::Int64 | ElementType::Double | ElementType::DateTime => {
+            Some(8)
+        }
         ElementType::ObjectId => Some(12),
         ElementType::Boolean => Some(1),
         _ => None,
@@ -636,9 +639,11 @@ mod tests {
         // For a fixed-width type the length comes from the type byte; trailing
         // doc_id bytes do not extend it.
         let tail = &[
-            0x80, 0x00, 0x00, 0x19, /* doc_id */ 0x02, 0x00, 0x01, b'x',
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x19, /* doc_id */ 0x02, 0x00, 0x01,
+            b'x',
         ];
-        assert_eq!(index_value_len(ElementType::Int32 as u8, tail), Some(4));
+        // Numerics index as the 8-byte f64 key; trailing doc_id bytes are ignored.
+        assert_eq!(index_value_len(ElementType::Int32 as u8, tail), Some(8));
     }
 
     #[test]
