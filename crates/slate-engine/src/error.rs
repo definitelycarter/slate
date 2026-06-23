@@ -54,6 +54,14 @@ pub enum EngineError {
         value: String,
         existing_id: String,
     },
+    /// An index scan was given a bound the index cannot represent as a key —
+    /// null, undefined, or a non-scalar value. Sparse indexes store only scalar
+    /// values, so such a bound is meaningless; this is surfaced loudly rather
+    /// than silently returning no rows (or, for a range, the wrong rows).
+    UnscannableBound {
+        field: String,
+        value_type: &'static str,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -74,6 +82,10 @@ impl fmt::Display for EngineError {
             } => write!(
                 f,
                 "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
+            ),
+            Self::UnscannableBound { field, value_type } => write!(
+                f,
+                "cannot scan index `{field}` for a {value_type} bound: the index stores only scalar values"
             ),
         }
     }

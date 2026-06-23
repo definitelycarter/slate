@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::ops::Bound;
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::spec::ElementType;
-use slate_store::{Store, StoreError, Transaction};
+use slate_store::{Store, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
 use crate::encoding::index_record::is_index_expired;
@@ -14,6 +14,127 @@ use crate::error::EngineError;
 use crate::index_sync::{IndexChanges, IndexDiff};
 use crate::traits::{CollectionHandle, EngineTransaction, IndexEntry, IndexRange};
 use crate::validate::validate_raw_document;
+
+/// A short name for a Bson value the index cannot encode as a key (the
+/// `_ => None` arm of [`BsonValue::from_bson`]) — for the `UnscannableBound`
+/// error message.
+fn unscannable_bson_type(value: &bson::Bson) -> &'static str {
+    use bson::Bson;
+    match value {
+        Bson::Null => "null",
+        Bson::Undefined => "undefined",
+        Bson::Array(_) => "array",
+        Bson::Document(_) => "object",
+        Bson::Binary(_) => "binary",
+        Bson::Decimal128(_) => "decimal128",
+        _ => "non-scalar",
+    }
+}
+
+/// What an index scan resolves to: the byte range to seek (a `(Bound, Bound)`
+/// pair that `scan_range` consumes as `RangeBounds<Vec<u8>>`), the per-entry
+/// exact-match for `Eq`, and the field-prefix length for decoding entries.
+struct ResolvedScan {
+    range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    exact: Option<(ElementType, Vec<u8>)>,
+    field_prefix_len: usize,
+}
+
+/// Turn an [`IndexRange`] into a byte range over a field's index keyspace.
+///
+/// `Eq(v)` seeks the value's prefix range and carries an exact-match — a byte
+/// range can't reject same-bytes-different-type or longer prefix-sharing values
+/// (the type isn't in the key). A `Range` becomes a *conservative superset*: it
+/// seeks to the lower bound (no over-scan) and stops just past the upper,
+/// ignoring inclusivity — the executor's coercing `compare_bson` recheck applies
+/// the exact bounds (and cross-type) over whatever we yield. A bound the sparse
+/// index can't encode (null / non-scalar) is a contract violation → error.
+fn resolve_index_scan(
+    collection: &str,
+    field: &str,
+    range: IndexRange<'_>,
+) -> Result<ResolvedScan, EngineError> {
+    let field_prefix =
+        KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+    let field_prefix_len = field_prefix.len();
+
+    // The key at which a value's entries begin: `i\0coll\0field\0` + value bytes.
+    let value_key = |value: &[u8]| {
+        KeyPrefix::IndexValue(Cow::Borrowed(collection), Cow::Borrowed(field), value).encode()
+    };
+    // Exclusive upper covering everything sharing `start` as a prefix (one value's
+    // entries, or the whole field). `Unbounded` when `start` is all `0xFF`.
+    let upper_after = |start: &[u8]| match increment_key(start) {
+        Some(end) => Bound::Excluded(end),
+        None => Bound::Unbounded,
+    };
+
+    let (range, exact) = match range {
+        IndexRange::Full => {
+            // Compute the exclusive upper from a borrow, then move `field_prefix`
+            // into the lower bound — no clone.
+            let end = upper_after(&field_prefix);
+            ((Bound::Included(field_prefix), end), None)
+        }
+        IndexRange::Eq(value) => {
+            let bv = encode_index_value(value, field)?;
+            let value_bytes = bv.bytes.into_owned();
+            let start = value_key(&value_bytes);
+            let end = upper_after(&start);
+            ((Bound::Included(start), end), Some((bv.tag, value_bytes)))
+        }
+        IndexRange::Range { lower, upper } => {
+            // Resolve the upper first (a borrow of `field_prefix` when unbounded)
+            // so the unbounded-lower case can *move* `field_prefix` into the lower
+            // bound rather than clone it.
+            let hi = match upper {
+                Some((v, _incl)) => {
+                    let key = value_key(encode_index_value(v, field)?.bytes.as_ref());
+                    upper_after(&key)
+                }
+                None => upper_after(&field_prefix),
+            };
+            let lo = match lower {
+                Some((v, _incl)) => {
+                    Bound::Included(value_key(encode_index_value(v, field)?.bytes.as_ref()))
+                }
+                None => Bound::Included(field_prefix),
+            };
+            ((lo, hi), None)
+        }
+    };
+
+    Ok(ResolvedScan {
+        range,
+        exact,
+        field_prefix_len,
+    })
+}
+
+/// Encode a value as index-key bytes, or `UnscannableBound` if the sparse index
+/// can't hold it (null / non-scalar). Shared by `Eq` and `Range` resolution.
+fn encode_index_value(value: &bson::Bson, field: &str) -> Result<BsonValue<'static>, EngineError> {
+    BsonValue::from_bson(value).ok_or_else(|| EngineError::UnscannableBound {
+        field: field.to_string(),
+        value_type: unscannable_bson_type(value),
+    })
+}
+
+/// The exclusive successor of a byte key: its last non-`0xFF` byte incremented,
+/// trailing `0xFF`s carried. `None` when every byte is `0xFF`.
+fn increment_key(key: &[u8]) -> Option<Vec<u8>> {
+    let mut upper = key.to_vec();
+    for byte in upper.iter_mut().rev() {
+        match byte.checked_add(1) {
+            Some(b) => {
+                *byte = b;
+                return Some(upper);
+            }
+            None => *byte = 0x00,
+        }
+    }
+    None
+}
 
 // ── KvTransaction ──────────────────────────────────────────────
 
@@ -275,138 +396,52 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         reverse: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError> {
         let ttl = self.now_millis;
-        let collection = handle.name();
+        let ResolvedScan {
+            range,
+            exact,
+            field_prefix_len,
+        } = resolve_index_scan(handle.name(), field, range)?;
 
-        let field_prefix =
-            KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
-
-        // An `Eq` against a value the (sparse) index cannot hold — null, or any
-        // non-scalar — matches no entry. Short-circuit to an empty scan; otherwise
-        // the unencodable bound below falls through to a full, unfiltered field
-        // scan (and the exact-match filter is skipped), wrongly returning every
-        // entry. The planner already declines to push such predicates, but the
-        // read path must be correct for any caller.
-        if let IndexRange::Eq(val) = &range
-            && BsonValue::from_bson(val).is_none()
-        {
-            return Ok(Box::new(std::iter::empty()));
-        }
-
-        // For `Eq`, the seek prefix is `field + sortable(value)`. A bare prefix
-        // scan would also match *longer* values that share that prefix (e.g.
-        // `Eq("om")` sweeping in `"omega"`), and values of another type that
-        // encode to identical bytes. Carry the encoded (tag, bytes) so the scan
-        // can keep only entries whose value matches exactly, in both length and
-        // type.
-        let eq_match: Option<(ElementType, Vec<u8>)> = match &range {
-            IndexRange::Eq(val) => {
-                BsonValue::from_bson(val).map(|bv| (bv.tag, bv.bytes.into_owned()))
-            }
-            _ => None,
-        };
-        let prefix = match &eq_match {
-            Some((_, bytes)) => {
-                KeyPrefix::IndexValue(Cow::Borrowed(collection), Cow::Borrowed(field), bytes)
-                    .encode()
-            }
-            None => field_prefix.clone(),
-        };
-
-        #[allow(clippy::type_complexity)]
-        let bounds: Option<(Option<Vec<u8>>, bool, Option<Vec<u8>>, bool)> = match range {
-            IndexRange::Range { lower, upper } => Some((
-                lower
-                    .as_ref()
-                    .and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.bytes.into_owned())),
-                lower.as_ref().is_some_and(|(_, incl)| *incl),
-                upper
-                    .as_ref()
-                    .and_then(|(v, _)| BsonValue::from_bson(v).map(|bv| bv.bytes.into_owned())),
-                upper.as_ref().is_some_and(|(_, incl)| *incl),
-            )),
-            _ => None,
-        };
-
-        #[allow(clippy::type_complexity)]
-        let mut iter: Box<
-            dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'b,
-        > = if reverse {
-            self.txn.scan_prefix_rev(handle.cf(), &prefix)?
-        } else {
-            self.txn.scan_prefix(handle.cf(), &prefix)?
-        };
-
-        let field_prefix_len = field_prefix.len();
+        // `scan_range` seeks straight to the lower bound (no lower-bound
+        // over-scan) and stops past the upper, so the per-entry work is only the
+        // expiry check and `Eq`'s exact-match — no manual bounds/early-termination.
+        let mut iter = self.txn.scan_range(handle.cf(), range, reverse)?;
         let mut done = false;
 
         Ok(Box::new(std::iter::from_fn(move || {
             if done {
                 return None;
             }
-
             for result in iter.by_ref() {
-                match result {
+                let (key_bytes, metadata_bytes) = match result {
+                    Ok(kv) => kv,
                     Err(e) => {
                         done = true;
                         return Some(Err(EngineError::Store(e)));
                     }
-                    Ok((key_bytes, metadata_bytes)) => {
-                        let entry =
-                            match IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len)
-                            {
-                                Some(e) => e,
-                                None => {
-                                    done = true;
-                                    return Some(Err(EngineError::InvalidKey(
-                                        "invalid index key".into(),
-                                    )));
-                                }
-                            };
-
-                        // Eq: keep only exact value matches (reject longer
-                        // prefix-sharing values and same-bytes-different-type).
-                        if let Some((want_tag, want_bytes)) = &eq_match
-                            && (entry.value_bytes() != want_bytes.as_slice()
-                                || entry.element_type() != Some(*want_tag))
-                        {
-                            continue;
-                        }
-
-                        if let Some((ref lower, lower_inc, ref upper, upper_inc)) = bounds {
-                            let value_bytes = entry.value_bytes();
-                            if let Some(lb) = lower {
-                                let cmp = value_bytes.cmp(lb.as_slice());
-                                if cmp == Ordering::Less || (cmp == Ordering::Equal && !lower_inc) {
-                                    if reverse {
-                                        done = true;
-                                        return None;
-                                    }
-                                    continue;
-                                }
-                            }
-                            if let Some(ub) = upper {
-                                let cmp = value_bytes.cmp(ub.as_slice());
-                                if cmp == Ordering::Greater
-                                    || (cmp == Ordering::Equal && !upper_inc)
-                                {
-                                    if !reverse {
-                                        done = true;
-                                        return None;
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-
-                        if entry.is_expired(ttl) {
-                            continue;
-                        }
-
-                        return Some(Ok(entry));
-                    }
+                };
+                let Some(entry) = IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len)
+                else {
+                    done = true;
+                    return Some(Err(EngineError::InvalidKey("invalid index key".into())));
+                };
+                // Expiry first — a cheap metadata check, the common reason to drop a row.
+                if entry.is_expired(ttl) {
+                    continue;
                 }
+                // Eq only: the byte range seeks the value prefix but can't filter by
+                // type (not in the key) or string length, so drop same-bytes-
+                // different-type and longer prefix-sharing entries. Ranges and Full
+                // need none — `scan_range` bounds them (and the executor's
+                // `compare_bson` recheck refines ranges).
+                if let Some((want_tag, want_bytes)) = &exact
+                    && (entry.value_bytes() != want_bytes.as_slice()
+                        || entry.element_type() != Some(*want_tag))
+                {
+                    continue;
+                }
+                return Some(Ok(entry));
             }
-
             done = true;
             None
         })))
