@@ -1,889 +1,134 @@
 # Roadmap
 
+A status index. Each substantial design lives in its own [RFC](./SUMMARY.md#rfcs);
+the entries here are a one-line description, a status, and a link to the detail.
+
 ## Query Engine
 
-`find` and SQL run through one stack: the Mongo front-end (`slate-query`) and
-SQL front-end (`slate-sql`) lower to one shared AST (`slate-ast`), planned by
+`find` and SQL run through one stack: the Mongo front-end (`slate-query`) and SQL
+front-end (`slate-sql`) lower to one shared AST (`slate-ast`), planned by
 `slate-planner`, executed by `slate-executor`, with expression evaluation in
-`slate-eval` (over the fast `slate-rawbson` field scanner). Two query surfaces,
-one planner/executor/evaluator, so they can't drift.
+`slate-eval` (over the fast `slate-rawbson` field scanner). Two query surfaces, one
+planner/executor/evaluator, so they can't drift. The legacy in-crate v1 engine has
+been **removed** — this is the only engine; a Mongo filter using an untranslated
+operator (`$in`, `$ne`) is a hard error, not a silent fallback.
 
-The legacy in-crate v1 planner/executor has been **removed** — this is now the
-only engine. A Mongo filter using an operator the front-end doesn't translate
-yet (e.g. `$in`, `$ne`) is a hard error rather than a silent fallback.
+**Testing the engine.** Correctness is covered by per-crate unit tests plus the
+external Cosmos parity harness (`tools/cosmos-parity`), which diffs against the real
+emulator. Planned successor: a hermetic golden-replay suite (capture Cosmos results
+offline, commit them, replay in-process) so the oracle runs under `cargo test`
+without Docker.
 
-### Testing the engine
+## Database Hardening — proposed
 
-Removing v1 retired the v1↔v2 differential suite (its oracle is gone).
-Correctness is covered by the per-crate unit tests plus the external Cosmos
-parity harness (`tools/cosmos-parity`), which diffs against the real emulator.
-Planned successor: a hermetic golden-replay test suite — capture Cosmos results
-offline, commit them, and replay in-process — so the Cosmos oracle runs under
-`cargo test` without Docker.
+Data-trust and operational foundations identified in a "proper embedded database"
+survey — guarantees currently delegated wholesale to the backends, untested and
+uninstrumented:
 
-## Database Hardening (RFCs — proposed)
-
-A "proper embedded database" survey found the query/index surface mature but the
-*data-trust* and *operational* foundations thin — guarantees delegated wholesale
-to the backends, untested, and uninstrumented. Five proposed RFCs map that gap
-into independently workable threads, to be triaged into tasks:
-
-- [Durability & Crash Safety](./rfcs/durability-and-crash-safety.md) — a
+- **[Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)** — a
   `Durability` knob with a documented commit guarantee, a kill-during-commit
   crash-test harness, and engine-level integrity `verify()`/`repair()`.
-- [Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)
+- **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
   — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
   + a `transact()` retry helper, and the `delete_range` exception.
-- [Observability & Introspection](./rfcs/observability-and-introspection.md) —
+- **[Observability & Introspection](./rfcs/observability-and-introspection.md)** —
   feature-gated `tracing`, EXPLAIN ANALYZE execution stats, and a `stats()`
   size/cardinality surface.
-- [Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)
+- **[Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)**
   — query deadline, materialization cap (the OOM guard), and document/key size
   limits, so the store can't take down its host.
-- [Logical Export / Import](./rfcs/logical-export-import.md) — manifest-driven
+- **[Logical Export / Import](./rfcs/logical-export-import.md)** — manifest-driven
   BSON/JSONL dump+reload for cross-backend migration, seeding, and recovery
   (complements physical `backup()`).
 
-## Index Key Value/Doc-Id Boundary (variable-width) — **done**
-
-An `i` index key is `i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}` with no
-delimiter between the value and the length-prefixed doc_id. For **fixed-width**
-value types the decoder derives the value length from the entry's type byte
-(`index_value_len`), so the boundary is unambiguous — this fixed numeric/date index
-scans, which previously crashed with `malformed value in index key` when a sortable
-number's bytes happened to resemble a length-prefixed doc_id header.
-
-**Variable-width** values (strings) used to locate the boundary by scanning backwards
-for a parseable trailing doc_id (`split_trailing_doc_id`). That scan was ambiguous —
-the value bytes plus the doc_id could admit more than one valid split, so a string
-index could silently mis-decode a few entries (observed: a `status = "active"` index
-scan undercounting a full scan by 3 on a 52k corpus). An undercount is a *false
-negative*, which the residual recheck cannot repair.
-
-### The fix (landed)
-
-The boundary is now deterministic, not guessed. A string (variable-width) index key
-carries a trailing **`u32` value-length suffix**:
-`i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}{value_len:u32}`. The decoder
-reads `value_len` directly; `split_trailing_doc_id` is gone. The suffix sits *after*
-the doc_id, so it never affects prefix scans or key ordering, and `u32` (not `u16`)
-means an indexed string over 64 KiB can't truncate the recorded length. **Fixed-width
-keys are byte-for-byte unchanged** — they keep deriving their length from the type
-byte. Decoding an `i` key now always requires the entry's metadata type byte, so the
-key-only `Key::decode_index` / `split_trailing_doc_id` path was removed; index entries
-are read only via `IndexRecord` / `IndexEntry`, which carry the metadata.
-
-This is an index-key encoding change (chosen approach 2 of the two below), so it is
-**versioned** (a marker in `_sys_`) with a re-index migration. The two candidate
-encodings were: (1) store the value length in the entry metadata, or (2) length-suffix
-the value so it reads back-to-front — (2) was taken because it leaves the metadata/TTL
-layout untouched and keeps the fixed-width path identical.
-
-**Migration.** On open the engine compares the stored index-encoding version and, when
-behind, **rebuilds every collection's `i` entries from the records** in one atomic
-transaction, then stamps the version. Records are the unambiguous source of truth, so
-the rebuild can't inherit the boundary bug it repairs; a failure rolls back and retries
-on the next open (never half-migrated). Unique (`u`) entries are untouched — their
-value runs to the end of the key with no doc_id suffix, so the boundary fix doesn't
-affect them.
-
-## Index Sargability (predicate pushdown)
-
-Several predicates that could be answered from an index instead full-scan, and the
-"can this use an index?" recognisers are added one function at a time. The
-[Index Sargability RFC](./rfcs/index-sargability.md) — now **decided**, with the
-full function/operator/subquery surface audited against `file:line` — defines a
-single doctrine and a unified `sargable() -> IndexAccess` recogniser (validated to
-cover the Eq/Range/Merge/Multikey/Spatial families). Increments, in order:
-
-- **Recogniser refactor + A — multikey containment — Done.** The ad-hoc `as_*`
-  helpers are now one `sargable() -> Option<(IndexAccess, Residual)>` entry point
-  that `plan_source` lowers (one arm per shape: `Scan`/`Multikey`/`Merge`). SQL
-  `ARRAY_CONTAINS`/`_ANY`/`_ALL` over a `.[]` index plan as multikey index access
-  (`_ANY` → `Merge(Or)`, `_ALL` → `Merge(And)`), with the predicate retained as a
-  recheck and the index name derived (`tags` → `tags.[]`). A also closed a latent
-  dedup bug: a `.[]` Eq scan emits one doc-id per matching element and nothing
-  below a lone `IndexScan → KeyLookup` de-duplicates, so every `Multikey` access
-  now routes its doc-ids through a dedup before `KeyLookup` (fixing the same
-  duplicate-row bug in the Mongo `{tags.[]: v}` / `MultikeyEq` form too).
-- **B — prefix range — Done.** `STARTSWITH(x, "pre")` and `LIKE 'pre%'` (an
-  anchored-prefix `REGEXMATCH`) plan as a `[pre, pre⁺)` string range via a new
-  `IndexScanRange::StringPrefix`, lowered through the engine's new
-  `IndexRange::Prefix`. The proof holds (no UTF-8 byte is `0xFF`, so the last-byte
-  increment never carries); the bound bytes reuse the `Eq` resolution with the
-  exact-match dropped. Retained recheck (the byte range can sweep cross-type
-  coincidences and a `LIKE` tail). End-to-end −95–97% (`STARTSWITH`) and −98.8%
-  (`LIKE`, which had been paying a per-row regex eval) at 10k rows. This was gated
-  on the variable-width string-boundary fix above (a string undercount is a false
-  negative the recheck can't repair); that fix had landed, lifting the gate.
-- **C — `STRINGEQUALS` → `Eq` — Done.** The 2-arg, case-sensitive `STRINGEQUALS(x, lit)`
-  plans as a tight `Eq` seek on a scalar string index (`consumed` — exact after the
-  boundary fix, like `x = 'lit'`); the 3-arg `ignoreCase` form and non-string literals
-  stay a `Filter`. End-to-end −98% (1k) / −99.8% (10k) vs. the full scan.
-
-Decided non-goals / no-ops: indexes stay **sparse** (`IS_NULL` / `IS_DEFINED` /
-`$exists` remain Filters — revisit only via a dense *partial* index for a proven
-hot path); **function-of-field / expression indexes** are out of scope absent a
-dedicated RFC; **Cosmos query-metrics capture is not worth wiring up** (the
-emulator treats index policy as a no-op and reports no index-utilization metrics,
-and a pushdown is invisible to results anyway). `EXISTS(… FROM e IN c.arr WHERE
-e = v)` stays a Filter — its array is an in-document unwind, not a collection
-index — with an `EXISTS → ARRAY_CONTAINS` rewrite noted as a future optimisation.
-
-## Unified Numeric Index Key — Done
-
-### Concept
-
-Encode every number into a single **order-preserving canonical index key** so all
-numeric types collapse onto one number line: `Int32(5)`, `Int64(5)`, and `Double(5.0)`
-encode to identical bytes, and byte order is numeric order. The
-[Unified Numeric Index Key RFC](./rfcs/unified-numeric-index-key.md) has the design,
-the storage-cost analysis, and the spike plan.
-
-### Motivation
-
-Each numeric type currently encodes the same value to different bytes, with no type tag
-in the key, so a tight `Eq` seek finds only one type. To honour `5 == 5L == 5.0` the
-executor routes **every** numeric `Eq`/`Range` to `IndexRange::Full` + a `CoercingFilter`
-that rechecks every entry — numeric equality loses all selectivity.
-
-### Benefits
-
-A unified key makes numeric `Eq` a tight seek and numeric `Range` an exact byte range, so
-`needs_full_scan`, `CoercingFilter`, and the per-row `compare_bson` recheck all **retire** —
-numerics rejoin the string/bool tight-seek path. The type tag (already stored in entry
-metadata) reconstructs the original BSON type, and only for *covered* projections; the
-common non-covered path never reads it.
-
-### Outcome
-
-Shipped **scheme A** — project every number to `f64` and reuse the existing sortable
-transform (`encode_f64_sortable`). The spike found this is the *only* oracle-consistent
-choice, not the "radical" one: `compare_bson` already compares all numerics via `as f64`
-(slate's documented f64 number tower), so an exact `i64 ∪ double` key would have
-contradicted the engine's own equality. Numeric `Eq` is **−93%** at 10k rows (full scan →
-tight seek); `needs_full_scan` + the numeric `CoercingFilter` are gone. Scoped to
-`{Int32, Int64, Double}`; **decimal128 stays excluded** (base-10, not a lossless superset
-of `double`). No migration (pre-users — indexes rebuild). NaN is not keyed, `-0.0`
-normalises to `+0.0`. Two follow-ups deferred — unique-index numeric values stay per-type,
-and an `into_index_value` micro-opt — tracked in the
-[RFC's Deferred work](./rfcs/unified-numeric-index-key.md#deferred-work).
-
-## Collect Node (Plan Materialization Barrier)
-
-### Concept
-
-A `Collect` plan node that drains its child stream and emits the result as a single
-materialized batch. This makes materialization points explicit in the plan tree instead
-of hidden inside executor implementations.
-
-```
-Sort                    IndexMerge(And)
-  Collect                 Collect            ← materialized into a set
-    Scan                    IndexScan(status)
-                          IndexScan(user_id) ← streamed, probed against set
-```
-
-### Motivation
-
-Today, `Sort` and `IndexMerge` secretly materialize their inputs internally. The plan
-tree shows `Sort(Scan)` which looks like a streaming pipeline, but the executor collects
-everything into a `Vec` before sorting. With `Collect` as an explicit node, the plan
-tree is honest about where memory grows.
-
-### Current nodes that collect internally
-
-- **`IndexMerge`** — collects both `lhs` and `rhs` into `Vec`s for set intersection/union
-- **`Sort`** — collects all records into a `Vec` to sort in memory
-- **`Distinct`** — iterates source eagerly to build a dedup set
-
-### Asymmetric IndexMerge (And)
-
-Postgres-style optimization: for `And`, collect only one side into a hash set, then
-stream the other side and probe against it. This avoids materializing both sides.
-For `Or`, both sides still need collection (full union).
-
-### Benefits
-
-- **Plan legibility** — materialization is visible in the plan tree
-- **Reusable** — any node needing a materialized input wraps its child in `Collect`
-- **EXPLAIN** — `Collect` nodes would surface those materialization points in
-  the plan tree EXPLAIN already prints (see _Plan Inspection_ below)
-- **Future stages** — natural boundary for spill-to-disk, distributed execution, caching
-
-### Performance note
-
-This is primarily a **composability win**, not a performance win. The same work happens
-either way. The real performance opportunity is the asymmetric `IndexMerge(And)` path,
-which is an algorithm change that could be implemented with or without `Collect` as a
-plan node.
-
----
-
-## Plan Inspection (EXPLAIN) — Done
-
-`Plan::explain()` (`slate-planner`) renders a lowered plan as an indented
-operator tree — one line per node, the operator plus the decisions that define
-it (an `IndexScan`'s field and bounds, a `Filter`'s predicate, a `Sort`'s keys),
-children indented below their parent. `Transaction::explain(cf, collection, sql)`
-(`slate-db`) lowers a query the same way `query` does and returns that rendering,
-and the REPL exposes it as `.explain <query>`.
-
-There is **no SQL `EXPLAIN` keyword** — plan inspection is a library/REPL affair,
-so the SQL grammar stays free of a reserved word. The rendering is *logical*: it
-shows the shape the planner settled on, with no cost estimates or row counts. The
-future `Collect` node (above) would make materialization points explicit in this
-same output.
-
----
-
-## Dynamic Primary Key Path — Done
-
-All executor nodes (`insert_record`, `upsert`, `replace`, `delete`, `read_record`,
-`index_scan`, `index_merge`, `projection`) and the mutation parser now use
-`CollectionHandle::pk_path()` instead of hardcoded `"_id"`.
-
-**Constraint:** `pk_path` must be a top-level scalar field. Dot-paths are rejected at
-collection creation time. This matches MongoDB (where `_id` is always top-level) and
-avoids significant complexity in the append/copy/skip patterns used by insert, upsert,
-replace, and projection nodes.
-
-**TTL path** supports dot-paths (e.g. `"meta.expires_at"`) since it is read-only —
-the engine resolves nested DateTime values during record encoding via a byte-level
-path scanner.
-
----
-
-## Backup — Done (Hot Backup)
-
-### Hot backup
-
-Online snapshots via `Database::backup(path)`. Delegates to the store backend behind
-the `BackupStore` trait — the caller doesn't need to know which backend is in use.
-
-- **RocksDB** — `rocksdb::Checkpoint` (hardlinks SST files, near-instant)
-- **redb** — `std::fs::copy` (CoW B-tree keeps the file crash-consistent)
-- **MemoryStore** — returns an error (nothing to back up)
-
-`backup()` is only available when `S: BackupStore`. Restore is offline — open the
-backup directory/file as a fresh store.
-
-### Export / Import (Not yet implemented)
-
-Logical backup. Dump collections as BSON or JSON, reload into the same or a different
-instance. The DB layer owns this because it understands collection metadata, index
-configuration, and PK paths. The engine just sees keys and bytes.
-
-Use cases: moving data between instances, seeding dev environments, cross-backend
-migration (e.g. redb → RocksDB).
-
----
-
-## MemoryStore Persistence (Write-Behind Flush)
-
-### Concept
-
-MemoryStore is fast but ephemeral. A write-behind persistence layer lets MemoryStore
-act as the hot path while flushing durable state to a pluggable backend
-asynchronously. This is the same pattern used by RocksDB (memtable + background
-flush) and Redis (RDB snapshots / AOF) — the sync API never blocks on I/O, and
-persistence is a separate concern.
-
-### Flush targets
-
-- **Disk (native)** — serialize snapshots or append to a WAL on macOS/Linux
-- **IndexedDB (browser)** — async flush from MemoryStore to browser storage,
-  hydrate on startup
-- **S3 / remote** — cloud backup for embedded deployments
-
-### Flush strategies
-
-- **Snapshot** — serialize the full store state periodically or after N writes
-- **WAL (write-ahead log)** — append each mutation, replay on startup. More
-  granular than snapshots, slightly more complex
-- **Dirty tracking** — only flush changed column families or key ranges
-
-### Design
-
-The flush layer wraps a `MemoryStore` and owns the persistence lifecycle. It does
-not change the `Store` trait — consumers interact with MemoryStore as usual. The
-flush runs on a background thread (native) or via `setInterval` / microtask
-(browser). On startup, the store hydrates from the durable backend before accepting
-operations.
-
-This avoids making the `Store` trait async. The async boundary lives entirely inside
-the flush layer, invisible to the engine, database, and public API.
-
-### Relation to BackupStore
-
-`BackupStore::backup()` is on-demand, point-in-time. The flush layer is continuous
-and automatic. They can coexist — `backup()` remains useful for explicit snapshots
-even when flush is running.
-
----
-
-## Change Detection (Watch Queries)
-
-### Concept
-
-Register a filter against a collection. On every insert, update, or delete, the
-written document is evaluated against registered filters. If it matches, the
-registered handler fires with the change event.
-
-```rust
-let handle = db.watch("users", filter!{ "status": "active" }, |events: &[ChangeEvent]| {
-    // events contains all matching changes from this commit
-})?;
-handle.unwatch(); // or just drop it
-```
-
-### Change events
-
-```rust
-pub enum ChangeEvent {
-    Insert { doc: RawDocumentBuf },
-    Update { old: RawDocumentBuf, new: RawDocumentBuf },
-    Delete { doc: RawDocumentBuf },
-}
-```
-
-Providing both old and new on updates lets the consumer diff without re-querying.
-
-### Why it fits an embedded DB
-
-In a client-server database, change streams are a networking concern (oplog tailing,
-WebSocket push). In an embedded DB, writes happen in-process — the write path can
-evaluate filters synchronously and dispatch to callbacks with zero serialization
-overhead.
-
-### Architecture
-
-**Registration table** (in-memory): `handle_id → (cf, collection, filter, callback)`,
-indexed by `(cf, collection) → Vec<handle_id>` for fast lookup during writes.
-Collections are unique per CF, so both are needed to identify a watch target.
-
-**Write path** — as documents flow through the plan tree, the executor checks
-registered watches for the current `(cf, collection)`. Matching docs buffer
-`(handle_id, op, old_doc?, new_doc?)` on the transaction. For deletes and updates
-the old doc is captured here since it won't survive commit. This is similar to how
-`Node::Trigger` and `Node::Validate` tap into the write pipeline — filter evaluation
-is a side effect of the write, not a separate scan.
-
-**Commit sequence:**
-
-1. **During writes** — filter evaluates as docs flow through the plan tree. Buffer
-   `(handle_id, op)` for matches. For deletes/updates, also buffer the old doc.
-2. **Before store commit** — read new docs for buffered IDs from the still-open
-   transaction. Assemble `ChangeEvent`s grouped by handle.
-3. **Store commit** — actual commit happens.
-4. **Emit** — fire callbacks with assembled events per handle.
-
-On rollback the buffer is dropped — no phantom events. Everything reads from the
-same transaction, no extra transaction needed.
-
-**Unwatch** — remove from the registration table. Any pending entries for that
-handle in in-flight transactions are ignored on flush.
-
-### Filter semantics
-
-For inserts and deletes, the filter checks the document directly. For updates, the
-filter matches on **old or new** — this catches documents entering and leaving the
-watched set (e.g. a user becoming active or stopping being active).
-
-### Design considerations
-
-- **Filter evaluation** — reuse the existing query filter logic from the planner/executor.
-  A registered watch is essentially a compiled filter predicate.
-- **Granularity** — fire on insert, update, delete, or any combination. Include both old
-  and new document for updates so the handler can diff.
-- **Lifecycle** — return a handle that can be dropped to unregister. Watches should not
-  prevent collection drops but should be cleaned up gracefully.
-- **Threading** — handlers run on the writer's thread by default (synchronous). Async
-  dispatch (channel-based) as an option for handlers that shouldn't block writes.
-- **Index-aware fast path** — if the watch filter matches an indexed field with an Eq
-  predicate, skip evaluation for writes that don't touch that field.
-
----
-
-## User-Defined Logic
-
-### Implemented
-
-**Triggers** and **validators** are implemented. Scripts are registered per-collection,
-resolved at plan time via `HookSnapshot`, and executed as typed plan nodes
-(`Node::Validate`, `Node::Trigger`, `Plan::Trigger`). See the
-[mutation pipeline](./querying.md) documentation for details.
-
-**Lua runtime** (`mlua`) is the default scripting backend. Sandboxed execution with
-instruction limits, BSON type preservation, and scoped transaction callbacks
-(`ctx.get`, `ctx.put`, `ctx.delete`).
-
-**JS runtime** (`wasm-bindgen`) provides the same `ScriptRuntime`/`ScriptHandle`
-traits on wasm32 targets, delegating script execution to the JS host.
-
-### Remaining hook points
-
-- **Computed fields** — derive a field value from the rest of the document on
-  insert/update. The result is stored in the document, making it indexable and
-  queryable like any real field.
-- **Custom index key extractors** — produce a synthetic index key from document fields
-  (e.g. a normalized/lowercased string, a composite key). The engine indexes the
-  output; the function defines *what* to index.
-- **Partial index filters** — a Lua predicate that controls whether a document is
-  included in an index. Evaluated on every insert/update during index maintenance.
-  See the Partial Indexes section below.
-- **Transform pipelines** — chain multiple functions on a document before storage.
-  Schema migration, field normalization, enrichment.
-
-### Future runtime: Wasm (wasmtime / wasmi)
-
-Polyglot — users write functions in any language that compiles to wasm32 (Rust, Swift,
-Go, JS via QuickJS, AssemblyScript). Sandboxed by default with no filesystem, network,
-or memory access beyond what's explicitly granted. Fuel metering provides hard
-computation bounds. The `RuntimeKind::Wasm` variant and `wasm` feature flag are
-reserved for this.
-
----
-
-## WebAssembly Support
-
-### What works today
-
-The full database stack (`slate-store`, `slate-engine`, `slate-query`, `slate-vm`,
-`slate-db`) compiles to `wasm32-unknown-unknown`. The MemoryStore backend works
-out of the box — no C dependencies, no filesystem, no threads.
-
-```bash
-cargo build -p slate-db --target wasm32-unknown-unknown --no-default-features --features js
-```
-
-This produces a `slate_db.wasm` binary with the complete query engine, planner,
-executor, index support, and JS scripting bridge.
-
-**Scripting on wasm32:** The native Lua runtime (`mlua`) vendors C code and cannot
-compile to wasm. The `js` feature in `slate-vm` provides an alternative:
-`JsScriptRuntime` and `JsScriptHandle` implement the `ScriptRuntime`/`ScriptHandle`
-traits via `wasm-bindgen`, delegating script execution to the JS host. The JS side
-plugs in any Lua engine (e.g. wasmoon for Lua 5.4 compiled to wasm, or Fengari for
-a pure-JS Lua VM).
-
-The bridge exposes three wasm-bindgen contract points:
-
-- **`slate_vm_load(name, source) → handle_id`** — JS compiles script source, returns
-  an integer handle
-- **`slate_vm_call(handle_id, input_bson, caps) → output_bson`** — JS executes the
-  compiled script with BSON input
-- **`slate_vm_invoke_method(name, args_bson) → result_bson`** — exported from Rust,
-  called by JS when a script invokes `ctx.get()`, `ctx.put()`, or `ctx.delete()`,
-  routing back into the Rust transaction layer
-
-Feature flags:
-
-| Feature | Runtime | Target | Use case |
-|---------|---------|--------|----------|
-| `lua`   | mlua (C Lua 5.4) | Native | Default for Rust/Swift apps |
-| `js`    | wasm-bindgen → JS host | wasm32 | Browser, Node.js |
-| `wasm`  | (reserved) | Any | Future: wasmtime/wasmi for embedded wasm modules |
-
-### Remaining work
-
-#### Platform adapters
-
-`slate-db` currently owns two platform-specific concerns: a `SystemTime::now()` clock
-and a background sweep thread (`std::thread::spawn`). These need to be gated for wasm.
-
-Gate platform-specific code behind a `runtime` feature in `slate-db` (default on).
-With `runtime` enabled, `Database::open` uses `SystemTime::now()` as the clock and
-spawns a background sweep thread — batteries included for native Rust consumers.
-Without it, the caller provides a clock function and handles sweep manually via
-`purge_expired()`.
-
-```
-slate-db (features = ["runtime"])   → default: SystemTime clock, sweep thread
-slate-db (default-features = false) → pure logic, caller provides clock, no sweep
-
-slate-uniffi  → depends on slate-db (default features → runtime on)
-                UniFFI bindings for Swift/Kotlin
-
-slate-wasm    → depends on slate-db with default-features = false
-                wasm-bindgen, injects Date.now(), no sweep (or JS setInterval)
-```
-
-Runtime blockers (compile succeeds, but these panic at runtime on wasm32):
-
-- ~~**`SystemTime::now()`** — `KvEngine::with_clock()` escape hatch already exists~~
-- ~~**`std::thread::spawn`** — sweep is gated behind `#[cfg(feature = "runtime")]`~~
-- ~~**`RAND()` RNG** — the default seeded PRNG is gated behind `runtime`; the wasm
-  host injects `Math.random` via `DatabaseBuilder::with_rand()` (mirrors `with_clock`)~~
-- **`getrandom`** — needs `features = ["js"]` for `crypto.getRandomValues()` entropy
-  (used by bson for ObjectId generation)
-
-#### Browser storage
-
-MemoryStore works on wasm32 but is ephemeral — data is lost on page reload. Two
-browser-native storage options could provide persistence:
-
-**OPFS (Origin Private File System)** — `createSyncAccessHandle()` in Web Workers
-provides synchronous file I/O. This maps directly to the existing `Store` trait
-without any API changes. Could potentially run redb on top of it since redb is
-file-backed. Limited to Web Workers (not the main thread).
-
-**IndexedDB via flush** — IndexedDB is async, and the `Store`/`Transaction` traits
-are synchronous. Rather than making the entire store layer async (which would bubble
-up through the engine, database, and public API), MemoryStore can persist to
-IndexedDB using a write-behind flush strategy. MemoryStore remains the hot path for
-reads and writes; a background flush (driven by `setInterval` or after N writes)
-serializes dirty state to IndexedDB asynchronously. On startup, the store hydrates
-from IndexedDB before becoming available. This keeps the `Store` trait sync and
-avoids infecting the core API with async — persistence is a separate concern bolted
-on from the outside.
-
-This is the same pattern RocksDB and redb use internally: writes hit memory
-(memtable / B-tree cache), and actual disk I/O happens in the background. The sync
-API isn't blocking on disk for every operation — it's "sync API, async I/O
-internally."
-
-#### ~~slate-wasm crate~~ — Done
-
-A thin binding crate (similar to `slate-uniffi`) that wraps `Database`, `Transaction`,
-and `Cursor` with `wasm-bindgen` exports. Depends on `slate-db` with
-`default-features = false`. Injects `Date.now()` as the clock. Exposes
-`purge_expired()` for manual or `setInterval`-driven cleanup.
-
----
-
-## ~~wasm: decouple the VM backend~~ — Done
-
-`slate-executor` previously hardcoded `slate-vm = { features = ["lua"] }`,
-which dragged `mlua` (native Lua, C-vendored) into *every* build — so
-`slate-wasm` couldn't compile to `wasm32`.
-
-No propagated feature turned out to be necessary. The executor touches
-scripting only through `slate-vm`'s trait objects (`VmPool`,
-`dyn ScriptRuntime`/`ScriptHandle`, `VmError`) and never names a concrete
-runtime, so the fix was simply to drop the forced `lua` feature from the
-normal dep and move it to a dev-dependency (tests still build a real
-`LuaScriptRuntime`). Under resolver v2 the dev-dep feature does not leak into
-the normal build, so the query stack — and `slate-wasm`, which takes
-`slate-db` with `default-features = false` — is now mlua-free and compiles to
-`wasm32-unknown-unknown`. A CI job (`cargo build -p slate-wasm --target
-wasm32-unknown-unknown`) guards against regression. Native keeps `lua` via
-`slate-db`'s default features.
-
-Concrete runtimes stay pluggable: register them into a `VmPool` and inject it
-via `DatabaseBuilder::with_scripting(pool)`. The `js` VM backend (JS-side Lua
-via wasm-bindgen, see "Scripting on wasm32" above) remains the path for
-actually running scripts on wasm32.
-
-## Interactive Shell (CLI) — Done
-
-`slate-cli` ships a native REPL (`cargo run -p slate-cli`) so the database can be
-probed without writing a throwaway binary. Lines beginning with `.` are
-meta-commands (`.create`, `.use`, `.insert`, `.update`, `.replace`, `.delete`,
-`.count`, `.distinct`, `.index`, `.unique-index`, `.drop-index`, `.indexes`,
-`.schema`, `.backup`, `.collections`, `.drop`, `.seed`); anything else runs as
-SQL against the active collection. `.backup <dir>` takes an online physical
-backup on the persistent backends (rocksdb/redb); it is rejected with a clear
-message on the in-memory backend. `.seed` with no argument loads a small
-built-in sample; `.seed <path>` bulk-loads a dataset file — a JSON array or
-JSONL/NDJSON (`mongoexport`'s default), auto-detected from the first byte — into
-a collection named after the file stem, streaming large JSONL files line by line.
-It opens an in-memory database by default, or
-a persistent one with `--rocksdb <path>` / `--redb <path>` (feature-gated).
-Input history persists to `~/.slate_history` across sessions, and every query or
-command result is annotated with its execution time. SQL statements are
-terminated by `;` and may span multiple lines (a `...>` continuation prompt
-buffers the rest; Ctrl-C cancels a half-typed statement); meta-commands stay
-single-line. Tab-completion suggests meta-command names, collection names, and
-the active collection's indexed fields.
-
-The command/session/format core lives in the crate's library (not the binary):
-a line is parsed to a `Command`, run against a `Database<S>` into a semantic
-`Output`, then rendered. That read→parse→execute→format core is the seam the
-browser playground below can reuse behind `slate-wasm` instead of reimplementing.
-
-Not yet covered: managing Lua hooks (triggers/validators/UDFs), a `.plan`/`.ast`
-inspector, multi-statement transactions, and Mongo-style `.find`.
-
-## Browser Playground
-
-### Concept
-
-Ship a single-page app powered by `slate-wasm` where users can create collections,
-insert documents, write queries, attach Lua hooks, and see query plans — all
-client-side with no backend.
-
-An interactive playground sells an embedded DB better than docs or benchmarks. Users
-can feel it working: insert a document, watch a Lua validator reject bad data, edit a
-computed field function, re-query, see results update instantly.
-
-### Architecture
-
-```
-Browser
-  ├── slate_db.wasm          ← database engine (MemoryStore)
-  ├── wasmoon / fengari      ← Lua VM in JS
-  └── UI (editor + results)  ← query input, document viewer, plan visualizer
-
-JS glue wires wasmoon into the wasm-bindgen bridge:
-  slate_vm_load  → wasmoon.loadString(source)
-  slate_vm_call  → wasmoon.callFunction(handle, input)
-  ctx.get/put/delete → slate_vm_invoke_method → Rust transaction layer
-```
-
-Depends on the platform adapter work and the `slate-wasm` crate above.
-
----
-
-## Unique Indexes — Done
-
-Single-field unique indexes enforce that no two live documents share the same value for a field. Created via `create_unique_index(cf, collection, field)` (or `create_index_with_options` with `IndexOptions { unique: true }`); violations surface as `UniqueViolation { index, value, existing_id }`.
-
-### Design: dual index format
-
-A unique index is still a normal indexed path — it keeps its value-first `i` entry, so every existing read path (index scans, range scans, covered projections) works unchanged. It additionally writes a second, point-lookup entry under a distinct `u` tag:
-
-```
-i (scan):     i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}   value: [type][ttl?]
-u (enforce):  u\0{collection}\0{field}\0{type_byte}{value_bytes}   value: {doc_id_lp}
-```
-
-The `u` key omits the doc_id (a unique value has at most one owner) and folds the BSON type byte into the key so distinct types never alias onto a single slot. The owning `_id` lives in the entry value, so the same `u` entry doubles as a point-lookup that returns the document id directly (see the planner follow-up).
-
-### Enforcement
-
-Two cooperating mechanisms:
-
-- **In-snapshot check** — before writing a `u` entry, `apply_index_changes` point-reads the `u` key. A slot owned by a different document is a `UniqueViolation`; a slot already owned by the same document is idempotent. This catches duplicates already visible to the transaction (committed, or written earlier in the same transaction — e.g. an `insert_many` with internal duplicates).
-- **Store conflict detection** — two *concurrent* transactions inserting the same value write the same `u` key. On RocksDB (`OptimisticTransactionDB`) this collides as a write-write conflict at commit and one fails. MemoryStore and redb serialize writers (single global write lock / single-writer), so the second writer simply observes the first's committed slot. All three backends are sound — by conflict detection or by serialization.
-
-### Why scalar-only is sound
-
-Uniqueness is defined here for single scalar values. A non-multikey path resolves to **at most one** value per document (`extract_all` on a path without `[]` yields zero or one scalar), so the value → `_id` mapping is one-to-one and the doc_id-less `u` key is unambiguous. Sparse falls out for free: an absent or non-scalar field produces no `u` entry, so any number of documents may omit a unique field. Multikey (`[]`) paths are rejected at creation — array fan-out would imply cross-element uniqueness (no two documents may share *any* element), a semantic deferred to the multikey follow-up.
-
-### Slot-stealing safety (why blind `u` deletes are correct)
-
-Invariant: **`u(x)` exists ⟺ exactly one document holds value `x`, and only that document's own mutation/delete/purge ever removes `u(x)`.**
-
-It holds because every `u` *write* is enforced (a put never overwrites an occupied slot — even an expired one) and every blind `u` *delete* is keyed by the deleting document's own current value (computed from its freshly-read record). No other document can interpose on a slot, so a blind delete only ever removes a slot the acting document owns. The earlier slot-stealing hazard — an expired document's purge deleting a slot another document had stolen — cannot arise, because "block even when expired" makes the steal itself impossible.
-
-### Expired slots (deferred refinement)
-
-A unique value owned by a document that has expired via TTL but not yet been purged continues to block new inserts of that value. This is conservative — never a false accept — and the slot is reclaimed by purge. The alternative (treat an expired slot as free) was deferred: it reintroduces the slot-stealing problem above and requires ownership-checked deletes. "Block until purge" was chosen as the simpler, sound first cut.
-
-### Follow-ups
-
-- **Planner point-get** — equality on a unique field has at most one match. The planner can read the `u` key directly (one point-get, doc_id straight from the entry value) instead of a prefix scan over the `i` keyspace, then a single `ReadRecord`. Purely additive; the `i` scan path stays the fallback. An expired owner's `u` entry resolves to a doc_id whose record `ReadRecord` filters out, so the lookup correctly returns no row.
-- **Compound unique** — uniqueness over a *combination* of paths (e.g. `(org_id, email)`); see Compound Indexes.
-- **Multikey unique** — uniqueness across array elements; see Multikey (Array) Indexes.
-
----
-
-## Decimal128 in Query Evaluation — Done
-
-A stored `Decimal128` (`$numberDecimal`) was correct in storage and visible to `find` (raw passthrough) but invisible to per-field evaluation: it projected as missing, never matched a comparison, and made aggregates return nothing. The data was always stored correctly — the gap was on the read/eval side. Surfaced by loading a real `mongoexport` (Atlas `sample_airbnb`, whose `price`/fees are all `$numberDecimal`) via `.seed`.
-
-### Design: one f64 number tower
-
-slate evaluates numbers in a single `f64` tower (Cosmos's one-number model — see [Numbers and comparison](./querying.md#numbers-and-comparison)). A `Decimal128` joins it by its `f64` value, fixed across three layers:
-
-- **`slate-rawbson`** — `RawField::value()` decoded every element type except Decimal128, so per-field access (`c.price`) returned `None`. (`skip_bson_value` already knew the type, which is why whole-doc `find` survived but field access didn't.)
-- **`slate-eval` number tower** — `scalar_of_bson`/`as_number`, the raw `scalar_of_raw`/`raw_as_number`, and aggregation's `num_f64` enumerated `Int32`/`Int64`/`Double`; they now read a Decimal128 as its `f64` via a shared `decimal_to_f64`. `type_rank` groups it with numbers, and `MIN`/`MAX` route through `order_bson` so they follow for free.
-
-Contract: comparison and sort use the `f64` value (exact for realistic magnitudes; only *computed* results are `f64`, never stored ones); `SUM`/`AVG` return a double; `MIN`/`MAX` preserve the original `Decimal128`; stored bytes are untouched, so `find` round-trips losslessly. The canonical-string conversion is the dependency-free path.
-
-### Follow-ups
-
-- **Decimal-preserving arithmetic** — a decimal crate (or a manual coefficient/exponent decode) would make `SUM`/`AVG`/arithmetic bit-exact and drop the per-value string allocation. Deferred; the `f64` path is reversible.
-- **Date vs string-literal comparison** — a stored `$date` is a real BSON `DateTime`, so `c.when > "2024-01-01"` compares across domains and matches nothing. Documented under [Numbers and comparison](./querying.md#numbers-and-comparison); no fix planned unless we add date literals/coercion.
-- **`SUM` over integers renders as a float** (`153354.0` vs Cosmos's `153354`) — same number-model bucket; confirm against hosted Cosmos before changing.
-
----
-
-## Compound Indexes
-
-### Problem
-
-Today, each index covers a single field. A query like `{ "status": "active", "created_at": { "$gt": "2024-01-01" } }` uses one index for `status` (Eq scan) and either a full scan or a second index for `created_at`, merged via `IndexMerge(And)`. This works but requires materializing one side into a hash set for the probe — two index scans plus a set intersection.
-
-### Design
-
-A compound index covers multiple fields in a defined order. The key layout extends naturally:
-
-```
-i\0{collection}\0{field1}+{field2}\0{value1_bytes}{value2_bytes}{doc_id_lp}
-```
-
-The planner recognizes when a compound index satisfies multiple predicates in a single scan. For the query above, a compound index on `["status", "created_at"]` produces a prefix scan on `status = "active"` followed by a range filter on `created_at` — one index walk, no merge.
-
-### Key prefix rules
-
-Compound indexes follow the leftmost prefix rule (same as MongoDB, MySQL):
-
-- Index on `["a", "b", "c"]` can satisfy queries on `{a}`, `{a, b}`, or `{a, b, c}`
-- Cannot satisfy `{b}` or `{b, c}` alone — the leading field must be present
-- Range predicates on a field terminate prefix usage — fields after the range use in-memory filtering
-
-### Work
-
-- Extend `CollectionConfig.indexes` to accept `Vec<String>` per index (single field is `vec!["field"]`)
-- Update key encoding to concatenate multiple value bytes with length prefixes
-- Extend `IndexDiff` to compute entries for multi-field keys
-- Planner: score compound indexes by how many query predicates they cover
-- Backfill: `create_index` with a compound spec re-indexes existing documents
-
-### Interaction with partial indexes
-
-Compound indexes can be combined with Lua-based partial index filters — e.g. a compound index on `["status", "priority"]` that only indexes documents where `is_archived == false`.
-
-### Interaction with unique indexes
-
-A compound index can also be unique, enforcing that no two documents share the same *combination* of values (e.g. unique on `(org_id, email)` — the same email is allowed across different orgs). This composes with the existing single-field `u` keyspace by concatenating the per-field sortable values into one `u` key, exactly as the `i` key layout above does. The scalar-only and sparse rules carry over per component.
-
----
-
-## Multikey (Array) Indexes
-
-### Concept
-
-Array fan-out is already supported for regular (`i`) indexes via `[]` path segments — `tags.[]` writes one index entry per element of `tags`, so `{ tags: "renewal_due" }` matches a document with `tags: ["active", "renewal_due"]`. A multikey index is the formalization of that fan-out as a first-class index kind.
-
-### Motivation
-
-Regular multikey already works for filtering. The open work is **multikey unique**: enforcing that no two documents share *any* array element (MongoDB semantics). With the per-value `u`-key scheme this nearly falls out — each element would claim its own `u` slot — but it is a distinct and surprising semantic surface, so unique indexes currently **reject** `[]` paths rather than enable it implicitly (see Unique Indexes).
-
-### Work
-
-- Allow `unique` on `[]` paths, fanning out one `u` entry per array element.
-- Define and document the cross-element collision semantics, including a single document with duplicate elements (claims one slot, not a self-collision).
-- Decide the interaction with sparse (empty array → no entries) and with compound multikey (MongoDB restricts to at most one multikey field per compound index).
-
----
-
-## SQL Query Surface
-
-### Concept
-
-A SQL-like query language for aggregation and complex reads, inspired by CosmosDB's SQL
-dialect. This is a query surface — it compiles down to the same plan tree nodes that the
-filter/find API uses, plus new aggregation nodes.
-
-```sql
-SELECT c.status, COUNT(1) AS total, AVG(c.score) AS avg_score
-FROM users c
-WHERE c.active = true
-GROUP BY c.status
-ORDER BY total DESC
-```
-
-### Why SQL
-
-SQL is universally understood. Offering a SQL surface for aggregation queries lowers the
-learning curve — users don't need to learn a custom pipeline DSL. The document model stays
-BSON; SQL is just the query language.
-
-### Sub-document joins (CosmosDB-style)
-
-CosmosDB supports `JOIN` within a single document's sub-arrays, not across collections.
-This is a natural fit for an embedded document DB:
-
-```sql
-SELECT c.name, t.tag
-FROM users c
-JOIN t IN c.tags
-WHERE t.tag = "rust"
-```
-
-This flattens the `tags` array, producing one row per element. No cross-collection joins,
-no foreign keys — just array unwinding expressed in SQL syntax.
-
-### Aggregation functions
-
-- **`COUNT`**, **`SUM`**, **`AVG`**, **`MIN`**, **`MAX`** — standard aggregates
-- **`GROUP BY`** — groups by one or more fields, produces one output row per group
-- **`HAVING`** — filter on aggregate results (post-group)
-- **`ARRAY_AGG`** / **`COLLECT`** — gather grouped values into an array
-
-### Execution
-
-Aggregation introduces new plan nodes:
-
-- **`GroupBy`** — materializes input, groups by key fields, computes aggregates
-- **`Having`** — post-group filter (operates on aggregate outputs)
-- **`ArrayUnwind`** — flattens a sub-array for `JOIN ... IN` syntax
-
-These compose with existing nodes (`Filter`, `Sort`, `Limit`, `Projection`, `IndexScan`).
-
-### Parser
-
-A lightweight SQL parser (hand-written recursive descent or `sqlparser-rs`) that emits the
-existing plan tree. The SQL surface is purely additive — the filter/find API continues to
-work unchanged.
-
-### Status & not-yet-implemented
-
-Most of the above has shipped — `SELECT`/`VALUE`/`*`/tabular, `WHERE`, `GROUP BY`,
-`ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, the five aggregates, and subqueries (see
-the [SQL Reference](./sql-support.md) and [Function Reference](./functions.md)).
-Remaining gaps:
-
-- **`HAVING`** and **`ARRAY_AGG`/`COLLECT`** aggregation extensions.
-- **`DOCUMENTID`** scalar function (returns the configured pk value). `RAND()` is
-  done — a fresh `[0, 1)` draw per call from an injected source (see the
-  [SQL Reference](./sql-support.md#non-deterministic-functions)).
-- **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`,
-  `ORDER BY RANK`: needs a full-text index + BM25 scoring.
-- **Vector** — `VECTORDISTANCE`: needs a vector index.
-- **Spatial index** — the `ST_*` functions are implemented; a spatial index is not.
-
----
-
-## Partial Indexes
-
-### Concept
-
-Index only a subset of documents in a collection, controlled by a filter predicate. Reduces
-index size and write amplification for collections where most queries target a known subset.
-
-```rust
-txn.create_index("orders", IndexConfig {
-    fields: vec!["customer_id".into()],
-    filter: Some("status ~= 'cancelled'"),  // Lua expression
-})?;
-```
-
-### Integration with Lua hooks
-
-The filter predicate is a Lua expression evaluated against each document on insert/update.
-If it returns `false`, the document is skipped during index maintenance — no entry is
-written. This reuses the Lua runtime from the user-defined logic system.
-
-### Use cases
-
-- Index `orders.customer_id` only for non-cancelled orders
-- Index `users.email` only for verified users
-- Sparse indexes: skip documents missing the indexed field entirely
-
-### Work
-
-- Extend `IndexConfig` with an optional filter expression (stored in index metadata)
-- `IndexDiff` evaluates the filter before generating index entries
-- `create_index` backfill respects the filter
-- Planner: only consider a partial index when the query's filter is a superset of the
-  index filter (the query must logically guarantee all matching documents are in the index)
-
----
+## Indexing
+
+- **[Index Key Value/Doc-Id Boundary](./rfcs/index-key-boundary.md)** — *done.*
+  Deterministic variable-width string index keys (`u32` value-length suffix); a
+  versioned re-index migration.
+- **[Index Sargability](./rfcs/index-sargability.md)** — *decided; A/B/C shipped.*
+  One `sargable()` recogniser; multikey containment, prefix range, and
+  `STRINGEQUALS` → `Eq` all push down to index access.
+- **[Unified Numeric Index Key](./rfcs/unified-numeric-index-key.md)** — *done.* All
+  numbers project to one order-preserving `f64` key; numeric `Eq` −93% at 10k rows.
+  Two follow-ups deferred.
+- **[Compound Indexes](./rfcs/compound-indexes.md)** — *proposed.* Multi-field keys,
+  leftmost-prefix rule, compound-unique.
+- **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
+  `[]` fan-out; the open work is multikey-unique.
+- **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of
+  documents via a Lua filter predicate.
+- **[Spatial Index](./rfcs/spatial-index.md)** — *proposed (design spike).*
+  Geohash/S2 candidate-cell scan + recheck for `ST_DISTANCE`/`ST_WITHIN`.
+- **[Index Intersection Strategy](./rfcs/index-intersection-strategy.md)** —
+  *proposed.* How `IndexMerge` chooses and combines indexes.
+- **Full-text & vector indexes** — *proposed.* BM25 full-text and `VECTORDISTANCE`;
+  see the [SQL Query Surface RFC](./rfcs/sql-query-surface.md).
+
+## Query & Execution
+
+- **[SQL Query Surface](./rfcs/sql-query-surface.md)** — *partially implemented.*
+  CosmosDB-style SQL; core `SELECT`/`WHERE`/`GROUP BY`/`ORDER BY`/`JOIN … IN`,
+  aggregates, and subqueries shipped. `HAVING`, `ARRAY_AGG`, `DOCUMENTID`, full-text,
+  and vector remain.
+- **[Collect Node](./rfcs/collect-node.md)** — *proposed.* Make plan materialization
+  points explicit; asymmetric `IndexMerge(And)`.
+- **Plan Inspection (EXPLAIN)** — *done.* `Plan::explain()` / `Transaction::explain`
+  render the logical operator tree; REPL `.explain`. No SQL `EXPLAIN` keyword (kept
+  out of the grammar). Runtime stats are the
+  [Observability RFC](./rfcs/observability-and-introspection.md).
+- **[Raw BSON Robustness](./rfcs/rawbson-robustness.md)** — *proposed.* A
+  malformed-input contract + differential fuzz for the byte scanner.
+- **Dynamic Primary Key Path** — *done.* All executor nodes use
+  `CollectionHandle::pk_path()`; `pk_path` must be a top-level scalar (dot-paths
+  rejected at creation). The TTL path may be a dot-path (read-only).
+- **[Decimal128 in Query Evaluation](./rfcs/decimal128-evaluation.md)** — *done.*
+  `Decimal128` joins the `f64` number tower for eval/sort/aggregates; stored bytes
+  untouched.
+
+## Constraints & Logic
+
+- **[Unique Indexes](./rfcs/unique-indexes.md)** — *done.* Single-field scalar
+  uniqueness via a dual `i`/`u` key format; sparse; scalar-only.
+- **[User-Defined Logic](./rfcs/user-defined-logic.md)** — *partially implemented.*
+  Lua/JS triggers + validators shipped; computed fields, custom key extractors,
+  partial-index filters, and transform pipelines remain.
+
+## Storage & Durability
+
+- **Hot Backup** — *done.* Online `Database::backup(path)` behind `BackupStore`
+  (RocksDB checkpoint, redb file copy; MemoryStore errors). Restore is offline.
+  Logical dump/reload is the
+  [Logical Export / Import RFC](./rfcs/logical-export-import.md).
+- **[MemoryStore Persistence](./rfcs/memorystore-persistence.md)** — *proposed.*
+  Write-behind flush of MemoryStore to a durable backend (disk/IndexedDB/S3) without
+  making the `Store` trait async.
+
+(Durability guarantees and the cross-backend concurrency contract are tracked under
+[Database Hardening](#database-hardening--proposed) above.)
+
+## Change Feeds
+
+- **[Change Detection (Watch Queries)](./rfcs/watch-queries.md)** — *proposed.*
+  Register a filter; matching inserts/updates/deletes fire a callback at commit.
+
+## Bindings & Tooling
+
+- **[WebAssembly Support](./rfcs/webassembly-support.md)** — *partially implemented.*
+  The full stack compiles to `wasm32`; MemoryStore + the JS scripting bridge work.
+  Platform adapters, browser storage (OPFS/IndexedDB), and `getrandom` entropy remain.
+- **Interactive Shell (CLI)** — *done.* `slate-cli` REPL: meta-commands + SQL,
+  `.seed` bulk-load, online `.backup`, multi-line statements, tab-completion,
+  persistent history. Not yet: hook management, a `.plan`/`.ast` inspector,
+  multi-statement transactions, and Mongo-style `.find`.
+- **Browser Playground** — *shipped.* A client-side `slate-wasm` single-page app
+  (create/insert/query/hooks/plans, no backend). See the live
+  [Playground](./playground.md).
 
 ## Test Coverage
 
-### Error paths
-
-Test behavior for: malformed queries, missing collections, invalid filter operators.
-
-### Encoding edge cases
-
-Negative ints in index keys, empty strings, special characters in record IDs, very long values.
-
-### ClientPool
-
-Test connection pooling: checkout/return, behavior under contention, handling of dropped connections.
+Backlog of targeted hardening tests: **error paths** (malformed queries, missing
+collections, invalid filter operators); **encoding edge cases** (negative ints in
+index keys, empty strings, special characters in record IDs, very long values); and
+**`ClientPool`** connection pooling (checkout/return, behavior under contention,
+dropped connections).
