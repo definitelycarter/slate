@@ -20,3 +20,4 @@
 
 - [Spatial Index](./rfcs/spatial-index.md)
 - [Index Sargability](./rfcs/index-sargability.md)
+- [Unified Numeric Index Key](./rfcs/unified-numeric-index-key.md)

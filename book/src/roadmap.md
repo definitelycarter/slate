@@ -100,6 +100,40 @@ and a pushdown is invisible to results anyway). `EXISTS(… FROM e IN c.arr WHER
 e = v)` stays a Filter — its array is an in-document unwind, not a collection
 index — with an `EXISTS → ARRAY_CONTAINS` rewrite noted as a future optimisation.
 
+## Unified Numeric Index Key
+
+### Concept
+
+Encode every number into a single **order-preserving canonical index key** so all
+numeric types collapse onto one number line: `Int32(5)`, `Int64(5)`, and `Double(5.0)`
+encode to identical bytes, and byte order is numeric order. The
+[Unified Numeric Index Key RFC](./rfcs/unified-numeric-index-key.md) has the design,
+the storage-cost analysis, and the spike plan.
+
+### Motivation
+
+Each numeric type currently encodes the same value to different bytes, with no type tag
+in the key, so a tight `Eq` seek finds only one type. To honour `5 == 5L == 5.0` the
+executor routes **every** numeric `Eq`/`Range` to `IndexRange::Full` + a `CoercingFilter`
+that rechecks every entry — numeric equality loses all selectivity.
+
+### Benefits
+
+A unified key makes numeric `Eq` a tight seek and numeric `Range` an exact byte range, so
+`needs_full_scan`, `CoercingFilter`, and the per-row `compare_bson` recheck all **retire** —
+numerics rejoin the string/bool tight-seek path. The type tag (already stored in entry
+metadata) reconstructs the original BSON type, and only for *covered* projections; the
+common non-covered path never reads it.
+
+### Open questions / scope
+
+Scoped to `{Int32, Int64, Double}` (all dyadic rationals, so a clean common order exists);
+**decimal128 stays excluded** — it is base-10, *not* a lossless superset of `double`, so
+"widen to the largest type" is unsound. Adopting Cosmos's all-numbers-are-`double` model is
+the radical alternative (loses `i64 > 2⁵³` fidelity). Needs a reindex migration
+(string-boundary precedent). NaN/±Inf/−0.0 ordering, fixed-vs-variable encoding, and
+cross-type unique-index semantics are the open questions.
+
 ## Collect Node (Plan Materialization Barrier)
 
 ### Concept
