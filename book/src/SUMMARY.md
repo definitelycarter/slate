@@ -22,3 +22,4 @@
 - [Index Sargability](./rfcs/index-sargability.md)
 - [Unified Numeric Index Key](./rfcs/unified-numeric-index-key.md)
 - [Index Intersection Strategy](./rfcs/index-intersection-strategy.md)
+- [Raw BSON Robustness](./rfcs/rawbson-robustness.md)
