@@ -224,6 +224,20 @@ fn sargable(
         return Some((access, Residual::Retained));
     }
 
+    // `STRINGEQUALS(x, lit)` (2-arg) → a tight `Eq` seek on a scalar string
+    // index. Consumed: it is plain `==`, so on a correct string index the seek is
+    // exact — identical to `x = 'lit'` (which is also consumed). The string
+    // value/doc-id boundary fix is what makes this sound.
+    if let Some((field, value)) = as_string_eq(pred, alias) {
+        return meta.indexes.contains(&field).then_some((
+            IndexAccess::Scan {
+                field,
+                range: IndexScanRange::Eq(value),
+            },
+            Residual::Consumed,
+        ));
+    }
+
     // A bare comparison atom on a scalar index → point/range scan. At the
     // conjunct level `plan_source` routes atoms through `field_index_scan`
     // (range-bound combining); this arm serves the OR-branch recursion above.
@@ -551,6 +565,24 @@ fn as_array_contains(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
     Some((path_of(&args[0], alias)?, as_literal(&args[1])?))
 }
 
+/// Interpret `STRINGEQUALS(alias.<path>, <string-literal>)` — the 2-arg,
+/// case-sensitive form. The optional 3rd `ignoreCase` arg makes the match
+/// case-insensitive, which a case-sensitive index can't bound, so it is excluded
+/// (falls back to a `Filter`). `stringequals.rs` is plain `==`, and the literal
+/// must be a string — the function is `undefined` for a non-string operand,
+/// which a scalar string index never matches anyway.
+fn as_string_eq(expr: &Expression, alias: &str) -> Option<(String, Bson)> {
+    let Expression::Function { name, args } = expr else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("STRINGEQUALS") || args.len() != 2 {
+        return None;
+    }
+    let field = path_of(&args[0], alias)?;
+    let value = as_literal(&args[1])?;
+    matches!(value, Bson::String(_)).then_some((field, value))
+}
+
 /// Recognize a [`Expression::MultikeyEq`] on `alias` — explicit multikey
 /// equality the find front-end emits for a `.[]` path. Returns the verbatim
 /// `.[]` path (which is also the index name) and the literal value, so it can
@@ -836,6 +868,73 @@ mod tests {
                 field: "tags.[]".into(),
                 value: Bson::Int64(7),
             }
+        );
+    }
+
+    // ── Increment C: STRINGEQUALS → Eq ──────────────────────────
+
+    #[test]
+    fn string_equals_is_an_eq_seek_consumed() {
+        let (access, residual) = recognise(
+            "SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, 'acme')",
+            &["name"],
+        )
+        .expect("sargable");
+        assert_eq!(
+            access,
+            IndexAccess::Scan {
+                field: "name".into(),
+                range: IndexScanRange::Eq(Bson::String("acme".into())),
+            }
+        );
+        // Plain `==` on a correct string index is exact — drop the recheck.
+        assert_eq!(residual, Residual::Consumed);
+    }
+
+    #[test]
+    fn string_equals_without_index_is_not_sargable() {
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, 'acme')",
+                &[]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn string_equals_ignore_case_is_not_sargable() {
+        // The 3-arg case-insensitive form can't be bounded by a case-sensitive
+        // index.
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, 'acme', true)",
+                &["name"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn string_equals_non_string_literal_is_not_sargable() {
+        // STRINGEQUALS is undefined for a non-string operand; never push it down.
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, 5)",
+                &["name"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn string_equals_non_literal_arg_is_not_sargable() {
+        assert!(
+            recognise(
+                "SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, c.other)",
+                &["name"]
+            )
+            .is_none()
         );
     }
 }

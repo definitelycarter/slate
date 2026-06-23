@@ -368,6 +368,41 @@ fn bench_query_array_contains(c: &mut Criterion) {
     group.finish();
 }
 
+// ── String predicate pushdown (sargability B/C) ─────────────
+
+/// `STRINGEQUALS(c.name, "Company-500")` over a scalar `name` index versus the
+/// same query with no index (full scan). Pins the increment-C win: a 2-arg
+/// `STRINGEQUALS` becomes a tight `Eq` seek instead of a `Scan → Filter`.
+fn bench_query_string_equals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_string_equals");
+    let sql = r#"SELECT VALUE c FROM c WHERE STRINGEQUALS(c.name, "Company-500")"#;
+    for n in [1_000, 10_000] {
+        let indexed = string_index_engine(n, true);
+        let unindexed = string_index_engine(n, false);
+        group.bench_with_input(BenchmarkId::new("indexed", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = indexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("full_scan", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = unindexed.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 // ── Distinct Benchmarks ─────────────────────────────────────
 
 fn bench_distinct_indexed_low(c: &mut Criterion) {
@@ -635,6 +670,7 @@ criterion_group!(
     bench_query_projection,
     bench_query_array_match,
     bench_query_array_contains,
+    bench_query_string_equals,
     bench_distinct_indexed_low,
     bench_distinct_indexed_high,
     bench_distinct_non_indexed,

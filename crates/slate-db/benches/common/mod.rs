@@ -157,6 +157,40 @@ pub fn array_tags_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
     engine
 }
 
+/// Seed a corpus with a high-cardinality string field `name` (`"Company-{i}"`)
+/// for the string-pushdown benchmarks (sargability increments B/C). With
+/// `indexed`, a scalar index on `name` is created so `STRINGEQUALS` (Eq seek) and
+/// `STARTSWITH` / `LIKE 'pre%'` (prefix range) plan as an `IndexScan`; without it
+/// the same query full-scans — the before/after the bench contrasts.
+pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
+    let engine = db_builder().open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "bench".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    if indexed {
+        txn.create_index(DEFAULT_CF, "bench", "name").unwrap();
+    }
+    let docs: Vec<bson::Document> = (0..n)
+        .map(|i| {
+            bson::doc! {
+                "_id": format!("rec-{i}"),
+                "name": format!("Company-{i}"),
+            }
+        })
+        .collect();
+    for chunk in docs.chunks(1000) {
+        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
+            .unwrap()
+            .drain()
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();

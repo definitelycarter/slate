@@ -3,8 +3,9 @@
 > **Status: in progress.** The unified recogniser refactor + **increment A**
 > (multikey containment) have shipped (`dfeafa9`, hardened by `07a508f`/`9cb5f89`),
 > and the variable-width string-boundary fix that gated **B/C** has landed
-> (`0cea567`). **Increments B (prefix range) and C (`STRINGEQUALS` → `Eq`) remain**
-> — both now unblocked and fully designed below, buildable with no further design.
+> (`0cea567`). **Increment C (`STRINGEQUALS` → `Eq`) has shipped**; **increment B
+> (prefix range) remains** — unblocked and fully designed below, buildable with no
+> further design.
 > The decided non-goals (sparse nulls, expression indexes, Cosmos metrics,
 > EXISTS-rewrite) stand. The spike (`tasks/index-sargability-spike.md`) audited the
 > full function/operator/subquery surface against `file:line` and resolved every
@@ -347,11 +348,18 @@ so the regex arm is purely a front-end convenience, not a separate mechanism.
 
 ## C — `STRINGEQUALS` → `Eq`
 
+> **Shipped.** Recognised as a `Scan Eq(String)`, **consumed** — see the recheck
+> note below.
+
 `STRINGEQUALS(x, lit)` (2-arg) is plain string equality (`stringequals.rs`), so it
-lowers to `Scan Eq(String)` — trivial once the recogniser exists. Guardrail: no
-`ignoreCase` 3rd arg. Like B, it rides the string index path and so inherits the
-boundary caveat (retained recheck; gated on the boundary fix for soundness). The
-3-arg case-insensitive form stays a `Filter`.
+lowers to `Scan Eq(String)`. Guardrails: no `ignoreCase` 3rd arg (the 3-arg
+case-insensitive form a case-sensitive index can't bound stays a `Filter`), and
+the literal must be a string (the function is `undefined` for a non-string operand,
+which a scalar string index never matches). With the variable-width
+string-boundary fix landed, a string `Eq` seek is *exact* — so unlike B, C is
+**consumed** (no residual recheck), exactly as `x = 'lit'` already is. (The RFC
+originally pencilled C in as a *retained* recheck, justified by the then-unfixed
+boundary; that caveat is now moot.)
 
 ## The sparse-vs-dense null question
 
@@ -462,8 +470,9 @@ feature.
    new `IndexScanRange::StringPrefix`. The highest-frequency win after A. *Size:
    small–moderate (one range variant + two recogniser arms + the executor byte-bound
    lowering).*
-4. **C (`STRINGEQUALS` → `Eq`).** Trivial once the recogniser and the string path
-   are in place. *Size: tiny.*
+4. **C (`STRINGEQUALS` → `Eq`) — done.** Trivial as predicted, once the recogniser
+   was in place; one arm + the string-literal/2-arg guardrails. Consumed (the
+   string `Eq` seek is exact after the boundary fix). *Size: tiny.*
 
 ## Recommendation
 
@@ -471,7 +480,8 @@ The **recogniser refactor + increment A** have shipped (`dfeafa9`) — A gave th
 refactor its proving case, and its dedup work fixed a latent multikey
 duplicate-row bug. **B and C** depended on the variable-width string-boundary fix
 for soundness (false negatives, which the recheck cannot mask); that fix has landed
-(`0cea567`), so they are now unblocked and are the **remaining work**. Keep
+(`0cea567`). **C has shipped** (a consumed `Eq` seek); **B (prefix range) is the
+remaining work**. Keep
 indexes **sparse** — the null family stays `Filter` — pending a workload that
 justifies a dense *partial* index. Treat **function-of-field / expression indexes**
 as out of scope absent a dedicated RFC. Do **not** add Cosmos metrics capture: the

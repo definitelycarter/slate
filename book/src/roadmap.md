@@ -89,7 +89,10 @@ cover the Eq/Range/Merge/Multikey/Spatial families). Increments, in order:
   variable-width string-boundary fix above** — a string undercount is a false
   negative, which the residual recheck cannot repair — and **that gate is now
   lifted** (the boundary fix has landed); B is ready to build.
-- **C — `STRINGEQUALS` → `Eq`** (trivial; rides the same string path, same now-lifted gate).
+- **C — `STRINGEQUALS` → `Eq` — Done.** The 2-arg, case-sensitive `STRINGEQUALS(x, lit)`
+  plans as a tight `Eq` seek on a scalar string index (`consumed` — exact after the
+  boundary fix, like `x = 'lit'`); the 3-arg `ignoreCase` form and non-string literals
+  stay a `Filter`. End-to-end −98% (1k) / −99.8% (10k) vs. the full scan.
 
 Decided non-goals / no-ops: indexes stay **sparse** (`IS_NULL` / `IS_DEFINED` /
 `$exists` remain Filters — revisit only via a dense *partial* index for a proven
