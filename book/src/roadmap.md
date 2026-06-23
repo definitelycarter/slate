@@ -21,6 +21,29 @@ Planned successor: a hermetic golden-replay test suite — capture Cosmos result
 offline, commit them, and replay in-process — so the Cosmos oracle runs under
 `cargo test` without Docker.
 
+## Database Hardening (RFCs — proposed)
+
+A "proper embedded database" survey found the query/index surface mature but the
+*data-trust* and *operational* foundations thin — guarantees delegated wholesale
+to the backends, untested, and uninstrumented. Five proposed RFCs map that gap
+into independently workable threads, to be triaged into tasks:
+
+- [Durability & Crash Safety](./rfcs/durability-and-crash-safety.md) — a
+  `Durability` knob with a documented commit guarantee, a kill-during-commit
+  crash-test harness, and engine-level integrity `verify()`/`repair()`.
+- [Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)
+  — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
+  + a `transact()` retry helper, and the `delete_range` exception.
+- [Observability & Introspection](./rfcs/observability-and-introspection.md) —
+  feature-gated `tracing`, EXPLAIN ANALYZE execution stats, and a `stats()`
+  size/cardinality surface.
+- [Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)
+  — query deadline, materialization cap (the OOM guard), and document/key size
+  limits, so the store can't take down its host.
+- [Logical Export / Import](./rfcs/logical-export-import.md) — manifest-driven
+  BSON/JSONL dump+reload for cross-backend migration, seeding, and recovery
+  (complements physical `backup()`).
+
 ## Index Key Value/Doc-Id Boundary (variable-width) — **done**
 
 An `i` index key is `i\0{collection}\0{field}\0{value_bytes}{doc_id_lp}` with no

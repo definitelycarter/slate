@@ -23,3 +23,8 @@
 - [Unified Numeric Index Key](./rfcs/unified-numeric-index-key.md)
 - [Index Intersection Strategy](./rfcs/index-intersection-strategy.md)
 - [Raw BSON Robustness](./rfcs/rawbson-robustness.md)
+- [Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)
+- [Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)
+- [Observability & Introspection](./rfcs/observability-and-introspection.md)
+- [Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)
+- [Logical Export / Import](./rfcs/logical-export-import.md)
