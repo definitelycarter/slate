@@ -1,9 +1,18 @@
 # RFC: Index Sargability (predicate pushdown)
 
-> **Status:** decided — the spike (`tasks/index-sargability-spike.md`) audited the
-> full function/operator/subquery surface, validated each "should" against
-> `file:line`, and resolved every Open Question. The increments below can be built
-> from this document with no further design. **No engine code yet.**
+> **Status: in progress.** The unified recogniser refactor + **increment A**
+> (multikey containment) have shipped (`dfeafa9`, hardened by `07a508f`/`9cb5f89`),
+> and the variable-width string-boundary fix that gated **B/C** has landed
+> (`0cea567`). **Increments B (prefix range) and C (`STRINGEQUALS` → `Eq`) remain**
+> — both now unblocked and fully designed below, buildable with no further design.
+> The decided non-goals (sparse nulls, expression indexes, Cosmos metrics,
+> EXISTS-rewrite) stand. The spike (`tasks/index-sargability-spike.md`) audited the
+> full function/operator/subquery surface against `file:line` and resolved every
+> Open Question.
+>
+> *Note: line references below are as-of the spike; the recogniser refactor moved
+> several (`as_atom` et al. now live in `sargable.rs`'s `fn sargable` dispatch). The
+> shapes and the design are current; treat exact `file:line` cites as historical.*
 
 ## Problem
 
@@ -161,7 +170,7 @@ conservative superset.
 
 | Shape | Sargable? | IndexAccess | Guardrail / evidence |
 |---|---|---|---|
-| `x = lit` | yes (consumed) | `Scan Eq` | `as_atom` `sargable.rs:345`; numeric Eq is a full-field scan + `compare_bson` so cross-type `40`/`40.0` match (`index_scan.rs:84-100`, `transaction.rs:288-300`) |
+| `x = lit` | yes (consumed) | `Scan Eq` | `as_atom`; numeric `Eq` is now a **tight seek** on the unified f64 index key, which collapses cross-type `40`/`40L`/`40.0` onto one key — the old full-field-scan + `CoercingFilter` recheck is retired (see the [Unified Numeric Index Key RFC](./unified-numeric-index-key.md)) |
 | `x <,<=,>,>= lit`, `BETWEEN` | yes (retained) | `Scan Range` | field raw on one side, const on the other; bounds combined per field `sargable.rs:159-220` |
 | `x IN (…)` | yes (retained) | `Merge(Or)` of `Eq` | each branch indexable `index_source_for:225` |
 | `a AND b`, `a OR b` | structural | conjunct split / `Merge(Or)` | `flatten_and:501`; top-level OR → `Merge(Or)` iff every branch indexable `:53-60` |
@@ -230,6 +239,10 @@ recogniser. An optional *rewrite* is the only bridge.
 
 ## A — multikey containment
 
+> **Shipped** (`dfeafa9`). The two design points below — index-name derivation and
+> single-scan dedup — landed as designed; the dedup also fixed the latent
+> `MultikeyEq` duplicate-row bug.
+
 `ARRAY_CONTAINS` / `_ANY` / `_ALL` over a `.[]`-indexed path. The element index
 already exists and already serves the Mongo `MultikeyEq` form; increment A reaches
 it from SQL. Two design points the audit surfaced:
@@ -254,19 +267,20 @@ need is the single-`ARRAY_CONTAINS` case. **This also fixes a latent bug in toda
 `tags:["db","db"]` twice; increment A should land with a test for duplicate
 elements.
 
-**Numeric coercion is already handled.** `ARRAY_CONTAINS(arr, 7)` matches `7`,
-`7.0`, and a stored `Int32`/`Int64`/`Double` alike (`compare_values`), and the
-three numeric types encode to *different* sortable keys
-(`bson_value.rs:19-47`). A tight `Eq` probe would miss cross-type numerics — but
-the executor already turns a numeric `Eq` into a *full-field scan + `compare_bson`
-post-filter* precisely for this (`index_scan.rs:84-100`, `transaction.rs:288-300`),
-so `Multikey{value: Int64(7)}` over the element index sweeps every numeric element
-and the recheck keeps it exact. No new work; just don't assume a point probe for
-numbers.
+**Numeric coercion is handled by the unified f64 key.** `ARRAY_CONTAINS(arr, 7)`
+matches `7`, `7.0`, and a stored `Int32`/`Int64`/`Double` alike (`compare_values`).
+When this RFC was written the three numeric types encoded to *different* sortable
+keys, so a tight `Eq` probe would miss cross-type numerics and the element scan
+leaned on a full-field scan + `compare_bson` recheck. The [Unified Numeric Index
+Key RFC](./unified-numeric-index-key.md) has since shipped: every number is keyed
+by its `f64` projection, so `Int32(7)`, `Int64(7)`, and `Double(7.0)` collapse onto
+**one** key. `Multikey{value: Int64(7)}` over the element index is therefore a
+**tight seek** that lands every numeric element at once — a point probe is now
+correct for numbers — and the retained recheck keeps it exact.
 
-**Size.** Small-to-moderate. The recogniser arms + index-name derivation + the
-single-scan dedup wrapper. No encoding change. This is the increment that gives the
-recogniser refactor its second real case, so land them together.
+**Size (as estimated).** Small-to-moderate — the recogniser arms + index-name
+derivation + the single-scan dedup wrapper, no encoding change. Landed together
+with the recogniser refactor (`dfeafa9`), to which A gave its second real case.
 
 ## B — prefix range
 
@@ -435,11 +449,10 @@ feature.
 
 ## Increment sequencing
 
-1. **Recogniser refactor + A (multikey containment), together.** The refactor needs
-   a real second case to prove the `IndexAccess` shape, and A supplies it. A is
-   fully understood (already scoped on `feat/array-contains-index`), needs no
-   encoding change, and its dedup requirement also closes a latent `MultikeyEq` bug.
-   *Size: small–moderate.*
+1. **Recogniser refactor + A (multikey containment), together — done (`dfeafa9`).**
+   The refactor needed a real second case to prove the `IndexAccess` shape, and A
+   supplied it. A needs no encoding change, and its dedup requirement also closed a
+   latent `MultikeyEq` duplicate-row bug. *Size: small–moderate, as estimated.*
 2. **The variable-width string-boundary fix** (roadmap §"Index Key Value/Doc-Id
    Boundary") was a **prerequisite for B and C**, because string pushdowns can
    false-negative and the recheck can't repair that. **Now landed** — string keys
@@ -454,11 +467,11 @@ feature.
 
 ## Recommendation
 
-Land the **recogniser refactor + increment A** first (A is fully understood and
-gives the refactor its proving case, and its dedup work fixes a latent multikey
-bug). **B and C** depended on the variable-width string-boundary fix for soundness
-(false negatives, which the recheck cannot mask); that fix has landed, so they are
-now unblocked. Keep
+The **recogniser refactor + increment A** have shipped (`dfeafa9`) — A gave the
+refactor its proving case, and its dedup work fixed a latent multikey
+duplicate-row bug. **B and C** depended on the variable-width string-boundary fix
+for soundness (false negatives, which the recheck cannot mask); that fix has landed
+(`0cea567`), so they are now unblocked and are the **remaining work**. Keep
 indexes **sparse** — the null family stays `Filter` — pending a workload that
 justifies a dense *partial* index. Treat **function-of-field / expression indexes**
 as out of scope absent a dedicated RFC. Do **not** add Cosmos metrics capture: the
