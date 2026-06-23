@@ -235,3 +235,35 @@ fn startswith_3arg_stays_full_scan() {
         "3-arg STARTSWITH should full-scan: {plan}"
     );
 }
+
+#[test]
+fn string_prefix_in_or_merges_and_matches_full_scan() {
+    // A prefix predicate as a top-level OR branch must lower through the same
+    // index path as Eq/Range — an `IndexMerge(Or)` over the string index — and
+    // still agree with a full scan. (A scalar string scan yields one entry per
+    // doc, so no dedup is needed, unlike a multikey scan.)
+    let indexed = seed(true);
+    let plain = seed(false);
+    let sql = "SELECT VALUE c._id FROM c \
+               WHERE STARTSWITH(c.name, \"alp\") OR STRINGEQUALS(c.name, \"beta\")";
+
+    assert_eq!(
+        ids(&indexed, sql),
+        ids(&plain, sql),
+        "indexed and full-scan disagree on the OR"
+    );
+    assert_eq!(
+        ids(&indexed, sql),
+        vec!["alpha", "alphabet", "alpine", "beta"]
+    );
+
+    let plan = explain(&indexed, sql);
+    assert!(
+        plan.contains("IndexMerge"),
+        "an all-indexable OR should merge index scans, not full-scan: {plan}"
+    );
+    assert!(
+        !plan.contains("\nScan") && !plan.contains("  Scan"),
+        "the OR should not fall back to a collection scan: {plan}"
+    );
+}

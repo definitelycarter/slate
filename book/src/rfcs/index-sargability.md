@@ -110,6 +110,52 @@ must never under-return. Two engine facts bear on this:
 > changes speed, never which rows return — provided the candidate set is a true
 > *superset* (never a false negative, never a duplicate).
 
+## Pushdown opportunities (summary)
+
+An at-a-glance reference for what reaches an index and how — the shipped A–C
+surface. The full shape-by-shape derivation (with `file:line` evidence) is in
+[The complete audit](#the-complete-audit) below; this is the cheat-sheet.
+
+**Pushes down:**
+
+| Predicate | Index | Plan | Recheck |
+|---|---|---|---|
+| `x = lit`, `STRINGEQUALS(x, 's')` (2-arg) | scalar | `IndexScan` point seek | consumed (exact) |
+| `x <,<=,>,>= lit`, `BETWEEN` | scalar | `IndexScan` range | retained |
+| `STARTSWITH(x, 'pre')`, `LIKE 'pre%'` | scalar (string) | `IndexScan` prefix range `[pre, pre⁺)` | retained |
+| `x IN (…)` | scalar | `IndexMerge(Or)` of point seeks | retained |
+| `ARRAY_CONTAINS(x, lit)` | `x.[]` multikey | deduped `IndexScan` | retained |
+| `ARRAY_CONTAINS_ANY/_ALL(x, …)` | `x.[]` multikey | `IndexMerge(Or)` / `(And)` | retained |
+| `a AND b` | per-conjunct | `IndexMerge(And)` of the above | per-conjunct |
+| `a OR b` (every branch indexable) | per-branch | `IndexMerge(Or)` of the above | retained |
+| Mongo `{x: v}`, `{x.[]: v}`, `$gt/$gte/$lt/$lte`, anchored `$regex` | scalar / multikey | as the SQL equivalents | per-form |
+
+**Stays a `Scan` (not sargable):**
+
+| Predicate | Why |
+|---|---|
+| `x != lit`, `NOT <sargable>` | an anti-scan is a full scan |
+| `field = field` | no constant side |
+| `IS_NULL` / `IS_DEFINED` / `$exists` | a **sparse** index stores no null/absent/type entry |
+| `CONTAINS` (substring), `ENDSWITH` (suffix), non-prefix `REGEXMATCH` | not a contiguous prefix range on a forward index |
+| 3-arg `ignoreCase` `STARTSWITH`/`STRINGEQUALS`, `(?i)` regex | case-insensitive — a case-sensitive index can't bound it |
+| inline-flag regex (`(?m)…`, `(?s)…`) and 3-arg `REGEXMATCH` | not a literal `^`-anchored prefix. `(?m)` in particular *must* be excluded: it makes `^` match at every line start, so `"x\npre"` matches `^pre` yet doesn't start with `pre` — a prefix range would be a **false negative**. Conservatively excluded |
+| `f(x) = c` (`UPPER`/`ABS`/`DATETIMEPART`/`ARRAY_LENGTH`/…) | a function wrapping the field destroys key order — see [expression indexes](#function-of-field--expression-indexes) |
+
+**Notes.**
+
+- **Same-field combination.** Comparison *atoms* on one indexed field are combined
+  into a single `IndexScan` (`field_index_scan` merges the range bounds). Function
+  predicates are not: two prefixes on the same field
+  (`STARTSWITH(x,'a') AND STARTSWITH(x,'ab')`), or a prefix plus a same-field range,
+  plan as separate `IndexScan`s intersected by `IndexMerge(And)`. That is correct
+  (the merge intersects doc-ids) but not collapsed into one scan — a minor missed
+  optimisation, not a correctness gap.
+- **Conservative by design.** The "stays a `Scan`" rows above are deliberate: each
+  could in principle narrow an index but is excluded because soundness (false
+  negatives) or case/anchor semantics aren't guaranteed. A pushdown is invisible to
+  results, so over-conservatism only costs speed, never correctness.
+
 ## The unified recogniser
 
 Replace the ad-hoc `as_*` helpers with one extensible entry point that returns a
