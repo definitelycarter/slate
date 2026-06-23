@@ -3,3 +3,6 @@
 /scratch
 .DS_Store
 *.xcframework
+
+
+/.claude/worktrees

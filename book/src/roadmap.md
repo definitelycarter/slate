@@ -804,8 +804,6 @@ Remaining gaps:
 - **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`,
   `ORDER BY RANK`: needs a full-text index + BM25 scoring.
 - **Vector** — `VECTORDISTANCE`: needs a vector index.
-- **Numeric-index selectivity** — cross-type numeric comparison is correct; a
-  canonical numeric index encoding for selectivity is a follow-up.
 - **Spatial index** — the `ST_*` functions are implemented; a spatial index is not.
 
 ---
