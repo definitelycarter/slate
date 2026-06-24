@@ -1,12 +1,21 @@
 # RFC: Raw BSON Robustness & Malformed-Input Contract
 
-> **Status: proposed.** Surfaced while consolidating the engine's raw-BSON
-> reading into `slate-rawbson` (the `for_each_path_value` / `extract` /
-> TTL-scan move). `cargo llvm-cov` reports the crate at **96.6% region /
-> 97% line** coverage, but that number hides the gap this RFC is about: the
-> dangerous byte-walking paths run *green on valid input* while being untested
-> — and undefended — against malformed input. No code lands until the decision
-> below is made and a spike measures the hot-path cost.
+> **Status: implemented** (`slate-rawbson` only). The spike (test-plan item 1,
+> the randomized differential against the `bson` oracle) ran against the
+> existing code and found **no latent happy-path scanner bug** — the scanner is
+> correct on valid input; the danger was strictly malformed input. The chosen
+> contract is the RFC's recommended split: **door 2 (`Option`) on the internal
+> primitives** (`skip_bson_value`, `RawField::get`/`get_path`/`get_value`/
+> `value` — signatures unchanged, so the engine/eval hot path is undisturbed)
+> and **door 3 (typed `RawBsonError`) at the public raw-`&[u8]` boundary** via
+> new `RawField::try_get`/`try_get_path`/`try_value` and `try_skip_bson_value`.
+> The 8 unchecked fixed-width skip arms are now bounds-checked, the checked arms
+> guard their result (not just the header), and `value()`'s slices plus the
+> `len == 0` String underflow are guarded — truncation yields `None`/`Err`, no
+> panic. Landed with the full test plan (differential, `raw_merge` multi-field
+> property test, per-type truncation tests, llvm-cov cleanups) and a
+> baseline-only `scan` bench (`rawfield_get/*`, the per-row hot path, plus a
+> `skip_bson_value/*` micro-bench).
 
 ## Problem
 

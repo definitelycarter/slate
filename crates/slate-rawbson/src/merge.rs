@@ -124,7 +124,7 @@ pub fn raw_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bson::{Document, doc};
+    use bson::{Bson, Document, doc};
 
     fn make_raw(doc: &Document) -> RawDocumentBuf {
         let bytes = bson::serialize_to_vec(doc).unwrap();
@@ -190,5 +190,148 @@ mod tests {
         let old = make_raw(&doc! { "_id": "r1", "a": 1_i32 });
         let update = make_raw(&doc! { "a": 1_i32 });
         assert!(raw_merge(&old, &update, "_id").unwrap().is_none());
+    }
+
+    // ── Multi-field offset-shift coverage ─────────────────────
+    //
+    // A single splice shifts every later field's byte offset, so the next
+    // `locate` must re-scan against the *rewritten* buffer. Single-field tests
+    // can't reach this; these multi-field cases and the property test below do.
+
+    #[test]
+    fn splice_then_overwrite_re_scans_shifted_offsets() {
+        // First update grows `a` (splice, shifts `b` and `c` right); the second
+        // update overwrites `c` in place — which only works if its offset was
+        // recomputed against the post-splice buffer.
+        let old = make_raw(&doc! { "_id": "r1", "a": "x", "b": 2_i32, "c": 3_i32 });
+        let update = make_raw(&doc! { "a": "a much longer string", "c": 99_i32 });
+        let merged = raw_merge(&old, &update, "_id").unwrap().unwrap();
+        let result = to_doc(&merged);
+        assert_eq!(result.get_str("a").unwrap(), "a much longer string");
+        assert_eq!(result.get_i32("b").unwrap(), 2);
+        assert_eq!(result.get_i32("c").unwrap(), 99);
+        assert_eq!(result.get_str("_id").unwrap(), "r1");
+    }
+
+    #[test]
+    fn shrink_then_append_keeps_buffer_consistent() {
+        let old = make_raw(&doc! { "_id": "r1", "a": "a long value here", "b": 1_i32 });
+        let update = make_raw(&doc! { "a": "x", "z": 7_i32 });
+        let merged = raw_merge(&old, &update, "_id").unwrap().unwrap();
+        let result = to_doc(&merged);
+        assert_eq!(result.get_str("a").unwrap(), "x");
+        assert_eq!(result.get_i32("b").unwrap(), 1);
+        assert_eq!(result.get_i32("z").unwrap(), 7);
+    }
+
+    /// SplitMix64 — dependency-free deterministic PRNG (repo fuzz idiom).
+    struct SplitMix64(u64);
+    impl SplitMix64 {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// A random scalar value spanning sizes that exercise in-place vs. splice.
+    fn rand_value(rng: &mut SplitMix64) -> Bson {
+        match rng.below(6) {
+            0 => Bson::Int32(rng.next() as i32),
+            1 => Bson::Int64(rng.next() as i64),
+            2 => Bson::Boolean(rng.next() & 1 == 0),
+            3 => {
+                let n = rng.below(12) as usize;
+                Bson::String("v".repeat(n))
+            }
+            4 => Bson::Double(rng.next() as f64),
+            _ => Bson::Null,
+        }
+    }
+
+    /// Build a random document over a small key pool (so `old`/`update` overlap).
+    fn rand_doc(rng: &mut SplitMix64, with_id: bool) -> Document {
+        const KEYS: &[&str] = &["a", "b", "c", "d", "e"];
+        let mut d = Document::new();
+        if with_id {
+            d.insert("_id", "rec");
+        }
+        let n = rng.below(5) as usize;
+        for _ in 0..n {
+            let k = KEYS[rng.below(KEYS.len() as u64) as usize];
+            d.insert(k, rand_value(rng));
+        }
+        d
+    }
+
+    /// Reference `$set`: apply each `update` field onto a clone of `old`,
+    /// skipping the pk. This is the oracle `raw_merge` must match.
+    fn reference_set(old: &Document, update: &Document, pk: &str) -> Document {
+        let mut out = old.clone();
+        for (k, v) in update {
+            if k == pk {
+                continue;
+            }
+            out.insert(k.clone(), v.clone());
+        }
+        out
+    }
+
+    #[test]
+    fn raw_merge_matches_reference_set_property() {
+        let mut rng = SplitMix64(0xC0FF_EE12_3456_789A);
+        for _ in 0..20_000 {
+            let old_doc = rand_doc(&mut rng, true);
+            let update_has_id = rng.next() & 1 == 0;
+            let update_doc = rand_doc(&mut rng, update_has_id);
+
+            let old = make_raw(&old_doc);
+            let update = make_raw(&update_doc);
+
+            let merged = raw_merge(&old, &update, "_id").unwrap();
+            let got = match merged {
+                Some(buf) => to_doc(&buf),
+                // `None` means "nothing changed" — the merged result equals old.
+                None => old_doc.clone(),
+            };
+
+            let want = reference_set(&old_doc, &update_doc, "_id");
+
+            // Compare as field sets (order may differ: appends land at the end).
+            assert_eq!(
+                got.len(),
+                want.len(),
+                "field count: got {got:?} want {want:?}"
+            );
+            for (k, v) in &want {
+                assert_eq!(
+                    got.get(k),
+                    Some(v),
+                    "field '{k}': got {:?} want {v:?}\nold={old_doc:?}\nupdate={update_doc:?}",
+                    got.get(k)
+                );
+            }
+        }
+    }
+
+    // ── Error-formatting cleanup (llvm-cov gaps) ──────────────
+
+    #[test]
+    fn raw_merge_error_display() {
+        let e = RawMergeError("boom".to_string());
+        assert_eq!(e.to_string(), "raw merge error: boom");
+    }
+
+    #[test]
+    fn raw_merge_error_from_bson_error() {
+        // Any bson error converts into a RawMergeError carrying its message.
+        let bson_err = RawDocumentBuf::from_bytes(vec![0, 0]).unwrap_err();
+        let merge_err: RawMergeError = bson_err.into();
+        assert!(merge_err.to_string().starts_with("raw merge error:"));
     }
 }

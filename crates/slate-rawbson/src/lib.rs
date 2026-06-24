@@ -13,47 +13,171 @@ use bson::spec::ElementType;
 mod merge;
 pub use merge::{RawMergeError, raw_merge};
 
+// ── Malformed-input contract ─────────────────────────────────────
+//
+// The crate uses two doors (per the rawbson-robustness RFC):
+//
+//   * Door 2 (`Option`) on the *internal* scan primitives — `skip_bson_value`,
+//     `RawField::get` / `get_path` / `get_value` / `value`. Truncation and
+//     "field absent" both collapse to `None`. These signatures are consumed by
+//     the engine/eval hot paths and stay `Option` to keep that path branch-thin.
+//   * Door 3 (typed error) on the *public, raw-`&[u8]`* boundary — the `try_*`
+//     entry points below distinguish `Truncated` / `BadLength` corruption from a
+//     genuinely absent field, so corrupt-on-disk bytes surface a signal instead
+//     of masquerading as a missing field.
+
+/// Why reading a raw BSON byte buffer failed.
+///
+/// Returned only by the `try_*` boundary on [`RawField`] (door 3). The internal
+/// `Option`-returning scanners collapse every one of these to `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawBsonError {
+    /// The buffer ended before a value the length headers promised — a value
+    /// runs past `bytes.len()`, a document header is short, or a field name has
+    /// no terminating nul.
+    Truncated,
+    /// A length field is structurally invalid (negative, or a document length
+    /// smaller than its own 4-byte header).
+    BadLength,
+    /// A type byte is not a BSON element type this scanner recognises.
+    UnknownType(u8),
+}
+
+impl std::fmt::Display for RawBsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RawBsonError::Truncated => write!(f, "raw BSON truncated"),
+            RawBsonError::BadLength => write!(f, "raw BSON has an invalid length field"),
+            RawBsonError::UnknownType(b) => {
+                write!(f, "raw BSON has unrecognised element type 0x{b:02X}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RawBsonError {}
+
 // ── skip_bson_value ─────────────────────────────────────────────
 
+/// Advance `pos` by `n` fixed-width bytes, returning `None` if that would land
+/// past the end of `bytes`. The bounds check is what makes every fixed-width
+/// `skip` arm total: a truncated buffer yields `None`, never an offset that a
+/// later slice would panic on.
+#[inline]
+fn skip_fixed(bytes: &[u8], pos: usize, n: usize) -> Option<usize> {
+    let end = pos.checked_add(n)?;
+    (end <= bytes.len()).then_some(end)
+}
+
+/// Read a 4-byte little-endian i32 length at `pos`, returning `None` if the
+/// header itself is truncated or the value is negative (lengths are never
+/// negative in well-formed BSON).
+#[inline]
+fn read_len(bytes: &[u8], pos: usize) -> Option<usize> {
+    let header_end = pos.checked_add(4)?;
+    let header = bytes.get(pos..header_end)?;
+    let raw = i32::from_le_bytes(header.try_into().ok()?);
+    usize::try_from(raw).ok()
+}
+
 /// Given a BSON type byte and the position where value bytes begin, return the
-/// position immediately after the value. Returns `None` if bytes are truncated
-/// or the type is unrecognised.
+/// position immediately after the value. Returns `None` if bytes are truncated,
+/// a length field is malformed, or the type is unrecognised.
+///
+/// # Contract
+///
+/// This is the crate's *internal* scan primitive and uses door 2 (`Option`):
+/// truncation and "absent" both collapse to `None`. Every returned `Some(end)`
+/// is guaranteed in-bounds (`end <= bytes.len()`), so callers may slice
+/// `value_start..end` without re-checking. Callers that need to distinguish
+/// corruption from absence should use the typed-error boundary on [`RawField`]
+/// ([`RawField::try_get`]).
 pub fn skip_bson_value(type_byte: u8, bytes: &[u8], pos: usize) -> Option<usize> {
     match type_byte {
-        0x01 => Some(pos + 8), // Double
+        0x01 => skip_fixed(bytes, pos, 8), // Double
         0x02 => {
-            // String: i32(len) + utf8 + nul
-            if pos + 4 > bytes.len() {
-                return None;
-            }
-            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
-            Some(pos + 4 + len)
+            // String: i32(len) + utf8 + nul. Guard both the header *and* the
+            // computed end — the header check alone leaves a slice that can
+            // still run off the buffer.
+            let len = read_len(bytes, pos)?;
+            skip_fixed(bytes, pos + 4, len)
         }
         0x03 | 0x04 => {
-            // Document / Array (self-contained)
-            if pos + 4 > bytes.len() {
+            // Document / Array (self-contained): length covers itself.
+            let len = read_len(bytes, pos)?;
+            // `len` includes the 4-byte header; the end is `pos + len`.
+            if len < 4 {
                 return None;
             }
-            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
-            Some(pos + len)
+            skip_fixed(bytes, pos, len)
         }
         0x05 => {
-            // Binary: i32(len) + subtype + data
-            if pos + 4 > bytes.len() {
-                return None;
-            }
-            let len = i32::from_le_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
-            Some(pos + 5 + len)
+            // Binary: i32(len) + subtype + data.
+            let len = read_len(bytes, pos)?;
+            // 4-byte header + 1 subtype byte + `len` data bytes.
+            skip_fixed(bytes, pos + 4, 1 + len)
         }
-        0x07 => Some(pos + 12), // ObjectId
-        0x08 => Some(pos + 1),  // Boolean
-        0x09 => Some(pos + 8),  // DateTime (i64)
-        0x0A => Some(pos),      // Null (0 bytes)
-        0x10 => Some(pos + 4),  // Int32
-        0x11 => Some(pos + 8),  // Timestamp
-        0x12 => Some(pos + 8),  // Int64
-        0x13 => Some(pos + 16), // Decimal128
+        0x07 => skip_fixed(bytes, pos, 12), // ObjectId
+        0x08 => skip_fixed(bytes, pos, 1),  // Boolean
+        0x09 => skip_fixed(bytes, pos, 8),  // DateTime (i64)
+        0x0A => Some(pos),                  // Null (0 bytes — pos is in-bounds by construction)
+        0x10 => skip_fixed(bytes, pos, 4),  // Int32
+        0x11 => skip_fixed(bytes, pos, 8),  // Timestamp
+        0x12 => skip_fixed(bytes, pos, 8),  // Int64
+        0x13 => skip_fixed(bytes, pos, 16), // Decimal128
         _ => None,
+    }
+}
+
+/// Door-3 sibling of [`skip_bson_value`]: same arithmetic, but it distinguishes
+/// the *reason* a value cannot be skipped — `Truncated` when the buffer ends
+/// early, `BadLength` for a structurally invalid length, `UnknownType` for an
+/// unrecognised type byte. Used by the public `try_*` boundary; the engine/eval
+/// hot path stays on the `Option`-returning [`skip_bson_value`].
+pub fn try_skip_bson_value(type_byte: u8, bytes: &[u8], pos: usize) -> Result<usize, RawBsonError> {
+    /// Bounds-check `pos + n`, attributing failure to truncation.
+    fn fixed(bytes: &[u8], pos: usize, n: usize) -> Result<usize, RawBsonError> {
+        let end = pos.checked_add(n).ok_or(RawBsonError::BadLength)?;
+        if end <= bytes.len() {
+            Ok(end)
+        } else {
+            Err(RawBsonError::Truncated)
+        }
+    }
+    /// Read a 4-byte length header, attributing failure to truncation/bad-length.
+    fn len(bytes: &[u8], pos: usize) -> Result<usize, RawBsonError> {
+        let header_end = pos.checked_add(4).ok_or(RawBsonError::BadLength)?;
+        let header = bytes.get(pos..header_end).ok_or(RawBsonError::Truncated)?;
+        let raw = i32::from_le_bytes(header.try_into().map_err(|_| RawBsonError::Truncated)?);
+        usize::try_from(raw).map_err(|_| RawBsonError::BadLength)
+    }
+
+    match type_byte {
+        0x01 => fixed(bytes, pos, 8), // Double
+        0x02 => {
+            let l = len(bytes, pos)?;
+            fixed(bytes, pos + 4, l)
+        }
+        0x03 | 0x04 => {
+            let l = len(bytes, pos)?;
+            if l < 4 {
+                return Err(RawBsonError::BadLength);
+            }
+            fixed(bytes, pos, l)
+        }
+        0x05 => {
+            let l = len(bytes, pos)?;
+            fixed(bytes, pos + 4, 1 + l)
+        }
+        0x07 => fixed(bytes, pos, 12), // ObjectId
+        0x08 => fixed(bytes, pos, 1),  // Boolean
+        0x09 => fixed(bytes, pos, 8),  // DateTime
+        0x0A => Ok(pos),               // Null
+        0x10 => fixed(bytes, pos, 4),  // Int32
+        0x11 => fixed(bytes, pos, 8),  // Timestamp
+        0x12 => fixed(bytes, pos, 8),  // Int64
+        0x13 => fixed(bytes, pos, 16), // Decimal128
+        other => Err(RawBsonError::UnknownType(other)),
     }
 }
 
@@ -95,6 +219,41 @@ impl<'a> RawField<'a> {
         field.value()
     }
 
+    // ── Fallible boundary (door 3) ───────────────────────────────
+
+    /// Find a top-level field by name, distinguishing corruption from absence.
+    ///
+    /// `Ok(Some(field))` — found. `Ok(None)` — genuinely absent (the whole
+    /// document scanned cleanly without the name). `Err(_)` — the bytes are
+    /// malformed (truncated value, bad length, unknown type, missing name nul).
+    ///
+    /// This is the door-3 entry point for raw, possibly-corrupt `&[u8]` (e.g. a
+    /// torn write read back from storage). Callers holding a validated
+    /// `RawDocument` can keep using the cheaper [`get`](Self::get).
+    pub fn try_get(bytes: &'a [u8], name: &str) -> Result<Option<Self>, RawBsonError> {
+        Ok(scan_field_checked(bytes, 0, name)?.map(|loc| loc.bind(bytes)))
+    }
+
+    /// Dot-path sibling of [`try_get`](Self::try_get).
+    pub fn try_get_path(bytes: &'a [u8], path: &str) -> Result<Option<Self>, RawBsonError> {
+        Ok(resolve_path_checked(bytes, 0, path)?.map(|loc| loc.bind(bytes)))
+    }
+
+    /// Parse the value bytes, distinguishing corruption from an unconvertible
+    /// type.
+    ///
+    /// `Ok(Some(value))` — parsed. `Ok(None)` — a valid type this scanner does
+    /// not convert (e.g. Timestamp). `Err(_)` — the value bytes are truncated.
+    pub fn try_value(&self) -> Result<Option<RawBsonRef<'a>>, RawBsonError> {
+        // A converting type that fails `value()` means the value bytes are
+        // truncated; a non-converting type yields `Ok(None)`.
+        match self.value() {
+            Some(v) => Ok(Some(v)),
+            None if value_is_converting(self.element_type) => Err(RawBsonError::Truncated),
+            None => Ok(None),
+        }
+    }
+
     // ── Accessors ───────────────────────────────────────────────
 
     /// The BSON element type.
@@ -107,82 +266,69 @@ impl<'a> RawField<'a> {
         self.element_type == ElementType::Null
     }
 
+    /// The `N` fixed-width value bytes as an array, or `None` if truncated.
+    ///
+    /// Every fixed-width slice in [`value`](Self::value) goes through here, so a
+    /// truncated buffer yields `None` rather than panicking. On bytes from a
+    /// validated `RawDocument` this never fails.
+    #[inline]
+    fn fixed<const N: usize>(&self) -> Option<[u8; N]> {
+        let end = self.value_start.checked_add(N)?;
+        self.bytes.get(self.value_start..end)?.try_into().ok()
+    }
+
     /// Parse the value bytes into a `RawBsonRef`.
+    ///
+    /// Returns `None` for a value `value()` does not convert (e.g. Timestamp),
+    /// *and* for truncated/malformed value bytes — both collapse under door 2.
+    /// Use [`try_value`](Self::try_value) to distinguish corruption from an
+    /// unconvertible type at the public boundary.
     pub fn value(&self) -> Option<RawBsonRef<'a>> {
         match self.element_type {
-            ElementType::Double => {
-                let v = f64::from_le_bytes(
-                    self.bytes[self.value_start..self.value_start + 8]
-                        .try_into()
-                        .ok()?,
-                );
-                Some(RawBsonRef::Double(v))
-            }
+            ElementType::Double => Some(RawBsonRef::Double(f64::from_le_bytes(self.fixed()?))),
             ElementType::String => {
-                let len = i32::from_le_bytes(
-                    self.bytes[self.value_start..self.value_start + 4]
-                        .try_into()
-                        .ok()?,
-                ) as usize;
-                let s = std::str::from_utf8(
-                    &self.bytes[self.value_start + 4..self.value_start + 4 + len - 1],
-                )
-                .ok()?;
+                let len = i32::from_le_bytes(self.fixed::<4>()?);
+                // A well-formed string length counts the trailing nul, so the
+                // minimum is 1 (empty string). `len == 0` only occurs on
+                // corruption; computing `len - 1` would underflow `usize`.
+                let str_len = usize::try_from(len).ok()?.checked_sub(1)?;
+                let body_start = self.value_start.checked_add(4)?;
+                let body_end = body_start.checked_add(str_len)?;
+                let s = std::str::from_utf8(self.bytes.get(body_start..body_end)?).ok()?;
                 Some(RawBsonRef::String(s))
             }
             ElementType::EmbeddedDocument => {
-                let doc = RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end])
-                    .ok()?;
+                let doc =
+                    RawDocument::from_bytes(self.bytes.get(self.value_start..self.element_end)?)
+                        .ok()?;
                 Some(RawBsonRef::Document(doc))
             }
             ElementType::Array => {
-                let doc = RawDocument::from_bytes(&self.bytes[self.value_start..self.element_end])
-                    .ok()?;
+                let doc =
+                    RawDocument::from_bytes(self.bytes.get(self.value_start..self.element_end)?)
+                        .ok()?;
                 // SAFETY: RawArray is repr-transparent over RawDocument.
                 // The bson crate's own RawArray::from_doc does this same pointer cast.
                 let arr: &RawArray = unsafe { &*(doc as *const RawDocument as *const RawArray) };
                 Some(RawBsonRef::Array(arr))
             }
             ElementType::ObjectId => {
-                let oid = bson::oid::ObjectId::from_bytes(
-                    self.bytes[self.value_start..self.value_start + 12]
-                        .try_into()
-                        .ok()?,
-                );
+                let oid = bson::oid::ObjectId::from_bytes(self.fixed()?);
                 Some(RawBsonRef::ObjectId(oid))
             }
-            ElementType::Boolean => Some(RawBsonRef::Boolean(self.bytes[self.value_start] != 0)),
+            ElementType::Boolean => {
+                Some(RawBsonRef::Boolean(*self.bytes.get(self.value_start)? != 0))
+            }
             ElementType::DateTime => {
-                let ms = i64::from_le_bytes(
-                    self.bytes[self.value_start..self.value_start + 8]
-                        .try_into()
-                        .ok()?,
-                );
+                let ms = i64::from_le_bytes(self.fixed()?);
                 Some(RawBsonRef::DateTime(bson::DateTime::from_millis(ms)))
             }
             ElementType::Null => Some(RawBsonRef::Null),
-            ElementType::Int32 => {
-                let v = i32::from_le_bytes(
-                    self.bytes[self.value_start..self.value_start + 4]
-                        .try_into()
-                        .ok()?,
-                );
-                Some(RawBsonRef::Int32(v))
-            }
-            ElementType::Int64 => {
-                let v = i64::from_le_bytes(
-                    self.bytes[self.value_start..self.value_start + 8]
-                        .try_into()
-                        .ok()?,
-                );
-                Some(RawBsonRef::Int64(v))
-            }
-            ElementType::Decimal128 => {
-                let bytes: [u8; 16] = self.bytes[self.value_start..self.value_start + 16]
-                    .try_into()
-                    .ok()?;
-                Some(RawBsonRef::Decimal128(bson::Decimal128::from_bytes(bytes)))
-            }
+            ElementType::Int32 => Some(RawBsonRef::Int32(i32::from_le_bytes(self.fixed()?))),
+            ElementType::Int64 => Some(RawBsonRef::Int64(i64::from_le_bytes(self.fixed()?))),
+            ElementType::Decimal128 => Some(RawBsonRef::Decimal128(bson::Decimal128::from_bytes(
+                self.fixed()?,
+            ))),
             _ => None,
         }
     }
@@ -333,6 +479,116 @@ fn resolve_path(bytes: &[u8], base: usize, path: &str) -> Option<FieldLoc> {
         return None;
     }
     resolve_path(bytes, loc.value_start, rest)
+}
+
+// ── Fallible scanning primitives (door 3) ───────────────────────
+//
+// Mirror `scan_field` / `resolve_path` but surface a `RawBsonError` when the
+// bytes are malformed, reserving `Ok(None)` for a genuinely absent field. The
+// happy path (`get`/`get_path`) stays on the `Option` versions above.
+
+/// Read a 4-byte length header at `pos`, distinguishing truncation from a
+/// negative length.
+fn read_len_checked(bytes: &[u8], pos: usize) -> Result<usize, RawBsonError> {
+    let header_end = pos.checked_add(4).ok_or(RawBsonError::BadLength)?;
+    let header = bytes.get(pos..header_end).ok_or(RawBsonError::Truncated)?;
+    let raw = i32::from_le_bytes(header.try_into().map_err(|_| RawBsonError::Truncated)?);
+    usize::try_from(raw).map_err(|_| RawBsonError::BadLength)
+}
+
+/// Door-3 sibling of [`scan_field`]: `Ok(None)` = absent, `Err` = malformed.
+fn scan_field_checked(
+    bytes: &[u8],
+    base: usize,
+    field_name: &str,
+) -> Result<Option<FieldLoc>, RawBsonError> {
+    let target = field_name.as_bytes();
+    let doc_len = read_len_checked(bytes, base)?;
+    if doc_len < 5 {
+        // A document is at least a 4-byte header + terminating 0x00.
+        return Err(RawBsonError::BadLength);
+    }
+    let doc_end = base.checked_add(doc_len).ok_or(RawBsonError::BadLength)?;
+    if doc_end > bytes.len() {
+        return Err(RawBsonError::Truncated);
+    }
+    let mut pos = base + 4; // skip document length header
+
+    while pos < doc_end {
+        let type_byte = bytes[pos];
+        if type_byte == 0x00 {
+            break;
+        }
+        let element_type =
+            ElementType::from(type_byte).ok_or(RawBsonError::UnknownType(type_byte))?;
+        let element_start = pos;
+        pos += 1; // skip type byte
+
+        // Read null-terminated field name.
+        let name_start = pos;
+        while pos < doc_end && bytes[pos] != 0x00 {
+            pos += 1;
+        }
+        if pos >= doc_end {
+            return Err(RawBsonError::Truncated); // name never terminated
+        }
+        let name = &bytes[name_start..pos];
+        pos += 1; // skip null terminator
+
+        let value_start = pos;
+        let element_end = try_skip_bson_value(type_byte, bytes, pos)?;
+
+        if name == target {
+            return Ok(Some(FieldLoc {
+                element_type,
+                element_start,
+                value_start,
+                element_end,
+            }));
+        }
+        pos = element_end;
+    }
+    Ok(None)
+}
+
+/// Door-3 sibling of [`resolve_path`].
+fn resolve_path_checked(
+    bytes: &[u8],
+    base: usize,
+    path: &str,
+) -> Result<Option<FieldLoc>, RawBsonError> {
+    if !path.contains('.') {
+        return scan_field_checked(bytes, base, path);
+    }
+    let Some((first, rest)) = path.split_once('.') else {
+        return Ok(None);
+    };
+    let Some(loc) = scan_field_checked(bytes, base, first)? else {
+        return Ok(None);
+    };
+    if loc.element_type != ElementType::EmbeddedDocument {
+        return Ok(None);
+    }
+    resolve_path_checked(bytes, loc.value_start, rest)
+}
+
+/// Does [`RawField::value`] convert this element type to a `RawBsonRef`?
+/// (Used by [`RawField::try_value`] to tell "truncated" from "unconvertible".)
+fn value_is_converting(t: ElementType) -> bool {
+    matches!(
+        t,
+        ElementType::Double
+            | ElementType::String
+            | ElementType::EmbeddedDocument
+            | ElementType::Array
+            | ElementType::ObjectId
+            | ElementType::Boolean
+            | ElementType::DateTime
+            | ElementType::Null
+            | ElementType::Int32
+            | ElementType::Int64
+            | ElementType::Decimal128
+    )
 }
 
 // ── Multikey path traversal ─────────────────────────────────────
@@ -552,6 +808,16 @@ mod tests {
         assert_eq!(field.value(), Some(RawBsonRef::ObjectId(oid)));
     }
 
+    #[test]
+    fn value_decimal128() {
+        // Exercises the Decimal128 arm of value() (an llvm-cov gap before).
+        let dec =
+            bson::Decimal128::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        let doc = rawdoc! { "dec": dec };
+        let field = RawField::get(doc_bytes(&doc), "dec").unwrap();
+        assert_eq!(field.value(), Some(RawBsonRef::Decimal128(dec)));
+    }
+
     // ── Sub-document scanning ─────────────────────────────────
 
     #[test]
@@ -663,6 +929,350 @@ mod tests {
     #[test]
     fn skip_truncated_binary() {
         assert!(skip_bson_value(0x05, &[0, 0], 0).is_none());
+    }
+
+    // ── Per-type truncation (door 2: skip → None) ─────────────
+    //
+    // Each fixed-width arm must bounds-check: a buffer shorter than the value
+    // width yields `None`, not an out-of-bounds offset. The pre-hardening bug
+    // was `skip_bson_value(0x07, &[0; 5], 0) == Some(12)` — twelve, into five.
+
+    #[test]
+    fn skip_truncated_fixed_width_arms() {
+        // (type_byte, width, name). Buffer is one byte short of the width.
+        let cases: &[(u8, usize, &str)] = &[
+            (0x01, 8, "Double"),
+            (0x07, 12, "ObjectId"),
+            (0x08, 1, "Boolean"),
+            (0x09, 8, "DateTime"),
+            (0x10, 4, "Int32"),
+            (0x11, 8, "Timestamp"),
+            (0x12, 8, "Int64"),
+            (0x13, 16, "Decimal128"),
+        ];
+        for &(tb, width, name) in cases {
+            let buf = vec![0u8; width - 1];
+            assert_eq!(
+                skip_bson_value(tb, &buf, 0),
+                None,
+                "{name}: short buffer must skip to None"
+            );
+            // Exactly the width fits.
+            let full = vec![0u8; width];
+            assert_eq!(
+                skip_bson_value(tb, &full, 0),
+                Some(width),
+                "{name}: exact buffer must skip to {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn skip_objectid_into_short_buffer_is_none() {
+        // The concrete regression from the RFC: ObjectId into 5 bytes.
+        assert_eq!(skip_bson_value(0x07, &[0; 5], 0), None);
+    }
+
+    #[test]
+    fn skip_string_result_overrun_is_none() {
+        // Header fits (len = 100) but the body runs off the buffer. The
+        // pre-hardening checked arm only guarded the header.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&100_i32.to_le_bytes());
+        buf.extend_from_slice(b"short");
+        assert_eq!(skip_bson_value(0x02, &buf, 0), None);
+    }
+
+    #[test]
+    fn skip_document_length_under_header_is_none() {
+        // A document length smaller than its own 4-byte header is malformed.
+        let buf = 2_i32.to_le_bytes();
+        assert_eq!(skip_bson_value(0x03, &buf, 0), None);
+    }
+
+    #[test]
+    fn skip_negative_length_is_none() {
+        let buf = (-1_i32).to_le_bytes();
+        assert_eq!(skip_bson_value(0x02, &buf, 0), None);
+    }
+
+    // ── Per-type truncation (door 3: try_skip → typed error) ──
+
+    #[test]
+    fn try_skip_truncated_fixed_width_is_truncated() {
+        for &(tb, width) in &[
+            (0x01u8, 8usize),
+            (0x07, 12),
+            (0x09, 8),
+            (0x10, 4),
+            (0x12, 8),
+            (0x13, 16),
+        ] {
+            let buf = vec![0u8; width - 1];
+            assert_eq!(
+                try_skip_bson_value(tb, &buf, 0),
+                Err(RawBsonError::Truncated)
+            );
+        }
+    }
+
+    #[test]
+    fn try_skip_unknown_type_is_unknown() {
+        assert_eq!(
+            try_skip_bson_value(0xFF, &[0; 8], 0),
+            Err(RawBsonError::UnknownType(0xFF))
+        );
+    }
+
+    #[test]
+    fn try_skip_negative_length_is_bad_length() {
+        let buf = (-1_i32).to_le_bytes();
+        assert_eq!(
+            try_skip_bson_value(0x02, &buf, 0),
+            Err(RawBsonError::BadLength)
+        );
+    }
+
+    #[test]
+    fn try_skip_short_document_length_is_bad_length() {
+        let buf = 2_i32.to_le_bytes();
+        assert_eq!(
+            try_skip_bson_value(0x03, &buf, 0),
+            Err(RawBsonError::BadLength)
+        );
+    }
+
+    #[test]
+    fn try_skip_string_body_overrun_is_truncated() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&100_i32.to_le_bytes());
+        buf.extend_from_slice(b"short");
+        assert_eq!(
+            try_skip_bson_value(0x02, &buf, 0),
+            Err(RawBsonError::Truncated)
+        );
+    }
+
+    #[test]
+    fn try_skip_valid_matches_option_skip() {
+        // On well-formed bytes the two doors agree on the offset.
+        let doc = rawdoc! { "n": 7_i32 };
+        let bytes = doc_bytes(&doc);
+        // Locate the i32 value position via the scanner.
+        let field = RawField::get(bytes, "n").unwrap();
+        let pos = field.value_start();
+        assert_eq!(
+            try_skip_bson_value(0x10, bytes, pos),
+            Ok(skip_bson_value(0x10, bytes, pos).unwrap())
+        );
+    }
+
+    // ── value() on truncated value bytes (door 2 + door 3) ────
+
+    /// Construct a `RawField` pointing at `bytes[0..]` with a value that begins
+    /// at offset 0 and claims to end at `element_end` (which may be out of
+    /// bounds — exactly the corruption we're guarding).
+    fn field_over(etype: ElementType, bytes: &[u8], element_end: usize) -> RawField<'_> {
+        RawField {
+            bytes,
+            element_type: etype,
+            element_start: 0,
+            value_start: 0,
+            element_end,
+        }
+    }
+
+    #[test]
+    fn value_truncated_fixed_width_is_none() {
+        let cases: &[(ElementType, usize)] = &[
+            (ElementType::Double, 8),
+            (ElementType::ObjectId, 12),
+            (ElementType::Boolean, 1),
+            (ElementType::DateTime, 8),
+            (ElementType::Int32, 4),
+            (ElementType::Int64, 8),
+            (ElementType::Decimal128, 16),
+        ];
+        for &(etype, width) in cases {
+            let short = vec![0u8; width - 1];
+            let field = field_over(etype, &short, width); // element_end past buffer
+            assert_eq!(
+                field.value(),
+                None,
+                "{etype:?} truncated value() must be None"
+            );
+            assert_eq!(
+                field.try_value(),
+                Err(RawBsonError::Truncated),
+                "{etype:?} truncated try_value() must be Truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn value_string_len_zero_underflow_is_none() {
+        // A String length of 0 is corrupt (the minimum is 1, the nul). The
+        // pre-hardening code computed `len - 1`, underflowing usize and
+        // panicking. It must now be `None` / `Truncated`.
+        let buf = 0_i32.to_le_bytes(); // len header = 0, no body
+        let field = field_over(ElementType::String, &buf, 4);
+        assert_eq!(field.value(), None);
+        assert_eq!(field.try_value(), Err(RawBsonError::Truncated));
+    }
+
+    #[test]
+    fn value_string_body_truncated_is_none() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&100_i32.to_le_bytes()); // claims 100 bytes
+        buf.extend_from_slice(b"hi\0");
+        let field = field_over(ElementType::String, &buf, buf.len());
+        assert_eq!(field.value(), None);
+    }
+
+    #[test]
+    fn try_value_non_converting_type_is_ok_none() {
+        // Timestamp is valid but value() doesn't convert it → Ok(None), not Err.
+        let doc = rawdoc! { "ts": bson::Timestamp { time: 1, increment: 2 } };
+        let field = RawField::get(doc_bytes(&doc), "ts").unwrap();
+        assert_eq!(field.try_value(), Ok(None));
+    }
+
+    #[test]
+    fn try_value_valid_is_ok_some() {
+        let doc = rawdoc! { "n": 5_i32 };
+        let field = RawField::get(doc_bytes(&doc), "n").unwrap();
+        assert_eq!(field.try_value(), Ok(Some(RawBsonRef::Int32(5))));
+    }
+
+    // ── try_get boundary: corruption vs. absence ──────────────
+
+    #[test]
+    fn try_get_found() {
+        let doc = rawdoc! { "a": 1_i32, "b": "x" };
+        // `RawField` is not Debug, so destructure rather than `.unwrap()` it.
+        let Ok(Some(field)) = RawField::try_get(doc_bytes(&doc), "b") else {
+            panic!("expected found");
+        };
+        assert_eq!(field.value(), Some(RawBsonRef::String("x")));
+    }
+
+    #[test]
+    fn try_get_absent_is_ok_none() {
+        let doc = rawdoc! { "a": 1_i32 };
+        assert!(matches!(RawField::try_get(doc_bytes(&doc), "z"), Ok(None)));
+    }
+
+    #[test]
+    fn try_get_truncated_document_is_err() {
+        // A 4-byte length header claiming a doc longer than the buffer.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&999_i32.to_le_bytes());
+        buf.push(0x10); // an Int32 element type byte, no body
+        // `RawField` is byte-borrowing and intentionally not PartialEq/Debug,
+        // so assert on the error directly rather than the whole Result.
+        assert_eq!(
+            RawField::try_get(&buf, "x").err().unwrap(),
+            RawBsonError::Truncated
+        );
+    }
+
+    #[test]
+    fn try_get_short_header_is_err() {
+        assert_eq!(
+            RawField::try_get(&[0, 0], "x").err().unwrap(),
+            RawBsonError::Truncated
+        );
+    }
+
+    #[test]
+    fn try_get_unterminated_name_is_err() {
+        // Valid doc length, type byte, then a name with no nul before doc end.
+        let mut body = Vec::new();
+        body.push(0x10); // Int32
+        body.extend_from_slice(b"name"); // no nul terminator
+        body.extend_from_slice(&7_i32.to_le_bytes());
+        let total = (4 + body.len() + 1) as i32; // header + body + trailing 0x00
+        let mut buf = total.to_le_bytes().to_vec();
+        buf.extend_from_slice(&body);
+        buf.push(0x00);
+        // The name scan never finds a nul before doc_end → Truncated.
+        assert_eq!(
+            RawField::try_get(&buf, "name").err().unwrap(),
+            RawBsonError::Truncated
+        );
+    }
+
+    #[test]
+    fn try_get_path_nested_found() {
+        let doc = rawdoc! { "a": { "b": 9_i32 } };
+        let Ok(Some(field)) = RawField::try_get_path(doc_bytes(&doc), "a.b") else {
+            panic!("expected found");
+        };
+        assert_eq!(field.value(), Some(RawBsonRef::Int32(9)));
+    }
+
+    #[test]
+    fn try_get_path_non_doc_intermediate_is_ok_none() {
+        let doc = rawdoc! { "a": 1_i32 };
+        assert!(matches!(
+            RawField::try_get_path(doc_bytes(&doc), "a.b"),
+            Ok(None)
+        ));
+    }
+
+    // ── Option-scanner malformed guards (door 2: scan → None) ──
+
+    #[test]
+    fn get_short_header_is_none() {
+        // Fewer than 4 bytes can't even hold a document length header.
+        assert!(RawField::get(&[0, 0], "x").is_none());
+        assert!(RawField::get(&[], "x").is_none());
+    }
+
+    #[test]
+    fn get_unterminated_name_is_none() {
+        // Doc length OK, type byte present, but the field name never hits a nul
+        // before doc_end → the name-scan guard returns None.
+        let mut body = Vec::new();
+        body.push(0x10); // Int32
+        body.extend_from_slice(b"name"); // no nul terminator
+        body.extend_from_slice(&7_i32.to_le_bytes());
+        let total = (4 + body.len() + 1) as i32;
+        let mut buf = total.to_le_bytes().to_vec();
+        buf.extend_from_slice(&body);
+        buf.push(0x00);
+        assert!(RawField::get(&buf, "name").is_none());
+    }
+
+    #[test]
+    fn get_truncated_value_mid_doc_is_none() {
+        // A document whose declared length includes a value that runs past the
+        // buffer: the scanner's `skip_bson_value` returns None and `get`
+        // propagates it instead of panicking.
+        let mut body = Vec::new();
+        body.push(0x12); // Int64 (8-byte value)
+        body.extend_from_slice(b"n\0");
+        body.extend_from_slice(&[0u8; 3]); // only 3 of 8 value bytes
+        let total = (4 + body.len() + 1) as i32;
+        let mut buf = total.to_le_bytes().to_vec();
+        buf.extend_from_slice(&body);
+        buf.push(0x00);
+        assert!(RawField::get(&buf, "n").is_none());
+    }
+
+    // ── RawBsonError Display ───────────────────────────────────
+
+    #[test]
+    fn raw_bson_error_display() {
+        assert_eq!(RawBsonError::Truncated.to_string(), "raw BSON truncated");
+        assert_eq!(
+            RawBsonError::BadLength.to_string(),
+            "raw BSON has an invalid length field"
+        );
+        assert_eq!(
+            RawBsonError::UnknownType(0x06).to_string(),
+            "raw BSON has unrecognised element type 0x06"
+        );
     }
 
     // ── value() edge cases ────────────────────────────────────

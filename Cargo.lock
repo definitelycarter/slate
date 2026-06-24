@@ -1571,6 +1571,7 @@ name = "slate-rawbson"
 version = "0.1.0"
 dependencies = [
  "bson",
+ "criterion",
 ]
 
 [[package]]
