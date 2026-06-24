@@ -27,6 +27,14 @@ Two cooperating mechanisms:
 
 Uniqueness is defined here for single scalar values. A non-multikey path resolves to **at most one** value per document (`extract_all` on a path without `[]` yields zero or one scalar), so the value → `_id` mapping is one-to-one and the doc_id-less `u` key is unambiguous. Sparse falls out for free: an absent or non-scalar field produces no `u` entry, so any number of documents may omit a unique field. Multikey (`[]`) paths are rejected at creation — array fan-out would imply cross-element uniqueness (no two documents may share *any* element), a semantic deferred to the multikey follow-up.
 
+## Numeric values are unique per type
+
+The `u` key folds the BSON type byte in (see [dual index format](#design-dual-index-format)), so uniqueness is defined over the `(type, value)` pair, not the value alone. A unique index therefore treats `Int32(5)` and `Double(5.0)` as **distinct** — both may coexist — even though the comparison layer (`compare_bson`) treats them as **equal**, projecting every numeric to f64. This divergence is deliberate.
+
+Why not collapse numerics onto one slot to match `compare_bson`? Because uniqueness is a *write-rejecting* constraint and the f64 projection is lossy past 2⁵³. Collapsing would make the constraint reject genuinely distinct large integers: `Int64(2⁵³)` and `Int64(2⁵³+1)` both round to the same f64 and would register as a duplicate, blocking a legitimate insert. The two layers carry asymmetric risk. A wrong *read* — the regular `i` index already collapses numerics ([Unified Numeric Index Key](./unified-numeric-index-key.md)), so an equality query can over-match past 2⁵³ — returns a bad row, which is recoverable. A wrong *write-rejection* loses data at the door. So the layers are allowed to disagree: comparison honors the f64 model, uniqueness honors the exact `(type, value)`.
+
+**Open decision.** Whether uniqueness *should* instead collapse numerics (so `5` conflicts with `5.0`, matching the f64 tower's equality) is a real semantic question, with the 2⁵³ within-type collision above as its cost. It is deferred until validated against the Cosmos oracle — what a Cosmos unique-key constraint does across numeric types — since Cosmos is slate's correctness oracle for the query surface. Until then, per-`(type, value)` is the **stated contract**, pinned by `unique_index_keeps_numeric_types_distinct` in `slate-engine/tests/kv.rs` so it cannot silently drift into the f64 model by accident.
+
 ## Slot-stealing safety (why blind `u` deletes are correct)
 
 Invariant: **`u(x)` exists ⟺ exactly one document holds value `x`, and only that document's own mutation/delete/purge ever removes `u(x)`.**
@@ -39,6 +47,6 @@ A unique value owned by a document that has expired via TTL but not yet been pur
 
 ## Follow-ups
 
-- **Planner point-get** — equality on a unique field has at most one match. The planner can read the `u` key directly (one point-get, doc_id straight from the entry value) instead of a prefix scan over the `i` keyspace, then a single `ReadRecord`. Purely additive; the `i` scan path stays the fallback. An expired owner's `u` entry resolves to a doc_id whose record `ReadRecord` filters out, so the lookup correctly returns no row.
+- **Planner point-get** — equality on a unique field has at most one match. The planner can read the `u` key directly (one point-get, doc_id straight from the entry value) instead of a prefix scan over the `i` keyspace, then a single `ReadRecord`. Purely additive; the `i` scan path stays the fallback. An expired owner's `u` entry resolves to a doc_id whose record `ReadRecord` filters out, so the lookup correctly returns no row. **Gated on the numeric contract above:** the `i` index collapses numerics to f64 but the `u` key is per-`(type, value)`, so switching an equality plan from the `i` scan to the `u` point-get would change which rows match across numeric types. This optimization must not ship until the [open decision](#numeric-values-are-unique-per-type) is settled, or equality on a unique numeric field becomes path-dependent.
 - **Compound unique** — uniqueness over a *combination* of paths (e.g. `(org_id, email)`); see [Compound Indexes](./compound-indexes.md).
 - **Multikey unique** — uniqueness across array elements; see [Multikey (Array) Indexes](./multikey-indexes.md).

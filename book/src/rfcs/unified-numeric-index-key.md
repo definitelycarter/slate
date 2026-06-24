@@ -181,9 +181,12 @@ for doc-ids, fetch records, and return original BSON.
   so it could join the index later with no new machinery.
 - **DateTime** — stays on its own `i64` encoding (a timestamp, not a member of the
   numeric line). Do not fold it in.
-- **Unique index** — see [Deferred work](#deferred-work): unique (`u`) entries were
-  **left per-type** in Phase 2, so cross-type numeric uniqueness does *not* collapse
-  yet (`Int32(5)` and `Double(5.0)` are still allowed to coexist).
+- **Unique index** — resolved as a stated contract, not a loose end: unique (`u`)
+  entries stay **per-`(type, value)`**, so cross-type numeric uniqueness does *not*
+  collapse (`Int32(5)` and `Double(5.0)` may coexist). The rationale (a
+  write-rejecting constraint must not inherit the f64 model's 2⁵³ lossiness) and the
+  open question (whether to align with `compare_bson`, pending the Cosmos oracle)
+  now live in [Unique Indexes → Numeric values are unique per type](./unique-indexes.md#numeric-values-are-unique-per-type).
 - **Exact large-int covered reads** — open *only if* slate ever needs exact
   `Int64 > 2⁵³` in computed/covered positions; that's the engine-wide
   exact-number project (rework `compare_bson` + arithmetic), not this index.
@@ -217,14 +220,14 @@ regressions.
 Two items were intentionally left out of Phase 2, to be picked up separately:
 
 - **Unique-index numeric values stay per-type.** Only the regular (`i`) index
-  projects numerics to f64; unique (`u`) entries still encode per-type, with the
-  type byte folded into the key. So cross-type numeric uniqueness does **not**
-  collapse — a unique index currently allows both `Int32(5)` and `Double(5.0)`.
-  Whether it *should* (i.e. `5` conflicts with `5.0`, matching the f64 tower's
-  equality) is a real semantic decision with its own edge — *within*-type
-  collisions past 2⁵³ (`Int64(2⁵³)` would then conflict with `Int64(2⁵³+1)`) — so it
-  was kept separate from the sargability win. To adopt it: project `u` values
-  through `into_index_value` too, and settle the type-byte question.
+  projects numerics to f64; unique (`u`) entries encode per-`(type, value)`, with the
+  type byte folded into the key. This is now a **stated contract**, documented and
+  pinned by test in [Unique Indexes → Numeric values are unique per type](./unique-indexes.md#numeric-values-are-unique-per-type)
+  — not an accidental gap. Whether it *should* instead collapse (so `5` conflicts
+  with `5.0`) remains an open decision there, deferred against the Cosmos oracle
+  because of the *within*-type cost (`Int64(2⁵³)` would then conflict with
+  `Int64(2⁵³+1)`). If that decision lands as "collapse": project `u` values through
+  `into_index_value` too, and settle the type-byte question.
 - **`into_index_value` decode-then-reencode.** The write path builds a per-type
   `BsonValue` (`from_raw_bson_ref`) and then decodes it back to a number to
   re-encode as the f64 key — three steps where one would do. Negligible per insert,

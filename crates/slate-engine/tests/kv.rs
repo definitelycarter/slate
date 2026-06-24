@@ -1078,6 +1078,39 @@ fn unique_index_allows_distinct_values() {
 }
 
 #[test]
+fn unique_index_keeps_numeric_types_distinct() {
+    // Contract: uniqueness is per-(type, value). The `u` key folds the BSON type
+    // byte in, so Int32(5), Int64(5), and Double(5.0) occupy three distinct slots
+    // and may coexist — even though `compare_bson` treats them as equal. This pins
+    // the per-type contract in book/src/rfcs/unique-indexes.md so the unique index
+    // cannot silently drift into the regular index's f64 collapse.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "scores", &Default::default())
+        .unwrap();
+    txn.create_index_with_options(DEFAULT_CF, "scores", "score", &unique())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "scores").unwrap();
+
+    txn.put_nx(&handle, &bson::rawdoc! { "_id": "i32", "score": 5_i32 })
+        .unwrap();
+    txn.put_nx(&handle, &bson::rawdoc! { "_id": "i64", "score": 5_i64 })
+        .unwrap();
+    txn.put_nx(&handle, &bson::rawdoc! { "_id": "f64", "score": 5.0_f64 })
+        .unwrap();
+
+    // Within a single type, uniqueness still holds: a second Int32(5) collides.
+    let err = txn
+        .put_nx(&handle, &bson::rawdoc! { "_id": "dup", "score": 5_i32 })
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::UniqueViolation { .. }),
+        "expected UniqueViolation on same-type duplicate, got {err:?}"
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
 fn unique_index_is_sparse() {
     // Documents missing the unique field are not constrained — any number may
     // omit it.
