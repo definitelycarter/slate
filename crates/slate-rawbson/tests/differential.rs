@@ -221,7 +221,7 @@ fn differential_top_level_fields_match_oracle() {
                 continue;
             }
 
-            let oracle_first = doc_get_first(&oracle, name);
+            let oracle_first = doc_get_first(oracle, name);
             let got = field
                 .value()
                 .unwrap_or_else(|| panic!("value() None for convertible '{name}' in {doc:?}"));

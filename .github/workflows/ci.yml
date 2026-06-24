@@ -33,10 +33,12 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Default features (memory + lua + runtime) — RocksDB is opt-in and not
-      # built here, so no system libclang is needed. Runs the full unit +
-      # integration suite, including the hermetic Cosmos golden replay
-      # (crates/slate-db/tests/cosmos_golden.rs, which asserts on divergence).
+      # Runs the full unit + integration suite, including the hermetic Cosmos
+      # golden replay (crates/slate-db/tests/cosmos_golden.rs, which asserts on
+      # divergence). slate-db's dev-dependencies enable slate-store's `rocksdb`
+      # + `redb` features for the durability / crash-recovery tests, so this
+      # step (like the Clippy step's `--all-targets`) compiles the vendored
+      # RocksDB via bindgen, relying on the runner's preinstalled libclang.
       - name: Test
         run: cargo test --workspace
 
