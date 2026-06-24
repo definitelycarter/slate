@@ -35,6 +35,10 @@ uninstrumented:
 - **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
   — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
   + a `transact()` retry helper, and the `delete_range` exception.
+- **[Encryption at Rest](./rfcs/encryption-at-rest.md)** — decide the layer and
+  document the guarantee; OS-level encryption as the supported device story, with a
+  reserved key-provider seam (value-only encryption leaks indexed values, which live
+  in keys).
 - **[Observability & Introspection](./rfcs/observability-and-introspection.md)** —
   feature-gated `tracing`, EXPLAIN ANALYZE execution stats, and a `stats()`
   size/cardinality surface.

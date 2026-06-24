@@ -26,6 +26,7 @@
 - [Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)
 - [On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)
 - [Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)
+- [Encryption at Rest](./rfcs/encryption-at-rest.md)
 - [Observability & Introspection](./rfcs/observability-and-introspection.md)
 - [Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)
 - [Logical Export / Import](./rfcs/logical-export-import.md)
