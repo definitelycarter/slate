@@ -132,3 +132,61 @@ The in-memory implementation (feature-gated behind `memory`) is designed for eph
 
 **Memory footprint:** ~1.2 KB per record on disk/in-store (960 bytes BSON data + keys + index entries for a 50-field document). At 500k records, ~0.7 GB; at 1M records, ~1.4 GB including BTreeMap overhead — fits comfortably in a 2-4 GB container.
 
+## Durability & Integrity
+
+Two storage concerns decide whether you can trust the bytes on disk: *what survives a crash* (durability) and *whether the on-disk structures stay internally consistent* (integrity).
+
+### Durability levels
+
+`commit()` makes a guarantee about what is on disk if the power dies one instruction later. That guarantee is selectable per database (a builder default) and overridable per transaction. The three levels map onto each persistent backend's native control:
+
+| Level | RocksDB | redb | Guarantee on `Ok(commit)` |
+|-------|---------|------|---------------------------|
+| `Strict` | `WriteOptions` sync | `Durability::Immediate` | fsync'd; survives power loss |
+| `Buffered` *(default)* | default WAL, no sync | `Durability::Eventual` | survives a process crash, not power loss |
+| `Relaxed` | `disable_wal` | `Durability::None` | survives neither; fastest |
+
+`Buffered` is the default — the balance a typical embedded workload wants. Reach for `Strict` on data you can't reconstruct (accepting the fsync cost), and `Relaxed` for rebuildable/derived data where throughput dominates. `MemoryStore` is ephemeral, so the level is inert there (every commit is equally non-durable).
+
+Set the database-wide default on the builder:
+
+```rust
+use slate_db::{DatabaseBuilder, Durability};
+
+let db = DatabaseBuilder::new()
+    .with_durability(Durability::Strict)
+    .open(store)?;
+```
+
+Override it for a single write transaction — e.g. run a hot ingest path `Buffered` while a money-moving commit asks for `Strict`:
+
+```rust
+let txn = db.begin_with(Durability::Strict)?;
+// … writes …
+txn.commit()?;
+```
+
+`db.begin(false)` uses the builder default; `db.begin_with(level)` overrides it for that one transaction.
+
+### Integrity verification
+
+The engine maintains cross-structure invariants — every live record has its index (`i`) entries, every unique slot (`u`) has exactly one owner, and each index entry's metadata matches its record. `verify()` walks a collection and reports any drift; `repair()` rebuilds the index structures from the records, which are the source of truth.
+
+```rust
+use slate_db::DEFAULT_CF;
+
+let report = db.verify(DEFAULT_CF, "users")?;
+if !report.ok() {
+    // report.issues enumerates every problem; the counts give the scale walked.
+    db.repair(DEFAULT_CF, "users")?;
+}
+```
+
+`verify()` is a pure read path — it opens its own read-only snapshot and is safe to run on a live database. `IntegrityReport` carries the counts walked (`records_checked`, `index_entries_checked`, `unique_slots_checked`) and an `issues` list; `report.ok()` is `true` when that list is empty. Each `IntegrityIssue` names the field and document involved and falls into one of:
+
+- an index entry that is **missing**, **orphaned**, or has **mismatched** metadata;
+- a unique slot that is **missing**, **orphaned**, or owned by the **wrong** document;
+- a stored record that is **undecodable**.
+
+`repair()` reuses the same reindex path as the on-disk encoding migration: records are authoritative, so rebuilding the `i`/`u` structures from them restores consistency.
+
