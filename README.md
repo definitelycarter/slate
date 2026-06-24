@@ -1,6 +1,6 @@
 # Slate
 
-A document database built in Rust. Schema-flexible BSON documents with pluggable storage, query execution, indexing, and column-family-scoped collections — from embedded in a Swift app to standalone server.
+A document database built in Rust. Schema-flexible BSON documents with pluggable storage, query execution, indexing, and column-family-scoped collections — embedded in-process, from a native Swift app to the browser via WebAssembly.
 
 ## Features
 
