@@ -25,8 +25,9 @@ Data-trust and operational foundations identified in a "proper embedded database
 survey — guarantees currently delegated wholesale to the backends, untested and
 uninstrumented:
 
-- **[Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)** — a
-  `Durability` knob with a documented commit guarantee, a kill-during-commit
+- **[Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)** — *done.*
+  A `Durability` knob (`Strict`/`Buffered`/`Relaxed`, builder default + per-txn
+  override) with a documented per-backend commit guarantee, a kill-during-commit
   crash-test harness, and engine-level integrity `verify()`/`repair()`.
 - **[On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)** — generalise
   the index-encoding version+migration precedent to the record blob and catalog, so
@@ -77,17 +78,18 @@ uninstrumented:
 ## Query & Execution
 
 - **[SQL Query Surface](./rfcs/sql-query-surface.md)** — *partially implemented.*
-  CosmosDB-style SQL; core `SELECT`/`WHERE`/`GROUP BY`/`ORDER BY`/`JOIN … IN`,
-  aggregates, and subqueries shipped. `HAVING`, `ARRAY_AGG`, `DOCUMENTID`, full-text,
-  and vector remain.
+  CosmosDB-style SQL; core `SELECT`/`WHERE`/`GROUP BY`/`HAVING`/`ORDER BY`/`JOIN … IN`,
+  aggregates (incl. `ARRAY_AGG`/`COLLECT`), `DOCUMENTID`, and subqueries shipped.
+  Full-text and vector remain (each needs its index).
 - **[Collect Node](./rfcs/collect-node.md)** — *proposed.* Make plan materialization
   points explicit; asymmetric `IndexMerge(And)`.
 - **Plan Inspection (EXPLAIN)** — *done.* `Plan::explain()` / `Transaction::explain`
   render the logical operator tree; REPL `.explain`. No SQL `EXPLAIN` keyword (kept
   out of the grammar). Runtime stats are the
   [Observability RFC](./rfcs/observability-and-introspection.md).
-- **[Raw BSON Robustness](./rfcs/rawbson-robustness.md)** — *proposed.* A
-  malformed-input contract + differential fuzz for the byte scanner.
+- **[Raw BSON Robustness](./rfcs/rawbson-robustness.md)** — *done.* A malformed-input
+  contract (typed errors at the public boundary; a total, bounds-checked scanner) and
+  a differential fuzz against the `bson` crate for the byte scanner.
 - **Dynamic Primary Key Path** — *done.* All executor nodes use
   `CollectionHandle::pk_path()`; `pk_path` must be a top-level scalar (dot-paths
   rejected at creation). The TTL path may be a dot-path (read-only).
