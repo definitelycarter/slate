@@ -3,25 +3,32 @@
 //! This is a **value + range** test (matching Cosmos), not a type-identity one:
 //! `Int32`/`Int64` always qualify, and a `Double` qualifies iff it is finite,
 //! has no fractional part, and lies within the `i64` range (so `5.0` → true,
-//! `5.5` → false, and a magnitude beyond i64 → false). Comparison still coerces
-//! numerics by value; this just reports whether the value is an integer.
+//! `5.5` → false, and a magnitude beyond i64 → false). A `Decimal128` is judged
+//! by its f64 value the same way, since it shares the number tower (see
+//! `is_number`). Comparison still coerces numerics by value; this just reports
+//! whether the value is an integer.
 
 use bson::Bson;
 
 use crate::error::Result;
+use crate::eval::decimal_to_f64;
 use crate::value::Value;
 
 use super::arity;
+
+/// Whether an `f64` represents a signed 64-bit integer: finite, no fractional
+/// part, and within range. `i64::MAX as f64` rounds up to 2^63 (= i64::MAX + 1),
+/// so the upper bound is exclusive; `i64::MIN as f64` is exactly -2^63.
+fn is_i64_value(f: f64) -> bool {
+    f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64
+}
 
 pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
     arity(name, &args, 1)?;
     let is_int = match &args[0] {
         Value::Defined(Bson::Int32(_) | Bson::Int64(_)) => true,
-        // `i64::MAX as f64` rounds up to 2^63 (= i64::MAX + 1), so the upper
-        // bound is exclusive; `i64::MIN as f64` is exactly -2^63.
-        Value::Defined(Bson::Double(f)) => {
-            f.is_finite() && f.fract() == 0.0 && *f >= i64::MIN as f64 && *f < i64::MAX as f64
-        }
+        Value::Defined(Bson::Double(f)) => is_i64_value(*f),
+        Value::Defined(Bson::Decimal128(d)) => decimal_to_f64(d).is_some_and(is_i64_value),
         _ => false,
     };
     Ok(Value::Defined(Bson::Boolean(is_int)))
@@ -30,6 +37,21 @@ pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::super::{call, def};
+    use crate::value::Value;
+    use bson::Bson;
+
+    #[test]
+    fn decimal_integer_value() {
+        // A `Decimal128` is judged by its f64 value, same as `Double`: a whole
+        // value in range is an integer; a fractional or non-finite one is not.
+        let dec = |s: &str| Value::Defined(Bson::Decimal128(s.parse().unwrap()));
+        assert_eq!(call("IS_INTEGER", vec![dec("5.00")]).unwrap(), def(true));
+        assert_eq!(call("IS_INTEGER", vec![dec("5.50")]).unwrap(), def(false));
+        assert_eq!(
+            call("IS_INTEGER", vec![dec("Infinity")]).unwrap(),
+            def(false)
+        );
+    }
 
     #[test]
     fn cosmos_examples() {

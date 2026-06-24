@@ -401,7 +401,7 @@ SELECT VALUE IS_DEFINED(1)
 
 ### `IS_FINITE_NUMBER(expr)`
 Whether the value is a finite number (not infinity or NaN); integers are always finite.
-- **Returns:** `Boolean`.
+- **Returns:** `Boolean`; a `Decimal128` is finite iff its numeric value is.
 - **Example:** `IS_FINITE_NUMBER(1234.567)` → `true`
 
 ```slate-sql
@@ -410,7 +410,7 @@ SELECT VALUE IS_FINITE_NUMBER(1234.567)
 
 ### `IS_INTEGER(expr)`
 Whether the value represents a signed 64-bit integer (a value + range test, not type identity).
-- **Returns:** `Boolean`; `Int32`/`Int64` always qualify, and a `Double` qualifies only if finite, with no fractional part, and within `i64` range — so `5.0` → `true`, `5.5` → `false`.
+- **Returns:** `Boolean`; `Int32`/`Int64` always qualify, and a `Double` or `Decimal128` qualifies only if finite, with no fractional part, and within `i64` range — so `5.0` → `true`, `5.5` → `false`.
 - **Example:** `IS_INTEGER(5523432)` → `true`
 
 ```slate-sql
@@ -428,7 +428,7 @@ SELECT VALUE IS_NULL(null)
 
 ### `IS_NUMBER(expr)`
 Whether the value is a number.
-- **Returns:** `Boolean`.
+- **Returns:** `Boolean`; true for `Int32`, `Int64`, `Double`, and `Decimal128` (all part of slate's number model) — so `SUM`/`AVG` and `IS_NUMBER` agree.
 - **Example:** `IS_NUMBER(1)` → `true`
 
 ```slate-sql

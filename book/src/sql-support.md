@@ -30,7 +30,9 @@ forms below. `@name` placeholders are supplied via
   is a value/range test (Cosmos semantics); comparison coerces numerics by value.
 - **Number model:** every number is a 64-bit double, so math functions return a
   `Double` (`CEILING(0)` → `0.0`) — `ABS` is the exception, preserving the input's
-  integer type, and the `INT*`/`INC` functions return integers. See the
+  integer type, and the `INT*`/`INC` functions return integers. A stored
+  `Decimal128` reads as its double value, so it is a number everywhere:
+  comparison, `SUM`/`AVG`, and `IS_NUMBER` all treat it as one. See the
   [Function Reference](./functions.md) for the per-function detail.
 - A **type mismatch yields `undefined`**, which is omitted from a projection and
   excludes a row from a `WHERE` (rather than erroring).
