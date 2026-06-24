@@ -59,7 +59,8 @@ uninstrumented:
   `STRINGEQUALS` → `Eq` all push down to index access.
 - **[Unified Numeric Index Key](./rfcs/unified-numeric-index-key.md)** — *done.* All
   numbers project to one order-preserving `f64` key; numeric `Eq` −93% at 10k rows.
-  Two follow-ups deferred.
+  Follow-ups: unique-index numeric collapse *decided* (matches Cosmos; impl pending);
+  `into_index_value` micro-opt deferred.
 - **[Compound Indexes](./rfcs/compound-indexes.md)** — *proposed.* Multi-field keys,
   leftmost-prefix rule, compound-unique.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize

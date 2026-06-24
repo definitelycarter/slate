@@ -1079,11 +1079,13 @@ fn unique_index_allows_distinct_values() {
 
 #[test]
 fn unique_index_keeps_numeric_types_distinct() {
-    // Contract: uniqueness is per-(type, value). The `u` key folds the BSON type
-    // byte in, so Int32(5), Int64(5), and Double(5.0) occupy three distinct slots
-    // and may coexist — even though `compare_bson` treats them as equal. This pins
-    // the per-type contract in book/src/rfcs/unique-indexes.md so the unique index
-    // cannot silently drift into the regular index's f64 collapse.
+    // Current (transitional) behavior: uniqueness is per-(type, value). The `u` key
+    // folds the BSON type byte in, so Int32(5), Int64(5), and Double(5.0) occupy
+    // three distinct slots and may coexist — even though `compare_bson` treats them
+    // as equal. The decision (book/src/rfcs/unique-indexes.md, "Numeric uniqueness
+    // across types") is to collapse these onto one f64 slot, matching the query layer
+    // and Cosmos; this test asserts today's per-type behavior and flips to assert
+    // collapse when that migration lands.
     let engine = engine();
     let txn = engine.begin(false).unwrap();
     txn.create_collection(DEFAULT_CF, "scores", &Default::default())

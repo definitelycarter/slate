@@ -181,12 +181,12 @@ for doc-ids, fetch records, and return original BSON.
   so it could join the index later with no new machinery.
 - **DateTime** — stays on its own `i64` encoding (a timestamp, not a member of the
   numeric line). Do not fold it in.
-- **Unique index** — resolved as a stated contract, not a loose end: unique (`u`)
-  entries stay **per-`(type, value)`**, so cross-type numeric uniqueness does *not*
-  collapse (`Int32(5)` and `Double(5.0)` may coexist). The rationale (a
-  write-rejecting constraint must not inherit the f64 model's 2⁵³ lossiness) and the
-  open question (whether to align with `compare_bson`, pending the Cosmos oracle)
-  now live in [Unique Indexes → Numeric values are unique per type](./unique-indexes.md#numeric-values-are-unique-per-type).
+- **Unique index** — decided: unique (`u`) entries will **collapse** to the f64 key
+  too, so `5`/`5L`/`5.0` are one value (matching `compare_bson`, the `i` index, and
+  Cosmos). Shipped behavior is still per-`(type, value)`; the decision, its rationale
+  (slate already chose f64; Cosmos is pure f64 and owns the 2⁵³ ceiling; Mongo's
+  exact model considered and deferred), and the string-key guidance live in
+  [Unique Indexes → Numeric uniqueness across types](./unique-indexes.md#numeric-uniqueness-across-types).
 - **Exact large-int covered reads** — open *only if* slate ever needs exact
   `Int64 > 2⁵³` in computed/covered positions; that's the engine-wide
   exact-number project (rework `compare_bson` + arithmetic), not this index.
@@ -219,15 +219,16 @@ regressions.
 
 Two items were intentionally left out of Phase 2, to be picked up separately:
 
-- **Unique-index numeric values stay per-type.** Only the regular (`i`) index
-  projects numerics to f64; unique (`u`) entries encode per-`(type, value)`, with the
-  type byte folded into the key. This is now a **stated contract**, documented and
-  pinned by test in [Unique Indexes → Numeric values are unique per type](./unique-indexes.md#numeric-values-are-unique-per-type)
-  — not an accidental gap. Whether it *should* instead collapse (so `5` conflicts
-  with `5.0`) remains an open decision there, deferred against the Cosmos oracle
-  because of the *within*-type cost (`Int64(2⁵³)` would then conflict with
-  `Int64(2⁵³+1)`). If that decision lands as "collapse": project `u` values through
-  `into_index_value` too, and settle the type-byte question.
+- **Unique-index numeric collapse — decided, not yet implemented.** Only the regular
+  (`i`) index projects numerics to f64 today; unique (`u`) entries still encode
+  per-`(type, value)`. The [decision](./unique-indexes.md#numeric-uniqueness-across-types)
+  is to collapse `u` too, so `5`/`5L`/`5.0` are one value (matching `compare_bson`,
+  the `i` index, and the Cosmos oracle, which is itself pure f64). To implement:
+  project `u` values through `into_index_value`, settle the type-byte question, flip
+  the per-type test, and ship it with the unique-index planner point-get (gated on
+  it). The 2⁵³ within-type cost is accepted — it is the f64 model slate already runs,
+  and Cosmos's documented stance is to use a string key for exact integers beyond
+  2⁵³.
 - **`into_index_value` decode-then-reencode.** The write path builds a per-type
   `BsonValue` (`from_raw_bson_ref`) and then decodes it back to a number to
   re-encode as the f64 key — three steps where one would do. Negligible per insert,
