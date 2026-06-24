@@ -28,6 +28,10 @@ uninstrumented:
 - **[Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)** — a
   `Durability` knob with a documented commit guarantee, a kill-during-commit
   crash-test harness, and engine-level integrity `verify()`/`repair()`.
+- **[On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)** — generalise
+  the index-encoding version+migration precedent to the record blob and catalog, so
+  a newer binary migrates an older store forward or refuses cleanly — never silently
+  mis-reads.
 - **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
   — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
   + a `transact()` retry helper, and the `delete_range` exception.

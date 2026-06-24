@@ -24,6 +24,7 @@
 - [Index Intersection Strategy](./rfcs/index-intersection-strategy.md)
 - [Raw BSON Robustness](./rfcs/rawbson-robustness.md)
 - [Durability & Crash Safety](./rfcs/durability-and-crash-safety.md)
+- [On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)
 - [Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)
 - [Observability & Introspection](./rfcs/observability-and-introspection.md)
 - [Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)
