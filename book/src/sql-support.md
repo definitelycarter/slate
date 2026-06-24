@@ -12,6 +12,7 @@ SELECT [DISTINCT] [TOP n] VALUE <expr> | * | <expr> [AS k], …
 [FROM <alias> [JOIN <a> IN <arr>]*]
 [WHERE <expr>]
 [GROUP BY <expr>, …]
+[HAVING <expr>]
 [ORDER BY <expr> [ASC|DESC], …]
 [OFFSET n] [LIMIT n]
 ```
@@ -48,16 +49,18 @@ forms below. `@name` placeholders are supplied via
 - **`FROM` is optional** (matching Cosmos): a FROM-less query (`SELECT VALUE 1`, `SELECT 1 AS a, 2 AS b`) evaluates the `SELECT` once over a single implicit row. Only `SELECT *` requires a `FROM`.
 - **`JOIN <a> IN <array-expr>`** — cross-joins each document with the elements of one of its in-document arrays (it does not join another container).
 - **`WHERE` / `ORDER BY` / `OFFSET … LIMIT`** — standard; `ORDER BY` takes multiple keys with per-key `ASC`/`DESC`.
-- **`GROUP BY <expr>, …`** — one row per distinct group; `SELECT` and `ORDER BY` may reference only the group-key expressions or aggregates (`ORDER BY` sorts the resulting group rows). An ungrouped non-aggregate column — or `SELECT *` — is rejected, matching Cosmos.
+- **`GROUP BY <expr>, …`** — one row per distinct group; `SELECT`, `HAVING`, and `ORDER BY` may reference only the group-key expressions or aggregates (`ORDER BY` sorts the resulting group rows). An ungrouped non-aggregate column — or `SELECT *` — is rejected, matching Cosmos.
+- **`HAVING <expr>`** — a post-aggregation filter over the group rows (runs after `GROUP BY`, before `ORDER BY`). Unlike `WHERE` (which filters input rows before grouping), `HAVING` is grounded against the group keys and aggregates, exactly like the projection — a bare ungrouped column is rejected. A `HAVING` implies grouping even without a `GROUP BY` (so `SELECT VALUE COUNT(1) FROM c HAVING COUNT(1) > 0` is valid), and an aggregate used only in `HAVING` is still computed.
 - **Subqueries** range over an *in-document array* (`FROM x IN <array>`), never another container. Three forms: a scalar `(SELECT …)`, `EXISTS (…)`, and `ARRAY (…)`. They appear in `SELECT`, `WHERE`, and as a `JOIN` source; may be **correlated** (referencing the outer row) or uncorrelated, and may nest to any depth. A subquery whose `FROM` names an outer alias is item-scoped (iterates that single bound value), matching Cosmos.
 - **Subroot `FROM <base>.<path> [AS] <alias>`** — scopes iteration to a sub-path of each document; the alias binds to the whole sub-value (no unwinding), dropping documents where the path is undefined. The alias is optional (defaults to the last path segment).
 
 ## Aggregation
 
-`COUNT`, `SUM`, `AVG`, `MIN`, `MAX` collapse the matching rows (or each `GROUP BY`
-group) to one result row, via the blocking `Aggregate` node. A query that
-aggregates always emits one row per group, so `COUNT` over an empty set is `0`. See
-the [Function Reference](./functions.md#aggregate-functions) for the per-function
+`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `ARRAY_AGG` (synonym `COLLECT`) collapse
+the matching rows (or each `GROUP BY` group) to one result row, via the blocking
+`Aggregate` node. A query that aggregates always emits one row per group, so
+`COUNT` over an empty set is `0` and `ARRAY_AGG` over an empty set is `[]`. See the
+[Function Reference](./functions.md#aggregate-functions) for the per-function
 skip/poison/type rules.
 
 ## Non-deterministic functions
@@ -82,7 +85,6 @@ The parser accepts any `IDENT(...)` as a function call, so unimplemented functio
 surface as an eval-time "unknown function" error rather than a parse error. Notable
 gaps (tracked in the [Roadmap](./roadmap.md)):
 
-- **`DOCUMENTID`** — returns the configured pk value.
 - **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`, `ORDER BY RANK`: needs a full-text index + BM25 scoring.
 - **Vector** — `VECTORDISTANCE`: needs a vector index.
 - **Spatial index** — the `ST_*` functions are implemented (see the [Function Reference](./functions.md#spatial)); a spatial *index* is future work.

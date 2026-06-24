@@ -143,6 +143,16 @@ impl Parser {
             Vec::new()
         };
 
+        // `HAVING <expr>` — a post-aggregation filter. It follows `GROUP BY` and
+        // precedes `ORDER BY` (Cosmos/SQL order). The full scalar grammar is
+        // accepted; the grounding check (group keys / aggregates only) runs at
+        // plan time, alongside the same check on `SELECT`.
+        let having = if self.matches(&Token::Having) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
         let order_by = if self.matches(&Token::Order) {
             self.parse_order_by()?
         } else {
@@ -179,6 +189,7 @@ impl Parser {
             from,
             filter,
             group_by,
+            having,
             order_by,
             offset,
             limit,
@@ -1190,6 +1201,68 @@ mod tests {
     #[test]
     fn no_group_by_is_empty() {
         assert!(parse("SELECT VALUE c FROM c").group_by.is_empty());
+    }
+
+    #[test]
+    fn having_clause_parses_after_group_by() {
+        let q = parse("SELECT c.kind, COUNT(1) AS n FROM c GROUP BY c.kind HAVING COUNT(1) > 2");
+        assert_eq!(q.group_by.len(), 1);
+        // HAVING is a comparison whose lhs is the COUNT aggregate.
+        let Some(Expression::Binary {
+            op: BinOp::Gt, lhs, ..
+        }) = q.having
+        else {
+            panic!("expected a HAVING comparison, got {:?}", q.having);
+        };
+        assert!(matches!(*lhs, Expression::Function { ref name, .. } if name == "COUNT"));
+    }
+
+    #[test]
+    fn having_sits_between_group_by_and_order_by() {
+        // The full clause order parses end to end.
+        let q = parse(
+            "SELECT c.kind, SUM(c.n) AS total FROM c \
+             GROUP BY c.kind HAVING SUM(c.n) > 10 ORDER BY total DESC LIMIT 5",
+        );
+        assert!(q.having.is_some());
+        assert_eq!(q.order_by.len(), 1);
+        assert_eq!(q.limit, Some(5));
+    }
+
+    #[test]
+    fn no_having_is_none() {
+        assert!(
+            parse("SELECT c.kind FROM c GROUP BY c.kind")
+                .having
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn array_agg_and_collect_parse_as_function_calls() {
+        // Both surface as ordinary function calls in the AST; the planner routes
+        // them to the aggregation node.
+        let q = parse("SELECT VALUE ARRAY_AGG(c.tag) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(Expression::Function { ref name, .. }) if name == "ARRAY_AGG"
+        ));
+        let q = parse("SELECT VALUE COLLECT(c.tag) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(Expression::Function { ref name, .. }) if name == "COLLECT"
+        ));
+    }
+
+    #[test]
+    fn documentid_parses_as_function_call() {
+        // DOCUMENTID is a plain function in the AST; the planner desugars it.
+        let q = parse("SELECT VALUE DOCUMENTID(c) FROM c");
+        assert!(matches!(
+            q.select,
+            SelectClause::Value(Expression::Function { ref name, ref args })
+                if name == "DOCUMENTID" && args.len() == 1
+        ));
     }
 
     #[test]

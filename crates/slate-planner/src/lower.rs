@@ -96,10 +96,18 @@ pub(crate) fn lower_query(
         from,
         filter,
         group_by,
+        having,
         order_by,
         offset,
         limit,
     } = query;
+
+    // Desugar `DOCUMENTID(x)` → `x.<pk>` in the `WHERE` up front, before the
+    // sargability pass consumes it — so `WHERE DOCUMENTID(c) = v` is recognised
+    // as pk-equality (a point lookup) just like `WHERE c.<pk> = v`. The other
+    // clauses are desugared further below, after the FROM source is built.
+    let pk = meta.pk_path.as_str();
+    let filter = filter.map(|f| desugar_pk(f, pk));
 
     // Query-wide counter for subquery slot names (`$subN`), shared across the
     // FROM/JOIN sources and the projection so every slot is unique.
@@ -210,6 +218,22 @@ pub(crate) fn lower_query(
         },
     };
 
+    // Desugar `DOCUMENTID(c)` → `c.<pk>` in the remaining clauses (the `WHERE`
+    // was already desugared above for sargability). Done before group keys are
+    // formed, so `GROUP BY DOCUMENTID(c)` matches the same desugared form a
+    // `SELECT DOCUMENTID(c)` produces and folds into one `$keyN` slot. The
+    // `residual` is the not-pushed remainder of the (already-desugared) WHERE, so
+    // it needs no further desugaring.
+    let group_by: Vec<Expression> = group_by.into_iter().map(|e| desugar_pk(e, pk)).collect();
+    let having = having.map(|h| desugar_pk(h, pk));
+    let order_by: Vec<OrderByItem> = order_by
+        .into_iter()
+        .map(|item| OrderByItem {
+            expr: desugar_pk(item.expr, pk),
+            direction: item.direction,
+        })
+        .collect();
+
     // GROUP BY keys, each bound to a `$keyN` slot in the aggregation output.
     let group_keys: Vec<GroupKey> = group_by
         .into_iter()
@@ -224,7 +248,7 @@ pub(crate) fn lower_query(
     // slots, lowering each inner query to its own subtree. Done before the
     // group/aggregate rewrite so a subquery inside an aggregate's argument
     // becomes a slot the aggregate then reads.
-    let value_expr = select.into_value_expr(&alias);
+    let value_expr = desugar_pk(select.into_value_expr(&alias), pk);
     let mut subqueries: Vec<SubquerySpec> = Vec::new();
     // Bindings a nested subquery can reference: the enclosing scope plus this
     // query's own alias and joins. Borrows `alias`/`joins`, used only here
@@ -252,10 +276,15 @@ pub(crate) fn lower_query(
     // read-only pre-check keeps `find` and non-aggregate SQL allocation-free.
     let aggregating = !group_keys.is_empty()
         || contains_aggregate(&value_expr)
+        || having.as_ref().is_some_and(contains_aggregate)
         || order_by.iter().any(|item| contains_aggregate(&item.expr));
-    let (project_expr, order_by, aggregates) = if aggregating {
+    let (project_expr, having, order_by, aggregates) = if aggregating {
         let mut aggregates = Vec::new();
         let project_expr = rewrite_projection(value_expr, &group_keys, &mut aggregates);
+        // HAVING runs after aggregation, so — like ORDER BY — its references to
+        // the group keys and aggregates rewrite into the same `$keyN`/`$aggN`
+        // slots (an aggregate appearing only in HAVING is still computed).
+        let having = having.map(|h| rewrite_projection(h, &group_keys, &mut aggregates));
         // ORDER BY runs after aggregation, so its keys reference the group keys
         // and aggregates — rewrite them into the same `$keyN`/`$aggN` slots (an
         // aggregate appearing only in ORDER BY is still computed by the node).
@@ -266,9 +295,11 @@ pub(crate) fn lower_query(
                 direction: item.direction,
             })
             .collect();
-        (project_expr, order_by, aggregates)
+        (project_expr, having, order_by, aggregates)
     } else {
-        (value_expr, order_by, Vec::new())
+        // A `HAVING` with no grouping/aggregates is not reachable here — the
+        // validator requires HAVING to imply grouping — so `having` is `None`.
+        (value_expr, None, order_by, Vec::new())
     };
 
     // JOIN ... IN — each `Unwind` extends the environment. The first join (or a
@@ -340,15 +371,25 @@ pub(crate) fn lower_query(
     }
 
     if aggregating {
-        // Aggregation collapses rows into one per group; ORDER BY then sorts the
-        // group rows, and the projection (rewritten to read the `$keyN`/`$aggN`
-        // slots) shapes each. Both bind as `Env` over the aggregate output rows.
+        // Aggregation collapses rows into one per group; HAVING then filters those
+        // group rows, ORDER BY sorts them, and the projection (rewritten to read
+        // the `$keyN`/`$aggN` slots) shapes each. All bind as `Env` over the
+        // aggregate output rows.
         node = Node::Aggregate {
             group_keys,
             aggregates,
             binding,
             source: Box::new(node),
         };
+        // HAVING — a post-aggregation `Filter` over the group rows, before ORDER
+        // BY (so a group dropped by HAVING never reaches the sort or projection).
+        if let Some(predicate) = having {
+            node = Node::Filter {
+                predicate,
+                binding: RowBinding::Env,
+                source: Box::new(node),
+            };
+        }
         if !order_by.is_empty() {
             node = Node::Sort {
                 keys: order_by,
@@ -536,6 +577,71 @@ fn rewrite_projection(
         // Leaves and Mongo-only constructs — no SQL aggregates nested inside.
         other => other,
     }
+}
+
+/// Desugar `DOCUMENTID(<expr>)` into `<expr>.<pk_path>`, recursively, so it reads
+/// the configured primary-key field of the bound document (Cosmos's `DOCUMENTID`,
+/// which returns the document's id). The pk path is a catalog fact known only at
+/// plan time, so this rewrite happens here rather than in the evaluator (which
+/// has no catalog). A non-document argument's member access yields undefined,
+/// matching Cosmos. Arity ≠ 1 is left untouched — it falls through to the
+/// evaluator as an "unknown function"/arity error.
+fn desugar_pk(expr: Expression, pk_path: &str) -> Expression {
+    match expr {
+        Expression::Function { name, mut args }
+            if name.eq_ignore_ascii_case("DOCUMENTID") && args.len() == 1 =>
+        {
+            // `arg` itself may contain a nested DOCUMENTID — desugar it first.
+            let arg = desugar_pk(args.remove(0), pk_path);
+            member_chain_expr(arg, pk_path)
+        }
+        Expression::Function { name, args } => Expression::Function {
+            name,
+            args: args.into_iter().map(|a| desugar_pk(a, pk_path)).collect(),
+        },
+        Expression::Binary { op, lhs, rhs } => Expression::Binary {
+            op,
+            lhs: Box::new(desugar_pk(*lhs, pk_path)),
+            rhs: Box::new(desugar_pk(*rhs, pk_path)),
+        },
+        Expression::Unary { op, expr } => Expression::Unary {
+            op,
+            expr: Box::new(desugar_pk(*expr, pk_path)),
+        },
+        Expression::Member { base, field } => Expression::Member {
+            base: Box::new(desugar_pk(*base, pk_path)),
+            field,
+        },
+        Expression::Index { base, index } => Expression::Index {
+            base: Box::new(desugar_pk(*base, pk_path)),
+            index: Box::new(desugar_pk(*index, pk_path)),
+        },
+        Expression::Object(fields) => Expression::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k, desugar_pk(v, pk_path)))
+                .collect(),
+        ),
+        Expression::Array(items) => {
+            Expression::Array(items.into_iter().map(|i| desugar_pk(i, pk_path)).collect())
+        }
+        // A subquery's own lowering desugars it with the (same) pk path, so it is
+        // left intact here; leaves and Mongo-only constructs hold no DOCUMENTID.
+        other => other,
+    }
+}
+
+/// Build the member-access chain `base.seg0.seg1…` over an already-built base
+/// expression — `pk_path` may be a dotted path (e.g. `"meta.id"`).
+fn member_chain_expr(base: Expression, pk_path: &str) -> Expression {
+    let mut expr = base;
+    for seg in pk_path.split('.') {
+        expr = Expression::Member {
+            base: Box::new(expr),
+            field: seg.to_string(),
+        };
+    }
+    expr
 }
 
 /// Build the member-access chain `base.seg0.seg1…` as a scalar expression — the
@@ -954,6 +1060,150 @@ mod tests {
     fn validate_grouping_ignores_plain_queries() {
         // No grouping or aggregates → nothing to validate.
         assert!(validate_grouping(&parse("SELECT c.a, c.b FROM c")).is_ok());
+    }
+
+    #[test]
+    fn validate_grouping_allows_having_over_aggregates_and_keys() {
+        // HAVING over an aggregate and a group key is fine.
+        assert!(
+            validate_grouping(&parse(
+                "SELECT c.kind FROM c GROUP BY c.kind HAVING COUNT(1) > 1 AND c.kind != \"x\""
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_grouping_rejects_ungrouped_column_in_having() {
+        // `c.other` in HAVING is neither a group key nor inside an aggregate.
+        assert!(
+            validate_grouping(&parse(
+                "SELECT c.kind FROM c GROUP BY c.kind HAVING c.other > 1"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_grouping_having_without_group_by_implies_grouping() {
+        // A bare HAVING (no GROUP BY) still triggers the grouping rule, so an
+        // ungrouped SELECT column is rejected.
+        assert!(
+            validate_grouping(&parse("SELECT VALUE c.name FROM c HAVING COUNT(1) > 1")).is_err()
+        );
+        // …and an aggregate-only projection is accepted.
+        assert!(
+            validate_grouping(&parse("SELECT VALUE COUNT(1) FROM c HAVING COUNT(1) > 1")).is_ok()
+        );
+    }
+
+    #[test]
+    fn having_lowers_to_filter_above_aggregate() {
+        // HAVING is a `Filter` between the `Aggregate` and the `Project`, reading
+        // the rewritten `$keyN`/`$aggN` slots.
+        let node =
+            lower_sql("SELECT c.kind, COUNT(1) AS n FROM c GROUP BY c.kind HAVING COUNT(1) > 1");
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project at the root, got {node:?}");
+        };
+        let Node::Filter {
+            predicate,
+            binding,
+            source,
+        } = *source
+        else {
+            panic!("expected a HAVING Filter under Project");
+        };
+        assert_eq!(binding, RowBinding::Env);
+        // The COUNT in the HAVING predicate is rewritten to read an `$agg` slot,
+        // not re-evaluated per group.
+        let Expression::Binary { lhs, .. } = predicate else {
+            panic!("expected a comparison predicate");
+        };
+        assert!(matches!(*lhs, Expression::Identifier(ref s) if s.starts_with("$agg")));
+        assert!(matches!(*source, Node::Aggregate { .. }));
+    }
+
+    #[test]
+    fn having_only_aggregate_is_still_computed() {
+        // An aggregate that appears *only* in HAVING (not the SELECT) is still
+        // registered on the Aggregate node so the Filter can read it.
+        let node = lower_sql("SELECT VALUE c.kind FROM c GROUP BY c.kind HAVING COUNT(1) > 1");
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        let Node::Filter { source, .. } = *source else {
+            panic!("expected HAVING Filter");
+        };
+        let Node::Aggregate { aggregates, .. } = *source else {
+            panic!("expected Aggregate");
+        };
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].func, "COUNT");
+    }
+
+    #[test]
+    fn having_sits_below_sort() {
+        // Pipeline: Project <- Sort <- Filter(HAVING) <- Aggregate.
+        let node = lower_sql(
+            "SELECT c.kind, COUNT(1) AS n FROM c GROUP BY c.kind \
+             HAVING COUNT(1) > 1 ORDER BY COUNT(1) DESC",
+        );
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        let Node::Sort { source, .. } = *source else {
+            panic!("expected Sort under Project");
+        };
+        let Node::Filter { source, .. } = *source else {
+            panic!("expected HAVING Filter under Sort");
+        };
+        assert!(matches!(*source, Node::Aggregate { .. }));
+    }
+
+    #[test]
+    fn array_agg_lowers_to_aggregate() {
+        let node = lower_sql("SELECT c.kind, ARRAY_AGG(c.name) AS names FROM c GROUP BY c.kind");
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        let Node::Aggregate { aggregates, .. } = *source else {
+            panic!("expected Aggregate");
+        };
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].func, "ARRAY_AGG");
+    }
+
+    #[test]
+    fn documentid_desugars_to_pk_member_access() {
+        // DOCUMENTID(c) → c._id (the configured pk path), so the projection is a
+        // plain member access — no Aggregate node, no DOCUMENTID function call.
+        let node = lower_sql("SELECT VALUE DOCUMENTID(c) FROM c");
+        let Node::Project { expr, .. } = node else {
+            panic!("expected Project");
+        };
+        match expr {
+            Expression::Member { base, field } => {
+                assert_eq!(field, "_id");
+                assert!(matches!(*base, Expression::Identifier(ref a) if a == "c"));
+            }
+            other => panic!("expected `c._id` member access, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn documentid_in_where_desugars() {
+        // DOCUMENTID in a WHERE is desugared too; over the pk it plans as a point
+        // lookup (the pk-equality fast path), proving the rewrite reached the
+        // residual/sargability split.
+        let node = lower_with(
+            r#"SELECT VALUE c FROM c WHERE DOCUMENTID(c) = "2""#,
+            &age_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => assert!(matches!(*source, Node::Values(_))),
+            other => panic!("expected KeyLookup(Values) point read, got {other:?}"),
+        }
     }
 
     #[test]

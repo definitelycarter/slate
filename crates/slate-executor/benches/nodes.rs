@@ -37,7 +37,7 @@ use std::hint::black_box;
 use bson::{Bson, RawBson};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_ast::{Expression, OrderByItem, SelectClause};
+use slate_ast::{BinOp, Expression, Literal, OrderByItem, SelectClause};
 use slate_engine::Engine;
 use slate_executor::bench;
 use slate_planner::{
@@ -319,6 +319,23 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             arg: sv("c.score"),
             slot: "$agg0".into(),
         }];
+        // ARRAY_AGG(score) by status (2 groups): gathers each group's scores into
+        // an array — the n/2-element collection cost dominates over COUNT/SUM.
+        let array_agg_aggs = vec![AggregateExpr {
+            func: "ARRAY_AGG".into(),
+            arg: sv("c.score"),
+            slot: "$agg0".into(),
+        }];
+        // HAVING over the COUNT-by-status aggregate: `$agg0 > <half>` keeps the
+        // groups whose count exceeds half the rows (here, both, so it measures the
+        // post-group Filter pass without dropping its source). `$agg0` is the slot
+        // the Aggregate binds COUNT into; the parser has no `$`-ident syntax, so
+        // the predicate is built directly.
+        let having_pred = Expression::Binary {
+            op: BinOp::Gt,
+            lhs: Box::new(Expression::Identifier("$agg0".into())),
+            rhs: Box::new(Expression::Literal(Literal::Int((n / 4) as i64))),
+        };
 
         // Baseline: rebuild + drain a `values` source — the shared per-iter cost.
         group.bench_with_input(
@@ -486,6 +503,44 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
                         bench::values(docs.clone()),
                     )
                     .unwrap();
+                    black_box(bench::collect(src).unwrap())
+                })
+            },
+        );
+
+        // ARRAY_AGG(score) by status — array-gathering aggregate (2 groups).
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("aggregate_array_agg/{n}")),
+            &n,
+            |b, _| {
+                b.iter(|| {
+                    let src = bench::aggregate(
+                        count_keys.clone(),
+                        array_agg_aggs.clone(),
+                        alias(),
+                        bench::values(docs.clone()),
+                    )
+                    .unwrap();
+                    black_box(bench::collect(src).unwrap())
+                })
+            },
+        );
+
+        // HAVING — a post-aggregation Filter (Env-bound) over the COUNT-by-status
+        // group rows. Times the full Aggregate→Filter pipeline the planner emits.
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("having/{n}")),
+            &n,
+            |b, _| {
+                b.iter(|| {
+                    let agg = bench::aggregate(
+                        count_keys.clone(),
+                        count_aggs.clone(),
+                        alias(),
+                        bench::values(docs.clone()),
+                    )
+                    .unwrap();
+                    let src = bench::filter(having_pred.clone(), RowBinding::Env, agg);
                     black_box(bench::collect(src).unwrap())
                 })
             },

@@ -62,6 +62,9 @@ fn check_query(query: &Query, outer: &[&str]) -> Result<(), PlanError> {
     for k in &query.group_by {
         check_expr(k, &scope)?;
     }
+    if let Some(having) = &query.having {
+        check_expr(having, &scope)?;
+    }
     for o in &query.order_by {
         check_expr(&o.expr, &scope)?;
     }
@@ -128,6 +131,7 @@ fn check_expr(expr: &Expression, scope: &[&str]) -> Result<(), PlanError> {
 pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
     let grouping = !query.group_by.is_empty()
         || select_has_aggregate(&query.select)
+        || query.having.is_some()
         || query.order_by.iter().any(|i| contains_aggregate(&i.expr));
     if !grouping {
         return Ok(());
@@ -158,6 +162,11 @@ pub fn validate_grouping(query: &Query) -> Result<(), PlanError> {
                 check_grounded(&it.expr, &query.group_by, &bindings)?;
             }
         }
+    }
+    // HAVING runs after grouping, so — like the projection — it may reference only
+    // the group keys and aggregates (a bare ungrouped column is rejected).
+    if let Some(having) = &query.having {
+        check_grounded(having, &query.group_by, &bindings)?;
     }
     for item in &query.order_by {
         check_grounded(&item.expr, &query.group_by, &bindings)?;
@@ -235,11 +244,12 @@ fn check_grounded(
     }
 }
 
-/// Whether `name` (case-insensitive) is an aggregate function.
+/// Whether `name` (case-insensitive) is an aggregate function. `ARRAY_AGG` and
+/// its synonym `COLLECT` gather a group's values into an array.
 pub(crate) fn is_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_ascii_uppercase().as_str(),
-        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "ARRAY_AGG" | "COLLECT"
     )
 }
 

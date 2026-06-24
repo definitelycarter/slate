@@ -208,6 +208,11 @@ pub struct Query {
     /// distinct tuple of these expressions, and the `SELECT` may then reference
     /// only these expressions or aggregates.
     pub group_by: Vec<Expression>,
+    /// `HAVING <expr>` — `None` when absent. A post-aggregation filter over the
+    /// group rows: like `SELECT`, it may reference only the group-key expressions
+    /// and aggregates (a bare ungrouped column is rejected). Distinct from
+    /// `WHERE`, which filters input rows *before* grouping.
+    pub having: Option<Expression>,
     pub order_by: Vec<OrderByItem>,
     pub offset: Option<u64>,
     pub limit: Option<u64>,
@@ -216,9 +221,9 @@ pub struct Query {
 impl Query {
     /// The names of every `@parameter` referenced anywhere in the query — the
     /// projection, `JOIN … IN`/`FROM … IN` array expressions, `WHERE`,
-    /// `GROUP BY`, `ORDER BY`, and any nested subqueries — with the leading `@`
-    /// stripped, deduplicated and sorted. Used to validate that a caller supplied
-    /// a value for each referenced parameter.
+    /// `GROUP BY`, `HAVING`, `ORDER BY`, and any nested subqueries — with the
+    /// leading `@` stripped, deduplicated and sorted. Used to validate that a
+    /// caller supplied a value for each referenced parameter.
     pub fn parameter_names(&self) -> BTreeSet<&str> {
         let mut out = BTreeSet::new();
         self.collect_parameters(&mut out);
@@ -251,6 +256,9 @@ impl Query {
         }
         for key in &self.group_by {
             key.collect_parameters(out);
+        }
+        if let Some(having) = &self.having {
+            having.collect_parameters(out);
         }
         for item in &self.order_by {
             item.expr.collect_parameters(out);
@@ -455,6 +463,7 @@ mod tests {
             }),
             filter: Some(param("flt")),
             group_by: vec![param("grp")],
+            having: Some(param("hav")),
             order_by: vec![OrderByItem {
                 expr: param("ord"),
                 direction: SortDirection::Asc,
@@ -464,7 +473,7 @@ mod tests {
         };
         assert_eq!(
             q.parameter_names().into_iter().collect::<Vec<_>>(),
-            vec!["arr", "flt", "grp", "ord", "sel"]
+            vec!["arr", "flt", "grp", "hav", "ord", "sel"]
         );
     }
 }

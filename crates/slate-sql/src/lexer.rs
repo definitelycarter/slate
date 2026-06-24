@@ -85,6 +85,7 @@ fn keyword_or_ident(word: String) -> Token {
         "like" => Token::Like,
         "escape" => Token::Escape,
         "group" => Token::Group,
+        "having" => Token::Having,
         "order" => Token::Order,
         "by" => Token::By,
         "asc" => Token::Asc,
@@ -323,6 +324,14 @@ mod tests {
         assert_eq!(
             lex("SeLeCt vAlUe"),
             vec![Token::Select, Token::Value, Token::Eof]
+        );
+    }
+
+    #[test]
+    fn having_is_a_keyword() {
+        assert_eq!(
+            lex("GROUP BY HAVING"),
+            vec![Token::Group, Token::By, Token::Having, Token::Eof]
         );
     }
 

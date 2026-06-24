@@ -15,6 +15,10 @@
 //! - `MIN`/`MAX` skip `undefined`, order by the shared total order
 //!   ([`order_bson`]), preserve the winning value's type, and have **no** poison
 //!   rule. An empty group is `undefined`.
+//! - `ARRAY_AGG` (synonym `COLLECT`) gathers each row's *defined* value into an
+//!   array, preserving arrival order and each value's type; `undefined` values
+//!   are skipped. An empty group is the empty array `[]` — not `undefined` —
+//!   so a grouped query always emits an array for the group.
 
 use bson::Bson;
 
@@ -29,6 +33,8 @@ pub enum AggFunc {
     Avg,
     Min,
     Max,
+    /// `ARRAY_AGG` (synonym `COLLECT`) — gather the group's values into an array.
+    ArrayAgg,
 }
 
 impl AggFunc {
@@ -41,6 +47,7 @@ impl AggFunc {
             "AVG" => Some(AggFunc::Avg),
             "MIN" => Some(AggFunc::Min),
             "MAX" => Some(AggFunc::Max),
+            "ARRAY_AGG" | "COLLECT" => Some(AggFunc::ArrayAgg),
             _ => None,
         }
     }
@@ -67,6 +74,7 @@ impl AggFunc {
                 want: std::cmp::Ordering::Greater,
                 cur: None,
             },
+            AggFunc::ArrayAgg => Accumulator::ArrayAgg(Vec::new()),
         }
     }
 }
@@ -92,6 +100,8 @@ pub enum Accumulator {
         want: std::cmp::Ordering,
         cur: Option<Bson>,
     },
+    /// `ARRAY_AGG`/`COLLECT` — the group's defined values in arrival order.
+    ArrayAgg(Vec<Bson>),
 }
 
 impl Accumulator {
@@ -142,6 +152,13 @@ impl Accumulator {
                     }
                 }
             }
+            Accumulator::ArrayAgg(items) => {
+                // Skip undefined (a row that didn't produce a value), gather the
+                // rest in arrival order with their type preserved.
+                if let Value::Defined(b) = value {
+                    items.push(b);
+                }
+            }
         }
     }
 
@@ -175,6 +192,9 @@ impl Accumulator {
                 Some(b) => Value::Defined(b),
                 None => Value::Undefined,
             },
+            // Always an array — an empty group is `[]`, never undefined — so the
+            // group row carries the slot (an undefined slot would be omitted).
+            Accumulator::ArrayAgg(items) => Value::Defined(Bson::Array(items)),
         }
     }
 }
@@ -279,5 +299,52 @@ mod tests {
         // No poison rule — MIN/MAX range over mixed types via the total order.
         assert!(run(AggFunc::Min, vec![]).is_undefined());
         assert!(run(AggFunc::Max, vec![Value::Undefined]).is_undefined());
+    }
+
+    #[test]
+    fn array_agg_gathers_defined_values_in_order() {
+        // COLLECT is the synonym, so both names resolve to ArrayAgg.
+        assert_eq!(AggFunc::from_name("ARRAY_AGG"), Some(AggFunc::ArrayAgg));
+        assert_eq!(AggFunc::from_name("collect"), Some(AggFunc::ArrayAgg));
+
+        // Values are gathered in arrival order, with their type preserved.
+        assert_eq!(
+            run(AggFunc::ArrayAgg, vec![def("a"), def(2_i32), def(3.5_f64)]),
+            def(Bson::Array(vec![
+                Bson::String("a".into()),
+                Bson::Int32(2),
+                Bson::Double(3.5),
+            ]))
+        );
+    }
+
+    #[test]
+    fn array_agg_skips_undefined() {
+        // Undefined rows (a missing field) are dropped, not collected as null.
+        assert_eq!(
+            run(
+                AggFunc::ArrayAgg,
+                vec![def(1_i32), Value::Undefined, def(2_i32)]
+            ),
+            def(Bson::Array(vec![Bson::Int32(1), Bson::Int32(2)]))
+        );
+        // A real null *is* a value and is kept (distinct from undefined).
+        assert_eq!(
+            run(
+                AggFunc::ArrayAgg,
+                vec![Value::Defined(Bson::Null), def(1_i32)]
+            ),
+            def(Bson::Array(vec![Bson::Null, Bson::Int32(1)]))
+        );
+    }
+
+    #[test]
+    fn array_agg_empty_group_is_empty_array() {
+        // An empty group is `[]`, not undefined — so the group row keeps the slot.
+        assert_eq!(run(AggFunc::ArrayAgg, vec![]), def(Bson::Array(vec![])));
+        assert_eq!(
+            run(AggFunc::ArrayAgg, vec![Value::Undefined]),
+            def(Bson::Array(vec![]))
+        );
     }
 }

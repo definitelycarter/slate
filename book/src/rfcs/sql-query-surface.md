@@ -64,14 +64,25 @@ work unchanged.
 ## Status & not-yet-implemented
 
 Most of the above has shipped — `SELECT`/`VALUE`/`*`/tabular, `WHERE`, `GROUP BY`,
-`ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, the five aggregates, and subqueries (see
-the [SQL Reference](../sql-support.md) and [Function Reference](../functions.md)).
+`HAVING`, `ORDER BY`, `OFFSET`/`LIMIT`, `JOIN … IN`, the aggregates (`COUNT`/`SUM`/
+`AVG`/`MIN`/`MAX` plus `ARRAY_AGG`/`COLLECT`), and subqueries (see the
+[SQL Reference](../sql-support.md) and [Function Reference](../functions.md)).
+Newly shipped this slice:
+
+- **`HAVING`** — a post-group filter, lowered to a `Filter` over the `Aggregate`
+  output (between aggregation and `ORDER BY`/projection). Like `SELECT`, it may
+  reference only group keys and aggregates; an aggregate that appears only in
+  `HAVING` is still computed.
+- **`ARRAY_AGG`/`COLLECT`** — an aggregate that gathers each group's defined
+  values into an array (synonyms; empty group → `[]`).
+- **`DOCUMENTID`** scalar function — returns the configured pk value. Desugared at
+  plan time to `<alias>.<pk_path>` (the pk path is a catalog fact known only to
+  the planner), so it indexes/point-reads exactly like a direct pk reference.
+
 Remaining gaps:
 
-- **`HAVING`** and **`ARRAY_AGG`/`COLLECT`** aggregation extensions.
-- **`DOCUMENTID`** scalar function (returns the configured pk value). `RAND()` is
-  done — a fresh `[0, 1)` draw per call from an injected source (see the
-  [SQL Reference](../sql-support.md#non-deterministic-functions)).
+- `RAND()` is done — a fresh `[0, 1)` draw per call from an injected source (see
+  the [SQL Reference](../sql-support.md#non-deterministic-functions)).
 - **Full-text search** — `FULLTEXTCONTAINS`/`…ALL`/`…ANY`, `FULLTEXTSCORE`, `RRF`,
   `ORDER BY RANK`: needs a full-text index + BM25 scoring.
 - **Vector** — `VECTORDISTANCE`: needs a vector index.

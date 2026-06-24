@@ -25,6 +25,7 @@ pub enum Token {
     Like,
     Escape,
     Group,
+    Having,
     Order,
     By,
     Asc,

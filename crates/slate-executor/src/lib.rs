@@ -400,6 +400,11 @@ mod end_to_end {
         Executor::new(&txn).execute_collect(plan).unwrap()
     }
 
+    /// Convert a `bson!([...])` array into the `RawBson::Array` an executor emits.
+    fn raw_array(b: bson::Bson) -> RawBson {
+        RawBson::try_from(b).unwrap()
+    }
+
     #[test]
     fn where_order_limit_project() {
         // people: ada/36, alan/41, grace/44
@@ -534,6 +539,132 @@ mod end_to_end {
             vec![
                 RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 }),
                 RawBson::Document(rawdoc! { "senior": false, "n": 1_i64 }),
+            ]
+        );
+    }
+
+    // ── HAVING ──────────────────────────────────────────────────
+
+    #[test]
+    fn having_filters_groups_by_aggregate() {
+        // Two groups: under-41 (ada → n=1) and 41+ (alan, grace → n=2).
+        // HAVING COUNT(1) > 1 drops the single-member group.
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+             GROUP BY c.age >= 41 HAVING COUNT(1) > 1");
+        assert_eq!(
+            out,
+            vec![RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 })]
+        );
+    }
+
+    #[test]
+    fn having_can_reference_a_group_key() {
+        // HAVING over the group key itself: keep only the senior group.
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+             GROUP BY c.age >= 41 HAVING c.age >= 41");
+        assert_eq!(
+            out,
+            vec![RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 })]
+        );
+    }
+
+    #[test]
+    fn having_aggregate_not_in_select() {
+        // SUM(age) only appears in HAVING — it must still be computed. Senior
+        // group's age sum is 41 + 44 = 85 > 80; the junior group's is 36.
+        let out = run("SELECT VALUE c.age >= 41 FROM c \
+             GROUP BY c.age >= 41 HAVING SUM(c.age) > 80");
+        assert_eq!(out, vec![RawBson::Boolean(true)]);
+    }
+
+    #[test]
+    fn having_with_order_by_runs_before_sort() {
+        // Both groups survive HAVING COUNT(1) >= 1; ORDER BY then sorts them.
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+             GROUP BY c.age >= 41 HAVING COUNT(1) >= 1 ORDER BY COUNT(1) DESC");
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Document(rawdoc! { "senior": true, "n": 2_i64 }),
+                RawBson::Document(rawdoc! { "senior": false, "n": 1_i64 }),
+            ]
+        );
+    }
+
+    #[test]
+    fn having_dropping_all_groups_yields_no_rows() {
+        let out = run("SELECT c.age >= 41 AS senior, COUNT(1) AS n FROM c \
+             GROUP BY c.age >= 41 HAVING COUNT(1) > 100");
+        assert!(out.is_empty());
+    }
+
+    // ── ARRAY_AGG / COLLECT ─────────────────────────────────────
+
+    #[test]
+    fn array_agg_gathers_group_values() {
+        // Group by senior-ness; gather each group's names into an array.
+        // ada is junior; alan, grace are senior (scan order is by _id 1,2,3).
+        let out = run(
+            "SELECT c.age >= 41 AS senior, ARRAY_AGG(c.name) AS names FROM c \
+             GROUP BY c.age >= 41",
+        );
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Document(rawdoc! { "senior": false, "names": ["ada"] }),
+                RawBson::Document(rawdoc! { "senior": true, "names": ["alan", "grace"] }),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_is_a_synonym_for_array_agg() {
+        let out = run("SELECT VALUE COLLECT(c.name) FROM c");
+        assert_eq!(out, vec![raw_array(bson::bson!(["ada", "alan", "grace"]))]);
+    }
+
+    #[test]
+    fn array_agg_over_empty_set_is_empty_array() {
+        // A bare ARRAY_AGG over no matching rows still emits one row: `[]`.
+        let out = run("SELECT VALUE ARRAY_AGG(c.name) FROM c WHERE c.age > 100");
+        assert_eq!(out, vec![raw_array(bson::bson!([]))]);
+    }
+
+    // ── DOCUMENTID ──────────────────────────────────────────────
+
+    #[test]
+    fn documentid_returns_the_pk() {
+        // DOCUMENTID(c) → c._id for the people fixture (pk path `_id`).
+        let out = run("SELECT VALUE DOCUMENTID(c) FROM c ORDER BY c.age ASC");
+        assert_eq!(
+            out,
+            vec![
+                RawBson::String("1".into()),
+                RawBson::String("2".into()),
+                RawBson::String("3".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn documentid_in_where_point_reads() {
+        // DOCUMENTID(c) = "2" selects exactly alan.
+        let out = run(r#"SELECT VALUE c.name FROM c WHERE DOCUMENTID(c) = "2""#);
+        assert_eq!(out, vec![RawBson::String("alan".into())]);
+    }
+
+    #[test]
+    fn documentid_grouped_with_count() {
+        // GROUP BY DOCUMENTID(c) — one group per document, COUNT(1) = 1 each.
+        let out = run(
+            "SELECT DOCUMENTID(c) AS id, COUNT(1) AS n FROM c GROUP BY DOCUMENTID(c) ORDER BY DOCUMENTID(c) ASC",
+        );
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Document(rawdoc! { "id": "1", "n": 1_i64 }),
+                RawBson::Document(rawdoc! { "id": "2", "n": 1_i64 }),
+                RawBson::Document(rawdoc! { "id": "3", "n": 1_i64 }),
             ]
         );
     }

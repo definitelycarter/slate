@@ -54,6 +54,8 @@ pub fn find_to_query(filter: &RawDocument, options: &FindOptions) -> Result<Quer
         }),
         filter,
         group_by: Vec::new(),
+        // `find` never groups, so it never has a `HAVING`.
+        having: None,
         order_by,
         offset: options.skip.map(|n| n as u64),
         limit: options.take.map(|n| n as u64),

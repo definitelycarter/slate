@@ -33,7 +33,8 @@ SELECT VALUE UPPER("hello world")
 **Categories:** [Math](#math) · [Integer & bitwise](#integer--bitwise) ·
 [Type checking](#type-checking) · [String](#string) · [Array](#array) ·
 [Conditional & object](#conditional--object) · [Mutation helpers](#mutation-helpers) ·
-[Date & time](#date--time) · [Spatial](#spatial) · [Aggregates](#aggregate-functions)
+[Date & time](#date--time) · [Spatial](#spatial) · [Aggregates](#aggregate-functions) ·
+[Document identity](#document-identity)
 
 ## Math
 
@@ -1060,4 +1061,30 @@ Largest value of `expr` in the group, by Slate's total order across types.
 
 ```slate-sql
 SELECT VALUE MAX(c.price) FROM products c
+```
+
+### `ARRAY_AGG(expr)` / `COLLECT(expr)`
+Gathers each row's value of `expr` in the group into an array, in arrival order
+(`COLLECT` is a synonym). Pairs naturally with `GROUP BY` to roll a group's member
+values up into one document.
+- **Returns:** an Array; each value keeps its type, `undefined` values are skipped, and an empty group is the empty array `[]` (never `undefined`).
+- **Example:** `ARRAY_AGG(c.name)` over `products` → an array of the five product names.
+
+```slate-sql
+SELECT VALUE ARRAY_AGG(c.name) FROM products c
+```
+
+## Document identity
+
+### `DOCUMENTID(root)`
+The document's primary-key value, where `root` is the `FROM` alias (the whole
+document). The pk field is a catalog fact (`_id` in the playground), so this is
+desugared at plan time to `root.<pk_path>` — meaning `DOCUMENTID(c) = "x"` plans
+as the same point read as `c._id = "x"`.
+- **Returns:** the pk value (here a String); a non-document argument, or a document with no pk field, yields undefined.
+- **Example:** `DOCUMENTID(c)` over `products` → `"prod-001"`, …
+- **Grouping:** like any non-aggregate, `DOCUMENTID(c)` in a grouped `SELECT` must appear in `GROUP BY` (or inside an aggregate).
+
+```slate-sql
+SELECT VALUE DOCUMENTID(c) FROM products c
 ```
