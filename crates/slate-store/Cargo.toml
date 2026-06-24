@@ -33,3 +33,11 @@ required-features = ["rocksdb"]
 name = "redb"
 harness = false
 required-features = ["redb"]
+
+# Commit throughput parameterized by durability level (Strict/Buffered/Relaxed)
+# on the two persistent backends. Measures the fsync cost the durability spike
+# needs; separate harness so it never disturbs the per-backend benches above.
+[[bench]]
+name = "durability"
+harness = false
+required-features = ["rocksdb", "redb"]

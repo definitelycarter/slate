@@ -1,13 +1,21 @@
 # RFC: Durability & Crash Safety
 
-> **Status: proposed.** Surfaced in a "what's missing for a *proper embedded
-> database*" survey. Slate has invested heavily in the read path (two query
-> surfaces, one planner/executor, Cosmos-validated correctness, index-key
-> encoding). The layer a user actually stakes their data on — *what survives a
-> crash, and how we know* — is delegated wholesale to the backends, exposes no
-> knob, makes no documented guarantee, and is untested. This is the defining
-> property of a database versus a cache. No code lands until the durability
-> contract below is decided and a spike measures the fsync cost.
+> **Status: implemented.** All three threads have landed on
+> `feat/durability-crash-safety`: a `Durability` knob with a per-transaction
+> override (Thread A), a kill-during-commit → reopen → invariant-check harness
+> (Thread B, incl. the property/fuzz pass B2 and the migration crash test B3),
+> and an engine-level `verify()` + `repair()` (Thread C). Spike decisions and the
+> shipped surface are recorded in [Implementation notes](#implementation-notes)
+> at the foot of this RFC. The fsync-cost benchmark is authored
+> (`slate-store/benches/durability.rs`) and run separately.
+>
+> Surfaced in a "what's missing for a *proper embedded database*" survey. Slate
+> has invested heavily in the read path (two query surfaces, one
+> planner/executor, Cosmos-validated correctness, index-key encoding). The layer
+> a user actually stakes their data on — *what survives a crash, and how we know*
+> — was delegated wholesale to the backends, exposed no knob, made no documented
+> guarantee, and was untested. This is the defining property of a database versus
+> a cache.
 
 ## Problem
 
@@ -160,3 +168,68 @@ Cosmos's hosted replication model. This is squarely "extend beyond the oracle."
   roadmap item.
 - Not chasing a specific coverage number; the crash harness and `verify()` are
   the deliverables, not a percentage.
+
+## Implementation notes
+
+What shipped, and how the open questions were decided.
+
+### Spike decisions
+
+- **Per-transaction override: kept.** The open question was whether the override
+  was worth a `Transaction`-trait change or whether a per-`Database` default
+  sufficed for v1. It was kept, but paid for with a *non-breaking* trait change:
+  `Transaction::set_durability(&mut self, Durability)` has a **default no-op
+  body**, so existing implementors (and `MemoryStore`, where durability is inert)
+  need no change, while the persistent backends override it. The cost the spike
+  worried about (every implementor churns) therefore does not materialize, and
+  the granular knob — `db.begin_with(Durability::Strict)` for a money-moving
+  commit over a `Buffered` ingest default — is available. The fsync-cost numbers
+  are produced by `slate-store/benches/durability.rs`
+  (`durability/{rocks,redb}/commit/{strict,buffered,relaxed}/{1,16}`); the
+  override earns its keep precisely when `Strict` is materially slower than the
+  default, which the bench is there to confirm per backend.
+- **Durability resolution point differs per backend, hidden behind one trait.**
+  RocksDB bakes the flush policy into the transaction's `WriteOptions` at
+  creation, so `RocksTransaction` resolves the level at `begin` (and
+  `set_durability` re-creates the still-empty inner txn). redb applies durability
+  at `commit`, so `RedbTransaction` simply re-targets the live write transaction.
+  `Store::begin_with_durability` has a default impl (begin + `set_durability`)
+  that RocksDB overrides to resolve up front.
+- **`repair()` shipped alongside `verify()`.** The RFC called `repair` the
+  "natural follow-on"; it was small enough to land now. It reuses the encoding
+  migration's reindex routine for `i` entries and re-derives `u` slots from the
+  records, so `verify → repair → verify` is clean and idempotent.
+
+### Surface shipped
+
+| Level | RocksDB | redb | Guarantee on `Ok(commit)` |
+|---|---|---|---|
+| `Durability::Strict` | `WriteOptions::set_sync(true)` | `Durability::Immediate` | fsync'd; survives power loss |
+| `Durability::Buffered` (default) | default WAL, no sync | `Durability::Eventual` | survives process crash, not power loss |
+| `Durability::Relaxed` | `disable_wal(true)` | `Durability::None` | survives neither; fastest |
+
+- `slate_store::Durability` + `Store::{begin_with_durability, default_durability}`
+  and `Transaction::set_durability`; `RocksStore`/`RedbStore::open_with_durability`.
+- `DatabaseBuilder::with_durability`, `Database::begin_with`, `Database::{verify,
+  repair}`.
+- `slate_engine::{IntegrityReport, IntegrityIssue}` + `KvEngine::{verify, repair}`.
+
+### Tests
+
+- Thread A: store-level round-trip + override tests on RocksDB, redb, and
+  (inert) MemoryStore; DB-level `with_durability` / `begin_with` round-trips.
+- Thread C: `verify` clean-and-each-issue-variant tests + `repair`
+  rebuild-to-clean (engine unit tests).
+- Thread B: `crash_recovery.rs` — SIGKILL a worker subprocess mid-commit, reopen,
+  assert (a) it opens, (b) every acked txn is wholly present (atomicity), (c)
+  `verify()` is clean — on RocksDB and redb, plus a repeated-cycle test. B2: a
+  SplitMix64 insert/update/delete fuzz stream with `verify()` as the per-step
+  oracle. B3: an interrupted-migration test asserting the encoding version never
+  half-advances.
+
+### Cross-crate notes
+
+The RFC mentions a CLI `.verify` command; that lives in `slate-cli`, which is
+outside this change's crate footprint (`slate-store` / `slate-engine` /
+`slate-db`). The `verify()` / `repair()` engine + DB surface it would call is in
+place; wiring the CLI command is a follow-up in that crate.

@@ -1,6 +1,6 @@
 #![cfg(feature = "rocksdb")]
 
-use slate_store::{BackupStore, RocksStore, Store, Transaction};
+use slate_store::{BackupStore, Durability, RocksStore, Store, Transaction};
 
 fn temp_store() -> (RocksStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -707,4 +707,88 @@ fn backup_to_existing_path_fails() {
     let backup_dir = tempfile::tempdir().unwrap();
     // RocksDB checkpoint fails if the destination already exists
     assert!(store.backup(backup_dir.path()).is_err());
+}
+
+// ── Durability ───────────────────────────────────────────────
+
+#[test]
+fn default_durability_is_buffered() {
+    let (store, _dir) = temp_store();
+    assert_eq!(store.default_durability(), Durability::Buffered);
+}
+
+#[test]
+fn open_with_durability_sets_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RocksStore::open_with_durability(dir.path(), Durability::Strict).unwrap();
+    assert_eq!(store.default_durability(), Durability::Strict);
+}
+
+/// Every durability level must round-trip a committed write through a reopen
+/// (Relaxed disables the WAL but a clean close still flushes the memtable).
+#[test]
+fn each_durability_level_commits_and_reopens() {
+    for level in [
+        Durability::Strict,
+        Durability::Buffered,
+        Durability::Relaxed,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = RocksStore::open_with_durability(dir.path(), level).unwrap();
+            store.create_cf(CF).unwrap();
+            let txn = store.begin(false).unwrap();
+            let cf = txn.cf(CF).unwrap();
+            txn.put(&cf, b"k", b"v").unwrap();
+            txn.commit().unwrap();
+        }
+        let store = RocksStore::open(dir.path()).unwrap();
+        let txn = store.begin(true).unwrap();
+        let cf = txn.cf(CF).unwrap();
+        assert_eq!(
+            txn.get(&cf, b"k").unwrap().as_deref(),
+            Some(b"v".as_slice()),
+            "level {level:?} did not round-trip"
+        );
+    }
+}
+
+/// The per-transaction override (`begin_with_durability`) writes durably even
+/// when the store default is the loosest level.
+#[test]
+fn per_transaction_override_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = RocksStore::open_with_durability(dir.path(), Durability::Relaxed).unwrap();
+    store.create_cf(CF).unwrap();
+
+    let txn = store.begin_with_durability(Durability::Strict).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"money", b"moved").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(
+        txn.get(&cf, b"money").unwrap().as_deref(),
+        Some(b"moved".as_slice())
+    );
+}
+
+/// `set_durability` after `begin` (before any writes) recreates the inner txn
+/// with the new level, and the commit still lands.
+#[test]
+fn set_durability_after_begin_commits() {
+    let (store, _dir) = temp_store();
+    let mut txn = store.begin(false).unwrap();
+    txn.set_durability(Durability::Strict);
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"a", b"b").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(
+        txn.get(&cf, b"a").unwrap().as_deref(),
+        Some(b"b".as_slice())
+    );
 }

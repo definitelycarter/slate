@@ -101,7 +101,11 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     }
 
     /// Drop and rebuild a collection's `i` index entries from its records.
-    fn reindex_collection_indexes(&self, cf: &str, name: &str) -> Result<(), EngineError> {
+    pub(crate) fn reindex_collection_indexes(
+        &self,
+        cf: &str,
+        name: &str,
+    ) -> Result<(), EngineError> {
         let cf_handle = self.txn.cf(cf)?;
         let meta = self.load_collection_meta(cf, name)?;
         let specs = self.load_indexes(cf, name)?;
@@ -276,5 +280,92 @@ mod tests {
         let tx = engine.begin(true).unwrap();
         assert_eq!(tx.index_encoding_version().unwrap(), INDEX_ENCODING_VERSION);
         tx.rollback().unwrap();
+    }
+
+    /// Migration crash test (RFC Thread B3): a migration killed mid-rebuild must
+    /// leave the version un-advanced, so the *next* open re-runs it cleanly. The
+    /// migration runs in one transaction and commits the reindex + the version
+    /// bump atomically, so "killed mid-rebuild" is modelled by running the
+    /// reindex body and then rolling back instead of committing — the same effect
+    /// a crash before `commit()` would have. The version must still read 0, and a
+    /// real migration afterward must succeed and decode without undercount.
+    #[test]
+    fn migration_interrupted_before_commit_never_half_advances() {
+        let engine = KvEngine::new(MemoryStore::new());
+
+        // Seed a string index and downgrade its entries to the legacy (no-suffix)
+        // layout, so a migration has real work to do.
+        let rows = [("active", "u1"), ("active", "u2"), ("inactive", "u3")];
+        {
+            let tx = engine.begin(false).unwrap();
+            tx.create_collection(DEFAULT_CF, "c", &CreateCollectionOptions::default())
+                .unwrap();
+            tx.create_index_with_options(
+                DEFAULT_CF,
+                "c",
+                "status",
+                &IndexOptions { unique: false },
+            )
+            .unwrap();
+            let handle = tx.collection(DEFAULT_CF, "c").unwrap();
+            for (status, id) in rows {
+                tx.put(&handle, &doc(id, status)).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        {
+            let tx = engine.begin(false).unwrap();
+            let cf = tx.txn.cf(DEFAULT_CF).unwrap();
+            let prefix =
+                KeyPrefix::IndexField(Cow::Borrowed("c"), Cow::Borrowed("status")).encode();
+            let entries: Vec<(Vec<u8>, Vec<u8>)> = tx
+                .txn
+                .scan_prefix(&cf, &prefix)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            for (key, meta) in entries {
+                let legacy = key[..key.len() - 4].to_vec();
+                tx.txn.delete(&cf, &key).unwrap();
+                tx.txn.put(&cf, &legacy, &meta).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // "Crash" mid-migration: run the reindex body, then roll back.
+        {
+            let tx = engine.begin(false).unwrap();
+            tx.run_index_encoding_migration().unwrap();
+            tx.rollback().unwrap();
+        }
+
+        // The version must NOT have advanced (the bump was in the rolled-back txn).
+        {
+            let tx = engine.begin(true).unwrap();
+            assert_eq!(
+                tx.index_encoding_version().unwrap(),
+                0,
+                "version half-advanced after an interrupted migration"
+            );
+            tx.rollback().unwrap();
+        }
+
+        // A real migration on the next open succeeds and stamps the version.
+        engine.migrate_index_encoding().unwrap();
+        {
+            let tx = engine.begin(true).unwrap();
+            assert_eq!(tx.index_encoding_version().unwrap(), INDEX_ENCODING_VERSION);
+            // And the index decodes with the right count (no undercount).
+            let handle = tx.collection(DEFAULT_CF, "c").unwrap();
+            let active = bson::Bson::String("active".to_string());
+            let got = tx
+                .scan_index(&handle, "status", IndexRange::Eq(&active), false)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len();
+            assert_eq!(got, 2);
+            tx.rollback().unwrap();
+        }
     }
 }

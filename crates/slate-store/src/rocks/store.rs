@@ -4,7 +4,7 @@ use std::path::Path;
 use rocksdb::{MultiThreaded, OptimisticTransactionDB, Options, checkpoint::Checkpoint};
 
 use crate::error::StoreError;
-use crate::store::{BackupStore, Store};
+use crate::store::{BackupStore, Durability, Store};
 
 use super::transaction::RocksTransaction;
 
@@ -12,10 +12,21 @@ type DB = OptimisticTransactionDB<MultiThreaded>;
 
 pub struct RocksStore {
     db: DB,
+    default_durability: Durability,
 }
 
 impl RocksStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with_durability(path, Durability::default())
+    }
+
+    /// Open a store with an explicit default durability applied to every write
+    /// transaction (overridable per-transaction via
+    /// [`Store::begin_with_durability`]).
+    pub fn open_with_durability(
+        path: &Path,
+        default_durability: Durability,
+    ) -> Result<Self, StoreError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -29,7 +40,10 @@ impl RocksStore {
         }
         .map_err(|e| StoreError::Storage(e.to_string()))?;
 
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            default_durability,
+        })
     }
 
     pub fn db(&self) -> &DB {
@@ -41,7 +55,18 @@ impl Store for RocksStore {
     type Txn<'a> = RocksTransaction<'a>;
 
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, StoreError> {
-        RocksTransaction::new(&self.db, read_only)
+        RocksTransaction::new(&self.db, read_only, self.default_durability)
+    }
+
+    fn begin_with_durability(&self, durability: Durability) -> Result<Self::Txn<'_>, StoreError> {
+        // RocksDB bakes the flush policy into the transaction's WriteOptions at
+        // creation, so resolve it up front rather than via the post-begin
+        // `set_durability` default (which would recreate the inner txn).
+        RocksTransaction::new(&self.db, false, durability)
+    }
+
+    fn default_durability(&self) -> Durability {
+        self.default_durability
     }
 
     fn create_cf(&self, name: &str) -> Result<(), StoreError> {

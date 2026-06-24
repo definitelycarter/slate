@@ -3,7 +3,16 @@ use std::ops::{Bound, RangeBounds};
 use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
-use crate::store::{Transaction, increment_prefix};
+use crate::store::{Durability, Transaction, increment_prefix};
+
+/// Map a slate [`Durability`] level onto redb's native durability.
+fn redb_durability(durability: Durability) -> redb::Durability {
+    match durability {
+        Durability::Strict => redb::Durability::Immediate,
+        Durability::Buffered => redb::Durability::Eventual,
+        Durability::Relaxed => redb::Durability::None,
+    }
+}
 
 /// Eagerly-collected `(key, value)` entries returned by the write-path helpers.
 type Entries = Vec<(Vec<u8>, Vec<u8>)>;
@@ -42,17 +51,24 @@ pub struct RedbTransaction<'db> {
 }
 
 impl<'db> RedbTransaction<'db> {
-    pub fn new(db: &'db Database, read_only: bool) -> Result<Self, StoreError> {
+    pub fn new(
+        db: &'db Database,
+        read_only: bool,
+        durability: Durability,
+    ) -> Result<Self, StoreError> {
         let inner = if read_only {
             Inner::Read(
                 db.begin_read()
                     .map_err(|e| StoreError::Storage(e.to_string()))?,
             )
         } else {
-            Inner::Write(
-                db.begin_write()
-                    .map_err(|e| StoreError::Storage(e.to_string()))?,
-            )
+            let mut txn = db
+                .begin_write()
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+            // redb resolves durability at commit, so the level can be set now and
+            // re-set later via `set_durability` before the commit lands.
+            txn.set_durability(redb_durability(durability));
+            Inner::Write(txn)
         };
         Ok(Self {
             inner,
@@ -419,6 +435,14 @@ impl<'db> Transaction for RedbTransaction<'db> {
             }
             Inner::Consumed => Err(StoreError::TransactionConsumed),
             _ => unreachable!(),
+        }
+    }
+
+    fn set_durability(&mut self, durability: Durability) {
+        // redb applies the durability at commit, so re-set it on the live write
+        // transaction; read transactions make no durability promise (no-op).
+        if let Inner::Write(txn) = &mut self.inner {
+            txn.set_durability(redb_durability(durability));
         }
     }
 

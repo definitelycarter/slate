@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
 use serde::Serialize;
-use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, KvEngine};
+use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, IntegrityReport, KvEngine};
 use slate_query::{DistinctOptions, FindOptions};
-use slate_store::{BackupStore, Store};
+use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
 
 use crate::collection::{CollectionConfig, CollectionSchema};
@@ -55,6 +55,7 @@ pub struct DatabaseBuilder {
     pool: Option<VmPool>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     rand: Option<RandFn>,
+    durability: Option<Durability>,
     #[cfg(feature = "runtime")]
     sweep_interval: Option<std::time::Duration>,
 }
@@ -71,6 +72,7 @@ impl DatabaseBuilder {
             pool: None,
             clock: None,
             rand: None,
+            durability: None,
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
@@ -103,6 +105,22 @@ impl DatabaseBuilder {
     /// per-thread PRNG; absent any source, `RAND()` evaluates to undefined.
     pub fn with_rand(mut self, rand: impl Fn() -> f64 + Send + Sync + 'static) -> Self {
         self.rand = Some(Arc::new(rand));
+        self
+    }
+
+    /// Set the default durability level for every write transaction this
+    /// database opens, overriding the store's own default.
+    ///
+    /// Three levels, each documented on [`Durability`]:
+    /// - [`Durability::Strict`] — fsync per commit; survives power loss.
+    /// - [`Durability::Buffered`] — the default; survives a process crash but
+    ///   not power loss.
+    /// - [`Durability::Relaxed`] — fastest; survives neither.
+    ///
+    /// A money-moving commit can still tighten this per-transaction via
+    /// [`Database::begin_with`], which overrides the default for one transaction.
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = Some(durability);
         self
     }
 
@@ -160,6 +178,7 @@ impl DatabaseBuilder {
             pool: self.pool,
             registry,
             rand,
+            durability: self.durability,
             #[cfg(feature = "runtime")]
             ttl_handle,
         })
@@ -174,6 +193,9 @@ pub struct Database<S: Store> {
     registry: Option<HookRegistry>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
+    /// The builder-level durability default applied to every write transaction,
+    /// overriding the store's own default. `None` falls back to the store's.
+    durability: Option<Durability>,
     #[cfg(feature = "runtime")]
     ttl_handle: Option<crate::runtime::sweep::TtlHandle>,
 }
@@ -191,7 +213,34 @@ impl<S: Store + BackupStore> Database<S> {
 
 impl<S: Store> Database<S> {
     pub fn begin(&self, read_only: bool) -> Result<Transaction<'_, S>, DbError> {
-        let txn = self.engine.begin(read_only)?;
+        // A write transaction honors the builder-level durability default when
+        // one was set; a read transaction makes no durability promise, so it
+        // always takes the plain begin path. `None` falls through to the store's
+        // own default.
+        let txn = match (read_only, self.durability) {
+            (false, Some(level)) => self.engine.begin_with_durability(level)?,
+            _ => self.engine.begin(read_only)?,
+        };
+        self.wrap_txn(txn)
+    }
+
+    /// Begin a write transaction at an explicit durability level, overriding
+    /// both the store and builder defaults for this one transaction.
+    ///
+    /// The granular knob the durability contract promises: a hot ingest path can
+    /// run at the [`Durability::Buffered`] default while a money-moving commit
+    /// asks for [`Durability::Strict`].
+    pub fn begin_with(&self, durability: Durability) -> Result<Transaction<'_, S>, DbError> {
+        let txn = self.engine.begin_with_durability(durability)?;
+        self.wrap_txn(txn)
+    }
+
+    /// Wrap an engine transaction in a database [`Transaction`] (the shared tail
+    /// of `begin` and `begin_with`).
+    fn wrap_txn<'db>(
+        &'db self,
+        txn: <KvEngine<S> as Engine>::Txn<'db>,
+    ) -> Result<Transaction<'db, S>, DbError> {
         let snapshot = self.registry.as_ref().map(|r| r.snapshot());
         Ok(Transaction {
             txn,
@@ -201,6 +250,23 @@ impl<S: Store> Database<S> {
             rand: self.rand.clone(),
             hooks_dirty: Cell::new(false),
         })
+    }
+
+    /// Walk a collection's records and index structures and report any integrity
+    /// drift (missing / orphan / mismatched `i` / `u` / TTL entries).
+    ///
+    /// Read-only; safe on a live database. The oracle the crash harness asserts
+    /// with after each kill.
+    pub fn verify(&self, cf: &str, collection: &str) -> Result<IntegrityReport, DbError> {
+        Ok(self.engine.verify(cf, collection)?)
+    }
+
+    /// Rebuild a collection's index entries from its records (the source of
+    /// truth), bringing a drifted collection back to a clean
+    /// [`verify`](Self::verify).
+    pub fn repair(&self, cf: &str, collection: &str) -> Result<(), DbError> {
+        self.engine.repair(cf, collection)?;
+        Ok(())
     }
 
     /// Purge expired documents from a collection.

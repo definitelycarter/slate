@@ -37,7 +37,9 @@ rand = { version = "0.8", features = ["small_rng"], optional = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 rand = "0.8"
-slate-store = { path = "../slate-store", features = ["memory"] }
+# `memory` for the bulk of the suite; `rocksdb`/`redb` for the durability +
+# crash-recovery tests, which need a persistent backend to survive a reopen.
+slate-store = { path = "../slate-store", features = ["memory", "rocksdb", "redb"] }
 # Cosmos golden-replay parity (tests/cosmos_golden.rs): compare slate's
 # relaxed-extjson output against committed Cosmos goldens.
 serde_json = "1"

@@ -1,6 +1,6 @@
 #![cfg(feature = "redb")]
 
-use slate_store::{BackupStore, RedbStore, Store, Transaction};
+use slate_store::{BackupStore, Durability, RedbStore, Store, Transaction};
 
 fn temp_store() -> (RedbStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -759,4 +759,92 @@ fn backup_and_restore() {
     let cf = txn.cf(CF).unwrap();
     assert_eq!(&*txn.get(&cf, b"name").unwrap().unwrap(), b"Alice");
     assert_eq!(&*txn.get(&cf, b"score").unwrap().unwrap(), b"100");
+}
+
+// ── Durability ───────────────────────────────────────────────
+
+#[test]
+fn default_durability_is_buffered() {
+    let (store, _dir) = temp_store();
+    assert_eq!(store.default_durability(), Durability::Buffered);
+}
+
+#[test]
+fn open_with_durability_sets_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.redb");
+    let store = RedbStore::open_with_durability(&path, Durability::Strict).unwrap();
+    assert_eq!(store.default_durability(), Durability::Strict);
+}
+
+/// Every durability level must round-trip a committed write through a reopen.
+/// (`None` only loses durability if no *higher*-durability commit follows; a
+/// clean reopen sees the committed root regardless.)
+#[test]
+fn each_durability_level_commits_and_reopens() {
+    for level in [
+        Durability::Strict,
+        Durability::Buffered,
+        Durability::Relaxed,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.redb");
+        {
+            let store = RedbStore::open_with_durability(&path, level).unwrap();
+            store.create_cf(CF).unwrap();
+            let txn = store.begin(false).unwrap();
+            let cf = txn.cf(CF).unwrap();
+            txn.put(&cf, b"k", b"v").unwrap();
+            txn.commit().unwrap();
+        }
+        let store = RedbStore::open(&path).unwrap();
+        let txn = store.begin(true).unwrap();
+        let cf = txn.cf(CF).unwrap();
+        assert_eq!(
+            txn.get(&cf, b"k").unwrap().as_deref(),
+            Some(b"v".as_slice()),
+            "level {level:?} did not round-trip"
+        );
+    }
+}
+
+/// The per-transaction override writes at the requested level over a looser
+/// store default.
+#[test]
+fn per_transaction_override_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.redb");
+    let store = RedbStore::open_with_durability(&path, Durability::Relaxed).unwrap();
+    store.create_cf(CF).unwrap();
+
+    let txn = store.begin_with_durability(Durability::Strict).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"money", b"moved").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(
+        txn.get(&cf, b"money").unwrap().as_deref(),
+        Some(b"moved".as_slice())
+    );
+}
+
+/// `set_durability` after `begin` re-targets the live write transaction's
+/// commit, which still lands.
+#[test]
+fn set_durability_after_begin_commits() {
+    let (store, _dir) = temp_store();
+    let mut txn = store.begin(false).unwrap();
+    txn.set_durability(Durability::Strict);
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"a", b"b").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(
+        txn.get(&cf, b"a").unwrap().as_deref(),
+        Some(b"b".as_slice())
+    );
 }

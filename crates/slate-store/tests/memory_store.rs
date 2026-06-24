@@ -720,3 +720,26 @@ fn backup_returns_error() {
     let result = store.backup(dir.path());
     assert!(result.is_err());
 }
+
+/// MemoryStore is ephemeral, so the durability knob is inert: the default is
+/// `Buffered`, `set_durability` is a harmless no-op, and a commit still works.
+#[test]
+fn durability_is_inert_for_memory_store() {
+    use slate_store::Durability;
+
+    let store = mem_store();
+    assert_eq!(store.default_durability(), Durability::Buffered);
+
+    let mut txn = store.begin(false).unwrap();
+    txn.set_durability(Durability::Strict); // no-op, must not error
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"k", b"v").unwrap();
+    txn.commit().unwrap();
+
+    let txn = store.begin(true).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    assert_eq!(
+        txn.get(&cf, b"k").unwrap().as_deref(),
+        Some(b"v".as_slice())
+    );
+}

@@ -1,8 +1,10 @@
 mod catalog;
 mod migrate;
 mod transaction;
+mod verify;
 
 pub use transaction::KvTransaction;
+pub use verify::{IntegrityIssue, IntegrityReport};
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use slate_store::{BackupStore, Store};
+use slate_store::{BackupStore, Durability, Store};
 
 use crate::error::EngineError;
 
@@ -62,6 +64,29 @@ impl<S: Store + BackupStore> KvEngine<S> {
     pub fn backup(&self, dest: &Path) -> Result<(), EngineError> {
         self.store.backup(dest)?;
         Ok(())
+    }
+}
+
+impl<S: Store> KvEngine<S> {
+    /// Begin a write transaction at an explicit durability level, overriding the
+    /// store's default for this one transaction. Threads to the backend's native
+    /// flush control via [`Store::begin_with_durability`].
+    pub fn begin_with_durability(
+        &self,
+        durability: Durability,
+    ) -> Result<KvTransaction<'_, S>, EngineError> {
+        let now_millis = (self.clock)();
+        let txn = self.store.begin_with_durability(durability)?;
+        Ok(KvTransaction {
+            txn,
+            now_millis,
+            catalog_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// The store's default durability level.
+    pub fn default_durability(&self) -> Durability {
+        self.store.default_durability()
     }
 }
 

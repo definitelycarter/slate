@@ -4,13 +4,40 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use rocksdb::{
-    BoundColumnFamily, Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB, Options,
+    BoundColumnFamily, Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB,
+    OptimisticTransactionOptions, Options, WriteOptions,
 };
 
 use crate::error::StoreError;
-use crate::store::{Transaction, increment_prefix};
+use crate::store::{Durability, Transaction, increment_prefix};
 
 type DB = OptimisticTransactionDB<MultiThreaded>;
+
+/// Build the `WriteOptions` that realize a [`Durability`] level on RocksDB.
+///
+/// The transaction's `commit()` honors the `WriteOptions` it was created with:
+/// - `Strict`   → `set_sync(true)`: fsync the WAL before commit returns.
+/// - `Buffered` → defaults: WAL on, no fsync (survives a crash, not power loss).
+/// - `Relaxed`  → `disable_wal(true)`: skip the WAL entirely (fastest, least safe).
+fn write_options_for(durability: Durability) -> WriteOptions {
+    let mut opts = WriteOptions::new();
+    match durability {
+        Durability::Strict => opts.set_sync(true),
+        Durability::Buffered => {}
+        Durability::Relaxed => opts.disable_wal(true),
+    }
+    opts
+}
+
+/// Begin a fresh inner rocksdb transaction with the given durability's
+/// `WriteOptions`. Used at construction and to re-create the (empty) inner txn
+/// when `set_durability` changes the level before any writes.
+fn begin_inner(db: &DB, durability: Durability) -> rocksdb::Transaction<'_, DB> {
+    db.transaction_opt(
+        &write_options_for(durability),
+        &OptimisticTransactionOptions::default(),
+    )
+}
 
 /// Pre-resolved column family handle for reads.
 #[derive(Clone)]
@@ -22,16 +49,18 @@ pub struct RocksTransaction<'db> {
     txn: Option<rocksdb::Transaction<'db, DB>>,
     db: &'db DB,
     read_only: bool,
+    durability: Durability,
     cf_cache: RefCell<HashMap<String, Arc<BoundColumnFamily<'db>>>>,
 }
 
 impl<'db> RocksTransaction<'db> {
-    pub fn new(db: &'db DB, read_only: bool) -> Result<Self, StoreError> {
-        let txn = db.transaction();
+    pub fn new(db: &'db DB, read_only: bool, durability: Durability) -> Result<Self, StoreError> {
+        let txn = begin_inner(db, durability);
         Ok(Self {
             txn: Some(txn),
             db,
             read_only,
+            durability,
             cf_cache: RefCell::new(HashMap::new()),
         })
     }
@@ -277,6 +306,23 @@ impl<'db> Transaction for RocksTransaction<'db> {
         self.db
             .drop_cf(name)
             .map_err(|e| StoreError::Storage(e.to_string()))
+    }
+
+    fn set_durability(&mut self, durability: Durability) {
+        // RocksDB fixes the flush policy in the transaction's WriteOptions at
+        // creation, so changing the level means re-creating the inner txn. This
+        // is intended to be called immediately after `begin` (before any
+        // writes), where the txn is empty and re-creating it is free of any
+        // staged changes; the level is otherwise inherited from the store.
+        if self.durability == durability {
+            return;
+        }
+        self.durability = durability;
+        // A read-only txn makes no durability promise — keep its (empty) inner
+        // txn untouched. Otherwise swap in a fresh inner txn with the new level.
+        if !self.read_only && self.txn.is_some() {
+            self.txn = Some(begin_inner(self.db, durability));
+        }
     }
 
     fn commit(mut self) -> Result<(), StoreError> {

@@ -3,6 +3,36 @@ use std::path::Path;
 
 use crate::error::StoreError;
 
+/// The durability guarantee a committed transaction makes about surviving a
+/// crash. Chosen at the [`Store`] level (a builder default) and optionally
+/// overridden per-transaction via [`Transaction::set_durability`].
+///
+/// Each level maps onto every persistent backend's native control; the
+/// guarantee column is what `Ok(commit())` promises about data on disk if the
+/// power dies one instruction later:
+///
+/// | Level      | RocksDB             | redb                  | Guarantee on `Ok(commit)`              |
+/// |------------|---------------------|-----------------------|----------------------------------------|
+/// | `Strict`   | `WriteOptions` sync | `Durability::Immediate` | fsync'd; survives power loss          |
+/// | `Buffered` | default WAL, no sync | `Durability::Eventual`  | survives process crash, not power loss |
+/// | `Relaxed`  | `disable_wal`       | `Durability::None`      | survives neither; fastest             |
+///
+/// `MemoryStore` is ephemeral, so the level is inert there (every commit is
+/// equally non-durable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Durability {
+    /// fsync the commit before returning. Survives power loss. Slowest.
+    Strict,
+    /// Write through the backend's normal path (WAL on, no fsync). Survives a
+    /// process crash but not power loss. The default — the balance a typical
+    /// embedded workload wants.
+    #[default]
+    Buffered,
+    /// Skip the durability machinery entirely (no WAL / no flush). Survives
+    /// neither a process crash nor power loss. Fastest; for rebuildable data.
+    Relaxed,
+}
+
 /// Increment a prefix byte-string to produce an exclusive upper bound.
 ///
 /// Returns `None` when the entire prefix is `0xFF` (no upper bound exists).
@@ -26,6 +56,27 @@ pub trait Store {
         Self: 'a;
 
     fn begin(&self, read_only: bool) -> Result<Self::Txn<'_>, StoreError>;
+
+    /// Begin a write transaction with an explicit durability level, overriding
+    /// the store's default for this one transaction.
+    ///
+    /// The default implementation begins a normal transaction and sets the level
+    /// via [`Transaction::set_durability`]; backends that resolve durability at
+    /// `begin` time (rather than `commit`) may override this. `read_only` is
+    /// always `false` here — durability only concerns writes.
+    fn begin_with_durability(&self, durability: Durability) -> Result<Self::Txn<'_>, StoreError> {
+        let mut txn = self.begin(false)?;
+        txn.set_durability(durability);
+        Ok(txn)
+    }
+
+    /// The store-wide default durability applied to every [`begin`](Self::begin)
+    /// write transaction. Backends with a configurable default override this;
+    /// the trait default is [`Durability::Buffered`].
+    fn default_durability(&self) -> Durability {
+        Durability::Buffered
+    }
+
     fn create_cf(&self, name: &str) -> Result<(), StoreError>;
     fn drop_cf(&self, name: &str) -> Result<(), StoreError>;
     /// Deletes all keys in the given range within a column family.
@@ -82,6 +133,18 @@ pub trait Transaction {
     // Schema
     fn create_cf(&self, name: &str) -> Result<(), StoreError>;
     fn drop_cf(&self, name: &str) -> Result<(), StoreError>;
+
+    // Durability
+
+    /// Set this transaction's durability level, overriding the store default for
+    /// this transaction's [`commit`](Self::commit). Has effect only before
+    /// commit; calling it on a read-only transaction is a harmless no-op (a read
+    /// makes no durability promise).
+    ///
+    /// The default implementation does nothing — appropriate for ephemeral
+    /// backends (`MemoryStore`) where every commit is equally non-durable.
+    /// Persistent backends override it to drive their native flush control.
+    fn set_durability(&mut self, _durability: Durability) {}
 
     // Lifecycle
     fn commit(self) -> Result<(), StoreError>;
