@@ -32,6 +32,7 @@
 - [Logical Export / Import](./rfcs/logical-export-import.md)
 - [Index Key Value/Doc-Id Boundary](./rfcs/index-key-boundary.md)
 - [Compound Indexes](./rfcs/compound-indexes.md)
+- [Covering Index Scans & Engine-Level Recheck](./rfcs/covering-index-scans.md)
 - [Multikey (Array) Indexes](./rfcs/multikey-indexes.md)
 - [Partial Indexes](./rfcs/partial-indexes.md)
 - [Unique Indexes](./rfcs/unique-indexes.md)
