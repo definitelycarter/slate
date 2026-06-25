@@ -1,11 +1,15 @@
 # RFC: Vector Index & `VECTORDISTANCE`
 
-> **Status: proposed (design spike).** A vector field + nearest-neighbour search,
-> for semantic/RAG workloads, with Cosmos `VECTORDISTANCE` parity. This RFC frames
-> the design space and a recommended phasing; it does **not** commit to an ANN
-> implementation. The evidence behind every claim — how Cosmos / MongoDB /
-> pgvector / embedded stores lay vectors out on disk, the ANN algorithm families,
-> and the use cases — lives in the companion
+> **Status: `VECTORDISTANCE` function shipped; index proposed (design spike).** The
+> scalar `VECTORDISTANCE(a, b, metric?)` (cosine / dotproduct / euclidean) has
+> shipped in `slate-eval` as the *function-first* slice — usable now over a full
+> scan (`ORDER BY VECTORDISTANCE(…) … LIMIT k` for kNN), the `ST_*` precedent. The
+> flat vector *index* that turns it into a seek is designed below but unbuilt
+> (it shares the query-engine spine with the covering-scan work, so it lands after
+> that). This RFC frames the design space and a recommended phasing; it does
+> **not** commit to an ANN implementation. The evidence behind every claim — how
+> Cosmos / MongoDB / pgvector / embedded stores lay vectors out on disk, the ANN
+> algorithm families, and the use cases — lives in the companion
 > [research notes](./vector-index-research-notes.md) (84 cited sources). The
 > [roadmap](../roadmap.md) tracks status at a glance.
 
