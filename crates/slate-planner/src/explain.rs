@@ -17,7 +17,7 @@ use slate_ast::{BinOp, Expression, Literal, OrderByItem, SortDirection, Subquery
 
 use crate::plan::{
     AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey, IndexScanRange,
-    LogicalOp, Node, Plan, ScanDirection, UpsertMode,
+    LogicalOp, Node, Plan, ScanDirection, UpsertMode, VectorMetric,
 };
 use crate::stats::PlanStats;
 
@@ -253,6 +253,31 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             );
             render_node(source, depth + 1, lines, ctx);
         }
+        Node::VectorTopK {
+            collection,
+            field,
+            metric,
+            k,
+            source,
+            ..
+        } => {
+            // When there's a pre-filter `source`, it's the single child whose
+            // count is "examined"; with none the scan reads the whole field.
+            let suffix = ctx.annotate(index, source.as_ref().map(|_| ctx.emitted(index + 1)));
+            line(
+                lines,
+                depth,
+                format!(
+                    "VectorTopK {}.{field} {} k={k}{}{suffix}",
+                    coll(collection),
+                    vector_metric(metric),
+                    if source.is_some() { " filtered" } else { "" },
+                ),
+            );
+            if let Some(src) = source {
+                render_node(src, depth + 1, lines, ctx);
+            }
+        }
         Node::IndexMerge {
             logical, lhs, rhs, ..
         } => {
@@ -379,6 +404,15 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
 /// `cf.collection`, the container identity the executor resolves.
 fn coll(c: &CollectionRef) -> String {
     format!("{}.{}", c.cf, c.collection)
+}
+
+/// The metric name a [`Node::VectorTopK`] measures by.
+fn vector_metric(m: &VectorMetric) -> &'static str {
+    match m {
+        VectorMetric::Cosine => "cosine",
+        VectorMetric::DotProduct => "dotproduct",
+        VectorMetric::Euclidean => "euclidean",
+    }
 }
 
 /// Render an index scan's bounds: an exact match, a (half-)open range, or the

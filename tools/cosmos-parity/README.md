@@ -171,7 +171,20 @@ Real slate gaps:
   bit-reproduce Cosmos's proprietary spatial library to the corpus's 10-decimal
   comparison. The boolean spatial functions (`ST_ISVALID`, `ST_ISVALIDDETAILED`,
   `ST_WITHIN`, `ST_INTERSECTS`) match exactly.
-- **Not-yet-implemented functions** — `VECTORDISTANCE` (needs a vector index).
+
+Oracle-coverage boundary (the emulator structurally can't validate it — SKILL §9):
+- **Vector search** — `VECTORDISTANCE` and its flat vector index (`ORDER BY
+  VECTORDISTANCE(c.<field>, @q) … TOP k`) are implemented in slate, but the linux
+  Cosmos emulator does not support vector search, so it can't serve as the oracle
+  (the same structural limit as index choice / sargability — the emulator ignores
+  index policy and has no vector index, so a golden can't be captured from it). The
+  flat index is **exact** — it returns precisely the rows a full `VECTORDISTANCE`
+  scan would, which is what Cosmos's results validate against — so correctness is
+  pinned in-repo by the executor's brute-force reference tests
+  (`slate-executor` `nodes::vector_topk::tests::*_matches_brute_force` and the
+  end-to-end `e2e_*` cases, incl. the filtered pre-filter case), not a Cosmos
+  golden. When hosted-Cosmos (or a future emulator) gains vector search, capture a
+  golden for `ORDER BY VECTORDISTANCE(…) TOP k` then.
 
 Emulator limitations (oracle is wrong, slate is correct — confirm on hosted Cosmos):
 - **Multi-value subquery as a JOIN source** (`JOIN j IN (SELECT …)`) returns `[]`

@@ -621,6 +621,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             slate_planner::CollectionMeta {
                 indexes: Vec::new(),
                 compound_indexes: Vec::new(),
+                vector_indexes: Vec::new(),
                 pk_path: "_id".to_string(),
             }
         };
@@ -656,9 +657,22 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
                 indexes.push(identity.clone());
             }
         }
+        // Flat vector indexes — the planner routes a `VECTORDISTANCE(c.<field>, …)`
+        // kNN to a matching one. Map the engine's `VectorMetric` across the crate
+        // boundary into the planner's mirror (the planner can't depend on
+        // slate-engine); it carries only the field + metric the recogniser needs.
+        let vector_indexes = handle
+            .vector_indexes()
+            .iter()
+            .map(|spec| slate_planner::VectorIndexMeta {
+                field: spec.path.clone(),
+                metric: map_vector_metric(spec.metric),
+            })
+            .collect();
         Ok(slate_planner::CollectionMeta {
             indexes,
             compound_indexes,
+            vector_indexes,
             pk_path: handle.pk_path().to_string(),
         })
     }
@@ -1204,5 +1218,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         self.txn
             .drop_function(cf, collection, FunctionKind::Udf, name)?;
         Ok(())
+    }
+}
+
+/// Map the engine's [`VectorMetric`](slate_engine::VectorMetric) onto the
+/// planner's mirror — the same three metrics, kept as separate types so the
+/// planner needn't depend on slate-engine. The single crossing of that boundary.
+fn map_vector_metric(metric: slate_engine::VectorMetric) -> slate_planner::VectorMetric {
+    match metric {
+        slate_engine::VectorMetric::Cosine => slate_planner::VectorMetric::Cosine,
+        slate_engine::VectorMetric::DotProduct => slate_planner::VectorMetric::DotProduct,
+        slate_engine::VectorMetric::Euclidean => slate_planner::VectorMetric::Euclidean,
     }
 }

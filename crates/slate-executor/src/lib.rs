@@ -45,6 +45,20 @@ use slate_vm::pool::VmPool;
 use analyze::Counting;
 pub use error::ExecError;
 
+/// Map the planner's [`VectorMetric`](slate_planner::VectorMetric) onto
+/// [`slate_eval::VectorMetric`], which the vector-distance math is keyed on — the
+/// planner can't name the eval type, so the metric crosses the boundary here, the
+/// physical-execution side of the same map `slate-db` does for the catalog. The
+/// shared eval math is what keeps the top-k node bit-identical to the scalar
+/// `VECTORDISTANCE`.
+fn map_vector_metric(metric: slate_planner::VectorMetric) -> slate_eval::VectorMetric {
+    match metric {
+        slate_planner::VectorMetric::Cosine => slate_eval::VectorMetric::Cosine,
+        slate_planner::VectorMetric::DotProduct => slate_eval::VectorMetric::DotProduct,
+        slate_planner::VectorMetric::Euclidean => slate_eval::VectorMetric::Euclidean,
+    }
+}
+
 /// A streaming sequence of optionally-undefined raw values.
 ///
 /// The `'a` lifetime ties a stream to the transaction it reads from.
@@ -288,6 +302,30 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::key_lookup::execute(self.txn, &collection, source)?
             }
 
+            Node::VectorTopK {
+                collection,
+                field,
+                query_vector,
+                metric,
+                k,
+                source,
+            } => {
+                // The optional pre-filter sub-plan yields the candidate doc-ids
+                // (rule 1); `None` scans the whole field.
+                let source = source.map(|s| self.execute_node(*s, current)).transpose()?;
+                nodes::vector_topk::execute(
+                    self.txn,
+                    &collection,
+                    field,
+                    query_vector,
+                    map_vector_metric(metric),
+                    k,
+                    source,
+                    self.params.clone(),
+                    self.rand.clone(),
+                )?
+            }
+
             Node::IndexMerge {
                 collection,
                 logical,
@@ -513,6 +551,7 @@ mod end_to_end {
         let meta = CollectionMeta {
             indexes,
             compound_indexes,
+            vector_indexes: Vec::new(),
             pk_path: handle.pk_path().to_string(),
         };
         let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), people_ref(), &meta);
@@ -532,6 +571,7 @@ mod end_to_end {
         let meta = CollectionMeta {
             indexes: handle.indexes().to_vec(),
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: handle.pk_path().to_string(),
         };
         let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), people_ref(), &meta);

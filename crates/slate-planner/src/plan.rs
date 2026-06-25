@@ -106,6 +106,34 @@ pub enum ScanDirection {
     Reverse,
 }
 
+/// The distance/similarity metric a [`Node::VectorTopK`] measures by — Cosmos's
+/// three. Carried in the IR (not [`slate_eval::VectorMetric`]) to keep the
+/// planner free of the eval crate; the executor maps it across the boundary.
+/// Each variant's *sense* (higher-is-closer vs lower-is-closer) decides which k
+/// the top-k keeps and which `ORDER BY` direction the planner will seek for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorMetric {
+    /// Cosine similarity — higher is closer (`ORDER BY … DESC`).
+    Cosine,
+    /// Inner (dot) product — higher is closer (`ORDER BY … DESC`).
+    DotProduct,
+    /// Euclidean (L2) distance — lower is closer (`ORDER BY … ASC`).
+    Euclidean,
+}
+
+impl VectorMetric {
+    /// Whether a *larger* score means *nearer* — true for the similarity metrics,
+    /// false for the `euclidean` distance. The recogniser only emits a
+    /// `VectorTopK` when the `ORDER BY` direction matches this (DESC when true,
+    /// ASC when false), so a mismatch falls back to the full `Sort`+`Limit`.
+    pub fn higher_is_closer(self) -> bool {
+        match self {
+            VectorMetric::Cosine | VectorMetric::DotProduct => true,
+            VectorMetric::Euclidean => false,
+        }
+    }
+}
+
 /// How an [`Node::IndexMerge`] combines its two child ID streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOp {
@@ -228,6 +256,38 @@ pub enum Node {
         /// which proves every referenced field is a component or the pk before
         /// flipping it.
         covering: Option<Vec<String>>,
+    },
+
+    /// Flat-vector-index k-nearest-neighbour source — the physical form of
+    /// `ORDER BY VECTORDISTANCE(c.<field>, <q>[, <m>]) … LIMIT k` when `<field>`
+    /// has a matching flat vector index (the recogniser in [`crate::lower`]
+    /// emits it in place of `Sort`+`Limit`). Scans the index's stored vectors,
+    /// measures each against `query_vector` by `metric`, and yields the `k`
+    /// nearest doc-ids in nearest-first order — paired with [`Node::KeyLookup`]
+    /// to fetch the documents (a bare-id source, exactly like an `IndexScan`).
+    ///
+    /// `source`, when `Some`, is the **pre-filter**: a sub-plan yielding the
+    /// candidate doc-ids a constraining `WHERE` admits, materialized into a set
+    /// the top-k restricts to *before* selecting the k nearest. This is the
+    /// correctness rule for filtered vector search — the filter must shrink the
+    /// candidate set *before* the top-k, never after (a global top-k then
+    /// filtered would under-return). `None` means no constraining `WHERE`: the
+    /// top-k runs over the whole field.
+    VectorTopK {
+        collection: CollectionRef,
+        /// The document field the vector index is on (the path inside the
+        /// `VECTORDISTANCE` call, e.g. `embedding`).
+        field: String,
+        /// The query vector expression — evaluated *once* by the executor (it is
+        /// row-independent: a literal array, an `@parameter`, etc.).
+        query_vector: Expression,
+        /// The metric to measure by — the index's declared metric (which the
+        /// recogniser proved matches the call's, if one was given).
+        metric: VectorMetric,
+        /// How many nearest neighbours to keep (the `LIMIT`/`TOP`).
+        k: usize,
+        /// The pre-filter candidate-id source, or `None` for a whole-field scan.
+        source: Option<Box<Node>>,
     },
 
     /// Point read by ID — takes IDs (or documents, from which the pk is

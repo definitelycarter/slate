@@ -21,8 +21,10 @@ pub mod eval;
 pub mod functions;
 pub mod raweval;
 pub mod value;
+pub mod vector;
 
 pub use apply::apply_assignments;
 pub use error::{EvalError, Result};
 pub use eval::compare_bson;
 pub use value::Value;
+pub use vector::VectorMetric;
