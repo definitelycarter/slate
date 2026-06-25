@@ -201,6 +201,7 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             range,
             direction,
             limit,
+            covering,
         } => {
             let mut text = format!("IndexScan {}.{field} {}", coll(collection), bounds(range));
             text.push(' ');
@@ -210,6 +211,9 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             });
             if let Some(n) = limit {
                 text.push_str(&format!(" limit {n}"));
+            }
+            if *covering {
+                text.push_str(" covering");
             }
             text.push_str(&ctx.annotate(index, None));
             line(lines, depth, text);
@@ -629,6 +633,7 @@ Project c.name
                 range: IndexScanRange::Eq(Bson::String("x".to_string())),
                 direction: ScanDirection::Forward,
                 limit: None,
+                covering: false,
             }),
         });
         assert_eq!(
@@ -650,6 +655,7 @@ KeyLookup default.users
             },
             direction: ScanDirection::Reverse,
             limit: Some(10),
+            covering: false,
         });
         assert_eq!(
             plan.explain(),

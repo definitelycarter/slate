@@ -45,12 +45,12 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
             // validate it before lowering — the two checks Cosmos applies.
             validate_bindings(&query)?;
             validate_grouping(&query)?;
-            Ok(Plan::Query(lower_query(
-                query,
-                ctx.container.clone(),
-                &ctx.meta,
-                &[],
-            )))
+            let node = lower_query(query, ctx.container.clone(), &ctx.meta, &[]);
+            // Covering applies only to reads: a single-field index scan whose
+            // query touches only the indexed field and the pk skips the document
+            // fetch (RFC Part B). Writes lower through `write_source` and never
+            // reach here, so a write always sees the real documents.
+            Ok(Plan::Query(crate::covering::apply(node, &ctx.meta.pk_path)))
         }
 
         Statement::Insert { docs } => {

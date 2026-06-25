@@ -185,16 +185,24 @@ pub enum Node {
     /// streams the collection's documents.
     Scan { collection: CollectionRef },
 
-    /// Index scan — a *source* node that yields bare document IDs from an index
-    /// on `field`. Pair with [`Node::KeyLookup`] to fetch the documents. (The
-    /// covered-index optimization is a planner concern, deferred with
-    /// sargability.)
+    /// Index scan — a *source* node yielding document IDs from an index on
+    /// `field`, or — when `covering` — synthesized documents served entirely
+    /// from the index entries. A non-covering scan pairs with
+    /// [`Node::KeyLookup`] to fetch the documents; a covering scan is a complete
+    /// source and the planner omits the `KeyLookup` (RFC: Covering Index Scans,
+    /// Part B).
     IndexScan {
         collection: CollectionRef,
         field: String,
         range: IndexScanRange,
         direction: ScanDirection,
         limit: Option<usize>,
+        /// When `true`, yield a synthesized `{field: entry.value(), <pk>: id}`
+        /// document per entry instead of a bare doc-id, so a query referencing
+        /// only `field` and the primary key needs no `KeyLookup`. Set solely by
+        /// the covering pass ([`crate::covering`]), which proves every
+        /// referenced field is the scanned field or the pk before flipping it.
+        covering: bool,
     },
 
     /// Compound index scan — a *source* node yielding bare document IDs from a

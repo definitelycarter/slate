@@ -631,6 +631,9 @@ fn index_scan(container: &CollectionRef, field: &str, range: IndexScanRange) -> 
         range,
         direction: ScanDirection::Forward,
         limit: None,
+        // Not covering by default — the covering pass flips this after proving
+        // the query reads only this field and the pk (RFC Part B).
+        covering: false,
     }
 }
 

@@ -1,8 +1,13 @@
-//! The `IndexScan` source — yields bare document IDs from a field index.
+//! The `IndexScan` source — yields document IDs from a field index, or — when
+//! `covering` — synthesized documents served entirely from the index entries.
 //!
 //! Maps the IR's [`IndexScanRange`] onto the engine's `IndexRange` and streams
 //! the matching entries' doc-IDs. Pair with [`super::key_lookup`] to fetch the
-//! documents.
+//! documents — unless the scan is **covering**, in which case it emits a
+//! synthesized `{field: entry.value(), <pk>: doc_id}` document per entry and the
+//! planner omits the `KeyLookup` (RFC: Covering Index Scans, Part B). The
+//! planner only sets `covering` after proving the query reads nothing but
+//! `field` and the pk, so the two fields the entry carries are all it needs.
 //!
 //! ## Post-filter: keeping the index identical to a scan
 //!
@@ -22,12 +27,30 @@
 
 use std::cmp::Ordering;
 
-use bson::Bson;
-use slate_engine::{Catalog, EngineTransaction, IndexRange};
+use bson::raw::CString;
+use bson::{Bson, RawBson, RawDocumentBuf};
+use slate_engine::{Catalog, EngineError, EngineTransaction, IndexEntry, IndexRange};
 use slate_eval::compare_bson;
 use slate_planner::{CollectionRef, IndexScanRange, ScanDirection};
 
 use crate::{ExecError, ValueIter};
+
+/// Build the covering row for one entry: the indexed value under `field`, and
+/// the doc-id under `pk_path`. The pk is skipped when the index field *is* the
+/// pk (avoiding a duplicate key); the planner proved the query reads nothing but
+/// these two fields, so the synthesized document is a drop-in for the fetched one.
+fn synthesize_row(entry: &IndexEntry, field: &str, pk_path: &str) -> Result<RawBson, EngineError> {
+    let field_key = CString::try_from(field)
+        .map_err(|e| EngineError::InvalidKey(format!("index field {field:?}: {e}")))?;
+    let mut doc = RawDocumentBuf::new();
+    doc.append(field_key, entry.value()?);
+    if pk_path != field {
+        let pk_key = CString::try_from(pk_path)
+            .map_err(|e| EngineError::InvalidKey(format!("pk path {pk_path:?}: {e}")))?;
+        doc.append(pk_key, entry.doc_id()?);
+    }
+    Ok(RawBson::Document(doc))
+}
 
 /// A bounded range predicate matched with the same coercing, type-bracketed
 /// comparator `WHERE` uses, so the index path returns exactly what a residual
@@ -79,8 +102,14 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     range: &IndexScanRange,
     direction: ScanDirection,
     limit: Option<usize>,
+    covering: bool,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
+
+    // A covering scan synthesizes rows from entries, so it needs the pk path;
+    // own it (a short string) since the closure outlives the borrowed handle. The
+    // common non-covering scan pays nothing.
+    let pk_path = covering.then(|| handle.pk_path().to_string());
 
     let post_filter = CoercingFilter::for_range(range);
 
@@ -143,8 +172,14 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             }
             count += 1;
 
-            return match entry.doc_id() {
-                Ok(id) => Some(Ok(Some(id))),
+            // Covering: emit the synthesized `{field, pk}` row; otherwise the
+            // bare doc-id for the paired `KeyLookup` to fetch.
+            let yielded = match pk_path.as_deref() {
+                Some(pk) => synthesize_row(&entry, &field, pk),
+                None => entry.doc_id(),
+            };
+            return match yielded {
+                Ok(row) => Some(Ok(Some(row))),
                 Err(e) => {
                     done = true;
                     Some(Err(ExecError::Engine(e)))
@@ -172,7 +207,16 @@ mod tests {
     ) -> Vec<RawBson> {
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
-        let iter = execute(&txn, &people_ref(), "age".into(), &range, direction, limit).unwrap();
+        let iter = execute(
+            &txn,
+            &people_ref(),
+            "age".into(),
+            &range,
+            direction,
+            limit,
+            false,
+        )
+        .unwrap();
         collect(iter).unwrap()
     }
 

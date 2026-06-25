@@ -57,6 +57,7 @@ mod tests {
             range: IndexScanRange::Eq(Bson::Int64(age)),
             direction: ScanDirection::Forward,
             limit: None,
+            covering: false,
         }
     }
 

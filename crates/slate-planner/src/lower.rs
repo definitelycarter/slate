@@ -29,7 +29,8 @@ use crate::validate::{contains_aggregate, is_aggregate_name};
 
 /// Lower `query` into a plan that reads from `container`.
 pub fn lower(query: Query, container: CollectionRef, meta: &CollectionMeta) -> Plan {
-    Plan::Query(lower_query(query, container, meta, &[]))
+    let node = lower_query(query, container, meta, &[]);
+    Plan::Query(crate::covering::apply(node, &meta.pk_path))
 }
 
 /// A subquery used directly as a FROM/JOIN iteration source is *multi-value*:

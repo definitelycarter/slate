@@ -117,7 +117,13 @@ fn string_equals_uses_index_scan() {
         "SELECT VALUE c._id FROM c WHERE STRINGEQUALS(c.name, \"alpha\")",
     );
     assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
-    assert!(plan.contains("KeyLookup"), "expected a key lookup: {plan}");
+    // Projecting only the pk (carried by the index entry) covers the query, so
+    // the scan is `covering` and the document fetch is dropped (RFC Part B).
+    assert!(
+        plan.contains("covering"),
+        "expected a covering scan: {plan}"
+    );
+    assert!(!plan.contains("KeyLookup"), "covered, no fetch: {plan}");
     assert!(
         plan.contains("things.name"),
         "index scan should name the indexed field: {plan}"
@@ -201,7 +207,13 @@ fn startswith_uses_index_scan() {
         "SELECT VALUE c._id FROM c WHERE STARTSWITH(c.name, \"alp\")",
     );
     assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
-    assert!(plan.contains("KeyLookup"), "expected a key lookup: {plan}");
+    // Pk-only projection → covering scan; the retained STARTSWITH recheck still
+    // runs as a Filter over the synthesized row (RFC Part B).
+    assert!(
+        plan.contains("covering"),
+        "expected a covering scan: {plan}"
+    );
+    assert!(!plan.contains("KeyLookup"), "covered, no fetch: {plan}");
     assert!(
         plan.contains("things.name"),
         "index scan should name the indexed field: {plan}"
