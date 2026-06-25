@@ -12,7 +12,9 @@ use crate::encoding::index_record::is_index_expired;
 use crate::encoding::{IndexRecord, Key, KeyPrefix, Record};
 use crate::error::EngineError;
 use crate::index_sync::{IndexChanges, IndexDiff};
-use crate::traits::{CollectionHandle, EngineTransaction, IndexEntry, IndexRange};
+use crate::traits::{
+    CollectionHandle, CompoundRange, CompoundTail, EngineTransaction, IndexEntry, IndexRange,
+};
 use crate::validate::validate_raw_document;
 
 /// A short name for a Bson value the index cannot encode as a key (the
@@ -145,6 +147,89 @@ fn resolve_index_scan(
         range,
         exact,
         field_prefix_len,
+    })
+}
+
+/// What a compound index scan resolves to: the byte range to seek and the
+/// field-prefix length for decoding entries. Unlike the single-field
+/// [`ResolvedScan`], no per-entry exact-match is computed here — the executor
+/// rechecks the leading equalities (and the trailing range) exactly, since a
+/// variable-width leading component's byte prefix is a conservative superset.
+struct ResolvedCompoundScan {
+    range: (Bound<Vec<u8>>, Bound<Vec<u8>>),
+    field_prefix_len: usize,
+    type_byte_count: usize,
+}
+
+/// Turn a [`CompoundRange`] into a byte range over a compound index's keyspace.
+///
+/// The lower bound concatenates the equality-prefix value bytes onto the field
+/// prefix, plus the tail's lower bound; the upper bound is the exclusive
+/// successor of that prefix, narrowed by the tail's upper bound. Inclusivity is
+/// ignored at the byte level (the executor's recheck applies exact bounds), so
+/// this is a conservative superset — exactly the single-field `Range` contract,
+/// lifted to the compound prefix.
+fn resolve_compound_scan(
+    collection: &str,
+    field: &str,
+    range: CompoundRange<'_>,
+) -> Result<ResolvedCompoundScan, EngineError> {
+    let field_prefix =
+        KeyPrefix::IndexField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+    let field_prefix_len = field_prefix.len();
+    let type_byte_count = field.as_bytes().iter().filter(|&&b| b == 0x01).count() + 1;
+
+    // Common prefix: field prefix + the equality components' value bytes.
+    let mut prefix = field_prefix;
+    for value in range.eq_prefix {
+        prefix.extend_from_slice(encode_index_value(value, field)?.bytes.as_ref());
+    }
+
+    let upper_after = |start: &[u8]| match increment_key(start) {
+        Some(end) => Bound::Excluded(end),
+        None => Bound::Unbounded,
+    };
+
+    let (lo, hi) = match range.tail {
+        CompoundTail::Unbounded => {
+            let end = upper_after(&prefix);
+            (Bound::Included(prefix), end)
+        }
+        CompoundTail::Eq(value) => {
+            let mut lower = prefix;
+            lower.extend_from_slice(encode_index_value(value, field)?.bytes.as_ref());
+            let end = upper_after(&lower);
+            (Bound::Included(lower), end)
+        }
+        CompoundTail::Range { lower, upper } => {
+            // Upper first so the unbounded-lower case can move `prefix`.
+            let hi = match upper {
+                Some((v, _incl)) => {
+                    // Clone justified: when both bounds are present the lower-bound
+                    // branch below still needs `prefix`, so the upper key is built
+                    // from a copy. Bounded both-sided ranges are the rare case.
+                    let mut key = prefix.clone();
+                    key.extend_from_slice(encode_index_value(v, field)?.bytes.as_ref());
+                    upper_after(&key)
+                }
+                None => upper_after(&prefix),
+            };
+            let lo = match lower {
+                Some((v, _incl)) => {
+                    let mut key = prefix;
+                    key.extend_from_slice(encode_index_value(v, field)?.bytes.as_ref());
+                    Bound::Included(key)
+                }
+                None => Bound::Included(prefix),
+            };
+            (lo, hi)
+        }
+    };
+
+    Ok(ResolvedCompoundScan {
+        range: (lo, hi),
+        field_prefix_len,
+        type_byte_count,
     })
 }
 
@@ -470,7 +555,9 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         return Some(Err(EngineError::Store(e)));
                     }
                 };
-                let Some(entry) = IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len)
+                // Single-field scan: one component (n = 1).
+                let Some(entry) =
+                    IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len, 1)
                 else {
                     done = true;
                     return Some(Err(EngineError::InvalidKey("invalid index key".into())));
@@ -495,6 +582,58 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         continue;
                     }
                 }
+                return Some(Ok(entry));
+            }
+            done = true;
+            None
+        })))
+    }
+
+    fn scan_compound_index<'b>(
+        &'b self,
+        handle: &CollectionHandle<Self::Cf>,
+        field: &str,
+        range: CompoundRange<'_>,
+        reverse: bool,
+    ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'b>, EngineError> {
+        let ttl = self.now_millis;
+        let ResolvedCompoundScan {
+            range,
+            field_prefix_len,
+            type_byte_count,
+        } = resolve_compound_scan(handle.name(), field, range)?;
+
+        let mut iter = self.txn.scan_range(handle.cf(), range, reverse)?;
+        let mut done = false;
+
+        Ok(Box::new(std::iter::from_fn(move || {
+            if done {
+                return None;
+            }
+            for result in iter.by_ref() {
+                let (key_bytes, metadata_bytes) = match result {
+                    Ok(kv) => kv,
+                    Err(e) => {
+                        done = true;
+                        return Some(Err(EngineError::Store(e)));
+                    }
+                };
+                let Some(entry) = IndexEntry::from_raw(
+                    key_bytes,
+                    metadata_bytes,
+                    field_prefix_len,
+                    type_byte_count,
+                ) else {
+                    done = true;
+                    return Some(Err(EngineError::InvalidKey("invalid index key".into())));
+                };
+                if entry.is_expired(ttl) {
+                    continue;
+                }
+                // No engine-side exact-match: the byte seek is a conservative
+                // superset over the compound prefix, and the executor rechecks
+                // every leading equality (and the trailing range) exactly via the
+                // entry's per-component values.
                 return Some(Ok(entry));
             }
             done = true;

@@ -32,3 +32,37 @@ Remaining optimization opportunities for the encoding / key layer.
   anyway because it removes a production `clone()` (which AGENTS.md discourages) and
   is a net call-site simplification, not added complexity. The `*_into` variant
   remains available for any future caller that can amortize a buffer across a batch.
+
+## Correctness hardening (compound indexes)
+
+- **Pin the single/compound prefix-isolation invariant. (SHIPPED)** A single-field
+  full scan on `status` seeks `[i\0{coll}\0status\0, i\0{coll}\0status\x01)`. A
+  compound index `status\x01created_at` stores keys at
+  `i\0{coll}\0status\x01created_at\0…`, which sort *at/after* that exclusive upper
+  bound and are correctly excluded — safe only because **`FIELD_SEP` (0x01) > `SEP`
+  (0x00)**. Now guarded by: (1) a `const _: () = assert!(FIELD_SEP > SEP, …)`
+  static assertion + comment in `encoding/key.rs`; (2) a regression test
+  (`tests/kv.rs::single_and_compound_index_prefixes_do_not_leak`) — one collection
+  holding both `create_index("status")` and
+  `create_compound_index(["status","created_at"])`, asserting neither scan sweeps in
+  the other's entries.
+
+- **Specialize the single-field decode hot path. (SHIPPED — value-side offsets, no
+  enum.)** The single/compound decoder fork is gone. Index-entry decode is now a
+  single value-side-offsets path: the per-component value/doc_id boundaries are
+  precomputed on the *value* side at write time — metadata is
+  `[t1…tN][end_1…end_N : u32 LE][ttl?]`, where `end_k` is the cumulative value
+  length through component `k` — and the key drops its trailing var-width length
+  suffixes (the offsets replace them). `IndexEntry::from_raw(key, metadata,
+  field_prefix_len, n)` just bounds-checks and stores four fields (no offset
+  resolution loop, flat in N); accessors read each `end_k` O(1) from the metadata.
+  A throwaway decode/encode micro-bench (since removed) confirmed this matches the
+  single-field fast path at N=1 and beats the old general compound decoder, flat in
+  N. Guardrails: `traits.rs` `from_raw_decodes_production_entry` /
+  `from_raw_rejects_short_metadata` (scan-path decoder + its header bounds check),
+  the `index_record.rs` `from_pair` round-trip tests, the prefix-isolation test, and
+  `tests/kv.rs::string_index_full_scan_is_byte_sorted` (the raw value-concat sort
+  property now that suffixes are gone). Deleted: the `IndexEntry` `Single`/`Compound`
+  enum, `from_single_raw`/`from_compound_raw`, `compound_value_offsets`,
+  `index_value_len`, `index_value_is_var_width`, `fixed_value_len`, and the
+  `ValueOffsets`/`FixedLenCache` aliases.

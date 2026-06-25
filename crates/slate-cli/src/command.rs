@@ -38,12 +38,17 @@ pub enum Command {
         field: String,
         filter: Option<Value>,
     },
-    /// Create an index on a field of the current collection.
-    CreateIndex(String),
-    /// Create a unique index on a field of the current collection.
-    CreateUniqueIndex(String),
-    /// Drop an index on a field of the current collection.
-    DropIndex(String),
+    /// Create an index on one or more fields of the current collection.
+    /// A single field is a plain index; multiple fields are a compound index
+    /// (matched left-to-right by the leftmost-prefix rule).
+    CreateIndex(Vec<String>),
+    /// Create a unique index on one or more fields of the current collection.
+    /// Multiple fields constrain uniqueness of the combination.
+    CreateUniqueIndex(Vec<String>),
+    /// Drop an index on the current collection. A single field drops a plain
+    /// index; multiple fields (in the same order used to create it) drop the
+    /// matching compound index.
+    DropIndex(Vec<String>),
     /// List indexes on the current collection.
     ListIndexes,
     /// Count documents in the current collection, optionally filtered.
@@ -92,9 +97,12 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "use" => Ok(Command::Use(name_arg(args, "use")?)),
         "create" => Ok(Command::Create(name_arg(args, "create")?)),
         "drop" => Ok(Command::Drop(name_arg(args, "drop")?)),
-        "index" => Ok(Command::CreateIndex(name_arg(args, "index")?)),
-        "unique-index" => Ok(Command::CreateUniqueIndex(name_arg(args, "unique-index")?)),
-        "drop-index" => Ok(Command::DropIndex(name_arg(args, "drop-index")?)),
+        "index" => Ok(Command::CreateIndex(fields_arg(args, "index")?)),
+        "unique-index" => Ok(Command::CreateUniqueIndex(fields_arg(
+            args,
+            "unique-index",
+        )?)),
+        "drop-index" => Ok(Command::DropIndex(fields_arg(args, "drop-index")?)),
         "indexes" => Ok(Command::ListIndexes),
         "schema" => {
             if args.trim().is_empty() {
@@ -132,7 +140,10 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "explain" => {
             // The whole remaining line is the query (like `.backup`'s path) —
             // it contains spaces and its own syntax, so it is not tokenized.
-            let query = args.trim();
+            // Strip a trailing `;` so `.explain SELECT … ;` works like a bare
+            // SQL statement (the input layer strips it for SQL, but a one-line
+            // meta-command bypasses that path).
+            let query = args.trim().trim_end_matches(';').trim();
             if query.is_empty() {
                 return Err(".explain requires a query".to_string());
             }
@@ -215,6 +226,16 @@ fn name_arg(args: &str, cmd: &str) -> Result<String, String> {
         return Err(format!(".{cmd} takes a single name"));
     }
     Ok(name.to_string())
+}
+
+/// One or more whitespace-separated bare-word field paths. A single field is a
+/// plain index; multiple fields form a compound index in the given order.
+fn fields_arg(args: &str, cmd: &str) -> Result<Vec<String>, String> {
+    let fields: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    if fields.is_empty() {
+        return Err(format!(".{cmd} requires at least one field"));
+    }
+    Ok(fields)
 }
 
 /// Derive a collection name from a dataset file path: the file stem with every
@@ -354,8 +375,17 @@ mod tests {
     fn index_commands() {
         assert_eq!(
             Command::parse(".index email").unwrap(),
-            Command::CreateIndex("email".to_string())
+            Command::CreateIndex(vec!["email".to_string()])
         );
+        assert_eq!(
+            Command::parse(".index status created_at").unwrap(),
+            Command::CreateIndex(vec!["status".to_string(), "created_at".to_string()])
+        );
+        assert_eq!(
+            Command::parse(".unique-index org_id email").unwrap(),
+            Command::CreateUniqueIndex(vec!["org_id".to_string(), "email".to_string()])
+        );
+        assert!(Command::parse(".index").is_err());
         assert_eq!(Command::parse(".indexes").unwrap(), Command::ListIndexes);
     }
 
@@ -391,17 +421,21 @@ mod tests {
     }
 
     #[test]
-    fn unique_and_drop_index_take_a_field() {
+    fn unique_and_drop_index_take_fields() {
         assert_eq!(
             Command::parse(".unique-index email").unwrap(),
-            Command::CreateUniqueIndex("email".to_string())
+            Command::CreateUniqueIndex(vec!["email".to_string()])
         );
         assert_eq!(
             Command::parse(".drop-index email").unwrap(),
-            Command::DropIndex("email".to_string())
+            Command::DropIndex(vec!["email".to_string()])
+        );
+        assert_eq!(
+            Command::parse(".drop-index user.id status").unwrap(),
+            Command::DropIndex(vec!["user.id".to_string(), "status".to_string()])
         );
         assert!(Command::parse(".unique-index").is_err());
-        assert!(Command::parse(".drop-index a b").is_err());
+        assert!(Command::parse(".drop-index").is_err());
     }
 
     #[test]
@@ -464,7 +498,13 @@ mod tests {
             Command::parse(r#".explain SELECT VALUE c.name FROM c WHERE c.name = "x""#).unwrap(),
             Command::Explain(r#"SELECT VALUE c.name FROM c WHERE c.name = "x""#.to_string())
         );
+        // A trailing `;` (habit from SQL) is stripped, like a bare statement.
+        assert_eq!(
+            Command::parse(".explain select 1 ;").unwrap(),
+            Command::Explain("select 1".to_string())
+        );
         assert!(Command::parse(".explain").is_err());
+        assert!(Command::parse(".explain ;").is_err());
     }
 
     #[test]

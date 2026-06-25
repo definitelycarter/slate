@@ -208,6 +208,21 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::index_scan::execute(self.txn, &collection, field, &range, direction, limit)?
             }
 
+            Node::CompoundIndexScan {
+                collection,
+                field,
+                range,
+                direction,
+                limit,
+            } => nodes::compound_index_scan::execute(
+                self.txn,
+                &collection,
+                field,
+                &range,
+                direction,
+                limit,
+            )?,
+
             Node::KeyLookup { collection, source } => {
                 let source = self.execute_node(*source, current)?;
                 nodes::key_lookup::execute(self.txn, &collection, source)?
@@ -392,8 +407,19 @@ mod end_to_end {
         let txn = engine.begin(true).unwrap();
         // Index metadata from the catalog drives sargability (age is indexed).
         let handle = txn.collection(DEFAULT_CF, "people").unwrap();
+        let mut indexes = Vec::new();
+        let mut compound_indexes = Vec::new();
+        for identity in handle.indexes() {
+            let components = slate_engine::split_index_fields(identity);
+            if components.len() > 1 {
+                compound_indexes.push((identity.clone(), components));
+            } else {
+                indexes.push(identity.clone());
+            }
+        }
         let meta = CollectionMeta {
-            indexes: handle.indexes().to_vec(),
+            indexes,
+            compound_indexes,
             pk_path: handle.pk_path().to_string(),
         };
         let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), people_ref(), &meta);

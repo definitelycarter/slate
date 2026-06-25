@@ -254,6 +254,7 @@ mod tests {
             },
             meta: CollectionMeta {
                 indexes: vec!["age".into()],
+                compound_indexes: Vec::new(),
                 pk_path: "_id".into(),
             },
             validators: Vec::new(),

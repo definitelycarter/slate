@@ -264,14 +264,43 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         field: &str,
         options: &IndexOptions,
     ) -> Result<(), EngineError> {
+        // A single-field index is the one-component compound case.
+        self.create_compound_index_with_options(cf, collection, &[field.to_string()], options)
+    }
+
+    fn create_compound_index_with_options(
+        &self,
+        cf: &str,
+        collection: &str,
+        fields: &[String],
+        options: &IndexOptions,
+    ) -> Result<(), EngineError> {
         self.load_collection_meta(cf, collection)?;
         let cf_handle = self.txn.cf(cf)?;
 
-        // Unique indexes are scalar-only for now: a multikey (`[]`) path would
-        // imply element-wise uniqueness semantics we don't yet support.
-        if options.unique && field.contains("[]") {
+        if fields.is_empty() {
+            return Err(EngineError::InvalidDocument(
+                "an index must cover at least one field".into(),
+            ));
+        }
+
+        // The compound identity is the joined field names; a single field joins
+        // to itself, so existing single-field keys are unchanged.
+        let identity = crate::encoding::key::join_index_fields(fields);
+
+        // Unique indexes are scalar-only for now: a multikey (`[]`) component
+        // would imply element-wise uniqueness semantics we don't yet support.
+        if options.unique && fields.iter().any(|f| f.contains("[]")) {
             return Err(EngineError::InvalidDocument(format!(
-                "unique index does not support multikey ('[]') paths: {field}"
+                "unique index does not support multikey ('[]') paths: {identity}"
+            )));
+        }
+        // Compound (multi-field) indexes are scalar-only in this phase: a multikey
+        // component would require a value cross-product the leftmost-prefix seek
+        // can't express.
+        if fields.len() > 1 && fields.iter().any(|f| f.contains("[]")) {
+            return Err(EngineError::InvalidDocument(format!(
+                "compound index does not support multikey ('[]') paths: {identity}"
             )));
         }
 
@@ -280,11 +309,11 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         let config_key = Key::IndexConfig(
             Cow::Borrowed(cf),
             Cow::Borrowed(collection),
-            Cow::Borrowed(field),
+            Cow::Borrowed(&identity),
         )
         .encode();
         if self.txn.get(&sys, &config_key)?.is_some() {
-            return Err(EngineError::IndexExists(format!("{collection}.{field}")));
+            return Err(EngineError::IndexExists(format!("{collection}.{identity}")));
         }
         // Config value encodes uniqueness: `0x01` for unique, empty otherwise.
         let config_value: &[u8] = if options.unique { &[1] } else { &[] };
@@ -297,9 +326,9 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             .scan_prefix(&cf_handle, &record_prefix)?
             .collect::<Result<_, _>>()?;
 
-        let indexes = vec![field.to_string()];
+        let indexes = vec![identity.clone()];
         let unique_paths = if options.unique {
-            vec![field.to_string()]
+            vec![identity.clone()]
         } else {
             Vec::new()
         };
@@ -316,7 +345,8 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let ttl = record.ttl_millis();
             let doc = record.doc()?;
 
-            // Regular `i` entries, written for every indexed path.
+            // Regular `i` entries, written for every indexed path (compound
+            // identities produce one combined entry; see `from_document`).
             let entries = IndexRecord::from_document(collection, &indexes, doc, &doc_id, ttl);
             if !entries.is_empty() {
                 let refs: Vec<(&[u8], &[u8])> = entries

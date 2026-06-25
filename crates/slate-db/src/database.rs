@@ -475,6 +475,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         } else {
             slate_planner::CollectionMeta {
                 indexes: Vec::new(),
+                compound_indexes: Vec::new(),
                 pk_path: "_id".to_string(),
             }
         };
@@ -486,14 +487,33 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Read the index/pk metadata `slate-planner` needs to choose a scan source.
+    ///
+    /// Index identities split into single-field (the flat `indexes`) and compound
+    /// (`compound_indexes`, each carried as `(identity, components)` so the
+    /// planner passes the engine's stored identity through opaquely).
     fn collection_meta(
         &self,
         cf: &str,
         collection: &str,
     ) -> Result<slate_planner::CollectionMeta, DbError> {
         let handle = self.txn.collection(cf, collection)?;
+        let mut indexes = Vec::new();
+        let mut compound_indexes = Vec::new();
+        // `indexes()` yields identities borrowed from the catalog snapshot; the
+        // planner's `CollectionMeta` owns its identity strings, so each is cloned
+        // once here. This is per-plan setup (not a per-row path), so the cost is
+        // negligible and the owned copy is required.
+        for identity in handle.indexes() {
+            let components = slate_engine::split_index_fields(identity);
+            if components.len() > 1 {
+                compound_indexes.push((identity.clone(), components));
+            } else {
+                indexes.push(identity.clone());
+            }
+        }
         Ok(slate_planner::CollectionMeta {
-            indexes: handle.indexes().to_vec(),
+            indexes,
+            compound_indexes,
             pk_path: handle.pk_path().to_string(),
         })
     }
@@ -820,7 +840,46 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         Ok(())
     }
 
-    /// Drop an index and remove all its entries.
+    /// Create a *compound* (multi-field) index and backfill existing records.
+    ///
+    /// The `fields` are matched left-to-right by the leftmost-prefix rule: an
+    /// index on `["status", "created_at"]` can serve queries on `{status}` or
+    /// `{status, created_at}`, but not `{created_at}` alone. A single-element
+    /// `fields` is equivalent to [`create_index`](Self::create_index).
+    pub fn create_compound_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        fields: &[String],
+    ) -> Result<(), DbError> {
+        self.txn.create_compound_index(cf, collection, fields)?;
+        Ok(())
+    }
+
+    /// Create a *unique* compound index and backfill existing records.
+    ///
+    /// Enforces that no two live documents share the same *combination* of
+    /// values across `fields` (e.g. unique on `["org_id", "email"]` allows the
+    /// same email across different orgs). Scalar components only (no multikey
+    /// `[]`). Fails with [`DbError::UniqueViolation`] if existing data already
+    /// holds a duplicate combination.
+    pub fn create_unique_compound_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        fields: &[String],
+    ) -> Result<(), DbError> {
+        self.txn.create_compound_index_with_options(
+            cf,
+            collection,
+            fields,
+            &slate_engine::IndexOptions { unique: true },
+        )?;
+        Ok(())
+    }
+
+    /// Drop an index and remove all its entries. For a compound index, pass the
+    /// joined identity returned by [`list_indexes`](Self::list_indexes).
     pub fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
         self.txn.drop_index(cf, collection, field)?;
         Ok(())

@@ -1,7 +1,8 @@
 use bson::raw::RawBsonRef;
 use slate_engine::{
-    Catalog, CollectionHandle, DEFAULT_CF, Engine, EngineError, EngineTransaction, FunctionKind,
-    IndexOptions, IndexRange, KvEngine, runtime_tag,
+    Catalog, CollectionHandle, CompoundRange, CompoundTail, DEFAULT_CF, Engine, EngineError,
+    EngineTransaction, FunctionKind, IndexOptions, IndexRange, KvEngine, join_index_fields,
+    runtime_tag,
 };
 use slate_store::MemoryStore;
 
@@ -1358,4 +1359,264 @@ fn unique_index_blocks_value_held_by_expired_document() {
     )
     .unwrap();
     txn.commit().unwrap();
+}
+
+// ── Compound (multi-field) indexes ──────────────────────────────
+
+fn compound_orders() -> KvEngine<MemoryStore> {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "orders", &Default::default())
+        .unwrap();
+    txn.create_compound_index(
+        DEFAULT_CF,
+        "orders",
+        &["status".to_string(), "created_at".to_string()],
+    )
+    .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    for doc in [
+        bson::rawdoc! { "_id": "a", "status": "active", "created_at": 10i64 },
+        bson::rawdoc! { "_id": "b", "status": "active", "created_at": 20i64 },
+        bson::rawdoc! { "_id": "c", "status": "active2", "created_at": 15i64 },
+        bson::rawdoc! { "_id": "d", "status": "archived", "created_at": 5i64 },
+    ] {
+        txn.put(&handle, &doc).unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
+fn compound_field() -> String {
+    join_index_fields(&["status".to_string(), "created_at".to_string()])
+}
+
+fn doc_ids(entries: Vec<slate_engine::IndexEntry>) -> Vec<String> {
+    let mut ids: Vec<String> = entries
+        .iter()
+        .map(|e| match e.doc_id().unwrap() {
+            bson::RawBson::String(s) => s,
+            other => panic!("unexpected doc_id {other:?}"),
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn scan_compound_eq_prefix_overreads_byte_prefix() {
+    // The engine seek over `status = "active"` byte-prefix sweeps in the
+    // "active2" entry (id "c"); the engine does NOT recheck (the executor does),
+    // so this raw scan returns a, b, AND c. The executor-level test pins the
+    // exact exclusion.
+    let engine = compound_orders();
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    let field = compound_field();
+    let active = bson::Bson::String("active".into());
+    let entries: Vec<_> = txn
+        .scan_compound_index(
+            &handle,
+            &field,
+            CompoundRange {
+                eq_prefix: std::slice::from_ref(&active),
+                tail: CompoundTail::Unbounded,
+            },
+            false,
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // Conservative superset: includes the "active2" spillover.
+    let ids = doc_ids(entries);
+    assert!(ids.contains(&"a".to_string()));
+    assert!(ids.contains(&"b".to_string()));
+    assert!(ids.contains(&"c".to_string()));
+    assert!(!ids.contains(&"d".to_string()));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn scan_compound_full_equality_is_exact() {
+    // A full equality on both components seeks a tight prefix — exactly one row.
+    let engine = compound_orders();
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    let field = compound_field();
+    let active = bson::Bson::String("active".into());
+    let twenty = bson::Bson::Int64(20);
+    let entries: Vec<_> = txn
+        .scan_compound_index(
+            &handle,
+            &field,
+            CompoundRange {
+                eq_prefix: std::slice::from_ref(&active),
+                tail: CompoundTail::Eq(&twenty),
+            },
+            false,
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(doc_ids(entries), vec!["b".to_string()]);
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn compound_index_lists_joined_identity() {
+    let engine = compound_orders();
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    assert!(handle.indexes().iter().any(|i| i == &compound_field()));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn drop_compound_index_removes_entries() {
+    let engine = compound_orders();
+    let txn = engine.begin(false).unwrap();
+    txn.drop_index(DEFAULT_CF, "orders", &compound_field())
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    assert!(handle.indexes().is_empty());
+    txn.rollback().unwrap();
+}
+
+// ── Value-side-offsets format guardrails ─────────────────────
+
+#[test]
+fn single_and_compound_index_prefixes_do_not_leak() {
+    // Prefix isolation: a collection carries BOTH a single-field index on
+    // `status` and a compound index on `[status, created_at]`. Their value
+    // prefixes share `i\0orders\0status`, but the key byte right after diverges —
+    // `\0` (SEP) for the single index, `\x01` (FIELD_SEP) for the compound — and
+    // `FIELD_SEP > SEP`, so neither scan can sweep in the other's entries.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "orders", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "orders", "status").unwrap();
+    txn.create_compound_index(
+        DEFAULT_CF,
+        "orders",
+        &["status".to_string(), "created_at".to_string()],
+    )
+    .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+    for doc in [
+        bson::rawdoc! { "_id": "a", "status": "active", "created_at": 10i64 },
+        bson::rawdoc! { "_id": "b", "status": "active", "created_at": 20i64 },
+        bson::rawdoc! { "_id": "c", "status": "archived", "created_at": 5i64 },
+    ] {
+        txn.put(&handle, &doc).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "orders").unwrap();
+
+    // The single-field `status` scan sees every row exactly once — it must NOT
+    // also pick up the compound `status\x01created_at` entries (which would
+    // double-count a/b/c).
+    let single: Vec<_> = txn
+        .scan_index(&handle, "status", IndexRange::Full, false)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        doc_ids(single),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
+    // Each single-field entry is one component: `value()` is the status string.
+    let single_again: Vec<_> = txn
+        .scan_index(&handle, "status", IndexRange::Full, false)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for entry in &single_again {
+        assert!(matches!(entry.value().unwrap(), bson::RawBson::String(_)));
+    }
+
+    // The compound scan over the `active` prefix sees only its own entries; no
+    // single-index entry leaks in (which would fail per-component decode).
+    let active = bson::Bson::String("active".into());
+    let compound: Vec<_> = txn
+        .scan_compound_index(
+            &handle,
+            &compound_field(),
+            CompoundRange {
+                eq_prefix: std::slice::from_ref(&active),
+                tail: CompoundTail::Unbounded,
+            },
+            false,
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // Only the two `active` rows — `archived` (c) is outside the eq-prefix.
+    assert_eq!(doc_ids(compound), vec!["a".to_string(), "b".to_string()]);
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn string_index_full_scan_is_byte_sorted() {
+    // String ordering guardrail: with the key-side length suffixes gone, the
+    // sort-relevant region is exactly the raw value bytes followed by the doc_id.
+    // Index values where one is a byte-prefix of another (`"x"` vs `"xy"`) and one
+    // embeds a low byte (`"x\u{1}y"`) must come back in correct byte-sorted order
+    // from a full ascending scan.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "t", &Default::default())
+        .unwrap();
+    txn.create_index(DEFAULT_CF, "t", "name").unwrap();
+    let handle = txn.collection(DEFAULT_CF, "t").unwrap();
+    // Insert in deliberately scrambled order.
+    for (id, name) in [
+        ("3", "xy"),
+        ("1", "x"),
+        ("4", "xyz"),
+        ("2", "x\u{1}y"),
+        ("0", "abc"),
+    ] {
+        let doc = bson::rawdoc! { "_id": id, "name": name };
+        txn.put(&handle, &doc).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "t").unwrap();
+    let entries: Vec<_> = txn
+        .scan_index(&handle, "name", IndexRange::Full, false)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| match e.value().unwrap() {
+            bson::RawBson::String(s) => s,
+            other => panic!("unexpected value {other:?}"),
+        })
+        .collect();
+    // The key is `{value_bytes}{doc_id_lp}` (no suffix), so ordering compares the
+    // raw value bytes first, then the doc_id bytes that immediately follow. After
+    // the shared "x":
+    //   - "x"      → next byte is the doc_id type tag 0x02,
+    //   - "x\u{1}y" → next byte is the value's own 0x01,
+    // and 0x01 < 0x02, so "x\u{1}y" sorts BEFORE "x". "xy" ('y' = 0x79) and "xyz"
+    // follow. A scan that mis-resolved the value boundary would scramble this.
+    assert_eq!(
+        names,
+        vec![
+            "abc".to_string(),
+            "x\u{1}y".to_string(),
+            "x".to_string(),
+            "xy".to_string(),
+            "xyz".to_string(),
+        ]
+    );
+    txn.rollback().unwrap();
 }

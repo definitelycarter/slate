@@ -674,6 +674,7 @@ mod tests {
     fn no_index() -> CollectionMeta {
         CollectionMeta {
             indexes: vec![],
+            compound_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -681,6 +682,7 @@ mod tests {
     fn age_indexed() -> CollectionMeta {
         CollectionMeta {
             indexes: vec!["age".into()],
+            compound_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -886,6 +888,7 @@ mod tests {
     fn age_status_indexed() -> CollectionMeta {
         CollectionMeta {
             indexes: vec!["age".into(), "status".into()],
+            compound_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
