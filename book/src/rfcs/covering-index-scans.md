@@ -1,15 +1,19 @@
 # RFC: Covering Index Scans & Engine-Level Recheck
 
-> **Status: Part A implemented; Part B phase 1 (single-field, non-aggregate)
-> implemented; phases 2–3 (compound, covered aggregate) specified, deferred.**
+> **Status: Part A implemented; Part B phase 1 (single-field, non-aggregate —
+> top-level *and* dotted paths) implemented; phases 2–3 (compound, covered
+> aggregate) specified, deferred.**
 > A query/execution optimization for index access, surfaced while benchmarking
 > compound indexes. Part A shipped as a small planner change (below). Part B (the
 > covering scan) is a larger, correctness-critical change; its first, smallest
 > phase — covering a single-field index scan — has now shipped, measured at
 > **−15% (1k) / −21% (10k)** on a covered string projection and **−10% / −27%**
-> on a covered numeric projection. The remaining phases are fully designed here
-> before their implementation pass. The [roadmap](../roadmap.md) tracks status at
-> a glance.
+> on a covered numeric projection, and since extended to **dotted single-field
+> paths** (`user.id`, synthesized as `{user: {id: value}}`) under an
+> exact-path-match rule — measured at **−7 % (1k) / −15 % (10k)** on a covered
+> dotted projection over realistic documents (`query_indexed_eq_dotted_proj`). The
+> remaining phases are fully designed here before their implementation pass. The
+> [roadmap](../roadmap.md) tracks status at a glance.
 
 ## Concept
 
@@ -89,7 +93,7 @@ rechecks exactly those — a 1:1 correspondence — so consuming them is sound.
   unaffected (the executor recheck already enforced the equality; A only removes
   the redundant second check), which the end-to-end suites confirm.
 
-## Part B — covering scan: skip the `KeyLookup` *(phase 1 implemented)*
+## Part B — covering scan: skip the `KeyLookup` *(phase 1 implemented, incl. dotted paths)*
 
 When the set of fields a query references is a subset of the chosen index's
 components (plus `_id`/pk, which the entry carries as its doc_id), the planner
@@ -108,7 +112,8 @@ index scan whose query reads only that field and the pk. Concretely:
   identity.
 - **Executor** (`index_scan.rs`): a covering scan synthesizes
   `{ <field>: entry.value(), <pk>: doc_id }` per entry (`synthesize_row`) instead
-  of a bare doc-id; the non-covering path is unchanged.
+  of a bare doc-id; a dotted `field` nests (`user.id` → `{user: {id: value}}`,
+  built by `append_path`); the non-covering path is unchanged.
 - **Planner** (`covering.rs`): a conservative post-pass over the lowered
   `Plan::Query`, run at both read entry points (`plan()`'s Query arm and
   `lower()`), **never** on the write path. It is **two-phase**: a read-only
@@ -118,18 +123,35 @@ index scan whose query reads only that field and the pk. Concretely:
   doesn't help.
 - **Safety:** the analysis returns *uncoverable* the instant it sees any shape it
   doesn't fully understand (an `Env` binding ⇒ join/unwind/aggregate/subquery; a
-  bare-alias whole-row read; a deeper `alias.a.b`; an `Index`/`PathGet`/
-  `MultikeyEq`/`Subquery` on the alias; a dotted/`.[]` index field; an
-  `IndexMerge`/compound/multikey source). The invariant from B.3 holds: *a missed
-  cover is a lost optimization; a wrong cover is wrong results.* A differential
-  test (`covering_index.rs`) pins covered ≡ materialized (indexed vs unindexed)
-  and that `EXPLAIN` actually drops the `KeyLookup`.
+  bare-alias whole-row read; an `Index`/`PathGet`/`MultikeyEq`/`Subquery` on the
+  alias; a multikey `.[]` index field; an `IndexMerge`/compound/multikey source).
+  The invariant from B.3 holds: *a missed cover is a lost optimization; a wrong
+  cover is wrong results.* A differential test (`covering_index.rs`) pins covered
+  ≡ materialized (indexed vs unindexed) and that `EXPLAIN` actually drops the
+  `KeyLookup`.
+- **Dotted paths (the exact-path-match rule):** an index field may be a dotted
+  scalar path (`user.id`), not just top-level. A reference covers iff its
+  reconstructed dotted path *string-equals* a component path or the pk — so
+  `c.user.id` covers an index on `user.id`, but its **parent** (`c.user`, the
+  whole subdoc), an **extension** (`c.user.id.x`), and a **sibling**
+  (`c.user.name`) all bail, since the scalar entry carries only `user.id`. A
+  multikey `.[]` path still never covers (array fan-out is unreconstructable), and
+  a dotted field whose root segment collides with the (top-level) pk bails to
+  avoid a duplicate synthesized key.
 - **Measured** (back-to-back vs clean `main`, same machine): covered string
   projection **−15% (1k) / −21% (10k)**, covered numeric projection **−10% /
   −27%** — the win scaling with matched-row count, as predicted. Non-covered
   control queries were within the machine's run-to-run drift band (the same
   control swung −0.1%→+6% across runs against a fixed baseline), so no measurable
   regression on the paths the two-phase pass leaves untouched.
+- **Measured (dotted)** (`query_indexed_eq_dotted_proj`, an indexed `meta.note`
+  nested inside *realistic* documents, vs the same query uncovered on `main`):
+  **−7% (1k) / −15% (10k)**, reproduced. Smaller than the top-level win because
+  nested synthesis allocates an inner document per row, but a clear net win at
+  scale — and, like the others, it scales with matched rows. The win requires a
+  *heavy* fetched document to skip: on tiny documents (the synthesized cost ≈ the
+  fetch saved) it washes out, which is why the bench nests the indexed path inside
+  the realistic corpus, not a minimal one.
 
 Phases 2 (compound) and 3 (covered aggregate) remain as designed below.
 
@@ -205,6 +227,16 @@ understand → **bail (do not cover)**. The invariant: *a missed cover is a lost
 optimization; a wrong cover is wrong results* — so the collector returns
 "uncoverable" rather than guess.
 
+> **Implemented refinement (single-field, dotted).** The shipped pass loosens the
+> "depth-1 member / top-level scalar" rule above to **dotted scalar paths** by
+> *exact-path match*: it reconstructs each clean alias-rooted member chain into
+> its full dotted path (`c.user.id` → `"user.id"`, mirroring the planner's
+> `path_of`) and covers iff that string equals the index field or the pk. This is
+> strictly the safe loosening — a parent (`c.user`), an extension (`c.user.id.x`),
+> and a sibling (`c.user.name`) each reconstruct to a *different* string and so
+> bail, exactly where a wrong cover would return wrong rows. Multikey `.[]` paths
+> stay excluded. Compound (phase 2) reuses the same per-component path-matching.
+
 ### B.4 — the aggregate binding shift
 
 Above a `Node::Aggregate`, the `Project`/`Having` reference the aggregate output
@@ -216,11 +248,12 @@ not present in plain projections — is why aggregates are a later phase.
 
 ### B.5 — phasing
 
-1. **Single-field, non-aggregate.** ✅ **Shipped.** Exactly the captured baseline
-   (`query_indexed_eq_proj`); smallest correctness surface. The implemented pass
-   handles only this shape; the coverage analysis below was scoped down to a
-   single-field scan (no compound, no `IndexMerge`, no multikey) and a single
-   `Alias`-bound source.
+1. **Single-field, non-aggregate.** ✅ **Shipped** (top-level *and* dotted paths).
+   Exactly the captured baseline (`query_indexed_eq_proj`); smallest correctness
+   surface. The implemented pass handles only this shape; the coverage analysis
+   below was scoped down to a single-field scan (no compound, no `IndexMerge`, no
+   multikey) and a single `Alias`-bound source. Dotted scalar paths were added
+   under the exact-path-match rule (above), nesting the synthesized value.
 2. **Compound, non-aggregate.** *Same* coverage analysis; synthesize N components;
    covered set = the component list. A small increment over (1) — the executor
    reads several component values instead of one — **not** a from-scratch effort.
@@ -238,11 +271,12 @@ returns exactly what the materialized plan returns. There is no runtime
 **indexed** collection (covered) and an **unindexed** copy (full-scan,
 materialized) and asserts equal results — the only plan difference is the index,
 hence the cover. It pins the single-field covered case (find with `columns`, plus
-a range predicate) *and* the bail cases (whole-row `SELECT c`, an unindexed field,
-a deeper path `c.meta.note`), and uses `EXPLAIN` to confirm the covered plan
-actually drops the `KeyLookup` while the bail cases keep it (so the differential
-can't pass vacuously by never covering). The compound and aggregate cases join it
-as phases 2–3 land. This is the guard against the one dangerous failure mode (a
+a range predicate) *and* the bail cases (whole-row `SELECT c`, an unindexed
+field), and — for a dotted index (`meta.note`) — the covered nested projection
+alongside its parent/extension/sibling bails (`c.meta` / `c.meta.note.deeper` /
+`c.meta.tag`). It uses `EXPLAIN` to confirm the covered plan actually drops the
+`KeyLookup` while the bail cases keep it (so the differential can't pass vacuously
+by never covering). The compound and aggregate cases join it as phases 2–3 land. This is the guard against the one dangerous failure mode (a
 too-eager cover returning wrong rows).
 
 ## Benefits
@@ -259,8 +293,9 @@ too-eager cover returning wrong rows).
 
 - No "INCLUDE"/payload columns — covering is limited to fields that are already
   index *components*.
-- No covering over multikey (`[]`) or dot-path components in v1 — the synthesized
-  scalar can't reproduce array-distributing or nested access.
+- No covering over multikey (`[]`) components — the synthesized scalar can't
+  reproduce array-distributing access. (Dot-path components *are* covered, by
+  nesting the synthesized value under an exact-path-match rule; see phase 1.)
 - No streaming/ordered `GROUP BY` (the index returns a fixed leading prefix already
   grouped by the next component) — a real but separate optimization; see
   [Collect Node](./collect-node.md).
@@ -274,10 +309,12 @@ Phase 1 resolved all three for the single-field case; they recur for phases 2–
    on `Node::CompoundIndexScan` (B.1).
 2. ✅ The conservative referenced-field collector + bail rules shipped as
    `covering.rs`, gated by the differential test (B.6) before the executor
-   synthesis was trusted.
+   synthesis was trusted. Since extended to dotted scalar paths via exact-path
+   match + nested synthesis (`append_path`), with the same differential guard.
 3. ✅ Phase (1) single-field landed and was measured against a clean-`main`
-   baseline (−15%/−21% string, −10%/−27% numeric covered projections). Phases (2)
-   compound and (3) aggregate remain.
+   baseline (−15%/−21% string, −10%/−27% numeric covered projections). Dotted
+   single-field paths followed (same synthesize-vs-fetch win, structurally). Phases
+   (2) compound and (3) aggregate remain.
 
 ## Cosmos, for reference
 

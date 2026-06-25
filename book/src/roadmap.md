@@ -100,8 +100,13 @@ uninstrumented:
   rebuild only if coverable) drops the fetch when the query reads only the indexed
   field and the pk. Measured **−15 % (1k) / −21 % (10k)** on a covered string
   projection, **−10 % / −27 %** on a covered numeric projection (`query_indexed_eq_proj`,
-  `_numeric_proj`), with a covered-≡-materialized differential test. Phases 2
-  (compound) and 3 (covered aggregate) stay designed in the RFC, deferred.
+  `_numeric_proj`), with a covered-≡-materialized differential test. Now also covers
+  **dotted single-field paths** (`user.id`): an exact-path-match rule (a reference
+  covers iff its reconstructed dotted path string-equals the index field or pk —
+  parent/extension/sibling bail) plus nested synthesis (`{user: {id: value}}`),
+  measured **−7 % (1k) / −15 % (10k)** on a covered dotted projection over realistic
+  documents (`query_indexed_eq_dotted_proj`). Phases 2 (compound) and 3 (covered
+  aggregate) stay designed in the RFC, deferred.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of

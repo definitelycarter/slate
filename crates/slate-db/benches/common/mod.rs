@@ -191,6 +191,47 @@ pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
     engine
 }
 
+/// Seed a *realistic* (heavy) corpus with a `meta.note` field nested inside each
+/// document, and a single-field index on the dotted path `meta.note`. The body is
+/// the same heavy doc as `realistic_seeded_engine` (so the covered dotted
+/// projection is directly comparable to the top-level `query_indexed_eq_proj`, and
+/// covering's win — skipping the heavy fetch — is exercised, not masked by tiny
+/// docs); half the rows are `"active"` (the matched set). Always indexed: the
+/// covering before/after is `main` (a dotted field bails → `IndexScan →
+/// KeyLookup`) vs the branch (covers, synthesizing `{meta: {note}}`).
+pub fn nested_indexed_engine(n: usize) -> Database<MemoryStore> {
+    let engine = db_builder().open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "bench".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.create_index(DEFAULT_CF, "bench", "meta.note").unwrap();
+    let mut rng = StdRng::seed_from_u64(42);
+    let docs: Vec<bson::Document> = (0..n)
+        .map(|i| {
+            let mut doc = generate_realistic_doc(&mut rng, i);
+            doc.insert(
+                "meta",
+                bson::doc! {
+                    "note": if i % 2 == 0 { "active" } else { "rejected" },
+                    "tag": format!("t{i}"),
+                },
+            );
+            doc
+        })
+        .collect();
+    for chunk in docs.chunks(1000) {
+        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
+            .unwrap()
+            .drain()
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
 /// Seed a corpus with a *compound* index on `["status", "contacts_count"]` and
 /// no single-field `status` index, so a leading-equality query
 /// (`WHERE c.status = "active"`) plans as a `CompoundIndexScan` on the leftmost
