@@ -160,7 +160,7 @@ A unique index keeps its regular value-first `i` entry, so it serves index scans
 
 ### Compound Indexes
 
-A compound index spans **multiple fields in order**. Create one with `create_compound_index(cf, collection, fields)` (and `create_unique_compound_index(…)` to constrain the *combination* of values). Like all indexes, these are programmatic — there is no SQL `CREATE INDEX`.
+A compound index spans **multiple fields in order**. Create one with `create_compound_index(cf, collection, fields)` (and `create_unique_compound_index(…)` to constrain the *combination* of values). There is no SQL `CREATE INDEX`; create them programmatically, or in the `slate-cli` REPL with `.index <a> <b> …` (two or more fields = compound; `.unique-index <a> <b> …` for compound-unique).
 
 ```rust
 // compound index on (status, created_at)

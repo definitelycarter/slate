@@ -38,10 +38,13 @@ pub enum Command {
         field: String,
         filter: Option<Value>,
     },
-    /// Create an index on a field of the current collection.
-    CreateIndex(String),
-    /// Create a unique index on a field of the current collection.
-    CreateUniqueIndex(String),
+    /// Create an index on one or more fields of the current collection.
+    /// A single field is a plain index; multiple fields are a compound index
+    /// (matched left-to-right by the leftmost-prefix rule).
+    CreateIndex(Vec<String>),
+    /// Create a unique index on one or more fields of the current collection.
+    /// Multiple fields constrain uniqueness of the combination.
+    CreateUniqueIndex(Vec<String>),
     /// Drop an index on a field of the current collection.
     DropIndex(String),
     /// List indexes on the current collection.
@@ -92,8 +95,11 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "use" => Ok(Command::Use(name_arg(args, "use")?)),
         "create" => Ok(Command::Create(name_arg(args, "create")?)),
         "drop" => Ok(Command::Drop(name_arg(args, "drop")?)),
-        "index" => Ok(Command::CreateIndex(name_arg(args, "index")?)),
-        "unique-index" => Ok(Command::CreateUniqueIndex(name_arg(args, "unique-index")?)),
+        "index" => Ok(Command::CreateIndex(fields_arg(args, "index")?)),
+        "unique-index" => Ok(Command::CreateUniqueIndex(fields_arg(
+            args,
+            "unique-index",
+        )?)),
         "drop-index" => Ok(Command::DropIndex(name_arg(args, "drop-index")?)),
         "indexes" => Ok(Command::ListIndexes),
         "schema" => {
@@ -215,6 +221,16 @@ fn name_arg(args: &str, cmd: &str) -> Result<String, String> {
         return Err(format!(".{cmd} takes a single name"));
     }
     Ok(name.to_string())
+}
+
+/// One or more whitespace-separated bare-word field paths. A single field is a
+/// plain index; multiple fields form a compound index in the given order.
+fn fields_arg(args: &str, cmd: &str) -> Result<Vec<String>, String> {
+    let fields: Vec<String> = args.split_whitespace().map(str::to_string).collect();
+    if fields.is_empty() {
+        return Err(format!(".{cmd} requires at least one field"));
+    }
+    Ok(fields)
 }
 
 /// Derive a collection name from a dataset file path: the file stem with every
@@ -354,8 +370,17 @@ mod tests {
     fn index_commands() {
         assert_eq!(
             Command::parse(".index email").unwrap(),
-            Command::CreateIndex("email".to_string())
+            Command::CreateIndex(vec!["email".to_string()])
         );
+        assert_eq!(
+            Command::parse(".index status created_at").unwrap(),
+            Command::CreateIndex(vec!["status".to_string(), "created_at".to_string()])
+        );
+        assert_eq!(
+            Command::parse(".unique-index org_id email").unwrap(),
+            Command::CreateUniqueIndex(vec!["org_id".to_string(), "email".to_string()])
+        );
+        assert!(Command::parse(".index").is_err());
         assert_eq!(Command::parse(".indexes").unwrap(), Command::ListIndexes);
     }
 
@@ -394,7 +419,7 @@ mod tests {
     fn unique_and_drop_index_take_a_field() {
         assert_eq!(
             Command::parse(".unique-index email").unwrap(),
-            Command::CreateUniqueIndex("email".to_string())
+            Command::CreateUniqueIndex(vec!["email".to_string()])
         );
         assert_eq!(
             Command::parse(".drop-index email").unwrap(),

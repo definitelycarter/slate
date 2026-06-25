@@ -136,8 +136,8 @@ impl<S: BackupStore> Session<S> {
             } => self.replace(filter, replacement),
             Command::Delete { filter } => self.delete(filter),
             Command::Distinct { field, filter } => self.distinct(field, filter),
-            Command::CreateIndex(field) => self.create_index(field),
-            Command::CreateUniqueIndex(field) => self.create_unique_index(field),
+            Command::CreateIndex(fields) => self.create_index(fields),
+            Command::CreateUniqueIndex(fields) => self.create_unique_index(fields),
             Command::DropIndex(field) => self.drop_index(field),
             Command::ListIndexes => self.list_indexes(),
             Command::Count(filter) => self.count(filter),
@@ -291,23 +291,52 @@ impl<S: BackupStore> Session<S> {
         Ok(Output::Rows(rows))
     }
 
-    fn create_index(&self, field: String) -> Result<Output, String> {
+    fn create_index(&self, fields: Vec<String>) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        txn.create_index(DEFAULT_CF, collection, &field)
-            .map_err(es)?;
+        // A single field uses the plain index API; multiple fields a compound
+        // index. (The engine treats single-field as the one-component case, so
+        // these converge — the split is just for the clearer canonical API.)
+        match fields.as_slice() {
+            [single] => txn
+                .create_index(DEFAULT_CF, collection, single)
+                .map_err(es)?,
+            many => txn
+                .create_compound_index(DEFAULT_CF, collection, many)
+                .map_err(es)?,
+        }
         txn.commit().map_err(es)?;
-        Ok(Output::Message(format!("created index on `{field}`")))
+        let kind = if fields.len() == 1 {
+            "index"
+        } else {
+            "compound index"
+        };
+        Ok(Output::Message(format!(
+            "created {kind} on `{}`",
+            fields.join(", ")
+        )))
     }
 
-    fn create_unique_index(&self, field: String) -> Result<Output, String> {
+    fn create_unique_index(&self, fields: Vec<String>) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        txn.create_unique_index(DEFAULT_CF, collection, &field)
-            .map_err(es)?;
+        match fields.as_slice() {
+            [single] => txn
+                .create_unique_index(DEFAULT_CF, collection, single)
+                .map_err(es)?,
+            many => txn
+                .create_unique_compound_index(DEFAULT_CF, collection, many)
+                .map_err(es)?,
+        }
         txn.commit().map_err(es)?;
+        let kind = if fields.len() == 1 {
+            "unique index"
+        } else {
+            "unique compound index"
+        };
         Ok(Output::Message(format!(
-            "created unique index on `{field}`"
+            "created {kind} on `{}`",
+            fields.join(", ")
         )))
     }
 
@@ -808,6 +837,35 @@ mod tests {
         match run(&mut s, ".indexes") {
             Output::Indexes(fields) => assert!(!fields.iter().any(|f| f == "city")),
             other => panic!("expected indexes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compound_index_via_multi_arg() {
+        let mut s = session();
+        run(&mut s, ".create orders");
+        // Multiple fields create a compound index; its identity joins the
+        // components with the field separator (0x01).
+        match run(&mut s, ".index status created_at") {
+            Output::Message(m) => assert!(m.contains("compound index"), "got {m:?}"),
+            other => panic!("expected message, got {other:?}"),
+        }
+        match run(&mut s, ".indexes") {
+            Output::Indexes(fields) => assert!(
+                fields.iter().any(|f| f == "status\u{1}created_at"),
+                "compound identity missing: {fields:?}"
+            ),
+            other => panic!("expected indexes, got {other:?}"),
+        }
+        // A single field is still a plain (non-compound) index.
+        match run(&mut s, ".index city") {
+            Output::Message(m) => {
+                assert!(
+                    m.contains("index on") && !m.contains("compound"),
+                    "got {m:?}"
+                )
+            }
+            other => panic!("expected message, got {other:?}"),
         }
     }
 

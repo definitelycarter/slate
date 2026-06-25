@@ -54,8 +54,8 @@ Commands:
     .delete <filter>            delete matching documents
     .count [filter]             count documents (optionally filtered)
     .distinct <field> [filter]  distinct values of a field
-    .index <field>              create an index on a field
-    .unique-index <field>       create a unique index on a field
+    .index <field>...           create an index (2+ fields = compound)
+    .unique-index <field>...    create a unique index (2+ fields = compound)
     .drop-index <field>         drop an index on a field
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
