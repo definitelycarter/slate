@@ -62,6 +62,15 @@ pub enum EngineError {
         field: String,
         value_type: &'static str,
     },
+    /// A persisted on-disk format is newer than this binary understands. The
+    /// store was written by a newer Slate; opening it could only mis-read, so
+    /// the engine refuses cleanly. Upgrade Slate to a build that supports the
+    /// format version on disk.
+    UnsupportedFormatVersion {
+        format: &'static str,
+        found: u8,
+        supported: u8,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -86,6 +95,14 @@ impl fmt::Display for EngineError {
             Self::UnscannableBound { field, value_type } => write!(
                 f,
                 "cannot scan index `{field}` for a {value_type} bound: the index stores only scalar values"
+            ),
+            Self::UnsupportedFormatVersion {
+                format,
+                found,
+                supported,
+            } => write!(
+                f,
+                "store's {format} format is version {found}, but this binary supports up to version {supported} — upgrade Slate to open this store"
             ),
         }
     }

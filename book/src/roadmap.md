@@ -29,10 +29,13 @@ uninstrumented:
   A `Durability` knob (`Strict`/`Buffered`/`Relaxed`, builder default + per-txn
   override) with a documented per-backend commit guarantee, a kill-during-commit
   crash-test harness, and engine-level integrity `verify()`/`repair()`.
-- **[On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)** — generalise
-  the index-encoding version+migration precedent to the record blob and catalog, so
-  a newer binary migrates an older store forward or refuses cleanly — never silently
-  mis-reads.
+- **[On-Disk Format Versioning](./rfcs/on-disk-format-versioning.md)** — *v1 done.*
+  The index-encoding version marker is generalised into a `_sys_` format registry
+  (`index_encoding` + `catalog`); the catalog now carries a version with a
+  refuse-too-new gate and the typed `UnsupportedFormatVersion` error, so a newer
+  binary migrates an older store forward or refuses cleanly — never silently
+  mis-reads. The record-blob version is design-reserved (seam in place, the tag
+  byte stays the backstop) until a second record format needs it.
 - **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
   — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
   + a `transact()` retry helper, and the `delete_range` exception.
