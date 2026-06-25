@@ -36,10 +36,15 @@ uninstrumented:
 - **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
   — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
   + a `transact()` retry helper, and the `delete_range` exception.
-- **[Encryption at Rest](./rfcs/encryption-at-rest.md)** — decide the layer and
-  document the guarantee; OS-level encryption as the supported device story, with a
-  reserved key-provider seam (value-only encryption leaks indexed values, which live
-  in keys).
+- **[Encryption at Rest](./rfcs/encryption-at-rest.md)** — *v1 done (documentation
+  deliverable).* The layer is decided and the guarantee is written down:
+  OS / device-level encryption (iOS Data Protection, FileVault/APFS, equivalents) is
+  the supported at-rest story, documented with its honest threat model in
+  [Architecture → Storage Layer → Encryption at Rest](./architecture-storage.md#encryption-at-rest).
+  Slate ships zero crypto code. Value-only encryption is rejected (it leaks indexed
+  values, which live in keys). **Deferred:** backend page-level cipher and the
+  reserved `KeyProvider` seam — a future design, not a shipped API, to build only if
+  a threat model demands more than OS trust.
 - **[Observability & Introspection](./rfcs/observability-and-introspection.md)** —
   *A + B + C done; D + disk-size deferred.* Feature-gated `tracing` (the `trace`
   feature, off by default, zero-cost when off), EXPLAIN ANALYZE execution stats

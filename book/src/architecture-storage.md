@@ -197,3 +197,74 @@ if !report.ok() {
 
 `repair()` reuses the same reindex path as the on-disk encoding migration: records are authoritative, so rebuilding the `i`/`u` structures from them restores consistency.
 
+## Encryption at Rest
+
+Durability answers *will my bytes survive a crash*; this answers *who can read them
+off the disk*. The two are independent storage guarantees, so they live side by
+side here.
+
+**The guarantee.** Slate's supported at-rest protection is the **operating system /
+device's own full-disk or file-level encryption**, not application-level crypto.
+Slate itself ships **zero cipher code** — there is no encryption dependency in the
+tree, and the default pure-Rust backend (redb) has no native cipher. The on-disk
+file is protected exactly as well as the platform's encryption protects it:
+
+- **iOS / iPadOS** — files are protected by [iOS Data Protection](https://support.apple.com/guide/security/data-protection-overview-secf6276da8a/web),
+  per-file keys wrapped by a key hierarchy rooted in the device passcode and the
+  Secure Enclave. The relevant protection class is
+  **`NSFileProtectionCompleteUntilFirstUserAuthentication`** — the database file
+  must be readable across the app's full lifetime (including background work), but
+  stays encrypted while the device is powered off and before the user first unlocks
+  after boot. (`NSFileProtectionComplete` would lock the file whenever the device
+  locks, which breaks a long-lived embedded database; `NSFileProtectionNone` opts
+  out of at-rest protection and should not be used.) The embedding app is
+  responsible for setting this class on the database file/directory.
+- **macOS** — FileVault with APFS volume encryption protects the whole volume at
+  rest.
+- **Other platforms** — the equivalent OS facility (e.g. LUKS/dm-crypt on Linux,
+  BitLocker on Windows). Slate inherits whatever the platform provides; if the
+  platform encrypts nothing, neither does Slate.
+
+Because protection lives **below** the key/value layer, it covers *everything* on
+disk uniformly — record values, the index keyspace, the `_id`s embedded in record
+keys, the WAL, and the redb backup file copy alike.
+
+**Why below the keyspace, and why not value-only encryption.** Slate is an *indexed*
+store, and that rules out the obvious application-level approach. Index entries are
+keyed, not valued — an entry is `i\0{collection}\0{field}\0{value_bytes}{doc_id}`,
+so the indexed field value lives **in the key**, and record keys embed the `_id`.
+Range scans require those keys to stay byte-ordered on disk. Encrypting only record
+*values* (the cheap, backend-agnostic move) would therefore leave every indexed
+value and every `_id` in plaintext in the keyspace, while encrypting *keys* would
+destroy the ordering that range scans depend on (order-preserving encryption is weak
+and out of scope). For an indexed store, at-rest encryption belongs whole-file /
+page-level, beneath the key/value abstraction — which is exactly what OS / device
+encryption provides. Value-only encryption is rejected as security theater for this
+engine.
+
+**Threat model (what this does and does not protect).**
+
+- **Protects:** data at rest on a **locked or powered-off** device, and on backups
+  of the encrypted volume/file. An attacker who steals the device, the disk, or a
+  raw file copy without the OS keys reads ciphertext.
+- **Does not protect:** data against a **compromised running process** — once the OS
+  has unlocked the file for a live Slate instance, the bytes are readable by anything
+  with that process's access. It is not protection against malware running as the
+  user, a debugger attached to the live process, or memory inspection.
+- **Trust assumption:** it trusts the **OS key hierarchy** (Secure Enclave / passcode
+  on Apple, the platform keystore elsewhere). If that hierarchy is broken or absent,
+  there is no at-rest protection.
+
+**Not covered.** `MemoryStore` is ephemeral (nothing on disk to encrypt). The WASM
+binding is `MemoryStore`-only and the browser has no secure persistent key store, so
+at-rest encryption there would be theater regardless.
+
+**Future seam (deferred, not built).** If a threat model ever needs more than OS
+trust — e.g. a shared host where the OS account is not the trust boundary — the
+[Encryption at Rest RFC](./rfcs/encryption-at-rest.md) reserves a future *page-level*
+option below the keyspace, fed by a key-provider abstraction threaded through the
+builder and bindings. This is a **reserved design, not a shipped API**: there is no
+`with_encryption`, no `KeyProvider` type, and no `open_encrypted` constructor today —
+the open surface takes a path only, and no crypto will be built until a concrete
+threat model demands it. See the RFC for the full design and alternatives.
+
