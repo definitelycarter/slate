@@ -16,7 +16,6 @@ Slate is a Rust workspace; add the database crate plus a storage backend:
 [dependencies]
 slate-db = { path = "…/crates/slate-db" }
 slate-store = { path = "…/crates/slate-store" }   # backends
-slate-query = { path = "…/crates/slate-query" }   # FindOptions, filters
 bson = "3"
 ```
 
