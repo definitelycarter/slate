@@ -146,30 +146,25 @@ pub(crate) fn plan_source(
 
     // Priority 2: compound indexes. Pick the one whose leftmost prefix covers the
     // most predicates (a longer prefix is strictly more selective than a single
-    // field). The covered conjuncts are *retained* — the compound byte seek is a
-    // conservative superset (variable-width leading components can over-read, and
-    // components past the tail are unconstrained), so the residual `Filter` keeps
-    // the result exact. Equality atoms it claims are *not* added to `consumed`
-    // (they stay in the recheck), but they *are* excluded from the single-field
-    // loop below via `claimed`, so the same field isn't sought twice.
-    let mut claimed: Vec<usize> = Vec::new();
+    // field). The covered conjuncts are *consumed*: the executor's
+    // `CompoundIndexScan` node already rechecks each leading equality and the
+    // trailing range exactly against the index entry — dropping the byte seek's
+    // conservative over-read — with the same coercing `compare_bson` comparator
+    // `WHERE` uses. A residual `Filter` over the fetched document would re-check
+    // the identical predicate, so it is pure redundancy. This mirrors single-field
+    // `Eq`, whose in-scan recheck likewise consumes the atom (RFC: Covering Index
+    // Scans & Engine-Level Recheck, Part A).
     if let Some((access, used)) = best_compound_scan(&conjuncts, alias, &meta.compound_indexes) {
-        claimed.extend(used);
+        consumed.extend(used);
         accesses.push(access);
     }
 
     // Per indexed scalar field: combine its comparison atoms into a single
     // IndexScan (Eq wins; otherwise range bounds merge). These atoms are
     // consumed — the scan (with the executor's coercing post-filter) is exact.
-    // Skip fields already covered by the compound source (`claimed`).
-    let consumed_or_claimed = |consumed: &[usize]| -> Vec<usize> {
-        let mut all = consumed.to_vec();
-        all.extend(claimed.iter().copied());
-        all
-    };
+    // Skip fields already claimed by the compound source (now in `consumed`).
     for field in &meta.indexes {
-        let skip = consumed_or_claimed(&consumed);
-        if let Some((access, used)) = field_index_scan(&conjuncts, &skip, alias, field) {
+        if let Some((access, used)) = field_index_scan(&conjuncts, &consumed, alias, field) {
             accesses.push(access);
             consumed.extend(used);
         }
@@ -984,6 +979,60 @@ mod tests {
         let mut conjuncts = Vec::new();
         flatten_and(parse_where(sql), &mut conjuncts);
         best_compound_scan(&conjuncts, "c", &meta_compound(compound).compound_indexes)
+    }
+
+    /// Plan the `WHERE` of `sql` against `compound` indexes and return the residual
+    /// `Filter` expression `plan_source` leaves behind (`None` when every conjunct
+    /// is consumed).
+    fn plan_residual(sql: &str, compound: &[&[&str]]) -> Option<Expression> {
+        let container = CollectionRef {
+            cf: "default_cf".into(),
+            collection: "c".into(),
+        };
+        let (_, residual) = plan_source(
+            Some(parse_where(sql)),
+            "c",
+            &container,
+            &meta_compound(compound),
+        );
+        residual
+    }
+
+    /// A compound index that covers every conjunct (a leading equality plus a
+    /// trailing range) leaves no residual `Filter`: the executor's
+    /// `CompoundIndexScan` rechecks both exactly against the index entry, so a
+    /// document-level recheck would be redundant (RFC Part A).
+    #[test]
+    fn compound_scan_consumes_covered_conjuncts() {
+        let residual = plan_residual(
+            "SELECT VALUE c FROM c WHERE c.status = 'active' AND c.created_at > 5",
+            &[&["status", "created_at"]],
+        );
+        assert!(
+            residual.is_none(),
+            "fully-covered compound query kept a redundant residual: {residual:?}"
+        );
+    }
+
+    /// Only the compound-covered conjuncts are consumed: a predicate on a field
+    /// outside the index stays in the residual `Filter`, while the covered
+    /// equality is dropped.
+    #[test]
+    fn compound_scan_keeps_uncovered_conjunct_in_residual() {
+        let residual = plan_residual(
+            "SELECT VALUE c FROM c WHERE c.status = 'active' AND c.note = 'keep'",
+            &[&["status", "created_at"]],
+        )
+        .expect("the uncovered `note` predicate must remain");
+        let shown = format!("{residual:?}");
+        assert!(
+            shown.contains("note"),
+            "residual should keep `note`: {shown}"
+        );
+        assert!(
+            !shown.contains("status"),
+            "residual should drop the compound-covered `status`: {shown}"
+        );
     }
 
     #[test]

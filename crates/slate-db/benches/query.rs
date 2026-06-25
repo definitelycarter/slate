@@ -686,6 +686,32 @@ fn bench_query_sql(c: &mut Criterion) {
     group.finish();
 }
 
+/// Leading-equality on a compound index `(status, contacts_count)`:
+/// `WHERE c.status = "active"` plans as `CompoundIndexScan[status=active] →
+/// KeyLookup`. Part A of the covering-index RFC drops the residual `Filter
+/// status` the planner used to keep above the lookup (the compound scan node
+/// already rechecks the equality against the entry), so this is the before/after
+/// for that change. SQL (not a Mongo find) so the equality is a plain atom the
+/// compound-scan path claims.
+fn bench_query_compound_eq(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_compound_eq");
+    let sql = r#"SELECT VALUE c FROM c WHERE c.status = "active""#;
+    for n in [1_000, 10_000] {
+        let engine = compound_indexed_engine(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 /// IN-style disjunction on an indexed field (`$or` of several `{field: value}`
 /// equalities). Should plan to `IndexMerge(Or)` over the indexed candidates, not
 /// a full scan.
@@ -726,6 +752,7 @@ criterion_group!(
     bench_query_multi_field_and,
     bench_query_or_indexed,
     bench_query_sql,
+    bench_query_compound_eq,
     bench_query_null_filter,
     bench_query_sort_indexed,
     bench_query_sort_indexed_take,

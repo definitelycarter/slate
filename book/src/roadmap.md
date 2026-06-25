@@ -88,12 +88,16 @@ uninstrumented:
   components (see [Multikey RFC](./rfcs/multikey-indexes.md)); a SQL `CREATE INDEX`
   surface is not planned.
 - **[Covering Index Scans & Engine-Level Recheck](./rfcs/covering-index-scans.md)**
-  — *proposed.* Two index-access wins found benchmarking compound indexes: recheck a
-  scan's equality-constrained components *inside the engine* (entry byte-compare,
-  like single-field `Eq`) instead of a residual `Filter` over the fetched document,
-  and skip the `KeyLookup` for queries whose referenced fields are all index
-  components (covered scan). Goal: a compound index is never slower than the
-  single-field index on its leading prefix.
+  — *Part A done; Part B specified, deferred.* **Part A** (drop the redundant
+  residual `Filter`): a planner-only change — the executor's `CompoundIndexScan`
+  already rechecks each equality against the index entry, so the planner now
+  *consumes* the compound-covered conjuncts instead of re-checking them against the
+  fetched document (mirrors single-field `Eq`). Measured **−15–19 %** on a compound
+  leading-equality query (`query_compound_eq`). **Part B** (covering scan — skip the `KeyLookup`
+  when referenced fields ⊆ index components, synthesizing rows from the entry) is
+  fully designed across single-field / compound / aggregate cases in the RFC, with a
+  conservative coverage analysis and a differential-test safety net, and deferred to
+  a dedicated pass.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of
