@@ -62,8 +62,17 @@ uninstrumented:
   numbers project to one order-preserving `f64` key; numeric `Eq` −93% at 10k rows.
   Follow-ups: unique-index numeric collapse *decided* (matches Cosmos; impl pending);
   `into_index_value` micro-opt deferred.
-- **[Compound Indexes](./rfcs/compound-indexes.md)** — *proposed.* Multi-field keys,
-  leftmost-prefix rule, compound-unique.
+- **[Compound Indexes](./rfcs/compound-indexes.md)** — *done (Phase 1).* Multi-field
+  keys, leftmost-prefix rule, compound-unique. Programmatic-only:
+  `create_compound_index` / `create_unique_compound_index` (no SQL `CREATE INDEX`
+  grammar). Identity = component field names joined by `\x01`; the key concatenates
+  per-component sortable values with a trailing `u32` length suffix per string
+  component, so single-field is the byte-identical N=1 case. The planner seeks the
+  leftmost equality prefix as a conservative superset; the executor rechecks the
+  leading equalities + trailing range exactly. Scalar components only — multikey
+  (`[]`) components are rejected at creation. Remaining: multikey compound
+  components (see [Multikey RFC](./rfcs/multikey-indexes.md)); a SQL `CREATE INDEX`
+  surface is not planned.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of

@@ -135,6 +135,33 @@ pub enum IndexScanRange {
     StringPrefix(String),
 }
 
+/// How a [`Node::CompoundIndexScan`] is bounded — the leftmost-prefix model.
+///
+/// `eq_prefix` pins the leading components to exact values; `tail` optionally
+/// constrains the next component. Components past the tail are unconstrained and
+/// dropped from the index by the residual recheck the planner keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundScanRange {
+    /// Exact values for the leading components, in field order.
+    pub eq_prefix: Vec<Bson>,
+    /// The predicate on the component immediately after the equality prefix.
+    pub tail: CompoundScanTail,
+}
+
+/// The trailing predicate of a [`CompoundScanRange`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompoundScanTail {
+    /// No further constraint — scan the whole equality-prefix group.
+    Unbounded,
+    /// Equality on the next component.
+    Eq(Bson),
+    /// Range on the next component.
+    Range {
+        lower: Option<(Bson, bool)>,
+        upper: Option<(Bson, bool)>,
+    },
+}
+
 /// A node in the plan tree.
 ///
 /// ## The row environment
@@ -166,6 +193,19 @@ pub enum Node {
         collection: CollectionRef,
         field: String,
         range: IndexScanRange,
+        direction: ScanDirection,
+        limit: Option<usize>,
+    },
+
+    /// Compound index scan — a *source* node yielding bare document IDs from a
+    /// multi-field index, bounded by the leftmost-prefix [`CompoundScanRange`].
+    /// `field` is the joined compound identity (`f1\x01f2`). Pair with
+    /// [`Node::KeyLookup`] to fetch the documents; the planner keeps a residual
+    /// recheck since the byte seek is a conservative superset.
+    CompoundIndexScan {
+        collection: CollectionRef,
+        field: String,
+        range: CompoundScanRange,
         direction: ScanDirection,
         limit: Option<usize>,
     },

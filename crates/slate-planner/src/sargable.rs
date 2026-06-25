@@ -26,13 +26,22 @@
 use bson::{Bson, RawBson};
 use slate_ast::{BinOp, Expression, Literal};
 
-use crate::plan::{CollectionRef, IndexScanRange, LogicalOp, Node, ScanDirection};
+use crate::plan::{
+    CollectionRef, CompoundScanRange, CompoundScanTail, IndexScanRange, LogicalOp, Node,
+    ScanDirection,
+};
 
 /// Index metadata for the queried collection, used to choose a scan source.
 #[derive(Debug, Clone, Default)]
 pub struct CollectionMeta {
-    /// Indexed field paths (e.g. `"age"`, `"address.city"`, `"tags.[]"`).
+    /// Single-field indexed paths (e.g. `"age"`, `"address.city"`, `"tags.[]"`).
     pub indexes: Vec<String>,
+    /// Compound (multi-field) indexes as `(identity, components)` pairs: the
+    /// engine's stored identity string (the join the executor scans by) and its
+    /// ordered component paths (e.g. `["status", "created_at"]`, matched by the
+    /// leftmost-prefix rule). The identity is passed through opaquely so the
+    /// planner never has to know the join encoding.
+    pub compound_indexes: Vec<(String, Vec<String>)>,
     /// Primary-key field path (e.g. `"_id"`).
     pub pk_path: String,
 }
@@ -45,6 +54,12 @@ pub(crate) enum IndexAccess {
     Scan {
         field: String,
         range: IndexScanRange,
+    },
+    /// Leftmost-prefix scan on a compound index. `field` is the joined identity;
+    /// `range` carries the equality prefix and the trailing predicate.
+    Compound {
+        field: String,
+        range: CompoundScanRange,
     },
     /// A `.[]` element scan. Lowers to a *deduped* id stream — a multikey scan
     /// emits one id per matching element, so a repeated element would otherwise
@@ -129,11 +144,32 @@ pub(crate) fn plan_source(
     let mut accesses: Vec<IndexAccess> = Vec::new();
     let mut consumed: Vec<usize> = Vec::new();
 
+    // Priority 2: compound indexes. Pick the one whose leftmost prefix covers the
+    // most predicates (a longer prefix is strictly more selective than a single
+    // field). The covered conjuncts are *retained* — the compound byte seek is a
+    // conservative superset (variable-width leading components can over-read, and
+    // components past the tail are unconstrained), so the residual `Filter` keeps
+    // the result exact. Equality atoms it claims are *not* added to `consumed`
+    // (they stay in the recheck), but they *are* excluded from the single-field
+    // loop below via `claimed`, so the same field isn't sought twice.
+    let mut claimed: Vec<usize> = Vec::new();
+    if let Some((access, used)) = best_compound_scan(&conjuncts, alias, &meta.compound_indexes) {
+        claimed.extend(used);
+        accesses.push(access);
+    }
+
     // Per indexed scalar field: combine its comparison atoms into a single
     // IndexScan (Eq wins; otherwise range bounds merge). These atoms are
     // consumed — the scan (with the executor's coercing post-filter) is exact.
+    // Skip fields already covered by the compound source (`claimed`).
+    let consumed_or_claimed = |consumed: &[usize]| -> Vec<usize> {
+        let mut all = consumed.to_vec();
+        all.extend(claimed.iter().copied());
+        all
+    };
     for field in &meta.indexes {
-        if let Some((access, used)) = field_index_scan(&conjuncts, &consumed, alias, field) {
+        let skip = consumed_or_claimed(&consumed);
+        if let Some((access, used)) = field_index_scan(&conjuncts, &skip, alias, field) {
             accesses.push(access);
             consumed.extend(used);
         }
@@ -277,6 +313,13 @@ fn sargable(
 fn lower_access(access: &IndexAccess, container: &CollectionRef) -> Node {
     match access {
         IndexAccess::Scan { field, range } => index_scan(container, field, range.clone()),
+        IndexAccess::Compound { field, range } => Node::CompoundIndexScan {
+            collection: container.clone(),
+            field: field.clone(),
+            range: range.clone(),
+            direction: ScanDirection::Forward,
+            limit: None,
+        },
         IndexAccess::Multikey { field, value } => dedup_ids(index_scan(
             container,
             field,
@@ -350,6 +393,118 @@ fn field_index_scan(
         IndexAccess::Scan {
             field: field.to_string(),
             range: range_bound(lo, hi),
+        },
+        used,
+    ))
+}
+
+/// Choose the best compound index for the conjuncts: the one whose leftmost
+/// prefix consumes the most predicates. Returns the access and the conjunct
+/// indices it claims, or `None` if no compound index has a usable leading
+/// component. Ties are broken by first declared (stable).
+fn best_compound_scan(
+    conjuncts: &[Expression],
+    alias: &str,
+    compound_indexes: &[(String, Vec<String>)],
+) -> Option<(IndexAccess, Vec<usize>)> {
+    let mut best: Option<(IndexAccess, Vec<usize>)> = None;
+    for (identity, fields) in compound_indexes {
+        // Pass an empty `consumed` — the compound source is chosen first, so no
+        // prior index source has claimed any conjunct yet.
+        if let Some((access, used)) = compound_index_scan(conjuncts, &[], alias, identity, fields) {
+            let better = best.as_ref().is_none_or(|(_, b)| used.len() > b.len());
+            if better {
+                best = Some((access, used));
+            }
+        }
+    }
+    best
+}
+
+/// Build a leftmost-prefix [`IndexAccess::Compound`] for one compound index.
+///
+/// Walks the index's component fields left to right, consuming an equality atom
+/// per field for as long as they chain. The first field with only a range atom
+/// (no equality) becomes the trailing range and terminates the prefix — fields
+/// after a range can't be sought. Returns the access and the consumed conjunct
+/// indices, or `None` if the leading field has no usable atom (the leftmost-
+/// prefix rule: the first component must be constrained).
+///
+/// Conjuncts already `consumed` by an earlier (higher-priority) source are
+/// skipped, so two index sources never claim the same predicate.
+fn compound_index_scan(
+    conjuncts: &[Expression],
+    consumed: &[usize],
+    alias: &str,
+    identity: &str,
+    fields: &[String],
+) -> Option<(IndexAccess, Vec<usize>)> {
+    let mut eq_prefix: Vec<Bson> = Vec::new();
+    let mut used: Vec<usize> = Vec::new();
+    let mut tail = CompoundScanTail::Unbounded;
+
+    for field in fields {
+        // Gather this component's atoms (skipping ones already consumed or used
+        // by an earlier component in this same index).
+        let mut eq: Option<(Bson, usize)> = None;
+        let mut lower: Option<(Bson, bool, usize)> = None;
+        let mut upper: Option<(Bson, bool, usize)> = None;
+        for (i, conjunct) in conjuncts.iter().enumerate() {
+            if consumed.contains(&i) || used.contains(&i) {
+                continue;
+            }
+            let Some((f, op, value)) = as_atom(conjunct, alias) else {
+                continue;
+            };
+            if f != *field {
+                continue;
+            }
+            match op {
+                BinOp::Eq if eq.is_none() => eq = Some((value, i)),
+                BinOp::Gt if lower.is_none() => lower = Some((value, false, i)),
+                BinOp::Gte if lower.is_none() => lower = Some((value, true, i)),
+                BinOp::Lt if upper.is_none() => upper = Some((value, false, i)),
+                BinOp::Lte if upper.is_none() => upper = Some((value, true, i)),
+                _ => {}
+            }
+        }
+
+        if let Some((value, i)) = eq {
+            // Equality extends the prefix; keep walking to the next component.
+            eq_prefix.push(value);
+            used.push(i);
+            continue;
+        }
+        if lower.is_some() || upper.is_some() {
+            // A range on this component is the trailing predicate — the prefix
+            // stops here (later components can't be sought).
+            let lo = lower.map(|(v, incl, i)| {
+                used.push(i);
+                (v, incl)
+            });
+            let hi = upper.map(|(v, incl, i)| {
+                used.push(i);
+                (v, incl)
+            });
+            tail = CompoundScanTail::Range {
+                lower: lo,
+                upper: hi,
+            };
+        }
+        // No usable atom on this component → the prefix ends before it.
+        break;
+    }
+
+    // The leftmost-prefix rule: the leading component must be constrained, so we
+    // need at least one equality (or a range that became the tail on field 0).
+    if eq_prefix.is_empty() && matches!(tail, CompoundScanTail::Unbounded) {
+        return None;
+    }
+
+    Some((
+        IndexAccess::Compound {
+            field: identity.to_string(),
+            range: CompoundScanRange { eq_prefix, tail },
         },
         used,
     ))
@@ -789,6 +944,24 @@ mod tests {
     fn meta(indexes: &[&str]) -> CollectionMeta {
         CollectionMeta {
             indexes: indexes.iter().map(|s| s.to_string()).collect(),
+            compound_indexes: Vec::new(),
+            pk_path: "_id".into(),
+        }
+    }
+
+    /// A `CollectionMeta` with compound indexes — each given as its ordered
+    /// component fields; the identity is the components joined by `\x01`.
+    fn meta_compound(compound: &[&[&str]]) -> CollectionMeta {
+        let compound_indexes = compound
+            .iter()
+            .map(|fields| {
+                let components: Vec<String> = fields.iter().map(|s| s.to_string()).collect();
+                (components.join("\u{1}"), components)
+            })
+            .collect();
+        CollectionMeta {
+            indexes: Vec::new(),
+            compound_indexes,
             pk_path: "_id".into(),
         }
     }
@@ -803,6 +976,14 @@ mod tests {
     /// Recognise the single-predicate `WHERE` of `sql` against `indexes`.
     fn recognise(sql: &str, indexes: &[&str]) -> Option<(IndexAccess, Residual)> {
         sargable(&parse_where(sql), "c", &meta(indexes))
+    }
+
+    /// Plan the `WHERE` of `sql` against `compound` indexes and return the chosen
+    /// compound access (if any).
+    fn plan_compound(sql: &str, compound: &[&[&str]]) -> Option<(IndexAccess, Vec<usize>)> {
+        let mut conjuncts = Vec::new();
+        flatten_and(parse_where(sql), &mut conjuncts);
+        best_compound_scan(&conjuncts, "c", &meta_compound(compound).compound_indexes)
     }
 
     #[test]
@@ -1102,5 +1283,115 @@ mod tests {
         assert_eq!(regex_literal_prefix("abc"), None); // not anchored
         assert_eq!(regex_literal_prefix("(?i)^ad"), None); // case-insensitive
         assert_eq!(regex_literal_prefix("^\\"), None); // trailing lone backslash
+    }
+
+    // ── Compound index selection ────────────────────────────────
+
+    fn compound_access(sql: &str, compound: &[&[&str]]) -> (CompoundScanRange, Vec<usize>) {
+        let (access, used) = plan_compound(sql, compound).expect("a compound access");
+        let IndexAccess::Compound { range, .. } = access else {
+            panic!("expected a compound access");
+        };
+        (range, used)
+    }
+
+    #[test]
+    fn compound_two_equalities_consumes_both() {
+        let (range, used) = compound_access(
+            "SELECT VALUE c FROM c WHERE c.status = 'active' AND c.created_at = 5",
+            &[&["status", "created_at"]],
+        );
+        assert_eq!(
+            range.eq_prefix,
+            vec![Bson::String("active".into()), Bson::Int64(5)]
+        );
+        assert!(matches!(range.tail, CompoundScanTail::Unbounded));
+        assert_eq!(used.len(), 2);
+    }
+
+    #[test]
+    fn compound_eq_then_range_uses_prefix_and_tail() {
+        let (range, used) = compound_access(
+            "SELECT VALUE c FROM c WHERE c.status = 'active' AND c.created_at > 5",
+            &[&["status", "created_at"]],
+        );
+        assert_eq!(range.eq_prefix, vec![Bson::String("active".into())]);
+        assert_eq!(
+            range.tail,
+            CompoundScanTail::Range {
+                lower: Some((Bson::Int64(5), false)),
+                upper: None,
+            }
+        );
+        assert_eq!(used.len(), 2);
+    }
+
+    #[test]
+    fn compound_leading_field_only_is_a_prefix_scan() {
+        // Only the leading field is constrained → a single-equality prefix, tail
+        // unbounded (the leftmost-prefix rule lets a compound index serve `{a}`).
+        let (range, used) = compound_access(
+            "SELECT VALUE c FROM c WHERE c.status = 'active'",
+            &[&["status", "created_at"]],
+        );
+        assert_eq!(range.eq_prefix, vec![Bson::String("active".into())]);
+        assert!(matches!(range.tail, CompoundScanTail::Unbounded));
+        assert_eq!(used.len(), 1);
+    }
+
+    #[test]
+    fn compound_non_leading_field_alone_is_not_sargable() {
+        // `{created_at}` alone cannot use an index whose leading field is status.
+        assert!(
+            plan_compound(
+                "SELECT VALUE c FROM c WHERE c.created_at = 5",
+                &[&["status", "created_at"]],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn compound_range_on_leading_field_is_the_tail() {
+        // A range on the leading field is itself the trailing predicate (no eq
+        // prefix) — still a valid compound prefix scan.
+        let (range, used) = compound_access(
+            "SELECT VALUE c FROM c WHERE c.status > 'a'",
+            &[&["status", "created_at"]],
+        );
+        assert!(range.eq_prefix.is_empty());
+        assert_eq!(
+            range.tail,
+            CompoundScanTail::Range {
+                lower: Some((Bson::String("a".into()), false)),
+                upper: None,
+            }
+        );
+        assert_eq!(used.len(), 1);
+    }
+
+    #[test]
+    fn compound_prefers_longer_prefix_index() {
+        // Two candidate indexes; the one covering both equalities wins over the
+        // one covering only the first.
+        let (range, used) = compound_access(
+            "SELECT VALUE c FROM c WHERE c.a = 1 AND c.b = 2",
+            &[&["a", "x"], &["a", "b"]],
+        );
+        assert_eq!(range.eq_prefix, vec![Bson::Int64(1), Bson::Int64(2)]);
+        assert_eq!(used.len(), 2);
+    }
+
+    #[test]
+    fn compound_identity_is_the_joined_components() {
+        let (access, _) = plan_compound(
+            "SELECT VALUE c FROM c WHERE c.status = 'active'",
+            &[&["status", "created_at"]],
+        )
+        .unwrap();
+        let IndexAccess::Compound { field, .. } = access else {
+            panic!("expected compound");
+        };
+        assert_eq!(field, "status\u{1}created_at");
     }
 }

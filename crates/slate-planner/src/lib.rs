@@ -36,8 +36,8 @@ pub mod validate;
 
 pub use lower::lower;
 pub use plan::{
-    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, RowBinding,
-    ScanDirection, UpsertMode,
+    AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey, IndexScanRange,
+    LogicalOp, Node, Plan, RowBinding, ScanDirection, UpsertMode,
 };
 pub use planner::{PlanContext, plan};
 pub use sargable::CollectionMeta;

@@ -152,11 +152,35 @@ A unique index additionally enforces that no two live documents share the same v
 
 A unique index keeps its regular value-first `i` entry, so it serves index scans, range scans, and covered projections exactly like any other index. It additionally writes a point-lookup `u` entry — keyed by the value alone (`u\0{collection}\0{field}\0{type}{value}`) with the owning `_id` stored in the entry value. Enforcement is a point read on that `u` key before each write, backed by the store's write-write conflict detection for concurrent writers.
 
-**Scalar values only (for now).** Uniqueness is defined for single scalar values: a non-multikey path resolves to at most one value per document, so the value → `_id` mapping is one-to-one and the doc_id-less `u` key is unambiguous. A unique index on a multikey (`[]`) path is rejected — array fields fan out to multiple values per document, which implies cross-element uniqueness semantics we have not yet committed to. Compound and multikey unique indexes are tracked in the [roadmap](roadmap.md).
+**Scalar values only (for now).** Uniqueness is defined for single scalar values: a non-multikey path resolves to at most one value per document, so the value → `_id` mapping is one-to-one and the doc_id-less `u` key is unambiguous. A unique index on a multikey (`[]`) path is rejected — array fields fan out to multiple values per document, which implies cross-element uniqueness semantics we have not yet committed to. Compound unique indexes ship — see [Compound Indexes](#compound-indexes) below; multikey unique indexes are tracked in the [roadmap](roadmap.md).
 
 **Sparse.** A document that lacks the field (or holds a non-scalar there) produces no `u` entry and is unconstrained — any number of documents may omit a unique field.
 
 **Expired documents keep their slot.** A unique value owned by a document that has expired via TTL but not yet been purged still blocks new inserts of that value. This is conservative — a unique index never silently accepts a duplicate — and the slot is reclaimed when the dead document is purged.
+
+### Compound Indexes
+
+A compound index spans **multiple fields in order**. Create one with `create_compound_index(cf, collection, fields)` (and `create_unique_compound_index(…)` to constrain the *combination* of values). Like all indexes, these are programmatic — there is no SQL `CREATE INDEX`.
+
+```rust
+// compound index on (status, created_at)
+txn.create_compound_index(DEFAULT_CF, "orders", &["status".into(), "created_at".into()])?;
+```
+
+The planner applies the **leftmost-prefix rule**: an index on `(a, b, c)` serves any query that constrains a leftmost prefix of its fields, with at most a trailing range on the last constrained field. A query that skips the leading field falls back to a `Scan`.
+
+```text
+index on (status, created_at):
+  WHERE status = 'open' AND created_at >= @t   → CompoundIndexScan (equality + trailing range)
+  WHERE status = 'open'                        → CompoundIndexScan (leading prefix only)
+  WHERE created_at >= @t                       → Scan (skips the leading field)
+```
+
+The engine seeks the leading-equality prefix as a conservative superset (a string leading value can over-read its byte prefix); the executor then rechecks each leading equality and the trailing range exactly, so results match a full scan.
+
+**Compound-unique** enforces uniqueness of the whole tuple: two documents may share `status` or `created_at` individually, but not the same `(status, created_at)` pair. Backfill on creation fails with `UniqueViolation` if existing data already holds a duplicate combination.
+
+**Scalar components only (Phase 1).** Every component must resolve to a single scalar; a multikey (`[]`) component is rejected at creation, since an array component would fan one document across a cross-product of keys a leftmost-prefix seek can't address. Multikey compound indexes are tracked in the [roadmap](roadmap.md). A single-field index is exactly the one-component case of the same encoding.
 
 
 ## Plan Scenarios

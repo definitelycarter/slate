@@ -1,0 +1,391 @@
+//! Compound (multi-field) indexes, end to end.
+//!
+//! A compound index on `["status", "created_at"]` is matched by the
+//! leftmost-prefix rule: it serves `{status}` and `{status, created_at}` but not
+//! `{created_at}` alone. The pushdown is *invisible to results*: an indexed
+//! query returns exactly the same rows as a full scan. These pin that invariant
+//! against the tripwires — a leading value in a prefix relationship
+//! (`active` ⊂ `active2`), so the byte seek over-reads and the recheck must drop
+//! the spillover.
+
+use bson::{Bson, doc};
+use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_query::FindOptions;
+use slate_store::MemoryStore;
+
+/// Seed `orders` with `status` + `created_at`, optionally with a compound index
+/// on `["status", "created_at"]`. The `active`/`active2` pair exercises the
+/// leading-string byte-prefix over-read.
+fn seed(indexed: bool) -> Database<MemoryStore> {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "orders".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "orders",
+        vec![
+            doc! { "_id": "a", "status": "active", "created_at": 10 },
+            doc! { "_id": "b", "status": "active", "created_at": 20 },
+            doc! { "_id": "c", "status": "active", "created_at": 30 },
+            doc! { "_id": "d", "status": "active2", "created_at": 15 },
+            doc! { "_id": "e", "status": "archived", "created_at": 25 },
+            doc! { "_id": "f", "status": "archived", "created_at": 5 },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    // Create the index after data exists (also tests backfill).
+    if indexed {
+        txn.create_compound_index(
+            DEFAULT_CF,
+            "orders",
+            &["status".to_string(), "created_at".to_string()],
+        )
+        .unwrap();
+    }
+    txn.commit().unwrap();
+    db
+}
+
+/// The sorted `_id`s a `SELECT VALUE c._id … WHERE` selects from `orders`.
+fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
+    let txn = db.begin(true).unwrap();
+    let mut got: Vec<String> = txn
+        .query(DEFAULT_CF, "orders", sql)
+        .unwrap()
+        .iter_values::<String>()
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    got.sort();
+    got
+}
+
+fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
+    let txn = db.begin(true).unwrap();
+    let plan = txn.explain(DEFAULT_CF, "orders", sql).unwrap();
+    txn.rollback().unwrap();
+    plan
+}
+
+// ── Plan shape ──────────────────────────────────────────────────
+
+#[test]
+fn two_equalities_use_compound_scan() {
+    let db = seed(true);
+    let plan = explain(
+        &db,
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at = 20",
+    );
+    assert!(
+        plan.contains("CompoundIndexScan"),
+        "expected a CompoundIndexScan, got:\n{plan}"
+    );
+}
+
+#[test]
+fn eq_then_range_uses_compound_scan() {
+    let db = seed(true);
+    let plan = explain(
+        &db,
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at > 15",
+    );
+    assert!(
+        plan.contains("CompoundIndexScan"),
+        "expected a CompoundIndexScan, got:\n{plan}"
+    );
+}
+
+#[test]
+fn leading_field_only_uses_compound_scan() {
+    let db = seed(true);
+    let plan = explain(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'active'");
+    assert!(
+        plan.contains("CompoundIndexScan"),
+        "leftmost-prefix should serve a leading-field-only query:\n{plan}"
+    );
+}
+
+#[test]
+fn non_leading_field_falls_back_to_scan() {
+    let db = seed(true);
+    let plan = explain(&db, "SELECT VALUE c._id FROM c WHERE c.created_at = 20");
+    assert!(
+        !plan.contains("CompoundIndexScan"),
+        "a non-leading field alone cannot use the compound index:\n{plan}"
+    );
+    assert!(plan.contains("Scan"), "expected a full scan, got:\n{plan}");
+}
+
+// ── Results identical to a full scan ────────────────────────────
+
+#[test]
+fn indexed_results_match_full_scan() {
+    let indexed = seed(true);
+    let plain = seed(false);
+    for sql in [
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active'",
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at = 20",
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at > 15",
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at >= 20 AND c.created_at < 30",
+        "SELECT VALUE c._id FROM c WHERE c.status = 'active2'",
+        "SELECT VALUE c._id FROM c WHERE c.status = 'archived' AND c.created_at = 5",
+    ] {
+        assert_eq!(ids(&indexed, sql), ids(&plain, sql), "mismatch for `{sql}`");
+    }
+}
+
+#[test]
+fn leading_prefix_collision_is_excluded() {
+    // status = "active" must NOT pick up the "active2" doc, even though the seek
+    // over-reads its byte prefix.
+    let db = seed(true);
+    assert_eq!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'active'"),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
+}
+
+#[test]
+fn eq_then_range_selects_the_right_rows() {
+    let db = seed(true);
+    assert_eq!(
+        ids(
+            &db,
+            "SELECT VALUE c._id FROM c WHERE c.status = 'active' AND c.created_at > 15"
+        ),
+        vec!["b".to_string(), "c".to_string()]
+    );
+}
+
+// ── Index maintenance on update / delete ────────────────────────
+
+#[test]
+fn update_maintains_compound_index() {
+    let db = seed(true);
+    // Move "b" out of the (active, 20) slot.
+    {
+        let txn = db.begin(false).unwrap();
+        let filter = eq("_id", Bson::String("b".into()));
+        txn.update_one(DEFAULT_CF, "orders", &filter, doc! { "status": "archived" })
+            .unwrap()
+            .drain()
+            .unwrap();
+        txn.commit().unwrap();
+    }
+    // status = "active" now omits "b".
+    assert_eq!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'active'"),
+        vec!["a".to_string(), "c".to_string()]
+    );
+    // And "b" appears under archived.
+    assert!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'archived'")
+            .contains(&"b".to_string())
+    );
+}
+
+#[test]
+fn delete_maintains_compound_index() {
+    let db = seed(true);
+    {
+        let txn = db.begin(false).unwrap();
+        let filter = eq("_id", Bson::String("a".into()));
+        txn.delete_one(DEFAULT_CF, "orders", &filter)
+            .unwrap()
+            .drain()
+            .unwrap();
+        txn.commit().unwrap();
+    }
+    assert_eq!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'active'"),
+        vec!["b".to_string(), "c".to_string()]
+    );
+}
+
+// ── Sparsity: a missing component yields no entry ───────────────
+
+#[test]
+fn missing_component_is_not_indexed() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    {
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "orders".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.insert_many(
+            DEFAULT_CF,
+            "orders",
+            vec![
+                doc! { "_id": "a", "status": "active", "created_at": 10 },
+                // No `created_at` → not in the compound index.
+                doc! { "_id": "b", "status": "active" },
+            ],
+        )
+        .unwrap()
+        .drain()
+        .unwrap();
+        txn.create_compound_index(
+            DEFAULT_CF,
+            "orders",
+            &["status".to_string(), "created_at".to_string()],
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+    // The compound-index path returns only "a"; the residual recheck applied by
+    // the planner over the index source keeps "b" out (it has no created_at).
+    assert_eq!(
+        ids(&db, "SELECT VALUE c._id FROM c WHERE c.status = 'active'"),
+        vec!["a".to_string()]
+    );
+    // But a full-scan equality on just `status` still sees both (no index used).
+    let txn = db.begin(true).unwrap();
+    let found = txn
+        .find(
+            DEFAULT_CF,
+            "orders",
+            eq("status", Bson::String("active".into())),
+            FindOptions::default(),
+        )
+        .unwrap()
+        .iter_raw()
+        .unwrap()
+        .count();
+    assert_eq!(found, 2);
+}
+
+// ── list_indexes reports the joined identity ────────────────────
+
+#[test]
+fn list_indexes_reports_compound_identity() {
+    let db = seed(true);
+    let txn = db.begin(true).unwrap();
+    let indexes = txn.list_indexes(DEFAULT_CF, "orders").unwrap();
+    assert!(
+        indexes
+            .iter()
+            .any(|i| i.contains("status") && i.contains("created_at")),
+        "expected a compound identity in {indexes:?}"
+    );
+}
+
+// ── Unique compound indexes ─────────────────────────────────────
+
+/// A collection `members` with a unique compound index on `["org_id", "email"]`.
+fn seed_members_unique() -> Database<MemoryStore> {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "members".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.create_unique_compound_index(
+        DEFAULT_CF,
+        "members",
+        &["org_id".to_string(), "email".to_string()],
+    )
+    .unwrap();
+    txn.commit().unwrap();
+    db
+}
+
+#[test]
+fn unique_compound_allows_same_email_across_orgs() {
+    let db = seed_members_unique();
+    let txn = db.begin(false).unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "members",
+        doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    // Same email, different org → allowed (the combination is distinct).
+    txn.insert_one(
+        DEFAULT_CF,
+        "members",
+        doc! { "_id": "m2", "org_id": "globex", "email": "x@test.com" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn unique_compound_rejects_same_combination() {
+    let db = seed_members_unique();
+    let txn = db.begin(false).unwrap();
+    txn.insert_one(
+        DEFAULT_CF,
+        "members",
+        doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    // Same org AND same email → the combination collides.
+    let err = txn
+        .insert_one(
+            DEFAULT_CF,
+            "members",
+            doc! { "_id": "m2", "org_id": "acme", "email": "x@test.com" },
+        )
+        .unwrap()
+        .drain()
+        .unwrap_err();
+    assert!(
+        matches!(err, slate_db::DbError::UniqueViolation { .. }),
+        "expected DbError::UniqueViolation, got {err:?}"
+    );
+}
+
+#[test]
+fn unique_compound_backfill_detects_existing_duplicate() {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "members".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.insert_many(
+        DEFAULT_CF,
+        "members",
+        vec![
+            doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
+            doc! { "_id": "m2", "org_id": "acme", "email": "x@test.com" },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    // Backfilling a unique compound index over duplicate combinations fails.
+    let err = txn
+        .create_unique_compound_index(
+            DEFAULT_CF,
+            "members",
+            &["org_id".to_string(), "email".to_string()],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, slate_db::DbError::UniqueViolation { .. }),
+        "expected DbError::UniqueViolation, got {err:?}"
+    );
+}
+
+fn eq(field: &str, value: Bson) -> bson::RawDocumentBuf {
+    let mut doc = bson::Document::new();
+    doc.insert(field.to_string(), value);
+    bson::RawDocumentBuf::try_from(&doc).unwrap()
+}

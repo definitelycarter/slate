@@ -16,8 +16,8 @@ use bson::Bson;
 use slate_ast::{BinOp, Expression, Literal, OrderByItem, SortDirection, SubqueryKind, UnaryOp};
 
 use crate::plan::{
-    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, Node, Plan, ScanDirection,
-    UpsertMode,
+    AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey, IndexScanRange,
+    LogicalOp, Node, Plan, ScanDirection, UpsertMode,
 };
 
 impl Plan {
@@ -114,6 +114,28 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
             limit,
         } => {
             let mut text = format!("IndexScan {}.{field} {}", coll(collection), bounds(range));
+            text.push(' ');
+            text.push_str(match direction {
+                ScanDirection::Forward => "forward",
+                ScanDirection::Reverse => "reverse",
+            });
+            if let Some(n) = limit {
+                text.push_str(&format!(" limit {n}"));
+            }
+            line(lines, depth, text);
+        }
+        Node::CompoundIndexScan {
+            collection,
+            field,
+            range,
+            direction,
+            limit,
+        } => {
+            let mut text = format!(
+                "CompoundIndexScan {}.{field} {}",
+                coll(collection),
+                compound_bounds(range)
+            );
             text.push(' ');
             text.push_str(match direction {
                 ScanDirection::Forward => "forward",
@@ -259,6 +281,41 @@ fn bounds(range: &IndexScanRange) -> String {
             }
         }
         IndexScanRange::StringPrefix(p) => format!("starts with {p:?}"),
+    }
+}
+
+/// Render a compound scan's bounds: the equality prefix then the trailing
+/// predicate (`[= "active", = X] then >= Y`).
+fn compound_bounds(range: &CompoundScanRange) -> String {
+    let mut parts: Vec<String> = range
+        .eq_prefix
+        .iter()
+        .map(|v| format!("= {}", bson(v)))
+        .collect();
+    match &range.tail {
+        CompoundScanTail::Unbounded => {}
+        CompoundScanTail::Eq(v) => parts.push(format!("= {}", bson(v))),
+        CompoundScanTail::Range { lower, upper } => {
+            if let Some((v, inclusive)) = lower {
+                parts.push(format!(
+                    "{} {}",
+                    if *inclusive { ">=" } else { ">" },
+                    bson(v)
+                ));
+            }
+            if let Some((v, inclusive)) = upper {
+                parts.push(format!(
+                    "{} {}",
+                    if *inclusive { "<=" } else { "<" },
+                    bson(v)
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        "(all)".to_string()
+    } else {
+        format!("[{}]", parts.join(", "))
     }
 }
 

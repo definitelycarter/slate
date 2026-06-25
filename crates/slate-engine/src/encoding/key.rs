@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 
-use bson::spec::ElementType;
-
 use crate::encoding::bson_value::BsonValue;
 use crate::traits::FunctionKind;
 
@@ -15,11 +13,48 @@ const VALIDATOR_TAG: u8 = b'v';
 const DERIVED_TAG: u8 = b'd';
 const SEP: u8 = 0x00;
 
-/// Width of the trailing value-length suffix on variable-width index keys.
+/// Separator between the component field names of a compound index's identity.
 ///
-/// `u32` (not `u16`) so an indexed string longer than 64 KiB cannot silently
-/// truncate the recorded length and corrupt the value/doc_id boundary.
-const VALUE_LEN_SUFFIX: usize = 4;
+/// A compound index on `["status", "created_at"]` is identified by the single
+/// "field" string `status\x01created_at`, so the whole compound key machinery
+/// (prefix scans, `IndexField`, `drop_index`, purge) treats it as one opaque
+/// field segment — only the value encode/decode and the planner understand the
+/// internal structure. `\x01` is distinct from the `\x00` key separator and
+/// cannot collide with a real field-name byte (field names are dotted
+/// identifiers and `.[]`, never control characters).
+pub(crate) const FIELD_SEP: u8 = 0x01;
+
+// Prefix-isolation invariant: `FIELD_SEP > SEP`.
+//
+// A single-field index `f` and a compound index whose first component is `f`
+// share the value prefix `i\0{collection}\0f`, but their key prefixes diverge at
+// the next byte — the single index has `SEP` (0x00) there (`…\0f\0…`), the
+// compound has `FIELD_SEP` (0x01) (`…\0f\x01g\0…`). Because `FIELD_SEP > SEP`,
+// the compound's `IndexField` prefix sorts *after* the single's, so the two
+// scan ranges never overlap and a `status` scan can't sweep in `status\x01…`
+// entries (and vice versa). The single/compound prefix isolation test
+// (`tests/kv.rs::single_and_compound_index_prefixes_do_not_leak`) exercises
+// this at the engine level.
+const _: () = assert!(
+    FIELD_SEP > SEP,
+    "FIELD_SEP must sort after SEP so single-field and compound index prefixes isolate"
+);
+
+/// Join component field names into one compound-index identity string.
+///
+/// A single-field index round-trips to its own name (`["age"]` → `"age"`), so
+/// the existing single-field path is the `len == 1` case of the compound path.
+pub fn join_index_fields(fields: &[String]) -> String {
+    fields.join(std::str::from_utf8(&[FIELD_SEP]).unwrap_or("\u{1}"))
+}
+
+/// Split a compound-index identity string back into its component field names.
+///
+/// The inverse of [`join_index_fields`]. A plain (non-compound) identity yields
+/// a single-element vector.
+pub fn split_index_fields(field: &str) -> Vec<String> {
+    field.split(FIELD_SEP as char).map(str::to_string).collect()
+}
 
 fn function_tag(kind: FunctionKind) -> u8 {
     match kind {
@@ -41,8 +76,8 @@ fn tag_to_function_kind(tag: u8) -> Option<FunctionKind> {
 /// Parse just the collection and field from an `i`-tagged index key.
 ///
 /// Validates the `i\x00` prefix and the two separators. Does **not** resolve the
-/// value/doc_id boundary — that needs the entry's metadata type byte (see
-/// [`index_value_len`]), which a bare key does not carry. Returns
+/// value/doc_id boundary — that lives in the entry's metadata (the value-side
+/// precomputed offsets), which a bare key does not carry. Returns
 /// `(collection, field)`.
 pub(crate) fn parse_index_collection_field(key: &[u8]) -> Option<(&str, &str)> {
     if key.len() < 2 || key[0] != INDEX_TAG || key[1] != SEP {
@@ -57,61 +92,14 @@ pub(crate) fn parse_index_collection_field(key: &[u8]) -> Option<(&str, &str)> {
     Some((collection, field))
 }
 
-/// The fixed byte length of an index value of `tag`, or `None` for
-/// variable-width types (whose length is recorded in a trailing suffix).
-fn fixed_value_len(tag: ElementType) -> Option<usize> {
-    match tag {
-        // Int32/Int64/Double all index as the 8-byte f64 key (unified numeric
-        // index key); DateTime keeps its own 8-byte i64 encoding.
-        ElementType::Int32 | ElementType::Int64 | ElementType::Double | ElementType::DateTime => {
-            Some(8)
-        }
-        ElementType::ObjectId => Some(12),
-        ElementType::Boolean => Some(1),
-        _ => None,
-    }
-}
-
-/// Whether an index value of `tag` is stored variable-width — its key carries a
-/// trailing `u32` value-length suffix instead of a type-derived fixed length.
+/// Width of one component's value-side end-offset in an index entry's metadata.
 ///
-/// The single source of truth for the encoder (whether to append the suffix) and
-/// the decoder (whether to read it). Currently only `String` is variable-width.
-pub(crate) fn index_value_is_var_width(tag: ElementType) -> bool {
-    fixed_value_len(tag).is_none()
-}
-
-/// The byte length of an index entry's value.
-///
-/// `type_byte` is the entry's BSON element type (from its metadata); `tail` is the
-/// bytes from the value onward. Fixed-width types have a length fixed by their type
-/// (`{value}{doc_id_lp}`). Variable-width types (strings) carry the value length in
-/// a trailing `u32` suffix (`{value}{doc_id_lp}{value_len:u32}`), so the boundary is
-/// read directly rather than guessed. Both avoid the old ambiguous backward scan,
-/// which mis-split a value whose bytes resembled a length-prefixed doc_id header.
-pub(crate) fn index_value_len(type_byte: u8, tail: &[u8]) -> Option<usize> {
-    let tag = ElementType::from(type_byte)?;
-    match fixed_value_len(tag) {
-        Some(len) => {
-            if len > tail.len() {
-                return None;
-            }
-            Some(len)
-        }
-        None => {
-            // Variable-width: the last `VALUE_LEN_SUFFIX` bytes hold the value length.
-            // A valid tail is `{value}{doc_id_lp}{suffix}`, so it must also fit the
-            // doc_id length-prefix header (`LP_HEADER`) between value and suffix.
-            const LP_HEADER: usize = 3;
-            let suffix_at = tail.len().checked_sub(VALUE_LEN_SUFFIX)?;
-            let len = u32::from_be_bytes(tail[suffix_at..].try_into().ok()?) as usize;
-            if len.checked_add(LP_HEADER + VALUE_LEN_SUFFIX)? > tail.len() {
-                return None;
-            }
-            Some(len)
-        }
-    }
-}
+/// `u32` (not `u16`) so an indexed string longer than 64 KiB cannot silently
+/// truncate the recorded offset and corrupt the value/doc_id boundary. The
+/// offsets are the single source of truth for the value/doc_id boundary, replacing
+/// the old key-side length suffixes — see [`Key::encode_index_key_into`] and
+/// [`IndexEntry`](crate::IndexEntry).
+pub(crate) const VALUE_OFFSET_WIDTH: usize = 4;
 
 /// Structured key for engine storage operations.
 ///
@@ -199,15 +187,12 @@ impl<'a> Key<'a> {
     /// `BsonValue`). The caller supplies the buffer, which is cleared first;
     /// reuse one `buf` across a batch to amortize the allocation.
     ///
-    /// Layout: `i\x00{collection}\x00{field}\x00{value_bytes}[doc_id_encoded]`,
-    /// with a trailing `value_len: u32 BE` suffix appended for variable-width
-    /// (string) values: `…[doc_id_encoded]{value_len}`.
+    /// Layout: `i\x00{collection}\x00{field}\x00{value_bytes}[doc_id_encoded]`.
     ///
-    /// There is no separator between value_bytes and doc_id: fixed-width values
-    /// derive their length from the type byte, and variable-width values record
-    /// it in the trailing suffix, so the boundary is always recoverable (see
-    /// [`index_value_len`]). The suffix sits *after* the doc_id, so it never
-    /// affects prefix scans or key ordering.
+    /// There is no separator (and no trailing length suffix) between value_bytes
+    /// and doc_id: the value/doc_id boundary is recovered from the **value-side**
+    /// precomputed offset in the entry's metadata (see [`IndexRecord::encode`]),
+    /// not from the key, so the key carries only the sort-relevant bytes.
     pub fn encode_index_key_into(
         buf: &mut Vec<u8>,
         collection: &str,
@@ -216,18 +201,9 @@ impl<'a> Key<'a> {
         doc_id: &BsonValue<'_>,
     ) {
         let value_bytes: &[u8] = &value.bytes;
-        let var_width = index_value_is_var_width(value.tag);
-        let suffix = if var_width { VALUE_LEN_SUFFIX } else { 0 };
         buf.clear();
         buf.reserve(
-            2 + collection.len()
-                + 1
-                + field.len()
-                + 1
-                + value_bytes.len()
-                + 3
-                + doc_id.bytes.len()
-                + suffix,
+            2 + collection.len() + 1 + field.len() + 1 + value_bytes.len() + 3 + doc_id.bytes.len(),
         );
         buf.push(INDEX_TAG);
         buf.push(SEP);
@@ -237,9 +213,6 @@ impl<'a> Key<'a> {
         buf.push(SEP);
         buf.extend_from_slice(value_bytes);
         doc_id.write_length_prefixed(buf);
-        if var_width {
-            buf.extend_from_slice(&(value_bytes.len() as u32).to_be_bytes());
-        }
     }
 
     /// Allocating convenience over
@@ -253,6 +226,38 @@ impl<'a> Key<'a> {
         let mut buf = Vec::new();
         Self::encode_index_key_into(&mut buf, collection, field, value, doc_id);
         buf
+    }
+
+    /// Encode a *compound* index key from N component values into `buf`.
+    ///
+    /// Layout: `i\x00{collection}\x00{field}\x00{v1}{v2}…{vN}[doc_id_lp]`, where
+    /// `field` is the joined compound identity (`f1\x01f2`) and the component
+    /// value bytes are concatenated in field order. Per-component value/doc_id
+    /// boundaries are recovered from the **value-side** precomputed offsets in
+    /// the entry's metadata (see [`IndexRecord::encode_compound`]), so the key
+    /// carries no trailing length suffixes.
+    ///
+    /// The seek-relevant prefix is just the concatenated value bytes: a
+    /// leading-field equality seek is a plain byte prefix. With N == 1 this
+    /// produces byte-identical output to [`encode_index_key_into`].
+    pub fn encode_compound_index_key_into(
+        buf: &mut Vec<u8>,
+        collection: &str,
+        field: &str,
+        values: &[BsonValue<'_>],
+        doc_id: &BsonValue<'_>,
+    ) {
+        buf.clear();
+        buf.push(INDEX_TAG);
+        buf.push(SEP);
+        buf.extend_from_slice(collection.as_bytes());
+        buf.push(SEP);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(SEP);
+        for value in values {
+            buf.extend_from_slice(&value.bytes);
+        }
+        doc_id.write_length_prefixed(buf);
     }
 
     /// Encode a record key from borrowed parts, avoiding `BsonValue` clone.
@@ -495,9 +500,13 @@ mod tests {
         }
     }
 
-    /// Helper: encode an index entry, then recover its `(value_bytes, doc_id)`
-    /// using the metadata-aware boundary resolution that `IndexRecord`/`IndexEntry`
-    /// use in production (`index_value_len` keyed by the value's type byte).
+    /// Helper: encode an index entry, then recover its `(value_bytes, doc_id)`.
+    ///
+    /// The value/doc_id boundary now lives in the entry's *metadata* (the
+    /// value-side precomputed offsets), not in the key — so this helper takes the
+    /// boundary from the known `value.bytes.len()` (which the production write side
+    /// records into the metadata offsets) and confirms the doc_id parses straight
+    /// after the value bytes, with NO trailing length suffix.
     fn roundtrip_index_value<'b>(
         collection: &str,
         field: &str,
@@ -509,10 +518,12 @@ mod tests {
         assert_eq!(c, collection);
         assert_eq!(f, field);
         let value_start = 2 + collection.len() + 1 + field.len() + 1;
-        let value_len = index_value_len(value.tag as u8, &bytes[value_start..]).unwrap();
+        let value_len = value.bytes.len();
         let recovered_value = bytes[value_start..value_start + value_len].to_vec();
-        let (id, _rest) =
+        let (id, rest) =
             BsonValue::parse_length_prefixed(&bytes[value_start + value_len..]).unwrap();
+        // No trailing suffix: the doc_id runs to the very end of the key.
+        assert!(rest.is_empty(), "index key must have no trailing suffix");
         (recovered_value, id.into_owned())
     }
 
@@ -568,8 +579,9 @@ mod tests {
     #[test]
     fn index_key_string_value_collides_with_docid_header() {
         // Value bytes that embed a valid length-prefixed header (`[0x02][0x00][0x00]`)
-        // — the collision the old backward scan mis-split. The trailing suffix keeps
-        // the boundary exact regardless of doc_id type.
+        // — the collision the old backward scan mis-split. The value-side offset
+        // (in the metadata) keeps the boundary exact regardless of doc_id type, so
+        // the helper recovers the full value bytes.
         let value = BsonValue {
             tag: ElementType::String,
             bytes: Cow::Borrowed(b"active\x02\x00\x00\x00"),
@@ -588,8 +600,7 @@ mod tests {
 
     #[test]
     fn index_key_fixed_width_value_has_no_suffix() {
-        // Fixed-width (Int64) value: the key is byte-identical to the pre-suffix
-        // layout — `{value(8)}{doc_id_lp}` with no trailing suffix.
+        // Fixed-width (Int64) value: `{value(8)}{doc_id_lp}` with no trailing suffix.
         let value = BsonValue {
             tag: ElementType::Int64,
             bytes: Cow::Borrowed(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A]),
@@ -606,8 +617,9 @@ mod tests {
     }
 
     #[test]
-    fn index_key_variable_width_value_has_suffix() {
-        // String value: the key carries a trailing u32 value-length suffix.
+    fn index_key_variable_width_value_has_no_suffix() {
+        // String value: with value-side offsets, the key no longer carries a
+        // trailing length suffix — it ends right after the length-prefixed doc_id.
         let value = BsonValue {
             tag: ElementType::String,
             bytes: Cow::Borrowed(b"hello"),
@@ -615,17 +627,18 @@ mod tests {
         let doc_id = str_id("rec-1");
         let bytes = Key::encode_index_key("k", "f", &value, &doc_id);
         let value_start = 2 + "k".len() + 1 + "f".len() + 1;
-        // 5 value bytes + length-prefixed doc_id (5) + 4-byte suffix.
-        assert_eq!(bytes.len(), value_start + 5 + (3 + 5) + 4);
-        // Suffix encodes the value length.
-        let suffix = &bytes[bytes.len() - 4..];
-        assert_eq!(u32::from_be_bytes(suffix.try_into().unwrap()), 5);
+        // 5 value bytes + length-prefixed doc_id (5), no suffix.
+        assert_eq!(bytes.len(), value_start + 5 + (3 + 5));
+
+        let (recovered, id) = roundtrip_index_value("k", "f", &value, &doc_id);
+        assert_eq!(recovered, b"hello");
+        assert_eq!(id, doc_id);
     }
 
     #[test]
     fn decode_returns_none_for_index_key() {
         // `Key::decode` cannot resolve an `i` key's value boundary without the
-        // metadata type byte, so it does not handle index keys.
+        // metadata value-side offsets, so it does not handle index keys.
         let value = BsonValue {
             tag: ElementType::String,
             bytes: Cow::Borrowed(b"v"),
@@ -635,15 +648,80 @@ mod tests {
     }
 
     #[test]
-    fn index_value_len_fixed_width_ignores_trailing_bytes() {
-        // For a fixed-width type the length comes from the type byte; trailing
-        // doc_id bytes do not extend it.
-        let tail = &[
-            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x19, /* doc_id */ 0x02, 0x00, 0x01,
-            b'x',
-        ];
-        // Numerics index as the 8-byte f64 key; trailing doc_id bytes are ignored.
-        assert_eq!(index_value_len(ElementType::Int32 as u8, tail), Some(8));
+    fn join_split_index_fields_round_trip() {
+        let fields = vec!["status".to_string(), "created_at".to_string()];
+        let identity = join_index_fields(&fields);
+        assert_eq!(identity, "status\u{1}created_at");
+        assert_eq!(split_index_fields(&identity), fields);
+        // A single field joins to itself.
+        assert_eq!(join_index_fields(&["age".to_string()]), "age");
+        assert_eq!(split_index_fields("age"), vec!["age".to_string()]);
+    }
+
+    #[test]
+    fn compound_key_round_trips_string_plus_numeric() {
+        // status (var-width) + created_at (fixed-width Int64): the key is the
+        // concatenated value bytes then the length-prefixed doc_id, with NO
+        // trailing suffix (the per-component boundaries live in the metadata's
+        // value-side offsets, validated by the IndexRecord/IndexEntry tests).
+        let status = BsonValue {
+            tag: ElementType::String,
+            bytes: Cow::Borrowed(b"active"),
+        };
+        let created = BsonValue {
+            tag: ElementType::Int64,
+            bytes: Cow::Borrowed(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x14]),
+        };
+        let doc_id = str_id("order-1");
+        let values = vec![status.clone(), created.clone()];
+
+        let mut key = Vec::new();
+        Key::encode_compound_index_key_into(
+            &mut key,
+            "orders",
+            "status\u{1}created_at",
+            &values,
+            &doc_id,
+        );
+
+        let field = "status\u{1}created_at";
+        let value_start = 2 + "orders".len() + 1 + field.len() + 1;
+        // status (6) + created (8) = 14 total value bytes, then the doc_id.
+        let total_value_len = status.bytes.len() + created.bytes.len();
+        assert_eq!(total_value_len, 14);
+        assert_eq!(&key[value_start..value_start + 6], b"active");
+        let (id, rest) =
+            BsonValue::parse_length_prefixed(&key[value_start + total_value_len..]).unwrap();
+        assert_eq!(id, doc_id);
+        // No trailing suffix — the doc_id runs to the end of the key.
+        assert!(rest.is_empty(), "compound index key must have no suffix");
+    }
+
+    #[test]
+    fn compound_key_two_var_width_has_no_suffix() {
+        // Two strings: the key concatenates both then the doc_id, with no trailing
+        // length suffixes (boundaries are metadata-side now).
+        let a = BsonValue {
+            tag: ElementType::String,
+            bytes: Cow::Borrowed(b"hello"),
+        };
+        let b = BsonValue {
+            tag: ElementType::String,
+            bytes: Cow::Borrowed(b"worldd"),
+        };
+        let doc_id = str_id("d1");
+        let total_value_len = a.bytes.len() + b.bytes.len(); // 5 + 6 = 11
+        let values = vec![a, b];
+        let mut key = Vec::new();
+        Key::encode_compound_index_key_into(&mut key, "k", "a\u{1}b", &values, &doc_id);
+
+        let value_start = 2 + "k".len() + 1 + "a\u{1}b".len() + 1;
+        // value bytes + length-prefixed doc_id ("d1" = 2), no suffix.
+        assert_eq!(key.len(), value_start + total_value_len + (3 + 2));
+        let (id, rest) =
+            BsonValue::parse_length_prefixed(&key[value_start + total_value_len..]).unwrap();
+        assert_eq!(id, doc_id);
+        assert!(rest.is_empty(), "compound index key must have no suffix");
     }
 
     #[test]

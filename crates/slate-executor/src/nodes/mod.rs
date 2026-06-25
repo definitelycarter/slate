@@ -18,6 +18,7 @@
 
 pub(crate) mod aggregate;
 pub(crate) mod bind;
+pub(crate) mod compound_index_scan;
 pub(crate) mod delete;
 pub(crate) mod distinct;
 pub(crate) mod env;
