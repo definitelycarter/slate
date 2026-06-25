@@ -191,6 +191,37 @@ pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
     engine
 }
 
+/// Seed a corpus with a *compound* index on `["status", "contacts_count"]` and
+/// no single-field `status` index, so a leading-equality query
+/// (`WHERE c.status = "active"`) plans as a `CompoundIndexScan` on the leftmost
+/// prefix. Used to measure Part A of the covering-index RFC: dropping the
+/// redundant residual `Filter` the planner used to keep above the `KeyLookup`
+/// (the compound scan node already rechecks the equality against the entry).
+pub fn compound_indexed_engine(n: usize) -> Database<MemoryStore> {
+    let engine = db_builder().open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "bench".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    txn.create_compound_index(
+        DEFAULT_CF,
+        "bench",
+        &["status".to_string(), "contacts_count".to_string()],
+    )
+    .unwrap();
+    let docs = generate_realistic_batch(n);
+    for chunk in docs.chunks(1000) {
+        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
+            .unwrap()
+            .drain()
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
