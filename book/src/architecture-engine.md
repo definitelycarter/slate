@@ -54,7 +54,7 @@ The meaning of the AST: an `owned` evaluator (`eval`, walks `bson::Bson`) and a 
 
 **`slate-planner`** makes the *decisions*: it lowers `slate_ast::Query` to a `Plan`/`Node` IR, choosing a scan source via sargability (`c.<indexed-field> <cmp> <literal>` conjuncts push into an `IndexScan`; pk equality becomes a direct `KeyLookup`; everything else stays a residual `Filter`). It is fed the collection's index metadata (`CollectionMeta`) so it can choose an index.
 
-**`slate-executor`** runs the plan: pull-based streaming, one small per-node function per `Node`, mirroring the engine's `RawIter`. The stream item is `Result<Option<RawBson>, ExecError>` — the `Option` is the *undefined* channel (a `None` row is dropped at the output boundary), and carrying raw `RawBson` keeps `find` zero-copy.
+**`slate-executor`** runs the plan: pull-based streaming, one small per-node function per `Node`, mirroring the engine's `RawIter`. The stream item is `Result<Option<RawBson>, ExecError>` — the `Option` is the *undefined* channel (a `None` row is dropped at the output boundary), and carrying raw `RawBson` keeps `find` deserialization-free (the pipeline never re-materializes a typed `bson::Document`).
 
 ### Observability (`trace` feature, EXPLAIN ANALYZE, `stats()`)
 

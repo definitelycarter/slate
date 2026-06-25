@@ -102,7 +102,7 @@ let txn = db.begin(true)?;
 let cursor = txn.query(DEFAULT_CF, "accounts",
     "SELECT c.name, c.revenue FROM c WHERE c.status = 'active' ORDER BY c.revenue DESC")?;
 for row in cursor.iter_raw()? {
-    let row = row?;   // RawDocumentBuf, zero-copy
+    let row = row?;   // RawDocumentBuf — no deserialization
 }
 ```
 

@@ -130,9 +130,9 @@ A `Cursor` — from `find` or `query` — exposes:
 | Accessor | Yields | Use for |
 |---|---|---|
 | `iter::<T>()` | `T` per **document** | `find`; `SELECT *`; tabular `SELECT a, b`; document-shaped `SELECT VALUE` |
-| `iter_raw()` | `RawDocumentBuf` per document | zero-copy document access |
+| `iter_raw()` | `RawDocumentBuf` per document | raw document access, no deserialization |
 | `iter_values::<T>()` | `T` per **value** | SQL scalar projections (`SELECT VALUE c.name`) |
-| `iter_raw_values()` | `RawBson` per value | zero-copy scalar / document / array access |
+| `iter_raw_values()` | `RawBson` per value | raw scalar / document / array access, no deserialization |
 | `drain()` | row count | counting without materializing |
 
 `iter`/`iter_raw` error on a non-document value; `iter_values`/`iter_raw_values` accept any value.

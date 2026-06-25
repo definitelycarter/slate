@@ -55,7 +55,7 @@ let cursor = txn.find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?;
 for doc in cursor.iter::<User>()? {      // CursorIter<T> — deserializes into T
     let doc = doc?;
 }
-// or zero-copy raw access:
+// or raw access, no deserialization:
 for raw in cursor.iter_raw()? {          // RawCursorIter — yields RawDocumentBuf
     let raw = raw?;
 }
