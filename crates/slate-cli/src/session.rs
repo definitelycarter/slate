@@ -16,7 +16,9 @@ use std::path::Path;
 use bson::Bson;
 use serde_json::{Value, json};
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DistinctOptions};
+use slate_db::{
+    CollectionConfig, DEFAULT_CF, Database, DistinctOptions, ExportOptions, ImportOptions,
+};
 use slate_store::{BackupStore, Store};
 
 use crate::command::Command;
@@ -145,6 +147,8 @@ impl<S: BackupStore> Session<S> {
             Command::Seed => self.seed(),
             Command::SeedFile { path, collection } => self.seed_file(path, collection),
             Command::Backup(dest) => self.backup(dest),
+            Command::Export(dir) => self.export(dir),
+            Command::Import(dir) => self.import(dir),
             Command::Explain(query) => self.explain(&query),
             Command::Sql(sql) => self.sql(&sql),
         }
@@ -554,6 +558,35 @@ impl<S: BackupStore> Session<S> {
         self.db.backup(&dest).map_err(es)?;
         Ok(Output::Message(format!("backed up to `{dest}`")))
     }
+
+    /// Write a logical dump of the whole database to `dir` (BSON manifest +
+    /// per-collection document streams). Unlike `.backup` this is backend-neutral:
+    /// the dump can be imported into a database on any backend.
+    fn export(&self, dir: String) -> Result<Output, String> {
+        let report = self.db.export(&dir, ExportOptions::default()).map_err(es)?;
+        let docs = report.total_documents();
+        let cols = report.collections.len();
+        let dplural = if docs == 1 { "" } else { "s" };
+        let cplural = if cols == 1 { "" } else { "s" };
+        Ok(Output::Message(format!(
+            "exported {docs} document{dplural} from {cols} collection{cplural} to `{dir}`"
+        )))
+    }
+
+    /// Load a logical dump from `dir` into the database, recreating each
+    /// collection (with its indexes) from the manifest and reloading its
+    /// documents. A pre-existing `_id` aborts the import (the default
+    /// collision-is-an-error policy), so an import into a fresh database is safe.
+    fn import(&self, dir: String) -> Result<Output, String> {
+        let report = self.db.import(&dir, ImportOptions::default()).map_err(es)?;
+        let docs = report.total_documents();
+        let cols = report.collections.len();
+        let dplural = if docs == 1 { "" } else { "s" };
+        let cplural = if cols == 1 { "" } else { "s" };
+        Ok(Output::Message(format!(
+            "imported {docs} document{dplural} into {cols} collection{cplural} from `{dir}`"
+        )))
+    }
 }
 
 /// A small Cosmos-flavoured dataset for `.seed`: nested objects and arrays so
@@ -903,6 +936,75 @@ mod tests {
             err.contains("backup") || err.contains("in-memory"),
             "unexpected backup error: {err}"
         );
+    }
+
+    #[test]
+    fn export_then_import_round_trips_between_sessions() {
+        // `.export` is logical, so unlike `.backup` it works on the in-memory
+        // backend: dump one session and reload it into a fresh, independent one.
+        let dir = tempfile::tempdir().unwrap();
+        let dump = dir.path().to_string_lossy().into_owned();
+
+        let mut src = session();
+        run(&mut src, ".create people");
+        run(&mut src, ".index city");
+        run(
+            &mut src,
+            r#".insert [{"_id":"1","name":"ada","city":"London"},{"_id":"2","name":"alan","city":"London"},{"_id":"3","name":"grace","city":"York"}]"#,
+        );
+
+        let out = run(&mut src, &format!(".export {dump}"));
+        match out {
+            Output::Message(m) => assert!(
+                m.contains("exported 3 documents"),
+                "unexpected export message: {m}"
+            ),
+            other => panic!("expected a message, got {other:?}"),
+        }
+
+        // Fresh session, empty database — import the dump.
+        let mut dst = session();
+        let out = run(&mut dst, &format!(".import {dump}"));
+        match out {
+            Output::Message(m) => assert!(
+                m.contains("imported 3 documents"),
+                "unexpected import message: {m}"
+            ),
+            other => panic!("expected a message, got {other:?}"),
+        }
+
+        // The documents — and the `city` index — survived the trip.
+        run(&mut dst, ".use people");
+        assert_eq!(run(&mut dst, ".count"), Output::Count(3));
+        match run(
+            &mut dst,
+            "SELECT VALUE c.name FROM c WHERE c.city = 'London' ORDER BY c.name",
+        ) {
+            Output::Rows(rows) => {
+                assert_eq!(rows, vec!["\"ada\"".to_string(), "\"alan\"".to_string()])
+            }
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn import_into_populated_collection_reports_collision() {
+        // Default collision policy is error: a clashing `_id` aborts the import.
+        let dir = tempfile::tempdir().unwrap();
+        let dump = dir.path().to_string_lossy().into_owned();
+
+        let mut src = session();
+        run(&mut src, ".create people");
+        run(&mut src, r#".insert {"_id":"1","name":"ada"}"#);
+        run(&mut src, &format!(".export {dump}"));
+
+        let mut dst = session();
+        run(&mut dst, ".create people");
+        run(&mut dst, r#".insert {"_id":"1","name":"other"}"#);
+        let err = dst
+            .execute(Command::parse(&format!(".import {dump}")).unwrap())
+            .unwrap_err();
+        assert!(err.contains("duplicate"), "unexpected import error: {err}");
     }
 
     #[test]

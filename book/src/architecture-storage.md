@@ -77,6 +77,13 @@ when `S: BackupStore`.
 
 Restore is offline: open the backup directory (RocksDB) or file (redb) as a new store.
 
+`BackupStore::backup` is the *physical*, same-backend snapshot. The *logical*,
+backend-neutral counterpart — `Database::export` / `Database::import` — lives one
+tier up in `slate-db` (it needs the collection catalog the store layer can't see);
+see [Database & Bindings](./architecture-database.md). A logical import rebuilds
+index entries from the dumped records, so it round-trips *across* backends
+(e.g. redb → RocksDB) where a physical copy cannot.
+
 ### Error Type
 
 Custom `StoreError` enum with variants: `TransactionConsumed`, `ReadOnly`, `Storage`.

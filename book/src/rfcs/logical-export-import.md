@@ -1,9 +1,12 @@
 # RFC: Logical Export / Import
 
-> **Status: proposed.** Already named in the [roadmap](../roadmap.md) under
-> "Backup — Export / Import (Not yet implemented)"; this RFC turns that note into
-> a design. Slate has *physical* hot backup (`Database::backup`) but no *logical*
-> dump/reload — the format you need for cross-backend migration, dev seeding, and
+> **Status: shipped (BSON path).** `Database::export` / `Database::import` and the
+> CLI `.export` / `.import` commands implement the BSON-canonical manifest+streams
+> design below; cross-backend migration (a redb→RocksDB round-trip test) works.
+> JSONL interop remains deferred — `.seed` already ingests JSONL, so it covers the
+> human-inspectable lossy path until a matching exporter is built.
+> Slate already had *physical* hot backup (`Database::backup`); this adds the
+> *logical* dump/reload needed for cross-backend migration, dev seeding, and
 > recovery when a physical file is suspect or unreadable by another backend.
 
 ## Problem
@@ -112,3 +115,33 @@ they're flagged on export).
   They coexist for different jobs.
 - **No schema transformation on import** — documents land as dumped; reshaping is
   the Lua transform-pipeline roadmap item's job, not the importer's.
+
+## What shipped
+
+- **API:** `Database::export(...)` / `Database::import(...)`, with public types
+  re-exported from `slate-db`: `Manifest`, `CollectionDef`, `ExportOptions`,
+  `ImportOptions`, `ExportReport`, `ImportReport`, `OnCollision`.
+- **Dump layout:** a directory holding `manifest.bson` (versioned collection
+  definitions — `pk_path`, `ttl_path`, indexes including the unique subset) plus
+  one `<cf>.<collection>.bson` document-stream file per collection (concatenated
+  native raw BSON).
+- **Index rebuild on import:** index *entries* are never dumped. Import recreates
+  collections from the manifest, reloads documents, and rebuilds indexes from the
+  records — the same "records are the source of truth" contract as repair and the
+  encoding migration. The target backend therefore gets correctly-encoded indexes,
+  which is what makes this the headline **cross-backend migration** path
+  (redb→RocksDB round-trip test).
+- **Scope:** whole-DB and per-collection, both directions.
+- **Collision modes:** `OnCollision::Error` (default) / `Overwrite` / `Skip`.
+- **Fidelity:** the BSON canonical format is lossless — ObjectId, DateTime, and
+  Decimal128 all survive a round-trip.
+- **CLI:** `.export <dir>` and `.import <dir>` (whole-DB; the whole argument is the
+  path, like `.backup`; default error-on-collision).
+
+### Deferred follow-up
+
+- **JSONL / NDJSON interop export.** The human-inspectable, mongoexport-compatible,
+  lossy-on-BSON-types interop format is not yet emitted on export. The ingest half
+  already exists via `.seed`, so this is the remaining direction; the type-fidelity
+  contract (which BSON types degrade and how they're flagged) is the open design
+  point when it's built.

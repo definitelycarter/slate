@@ -46,9 +46,10 @@ uninstrumented:
 - **[Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)**
   — query deadline, materialization cap (the OOM guard), and document/key size
   limits, so the store can't take down its host.
-- **[Logical Export / Import](./rfcs/logical-export-import.md)** — manifest-driven
-  BSON/JSONL dump+reload for cross-backend migration, seeding, and recovery
-  (complements physical `backup()`).
+- **[Logical Export / Import](./rfcs/logical-export-import.md)** — *done (BSON path).*
+  Manifest-driven BSON dump+reload for cross-backend migration, seeding, and
+  recovery (complements physical `backup()`); see
+  [Storage & Durability](#storage--durability) below. JSONL interop export deferred.
 
 ## Indexing
 
@@ -109,8 +110,19 @@ uninstrumented:
 
 - **Hot Backup** — *done.* Online `Database::backup(path)` behind `BackupStore`
   (RocksDB checkpoint, redb file copy; MemoryStore errors). Restore is offline.
-  Logical dump/reload is the
-  [Logical Export / Import RFC](./rfcs/logical-export-import.md).
+  This is the *physical* same-backend snapshot; the *logical* dump/reload is
+  Logical Export / Import below.
+- **[Logical Export / Import](./rfcs/logical-export-import.md)** — *done (BSON path).*
+  `Database::export` / `import` and CLI `.export` / `.import` write a portable
+  dump directory: a versioned `manifest.bson` (collection defs — `pk_path`,
+  `ttl_path`, indexes incl. the unique subset) plus one `<cf>.<collection>.bson`
+  document-stream per collection. Index *entries* are never dumped — import
+  rebuilds them from the records (the "records are source of truth" contract), so
+  the *target* backend gets correctly-encoded indexes. That makes it the
+  cross-backend migration path (redb→RocksDB round-trip test). Whole-DB and
+  per-collection scope; collision modes `Error`/`Overwrite`/`Skip`; BSON canonical
+  is lossless (ObjectId/DateTime/Decimal128 preserved). JSONL interop export is
+  deferred — `.seed` already ingests JSONL.
 - **[MemoryStore Persistence](./rfcs/memorystore-persistence.md)** — *proposed.*
   Write-behind flush of MemoryStore to a durable backend (disk/IndexedDB/S3) without
   making the `Store` trait async.
@@ -129,9 +141,9 @@ uninstrumented:
   The full stack compiles to `wasm32`; MemoryStore + the JS scripting bridge work.
   Platform adapters, browser storage (OPFS/IndexedDB), and `getrandom` entropy remain.
 - **Interactive Shell (CLI)** — *done.* `slate-cli` REPL: meta-commands + SQL,
-  `.seed` bulk-load, online `.backup`, multi-line statements, tab-completion,
-  persistent history. Not yet: hook management, a `.plan`/`.ast` inspector,
-  multi-statement transactions, and Mongo-style `.find`.
+  `.seed` bulk-load, online `.backup`, logical `.export` / `.import`, multi-line
+  statements, tab-completion, persistent history. Not yet: hook management, a
+  `.plan`/`.ast` inspector, multi-statement transactions, and Mongo-style `.find`.
 - **Browser Playground** — *shipped.* A client-side `slate-wasm` single-page app
   (create/insert/query/hooks/plans, no backend). See the live
   [Playground](./playground.md).

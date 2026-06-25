@@ -42,6 +42,8 @@ const COMMAND_NAMES: &[&str] = &[
     "indexes",
     "schema",
     "backup",
+    "export",
+    "import",
     "explain",
 ];
 
