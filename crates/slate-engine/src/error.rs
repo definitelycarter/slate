@@ -71,6 +71,15 @@ pub enum EngineError {
         found: u8,
         supported: u8,
     },
+    /// A document's vector field has a dimensionality that disagrees with its
+    /// vector index's declared `dims`. Matching Cosmos, a vector whose length
+    /// differs from the policy is rejected rather than stored (the query math
+    /// only compares equal-length vectors), surfacing the mismatch loudly.
+    VectorDimsMismatch {
+        field: String,
+        expected: u32,
+        found: u32,
+    },
 }
 
 impl fmt::Display for EngineError {
@@ -103,6 +112,14 @@ impl fmt::Display for EngineError {
             } => write!(
                 f,
                 "store's {format} format is version {found}, but this binary supports up to version {supported} — upgrade Slate to open this store"
+            ),
+            Self::VectorDimsMismatch {
+                field,
+                expected,
+                found,
+            } => write!(
+                f,
+                "vector field `{field}` has {found} dimension(s), but its index declares {expected}"
             ),
         }
     }

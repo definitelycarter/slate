@@ -95,6 +95,11 @@ impl From<slate_engine::EngineError> for DbError {
             }
             slate_engine::EngineError::DuplicateKey(id) => DbError::DuplicateKey(id),
             slate_engine::EngineError::InvalidDocument(msg) => DbError::InvalidDocument(msg),
+            // A vector whose dimensionality disagrees with its index is a data
+            // error (a malformed document), not a malformed query.
+            err @ slate_engine::EngineError::VectorDimsMismatch { .. } => {
+                DbError::InvalidDocument(err.to_string())
+            }
             slate_engine::EngineError::IndexExists(desc) => DbError::IndexExists(desc),
             slate_engine::EngineError::FunctionExists(desc) => DbError::FunctionExists(desc),
             slate_engine::EngineError::UniqueViolation {
@@ -122,6 +127,29 @@ impl From<slate_executor::ExecError> for DbError {
             E::Mutation(m) => DbError::Serialization(m.to_string()),
             E::Vm(v) => DbError::Vm(v),
             E::Validation(msg) => DbError::InvalidDocument(msg),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vector_dims_mismatch_maps_to_invalid_document() {
+        // A dims mismatch is a data error, not a query error — it must surface as
+        // `InvalidDocument`, not fall through the wildcard to `InvalidQuery`.
+        let err = slate_engine::EngineError::VectorDimsMismatch {
+            field: "embedding".to_string(),
+            expected: 3,
+            found: 2,
+        };
+        let mapped: DbError = err.into();
+        match mapped {
+            DbError::InvalidDocument(msg) => {
+                assert!(msg.contains("embedding"), "message lost detail: {msg}");
+            }
+            other => panic!("expected InvalidDocument, got {other:?}"),
         }
     }
 }

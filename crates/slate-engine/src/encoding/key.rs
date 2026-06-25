@@ -11,6 +11,15 @@ const UNIQUE_INDEX_TAG: u8 = b'u';
 const TRIGGER_TAG: u8 = b't';
 const VALIDATOR_TAG: u8 = b'v';
 const DERIVED_TAG: u8 = b'd';
+/// Vector data entries in a collection's CF: `w\0{collection}\0{field}\0{doc_id_lp}`
+/// → packed little-endian `f32` blob. The `w` parallels `i` (secondary index
+/// data) but lives in its own keyspace, so the hot secondary path never sweeps in
+/// vector entries.
+const VECTOR_TAG: u8 = b'w';
+/// Vector-index config in `_sys_`: `y\0{cf}\0{collection}\0{field}` → a
+/// self-describing serialized `VectorIndexSpec`. Parallels `x` (secondary index
+/// config) but distinct, so loading secondary indexes never sees vector config.
+const VECTOR_CONFIG_TAG: u8 = b'y';
 const SEP: u8 = 0x00;
 
 /// Separator between the component field names of a compound index's identity.
@@ -119,8 +128,13 @@ pub(crate) const VALUE_OFFSET_WIDTH: usize = 4;
 pub enum Key<'a> {
     Collection(Cow<'a, str>, Cow<'a, str>),
     IndexConfig(Cow<'a, str>, Cow<'a, str>, Cow<'a, str>),
+    /// Vector-index config in `_sys_`: `(cf, collection, field)`.
+    VectorConfig(Cow<'a, str>, Cow<'a, str>, Cow<'a, str>),
     FunctionConfig(FunctionKind, Cow<'a, str>, Cow<'a, str>, Cow<'a, str>),
     Record(Cow<'a, str>, BsonValue<'a>),
+    /// A vector data entry in a collection's CF: `(collection, field, doc_id)`.
+    /// The value is the packed little-endian `f32` blob.
+    Vector(Cow<'a, str>, Cow<'a, str>, BsonValue<'a>),
 }
 
 impl<'a> Key<'a> {
@@ -156,6 +170,18 @@ impl<'a> Key<'a> {
                 buf.extend_from_slice(field.as_bytes());
                 buf
             }
+            Key::VectorConfig(cf, collection, field) => {
+                let mut buf =
+                    Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + field.len());
+                buf.push(VECTOR_CONFIG_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(field.as_bytes());
+                buf
+            }
             Key::FunctionConfig(kind, cf, collection, name) => {
                 let mut buf =
                     Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1 + name.len());
@@ -173,6 +199,19 @@ impl<'a> Key<'a> {
                 buf.push(RECORD_TAG);
                 buf.push(SEP);
                 buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                doc_id.write_length_prefixed(&mut buf);
+                buf
+            }
+            Key::Vector(collection, field, doc_id) => {
+                let mut buf = Vec::with_capacity(
+                    2 + collection.len() + 1 + field.len() + 1 + 3 + doc_id.bytes.len(),
+                );
+                buf.push(VECTOR_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(field.as_bytes());
                 buf.push(SEP);
                 doc_id.write_length_prefixed(&mut buf);
                 buf
@@ -273,6 +312,24 @@ impl<'a> Key<'a> {
         buf
     }
 
+    /// Encode a vector data key from borrowed parts, avoiding `BsonValue` clone.
+    ///
+    /// Layout: `w\x00{collection}\x00{field}\x00[doc_id_encoded]`. The doc_id is
+    /// length-prefixed and runs to the end of the key, so [`decode`](Key::decode)
+    /// recovers it unambiguously.
+    pub fn encode_vector_key(collection: &str, field: &str, doc_id: &BsonValue<'_>) -> Vec<u8> {
+        let mut buf =
+            Vec::with_capacity(2 + collection.len() + 1 + field.len() + 1 + 3 + doc_id.bytes.len());
+        buf.push(VECTOR_TAG);
+        buf.push(SEP);
+        buf.extend_from_slice(collection.as_bytes());
+        buf.push(SEP);
+        buf.extend_from_slice(field.as_bytes());
+        buf.push(SEP);
+        doc_id.write_length_prefixed(&mut buf);
+        buf
+    }
+
     /// Encode a unique-index key: `u\x00{collection}\x00{field}\x00{value_bytes}`.
     ///
     /// Unlike [`encode_index_key`](Key::encode_index_key), the doc_id is **not**
@@ -350,6 +407,35 @@ impl<'a> Key<'a> {
                     Cow::Borrowed(field),
                 ))
             }
+            VECTOR_CONFIG_TAG => {
+                // y\x00{cf}\x00{collection}\x00{field}
+                let first_sep = rest.iter().position(|&b| b == SEP)?;
+                let cf = std::str::from_utf8(&rest[..first_sep]).ok()?;
+                let after_cf = &rest[first_sep + 1..];
+                let second_sep = after_cf.iter().position(|&b| b == SEP)?;
+                let collection = std::str::from_utf8(&after_cf[..second_sep]).ok()?;
+                let field = std::str::from_utf8(&after_cf[second_sep + 1..]).ok()?;
+                Some(Key::VectorConfig(
+                    Cow::Borrowed(cf),
+                    Cow::Borrowed(collection),
+                    Cow::Borrowed(field),
+                ))
+            }
+            VECTOR_TAG => {
+                // w\x00{collection}\x00{field}\x00[type][len][id_bytes]
+                let first_sep = rest.iter().position(|&b| b == SEP)?;
+                let collection = std::str::from_utf8(&rest[..first_sep]).ok()?;
+                let after_collection = &rest[first_sep + 1..];
+                let second_sep = after_collection.iter().position(|&b| b == SEP)?;
+                let field = std::str::from_utf8(&after_collection[..second_sep]).ok()?;
+                let (doc_id, _) =
+                    BsonValue::parse_length_prefixed(&after_collection[second_sep + 1..])?;
+                Some(Key::Vector(
+                    Cow::Borrowed(collection),
+                    Cow::Borrowed(field),
+                    doc_id,
+                ))
+            }
             INDEX_TAG => {
                 // An `i` key's value/doc_id boundary cannot be resolved from the
                 // key alone — it needs the entry's metadata type byte (fixed-width
@@ -401,6 +487,11 @@ pub enum KeyPrefix<'a> {
     IndexValue(Cow<'a, str>, Cow<'a, str>, &'a [u8]),
     /// All unique-index entries for a field (`u\x00{collection}\x00{field}\x00`).
     UniqueIndexField(Cow<'a, str>, Cow<'a, str>),
+    /// All vector data entries for a field (`w\x00{collection}\x00{field}\x00`).
+    VectorField(Cow<'a, str>, Cow<'a, str>),
+    /// All vector-index configs for a collection in `_sys_`
+    /// (`y\x00{cf}\x00{collection}\x00`).
+    VectorConfig(Cow<'a, str>, Cow<'a, str>),
 }
 
 impl<'a> KeyPrefix<'a> {
@@ -472,6 +563,26 @@ impl<'a> KeyPrefix<'a> {
                 buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
                 buf.extend_from_slice(field.as_bytes());
+                buf.push(SEP);
+                buf
+            }
+            KeyPrefix::VectorField(collection, field) => {
+                let mut buf = Vec::with_capacity(2 + collection.len() + 1 + field.len() + 1);
+                buf.push(VECTOR_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(field.as_bytes());
+                buf.push(SEP);
+                buf
+            }
+            KeyPrefix::VectorConfig(cf, collection) => {
+                let mut buf = Vec::with_capacity(2 + cf.len() + 1 + collection.len() + 1);
+                buf.push(VECTOR_CONFIG_TAG);
+                buf.push(SEP);
+                buf.extend_from_slice(cf.as_bytes());
+                buf.push(SEP);
+                buf.extend_from_slice(collection.as_bytes());
                 buf.push(SEP);
                 buf
             }
@@ -768,6 +879,61 @@ mod tests {
             Cow::Borrowed("f"),
         );
         assert_eq!(computed.encode()[0], b'd');
+    }
+
+    #[test]
+    fn vector_config_key_roundtrip() {
+        let key = Key::VectorConfig(
+            Cow::Borrowed("default_cf"),
+            Cow::Borrowed("photos"),
+            Cow::Borrowed("embedding"),
+        );
+        let bytes = key.encode();
+        assert_eq!(bytes, b"y\x00default_cf\x00photos\x00embedding");
+        assert_eq!(Key::decode(&bytes).unwrap(), key);
+    }
+
+    #[test]
+    fn vector_data_key_roundtrip() {
+        // `w\0{collection}\0{field}\0{doc_id_lp}`, doc_id runs to the end.
+        let doc_id = str_id("photo-1");
+        let bytes = Key::encode_vector_key("photos", "embedding", &doc_id);
+        let key = Key::Vector(
+            Cow::Borrowed("photos"),
+            Cow::Borrowed("embedding"),
+            doc_id.clone(),
+        );
+        assert_eq!(bytes, key.encode());
+        match Key::decode(&bytes).unwrap() {
+            Key::Vector(collection, field, id) => {
+                assert_eq!(collection, "photos");
+                assert_eq!(field, "embedding");
+                assert_eq!(id, doc_id);
+            }
+            other => panic!("expected Key::Vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_data_key_objectid_id_roundtrip() {
+        let oid = oid_id(&[
+            0x50, 0x7f, 0x1f, 0x77, 0xbc, 0xf8, 0x6c, 0xd7, 0x99, 0x43, 0x90, 0x11,
+        ]);
+        let bytes = Key::encode_vector_key("photos", "embedding", &oid);
+        match Key::decode(&bytes).unwrap() {
+            Key::Vector(_, _, id) => assert_eq!(id, oid),
+            other => panic!("expected Key::Vector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vector_field_prefix_bytes() {
+        let prefix =
+            KeyPrefix::VectorField(Cow::Borrowed("photos"), Cow::Borrowed("embedding")).encode();
+        assert_eq!(prefix, b"w\x00photos\x00embedding\x00");
+        // A data key for that field starts with the prefix.
+        let key = Key::encode_vector_key("photos", "embedding", &str_id("p1"));
+        assert!(key.starts_with(&prefix));
     }
 
     #[test]

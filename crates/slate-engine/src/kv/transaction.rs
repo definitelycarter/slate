@@ -14,8 +14,12 @@ use crate::error::EngineError;
 use crate::index_sync::{IndexChanges, IndexDiff};
 use crate::traits::{
     CollectionHandle, CompoundRange, CompoundTail, EngineTransaction, IndexEntry, IndexRange,
+    VectorScanEntry,
 };
 use crate::validate::validate_raw_document;
+use crate::vector::{
+    decode_vector_entry, encode_vector_entry, is_vector_entry_expired, pack_vector,
+};
 
 /// A short name for a Bson value the index cannot encode as a key (the
 /// `_ => None` arm of [`BsonValue::from_bson`]) — for the `UnscannableBound`
@@ -353,6 +357,51 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         }
         Ok(())
     }
+
+    /// Bring the vector indexes in sync with a written document.
+    ///
+    /// For each declared vector field: pack the new embedding, frame it with the
+    /// document's TTL (so a vector scan can drop expired entries reading only the
+    /// vector keyspace — see [`encode_vector_entry`]), and write it at the doc's
+    /// vector key (overwriting in place — vector entries are keyed by doc_id, not
+    /// value, so a changed embedding needs no separate delete), or, if the field
+    /// is now absent, blind-delete any stale entry. A wrong-dimensionality or
+    /// non-numeric vector returns an error, aborting the write (Cosmos parity).
+    /// `ttl_millis` is the document's TTL (the same value stamped into its record
+    /// and index entries). Zero-cost when the collection has no vector indexes.
+    fn maintain_vector_indexes_on_put(
+        &self,
+        handle: &CollectionHandle<<S::Txn<'a> as Transaction>::Cf>,
+        doc_id: &BsonValue<'_>,
+        doc: &RawDocument,
+        ttl_millis: Option<i64>,
+    ) -> Result<(), EngineError> {
+        for spec in handle.vector_indexes() {
+            let key = Key::encode_vector_key(handle.name(), &spec.path, doc_id);
+            match pack_vector(doc, &spec.path, spec.dims)? {
+                Some(packed) => {
+                    let entry = encode_vector_entry(ttl_millis, &packed);
+                    self.txn.put(handle.cf(), &key, &entry)?
+                }
+                None => self.txn.delete(handle.cf(), &key)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a document's vector entries (delete path). Blind deletes — a vector
+    /// key is owned by exactly one document. No-op when there are no vector indexes.
+    fn maintain_vector_indexes_on_delete(
+        &self,
+        handle: &CollectionHandle<<S::Txn<'a> as Transaction>::Cf>,
+        doc_id: &BsonValue<'_>,
+    ) -> Result<(), EngineError> {
+        for spec in handle.vector_indexes() {
+            let key = Key::encode_vector_key(handle.name(), &spec.path, doc_id);
+            self.txn.delete(handle.cf(), &key)?;
+        }
+        Ok(())
+    }
 }
 
 /// Build a [`EngineError::UniqueViolation`] from the colliding `u` key and the
@@ -436,6 +485,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .diff(handle.name())?;
 
         self.apply_index_changes(handle, &changes)?;
+        self.maintain_vector_indexes_on_put(handle, &doc_id, doc, record.ttl_millis())?;
         self.txn.put(handle.cf(), &encoded_key, record.as_bytes())?;
 
         Ok(())
@@ -471,6 +521,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             .diff(handle.name())?;
 
         self.apply_index_changes(handle, &changes)?;
+        self.maintain_vector_indexes_on_put(handle, &doc_id, doc, record.ttl_millis())?;
         self.txn.put(handle.cf(), &encoded_key, record.as_bytes())?;
 
         Ok(())
@@ -495,6 +546,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 .diff(handle.name())?;
 
             self.apply_index_changes(handle, &changes)?;
+            self.maintain_vector_indexes_on_delete(handle, &doc_id)?;
             self.txn.delete(handle.cf(), &encoded)?;
         }
 
@@ -641,6 +693,53 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
         })))
     }
 
+    fn scan_vectors<'b>(
+        &'b self,
+        handle: &CollectionHandle<Self::Cf>,
+        field: &str,
+    ) -> Result<Box<dyn Iterator<Item = Result<VectorScanEntry, EngineError>> + 'b>, EngineError>
+    {
+        let now = self.now_millis;
+        let prefix =
+            KeyPrefix::VectorField(Cow::Borrowed(handle.name()), Cow::Borrowed(field)).encode();
+        let iter = self.txn.scan_prefix(handle.cf(), &prefix)?;
+        // Own `field` for the (cold) error path so the iterator doesn't borrow the
+        // caller's `&str` past this call.
+        let field = field.to_string();
+        Ok(Box::new(iter.filter_map(move |result| {
+            let (key_bytes, value_bytes) = match result {
+                Ok(kv) => kv,
+                Err(e) => return Some(Err(EngineError::Store(e))),
+            };
+            // Expiry first — an O(1) tag-byte check (no record read), matching how
+            // a traditional index scan reads the TTL from the entry's metadata. An
+            // expired-but-not-yet-purged document is dropped here rather than
+            // yielded only to be discarded by the downstream key-lookup (which
+            // would return fewer than k from a top-k). A TTL-free collection pays
+            // just the single tag read.
+            if is_vector_entry_expired(&value_bytes, now) {
+                return None;
+            }
+            let doc_id = match Key::decode(&key_bytes) {
+                Some(Key::Vector(_, _, doc_id)) => match doc_id.to_raw_bson() {
+                    Some(id) => id,
+                    None => {
+                        return Some(Err(EngineError::InvalidKey(
+                            "unsupported doc_id type in vector key".into(),
+                        )));
+                    }
+                },
+                _ => return Some(Err(EngineError::InvalidKey("invalid vector key".into()))),
+            };
+            match decode_vector_entry(&value_bytes) {
+                Some(vector) => Some(Ok((doc_id, vector))),
+                None => Some(Err(EngineError::InvalidDocument(format!(
+                    "vector entry for '{field}' is malformed"
+                )))),
+            }
+        })))
+    }
+
     fn purge(&self, handle: &CollectionHandle<Self::Cf>) -> Result<u64, EngineError> {
         self.purge_before(handle, self.now_millis)
     }
@@ -687,6 +786,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                     .with_property_path(handle.ttl_path())
                     .diff(handle.name())?;
                 self.apply_index_changes(handle, &changes)?;
+                self.maintain_vector_indexes_on_delete(handle, doc_id)?;
                 self.txn.delete(handle.cf(), &encoded)?;
                 deleted += 1;
             }

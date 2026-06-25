@@ -10,6 +10,7 @@ use crate::traits::{
     Catalog, CollectionHandle, CreateCollectionOptions, FunctionEntry, FunctionKind, IndexOptions,
     IndexSpec,
 };
+use crate::vector::{VectorIndexSpec, encode_vector_entry, pack_vector};
 
 use super::formats::CATALOG_VERSION;
 use super::transaction::{KvTransaction, unique_violation};
@@ -80,6 +81,31 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
         Ok(specs)
     }
 
+    /// Load vector-index definitions for a collection from the sys CF.
+    ///
+    /// Each config value is a self-describing serialized [`VectorIndexSpec`]
+    /// (mirroring `CollectionMeta`), deserialized whole. Lives in its own
+    /// `y`-tagged keyspace, so the secondary index path ([`load_indexes`]) never
+    /// sees these. Usually empty.
+    pub(crate) fn load_vector_indexes(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Result<Vec<VectorIndexSpec>, EngineError> {
+        let sys = self.sys_cf()?;
+        let prefix = KeyPrefix::VectorConfig(Cow::Borrowed(cf), Cow::Borrowed(collection)).encode();
+        let iter = self.txn.scan_prefix(&sys, &prefix)?;
+        let mut specs = Vec::new();
+        for result in iter {
+            let (_key_bytes, value) = result?;
+            let spec: VectorIndexSpec = bson::deserialize_from_slice(&value).map_err(|e| {
+                EngineError::InvalidDocument(format!("invalid vector index config: {e}"))
+            })?;
+            specs.push(spec);
+        }
+        Ok(specs)
+    }
+
     /// Split loaded index specs into the full path list (drives `i` entries)
     /// and the unique subset (drives `u` entries + enforcement).
     fn split_index_specs(specs: Vec<IndexSpec>) -> (Vec<String>, Vec<String>) {
@@ -121,6 +147,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         }
         let meta = self.load_collection_meta(cf, name)?;
         let (indexes, unique_indexes) = Self::split_index_specs(self.load_indexes(cf, name)?);
+        let vector_indexes = self.load_vector_indexes(cf, name)?;
         let cf_handle = self.txn.cf(cf)?;
         let handle = CollectionHandle::new(
             name.to_string(),
@@ -128,6 +155,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             cf_handle,
             indexes,
             unique_indexes,
+            vector_indexes,
             meta.pk,
             meta.ttl,
         );
@@ -159,6 +187,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             let meta = self.load_collection_meta(&cf_name, &name)?;
             let (indexes, unique_indexes) =
                 Self::split_index_specs(self.load_indexes(&cf_name, &name)?);
+            let vector_indexes = self.load_vector_indexes(&cf_name, &name)?;
             let cf_handle = self.txn.cf(&cf_name)?;
             handles.push(CollectionHandle::new(
                 name,
@@ -166,6 +195,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
                 cf_handle,
                 indexes,
                 unique_indexes,
+                vector_indexes,
                 meta.pk,
                 meta.ttl,
             ));
@@ -234,11 +264,24 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             KeyPrefix::IndexField(Cow::Borrowed(name), Cow::Borrowed(&meta.ttl)).encode();
         self.delete_prefix(&cf_handle, &ttl_prefix)?;
 
+        // Delete all vector data entries (one prefix per indexed vector field).
+        let vector_specs = self.load_vector_indexes(cf, name)?;
+        for spec in &vector_specs {
+            let v_prefix =
+                KeyPrefix::VectorField(Cow::Borrowed(name), Cow::Borrowed(&spec.path)).encode();
+            self.delete_prefix(&cf_handle, &v_prefix)?;
+        }
+
         // Delete all index config keys from _sys_.
         let sys = self.sys_cf()?;
         let idx_config_prefix =
             KeyPrefix::IndexConfig(Cow::Borrowed(cf), Cow::Borrowed(name)).encode();
         self.delete_prefix(&sys, &idx_config_prefix)?;
+
+        // Delete all vector index config keys from _sys_.
+        let vec_config_prefix =
+            KeyPrefix::VectorConfig(Cow::Borrowed(cf), Cow::Borrowed(name)).encode();
+        self.delete_prefix(&sys, &vec_config_prefix)?;
 
         // Delete all function config keys from _sys_.
         for kind in [
@@ -397,6 +440,113 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
         )
         .encode();
         self.txn.delete(&sys, &key)?;
+
+        self.invalidate_collection(cf, collection);
+        Ok(())
+    }
+
+    fn create_vector_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        spec: &VectorIndexSpec,
+    ) -> Result<(), EngineError> {
+        self.load_collection_meta(cf, collection)?;
+        let cf_handle = self.txn.cf(cf)?;
+
+        if spec.dims == 0 {
+            return Err(EngineError::InvalidDocument(
+                "a vector index must declare at least one dimension".into(),
+            ));
+        }
+
+        // One vector index per (collection, field): reject a duplicate.
+        let sys = self.sys_cf()?;
+        let config_key = Key::VectorConfig(
+            Cow::Borrowed(cf),
+            Cow::Borrowed(collection),
+            Cow::Borrowed(&spec.path),
+        )
+        .encode();
+        if self.txn.get(&sys, &config_key)?.is_some() {
+            return Err(EngineError::IndexExists(format!(
+                "{collection}.{} (vector)",
+                spec.path
+            )));
+        }
+
+        // Persist the self-describing spec (the on-disk value is just its
+        // serialized form).
+        let config_value = bson::serialize_to_vec(spec).map_err(|e| {
+            EngineError::InvalidDocument(format!("failed to serialize vector index config: {e}"))
+        })?;
+        self.txn.put(&sys, &config_key, &config_value)?;
+
+        // Backfill: pack each existing record's vector and write its data entry.
+        // A dims mismatch in existing data fails the whole create (rolled back).
+        //
+        // Stream it: we can't write through `self.txn` while a scan iterator
+        // borrows it, so — mirroring `delete_prefix` — we collect only the
+        // lightweight record *keys* (not their bodies), drop the scan, then read
+        // each record body lazily inside the write loop. This avoids buffering
+        // every record body (hundreds of MB for a large collection); only one
+        // record is resident at a time. (The secondary-index backfill in
+        // `create_compound_index_with_options` still buffers full record bodies;
+        // this is the minimal streaming improvement for the vector path.)
+        let record_prefix = KeyPrefix::Record(Cow::Borrowed(collection)).encode();
+        let record_keys: Vec<Vec<u8>> = self
+            .txn
+            .scan_prefix(&cf_handle, &record_prefix)?
+            .map(|r| r.map(|(k, _)| k))
+            .collect::<Result<_, _>>()?;
+
+        for key_bytes in record_keys {
+            let Some(Key::Record(_, doc_id)) = Key::decode(&key_bytes) else {
+                continue;
+            };
+            // Read the record body now (the scan iterator is dropped, so writing
+            // through `self.txn` is free of the borrow). A record deleted between
+            // the key scan and this read simply yields no vector entry.
+            let Some(value_bytes) = self.txn.get(&cf_handle, &key_bytes)? else {
+                continue;
+            };
+            // Consume `value_bytes` (no clone): `Record::from_bytes` takes
+            // ownership, and the record isn't needed past this iteration.
+            let record = Record::from_bytes(value_bytes)?;
+            let doc = record.doc()?;
+            if let Some(packed) = pack_vector(doc, &spec.path, spec.dims)? {
+                let entry = encode_vector_entry(record.ttl_millis(), &packed);
+                let vec_key = Key::encode_vector_key(collection, &spec.path, &doc_id);
+                self.txn.put(&cf_handle, &vec_key, &entry)?;
+            }
+        }
+
+        self.invalidate_collection(cf, collection);
+        Ok(())
+    }
+
+    fn drop_vector_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        field: &str,
+    ) -> Result<(), EngineError> {
+        let cf_handle = self.txn.cf(cf)?;
+
+        // Delete every packed-vector data entry for this field.
+        let data_prefix =
+            KeyPrefix::VectorField(Cow::Borrowed(collection), Cow::Borrowed(field)).encode();
+        self.delete_prefix(&cf_handle, &data_prefix)?;
+
+        // Delete the config key from _sys_.
+        let sys = self.sys_cf()?;
+        let config_key = Key::VectorConfig(
+            Cow::Borrowed(cf),
+            Cow::Borrowed(collection),
+            Cow::Borrowed(field),
+        )
+        .encode();
+        self.txn.delete(&sys, &config_key)?;
 
         self.invalidate_collection(cf, collection);
         Ok(())

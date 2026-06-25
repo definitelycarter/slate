@@ -52,7 +52,13 @@ pub(crate) const INDEX_ENCODING_VERSION: u8 = 1;
 ///   byte-compatible with it (a new `version` field reads as `0` via
 ///   `#[serde(default)]`), so the forward migration from `0` is a version stamp,
 ///   not a blob rewrite.
-pub(crate) const CATALOG_VERSION: u8 = 1;
+/// - `2` — adds vector-index config: a new `y`-tagged `_sys_` keyspace holding a
+///   self-describing serialized `VectorIndexSpec` per `(cf, collection, field)`,
+///   plus a `w`-tagged vector data keyspace in each collection's CF. Purely
+///   additive — v1 catalogs carry no `y`/`w` keys, so the forward migration is a
+///   version stamp with **no migration code** (there are no persisted databases
+///   to migrate; the bump is for honesty under the migrate-or-refuse contract).
+pub(crate) const CATALOG_VERSION: u8 = 2;
 
 /// An *active* on-disk format — one that carries a stamped version marker and
 /// participates in the open-time check. The record format is reserved (see the
