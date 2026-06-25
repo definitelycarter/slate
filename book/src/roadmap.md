@@ -88,16 +88,20 @@ uninstrumented:
   components (see [Multikey RFC](./rfcs/multikey-indexes.md)); a SQL `CREATE INDEX`
   surface is not planned.
 - **[Covering Index Scans & Engine-Level Recheck](./rfcs/covering-index-scans.md)**
-  — *Part A done; Part B specified, deferred.* **Part A** (drop the redundant
-  residual `Filter`): a planner-only change — the executor's `CompoundIndexScan`
-  already rechecks each equality against the index entry, so the planner now
-  *consumes* the compound-covered conjuncts instead of re-checking them against the
-  fetched document (mirrors single-field `Eq`). Measured **−15–19 %** on a compound
-  leading-equality query (`query_compound_eq`). **Part B** (covering scan — skip the `KeyLookup`
-  when referenced fields ⊆ index components, synthesizing rows from the entry) is
-  fully designed across single-field / compound / aggregate cases in the RFC, with a
-  conservative coverage analysis and a differential-test safety net, and deferred to
-  a dedicated pass.
+  — *Part A done; Part B phase 1 done; phases 2–3 deferred.* **Part A** (drop the
+  redundant residual `Filter`): a planner-only change — the executor's
+  `CompoundIndexScan` already rechecks each equality against the index entry, so the
+  planner now *consumes* the compound-covered conjuncts instead of re-checking them
+  against the fetched document (mirrors single-field `Eq`). Measured **−15–19 %** on
+  a compound leading-equality query (`query_compound_eq`). **Part B** (covering scan
+  — skip the `KeyLookup` when referenced fields ⊆ index components, synthesizing rows
+  from the entry): **phase 1 shipped** — a single-field `IndexScan` gains a
+  `covering` flag and a conservative, two-phase planner pass (decide read-only, then
+  rebuild only if coverable) drops the fetch when the query reads only the indexed
+  field and the pk. Measured **−15 % (1k) / −21 % (10k)** on a covered string
+  projection, **−10 % / −27 %** on a covered numeric projection (`query_indexed_eq_proj`,
+  `_numeric_proj`), with a covered-≡-materialized differential test. Phases 2
+  (compound) and 3 (covered aggregate) stay designed in the RFC, deferred.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of

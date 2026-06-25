@@ -41,9 +41,12 @@ fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
 
 #[test]
 fn indexed_equality_uses_index_scan_then_key_lookup() {
+    // Projecting `c.age` (not indexed) forces the document fetch — so this keeps
+    // the IndexScan→KeyLookup pairing. (Projecting only the indexed `c.name`
+    // would drop the KeyLookup as a covering scan; see `covering_index.rs`.)
     let plan = explain(
         &seeded(),
-        "SELECT VALUE c.name FROM c WHERE c.name = \"ada\"",
+        "SELECT VALUE c.age FROM c WHERE c.name = \"ada\"",
     );
     // The sargable `name` equality is pushed into an index scan whose IDs the
     // key lookup resolves to documents — the index is consulted, not the heap.

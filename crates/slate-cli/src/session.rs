@@ -1179,10 +1179,15 @@ mod tests {
             r#".explain SELECT VALUE c.name FROM c WHERE c.name = "ada""#,
         ) {
             Output::Plan(plan) => {
-                // The sargable equality on the indexed field plans to an index
-                // scan resolved by a key lookup.
+                // The sargable equality plans to an index scan; since the query
+                // reads only the indexed `name`, it's a covering scan that serves
+                // the row from the entry — no key lookup (RFC Part B).
                 assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
-                assert!(plan.contains("KeyLookup"), "expected a key lookup: {plan}");
+                assert!(
+                    plan.contains("covering"),
+                    "expected a covering scan: {plan}"
+                );
+                assert!(!plan.contains("KeyLookup"), "covered, no fetch: {plan}");
             }
             other => panic!("expected a plan, got {other:?}"),
         }

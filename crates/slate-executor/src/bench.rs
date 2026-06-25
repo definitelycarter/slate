@@ -87,7 +87,8 @@ pub fn scan<'a, T: EngineTransaction + Catalog>(
     nodes::scan::execute(txn, collection)
 }
 
-/// `IndexScan` — yields bare doc-IDs from a field index.
+/// `IndexScan` — yields bare doc-IDs from a field index (non-covering; the
+/// covering variant is exercised end-to-end by the `query` bench).
 pub fn index_scan<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
@@ -96,7 +97,7 @@ pub fn index_scan<'a, T: EngineTransaction + Catalog>(
     direction: ScanDirection,
     limit: Option<usize>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::index_scan::execute(txn, collection, field, range, direction, limit)
+    nodes::index_scan::execute(txn, collection, field, range, direction, limit, false)
 }
 
 // ── Transform nodes ─────────────────────────────────────────────────────────

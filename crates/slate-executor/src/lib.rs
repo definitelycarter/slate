@@ -255,9 +255,16 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 range,
                 direction,
                 limit,
-            } => {
-                nodes::index_scan::execute(self.txn, &collection, field, &range, direction, limit)?
-            }
+                covering,
+            } => nodes::index_scan::execute(
+                self.txn,
+                &collection,
+                field,
+                &range,
+                direction,
+                limit,
+                covering,
+            )?,
 
             Node::CompoundIndexScan {
                 collection,

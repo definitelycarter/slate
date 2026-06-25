@@ -1,11 +1,15 @@
 # RFC: Covering Index Scans & Engine-Level Recheck
 
-> **Status: Part A implemented (planner-only); Part B specified, deferred.**
+> **Status: Part A implemented; Part B phase 1 (single-field, non-aggregate)
+> implemented; phases 2–3 (compound, covered aggregate) specified, deferred.**
 > A query/execution optimization for index access, surfaced while benchmarking
-> compound indexes. Part A shipped as a small planner change (below). Part B
-> (the covering scan) is a larger, correctness-critical change — fully designed
-> here before an implementation pass. The [roadmap](../roadmap.md) tracks status
-> at a glance.
+> compound indexes. Part A shipped as a small planner change (below). Part B (the
+> covering scan) is a larger, correctness-critical change; its first, smallest
+> phase — covering a single-field index scan — has now shipped, measured at
+> **−15% (1k) / −21% (10k)** on a covered string projection and **−10% / −27%**
+> on a covered numeric projection. The remaining phases are fully designed here
+> before their implementation pass. The [roadmap](../roadmap.md) tracks status at
+> a glance.
 
 ## Concept
 
@@ -85,12 +89,49 @@ rechecks exactly those — a 1:1 correspondence — so consuming them is sound.
   unaffected (the executor recheck already enforced the equality; A only removes
   the redundant second check), which the end-to-end suites confirm.
 
-## Part B — covering scan: skip the `KeyLookup` *(specified, deferred)*
+## Part B — covering scan: skip the `KeyLookup` *(phase 1 implemented)*
 
 When the set of fields a query references is a subset of the chosen index's
 components (plus `_id`/pk, which the entry carries as its doc_id), the planner
 marks the scan **covering** and omits the `KeyLookup`; the executor synthesizes
 each row from the index entry instead of fetching the document.
+
+### What shipped (phase 1: single-field, non-aggregate)
+
+Phase 1 covers exactly the `query_indexed_eq_proj` shape below — a single-field
+index scan whose query reads only that field and the pk. Concretely:
+
+- **IR:** `Node::IndexScan` gained a `covering: bool` (not the
+  `Option<Vec<String>>` the spike floated — see B.1). The scan already carries
+  its `field`, so a bool is the honest representation; compound covering will
+  carry the component names because a compound node's `field` is an opaque joined
+  identity.
+- **Executor** (`index_scan.rs`): a covering scan synthesizes
+  `{ <field>: entry.value(), <pk>: doc_id }` per entry (`synthesize_row`) instead
+  of a bare doc-id; the non-covering path is unchanged.
+- **Planner** (`covering.rs`): a conservative post-pass over the lowered
+  `Plan::Query`, run at both read entry points (`plan()`'s Query arm and
+  `lower()`), **never** on the write path. It is **two-phase**: a read-only
+  `is_coverable` walk decides first (no allocation, alias borrowed not cloned),
+  and only a coverable plan is rebuilt — so a non-coverable query (the common
+  case) keeps its plan untouched and the optimization never taxes the paths it
+  doesn't help.
+- **Safety:** the analysis returns *uncoverable* the instant it sees any shape it
+  doesn't fully understand (an `Env` binding ⇒ join/unwind/aggregate/subquery; a
+  bare-alias whole-row read; a deeper `alias.a.b`; an `Index`/`PathGet`/
+  `MultikeyEq`/`Subquery` on the alias; a dotted/`.[]` index field; an
+  `IndexMerge`/compound/multikey source). The invariant from B.3 holds: *a missed
+  cover is a lost optimization; a wrong cover is wrong results.* A differential
+  test (`covering_index.rs`) pins covered ≡ materialized (indexed vs unindexed)
+  and that `EXPLAIN` actually drops the `KeyLookup`.
+- **Measured** (back-to-back vs clean `main`, same machine): covered string
+  projection **−15% (1k) / −21% (10k)**, covered numeric projection **−10% /
+  −27%** — the win scaling with matched-row count, as predicted. Non-covered
+  control queries were within the machine's run-to-run drift band (the same
+  control swung −0.1%→+6% across runs against a fixed baseline), so no measurable
+  regression on the paths the two-phase pass leaves untouched.
+
+Phases 2 (compound) and 3 (covered aggregate) remain as designed below.
 
 ### Measured opportunity
 
@@ -100,15 +141,23 @@ The existing single-field covered-projection bench is the baseline target:
 find(filter = {status: "active"}, columns = ["status"])   -- status is indexed
 ```
 
-| `query_indexed_eq_proj` | mean (current: `IndexScan → KeyLookup → Project`) |
-|---|---|
-| 1 000 docs | **245 µs** |
-| 10 000 docs | **2.71 ms** |
+| `query_indexed_eq_proj` | before (`IndexScan → KeyLookup → Project`) | after (covering) |
+|---|---|---|
+| 1 000 docs | **245 µs** | **~−15%** |
+| 10 000 docs | **2.71 ms** | **~−21%** |
 
 Part B removes the per-matched-row document fetch; the win scales with the number
 of matched rows.
 
-### B.1 — IR change
+### B.1 — IR change *(settled: `covering: bool` for single-field)*
+
+Phase 1 added `covering: bool` to `Node::IndexScan` (not the
+`Option<Vec<String>>` below): the single-field scan already names its `field`, so
+the executor synthesizes `{field, pk}` from a bool alone. The spike's original
+sketch — carrying component names — is the right shape for **compound** covering
+(phase 2), whose `field` is the opaque joined identity `f1\x01f2`, so
+`Node::CompoundIndexScan` will gain its own covering marker then. The original
+analysis follows:
 
 Add a covering marker to `Node::IndexScan` and `Node::CompoundIndexScan` carrying
 the component field names to synthesize (e.g. `covering: Option<Vec<String>>`,
@@ -167,23 +216,34 @@ not present in plain projections — is why aggregates are a later phase.
 
 ### B.5 — phasing
 
-1. **Single-field, non-aggregate.** Exactly the captured baseline
-   (`query_indexed_eq_proj`); smallest correctness surface. Ship + measure first.
+1. **Single-field, non-aggregate.** ✅ **Shipped.** Exactly the captured baseline
+   (`query_indexed_eq_proj`); smallest correctness surface. The implemented pass
+   handles only this shape; the coverage analysis below was scoped down to a
+   single-field scan (no compound, no `IndexMerge`, no multikey) and a single
+   `Alias`-bound source.
 2. **Compound, non-aggregate.** *Same* coverage analysis; synthesize N components;
    covered set = the component list. A small increment over (1) — the executor
    reads several component values instead of one — **not** a from-scratch effort.
+   Adds a covering marker to `Node::CompoundIndexScan` (carrying component names,
+   since its `field` is the opaque joined identity).
 3. **Covered aggregate.** The RFC's headline `GROUP BY` (e.g.
    `SELECT c.status, COUNT(1) … GROUP BY c.status` over compound `(user.id,
    status)`). Adds the B.4 binding-aware collection. Largest win, most analysis.
 
 ### B.6 — safety net
 
-A **differential test**: for each covered query, assert its result equals the same
-query forced through the materialized plan (covering disabled). Pin the
-single-field, compound, and aggregate covered cases *and* the bail cases (whole-row
-`SELECT c`, deeper path `c.a.b`, indexed `c.tags[0]`, multikey component, joined
-query) — each of which must keep the `KeyLookup`. This is the guard against the
-one dangerous failure mode (a too-eager cover returning wrong rows).
+A **differential test** (shipped as `covering_index.rs`): assert a covered query
+returns exactly what the materialized plan returns. There is no runtime
+"covering off" toggle, so the differential runs the same query against an
+**indexed** collection (covered) and an **unindexed** copy (full-scan,
+materialized) and asserts equal results — the only plan difference is the index,
+hence the cover. It pins the single-field covered case (find with `columns`, plus
+a range predicate) *and* the bail cases (whole-row `SELECT c`, an unindexed field,
+a deeper path `c.meta.note`), and uses `EXPLAIN` to confirm the covered plan
+actually drops the `KeyLookup` while the bail cases keep it (so the differential
+can't pass vacuously by never covering). The compound and aggregate cases join it
+as phases 2–3 land. This is the guard against the one dangerous failure mode (a
+too-eager cover returning wrong rows).
 
 ## Benefits
 
@@ -207,12 +267,17 @@ one dangerous failure mode (a too-eager cover returning wrong rows).
 
 ## Spike (for the Part B pass)
 
-1. Settle the IR representation (covering field on the existing variants vs new
-   `Covering*` nodes).
-2. Build the conservative referenced-field collector + its bail rules, with the
-   differential test (B.6) as the gate — *before* wiring the executor synthesis.
-3. Land phase (1) single-field, re-run `query_indexed_eq_proj` against the saved
-   `cov_before` baseline, then extend to (2) compound and (3) aggregate.
+Phase 1 resolved all three for the single-field case; they recur for phases 2–3:
+
+1. ✅ IR representation settled — `covering: bool` on `Node::IndexScan` (the
+   single-field scan names its field). Compound will add a component-name marker
+   on `Node::CompoundIndexScan` (B.1).
+2. ✅ The conservative referenced-field collector + bail rules shipped as
+   `covering.rs`, gated by the differential test (B.6) before the executor
+   synthesis was trusted.
+3. ✅ Phase (1) single-field landed and was measured against a clean-`main`
+   baseline (−15%/−21% string, −10%/−27% numeric covered projections). Phases (2)
+   compound and (3) aggregate remain.
 
 ## Cosmos, for reference
 
