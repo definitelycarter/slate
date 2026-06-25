@@ -126,6 +126,7 @@ mod tostring;
 mod trim;
 mod trunc;
 mod upper;
+mod vectordistance;
 
 /// Call a scalar function by name with already-evaluated arguments.
 pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
@@ -234,6 +235,8 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         "ST_ISVALID" => st_isvalid::eval(name, args),
         "ST_ISVALIDDETAILED" => st_isvaliddetailed::eval(name, args),
         "ST_WITHIN" => st_within::eval(name, args),
+        // Vector search (function-first; the flat vector index is deferred).
+        "VECTORDISTANCE" => vectordistance::eval(name, args),
         other => Err(EvalError {
             message: format!("unknown function: {other}"),
         }),

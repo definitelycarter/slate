@@ -33,8 +33,8 @@ SELECT VALUE UPPER("hello world")
 **Categories:** [Math](#math) · [Integer & bitwise](#integer--bitwise) ·
 [Type checking](#type-checking) · [String](#string) · [Array](#array) ·
 [Conditional & object](#conditional--object) · [Mutation helpers](#mutation-helpers) ·
-[Date & time](#date--time) · [Spatial](#spatial) · [Aggregates](#aggregate-functions) ·
-[Document identity](#document-identity)
+[Date & time](#date--time) · [Spatial](#spatial) · [Vector](#vector) ·
+[Aggregates](#aggregate-functions) · [Document identity](#document-identity)
 
 ## Math
 
@@ -1008,6 +1008,28 @@ Area in **square meters** of a polygonal geometry, on the WGS84 ellipsoid.
 SELECT VALUE ST_AREA(
   { "type": "Polygon", "coordinates": [[[-122.3, 47.6], [-122.3, 47.7], [-122.2, 47.7], [-122.2, 47.6], [-122.3, 47.6]]] }
 )
+```
+
+## Vector
+
+### `VECTORDISTANCE(vector1, vector2[, metric])`
+Similarity/distance between two numeric embedding vectors — equal-length arrays of
+numbers. `metric` is an optional string (case-insensitive): `"cosine"` (default),
+`"dotproduct"`, or `"euclidean"`.
+- **Returns:** Double. Following Cosmos's `VectorDistance`, the *sense* depends on
+  the metric: **`cosine`/`dotproduct` are similarities** (higher is closer, so
+  `ORDER BY … DESC`), **`euclidean` is a distance** (lower is closer, so
+  `ORDER BY … ASC`). Undefined, non-array, empty, unequal-length, or non-numeric
+  input → undefined; an unknown metric → error.
+- **Note:** the application supplies the embeddings (Slate stores and compares,
+  never generates them). This is the *function-first* slice — a full scan
+  evaluates it per document; a flat vector index that turns nearest-neighbour
+  search into a seek is planned (see the
+  [Vector Index RFC](./rfcs/vector-index.md)).
+- **Example:** `[1,2,3]·[4,5,6]` (dot product) → `32.0`
+
+```slate-sql
+SELECT VALUE VECTORDISTANCE([1, 2, 3], [4, 5, 6], "dotproduct")
 ```
 
 ## Aggregate functions
