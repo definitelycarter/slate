@@ -69,7 +69,7 @@ fn find_sorted(
         .unwrap()
         .collect::<Result<Vec<RawDocumentBuf>, _>>()
         .unwrap();
-    docs.sort_by(|a, b| id_of(a).cmp(&id_of(b)));
+    docs.sort_by_key(id_of);
     docs
 }
 
