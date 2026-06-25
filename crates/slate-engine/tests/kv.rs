@@ -1,8 +1,8 @@
 use bson::raw::RawBsonRef;
 use slate_engine::{
     Catalog, CollectionHandle, CompoundRange, CompoundTail, DEFAULT_CF, Engine, EngineError,
-    EngineTransaction, FunctionKind, IndexOptions, IndexRange, KvEngine, join_index_fields,
-    runtime_tag,
+    EngineTransaction, FunctionKind, IndexOptions, IndexRange, KvEngine, VectorDataType,
+    VectorIndexSpec, VectorMetric, join_index_fields, runtime_tag,
 };
 use slate_store::MemoryStore;
 
@@ -434,6 +434,7 @@ fn stale_handle_misses_index_on_put() {
         "users".to_string(),
         DEFAULT_CF.to_string(),
         fresh_handle.cf().clone(),
+        vec![],
         vec![],
         vec![],
         "_id".to_string(),
@@ -1617,6 +1618,589 @@ fn string_index_full_scan_is_byte_sorted() {
             "xy".to_string(),
             "xyz".to_string(),
         ]
+    );
+    txn.rollback().unwrap();
+}
+
+// ── Vector index (flat) ──────────────────────────────────────
+
+/// Collect a vector scan into a deterministic `(string_id, vector)` list, so
+/// assertions don't depend on the store's key-iteration order.
+fn sorted_vectors<T: EngineTransaction>(
+    txn: &T,
+    handle: &CollectionHandle<T::Cf>,
+    field: &str,
+) -> Vec<(String, Vec<f32>)> {
+    let mut out: Vec<(String, Vec<f32>)> = txn
+        .scan_vectors(handle, field)
+        .unwrap()
+        .map(|r| {
+            let (id, v) = r.unwrap();
+            let id = match id {
+                bson::RawBson::String(s) => s,
+                other => panic!("expected string doc_id, got {other:?}"),
+            };
+            (id, v)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// A 3-d `float32` cosine spec on `embedding`.
+fn embedding_spec() -> VectorIndexSpec {
+    VectorIndexSpec::float32("embedding", 3, VectorMetric::Cosine)
+}
+
+#[test]
+fn create_vector_index_then_scan_yields_packed_vectors() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 0.0, 0.0] },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [0.0, 2.0, 0.5] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.0]),
+            ("b".to_string(), vec![0.0, 2.0, 0.5]),
+        ]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn vector_index_backfills_existing_records() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    // Insert before the index exists; one doc has no embedding (stays sparse).
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0] },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [4.0, 5.0, 6.0] },
+    )
+    .unwrap();
+    txn.put(&handle, &bson::rawdoc! { "_id": "c", "name": "no vec" })
+        .unwrap();
+
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![
+            ("a".to_string(), vec![1.0, 2.0, 3.0]),
+            ("b".to_string(), vec![4.0, 5.0, 6.0]),
+        ]
+    );
+    txn.commit().unwrap();
+}
+
+#[test]
+fn vector_index_is_sparse_for_missing_field() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(&handle, &bson::rawdoc! { "_id": "a", "name": "no vec" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert!(sorted_vectors(&txn, &handle, "embedding").is_empty());
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn put_overwrite_updates_vector_in_place() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 1.0, 1.0] },
+    )
+    .unwrap();
+    // Overwrite the same doc_id with a new embedding.
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [9.0, 8.0, 7.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![("a".to_string(), vec![9.0, 8.0, 7.0])]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn put_removing_vector_field_drops_entry() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0] },
+    )
+    .unwrap();
+    // Overwrite without the embedding — the stale entry must be removed.
+    txn.put(&handle, &bson::rawdoc! { "_id": "a", "name": "dropped" })
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert!(sorted_vectors(&txn, &handle, "embedding").is_empty());
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn delete_removes_vector_entry() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0] },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [4.0, 5.0, 6.0] },
+    )
+    .unwrap();
+    txn.delete(&handle, &RawBsonRef::String("a")).unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![("b".to_string(), vec![4.0, 5.0, 6.0])]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn vector_dims_mismatch_on_insert_is_an_error() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    // 2 dims where the index declares 3.
+    let err = txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0] },
+    );
+    match err {
+        Err(EngineError::VectorDimsMismatch {
+            field,
+            expected,
+            found,
+        }) => {
+            assert_eq!(field, "embedding");
+            assert_eq!(expected, 3);
+            assert_eq!(found, 2);
+        }
+        other => panic!("expected VectorDimsMismatch, got {other:?}"),
+    }
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn vector_dims_mismatch_on_backfill_fails_create() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    // A pre-existing doc with the wrong dimensionality.
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0, 4.0] },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec()),
+        Err(EngineError::VectorDimsMismatch { found: 4, .. })
+    ));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn non_array_vector_field_is_an_error() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    assert!(matches!(
+        txn.put(
+            &handle,
+            &bson::rawdoc! { "_id": "a", "embedding": "not a vector" }
+        ),
+        Err(EngineError::InvalidDocument(_))
+    ));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn duplicate_vector_index_errors() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    assert!(matches!(
+        txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec()),
+        Err(EngineError::IndexExists(_))
+    ));
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn drop_vector_index_removes_entries_and_config() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(false).unwrap();
+    txn.drop_vector_index(DEFAULT_CF, "photos", "embedding")
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    // Config gone from the handle, and no data entries remain.
+    assert!(handle.vector_indexes().is_empty());
+    assert!(sorted_vectors(&txn, &handle, "embedding").is_empty());
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn drop_collection_removes_vector_entries() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(false).unwrap();
+    txn.drop_collection(DEFAULT_CF, "photos").unwrap();
+    // Recreate the collection + index: a stale vector entry would resurface here.
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert!(sorted_vectors(&txn, &handle, "embedding").is_empty());
+    txn.commit().unwrap();
+}
+
+#[test]
+fn multiple_vector_indexes_per_collection_route_by_field() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "items", &Default::default())
+        .unwrap();
+    // Two embeddings of different dimensionality and metric on one collection.
+    txn.create_vector_index(
+        DEFAULT_CF,
+        "items",
+        &VectorIndexSpec::float32("image_embedding", 2, VectorMetric::Cosine),
+    )
+    .unwrap();
+    txn.create_vector_index(
+        DEFAULT_CF,
+        "items",
+        &VectorIndexSpec::float32("text_embedding", 3, VectorMetric::Euclidean),
+    )
+    .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "items").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! {
+            "_id": "a",
+            "image_embedding": [1.0, 2.0],
+            "text_embedding": [3.0, 4.0, 5.0],
+        },
+    )
+    .unwrap();
+    // A doc carrying only one of the two embeddings.
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "image_embedding": [6.0, 7.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "items").unwrap();
+    assert_eq!(handle.vector_indexes().len(), 2);
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "image_embedding"),
+        vec![
+            ("a".to_string(), vec![1.0, 2.0]),
+            ("b".to_string(), vec![6.0, 7.0]),
+        ]
+    );
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "text_embedding"),
+        vec![("a".to_string(), vec![3.0, 4.0, 5.0])]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn vector_index_spec_persists_across_reload() {
+    let engine = engine();
+    let spec = VectorIndexSpec {
+        path: "meta.vec".to_string(),
+        dims: 4,
+        metric: VectorMetric::Euclidean,
+        dtype: VectorDataType::Float32,
+    };
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "docs", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "docs", &spec).unwrap();
+    txn.commit().unwrap();
+
+    // A fresh transaction reloads the handle from the catalog.
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "docs").unwrap();
+    assert_eq!(handle.vector_indexes(), &[spec]);
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn purge_removes_vector_entries() {
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    // One doc already expired (ttl in the distant past), one with no ttl.
+    let past = bson::DateTime::from_millis(1_000);
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0], "ttl": past },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [4.0, 5.0, 6.0] },
+    )
+    .unwrap();
+    let purged = txn.purge(&handle).unwrap();
+    assert_eq!(purged, 1);
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    // The expired doc's vector entry is gone; the live one remains.
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![("b".to_string(), vec![4.0, 5.0, 6.0])]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn scan_vectors_skips_expired_but_unpurged_documents() {
+    // A document expired per `now_millis` but not yet purged must NOT be yielded
+    // by `scan_vectors` — otherwise a top-k would return fewer than k once the
+    // downstream key-lookup drops it. The clock is 10_000; 'a' has a past TTL.
+    let engine = KvEngine::with_clock(MemoryStore::new(), || 10_000);
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    // 'a' expired (ttl 1_000 < clock 10_000); 'b' lives in the future; 'c' has no
+    // TTL at all. None are purged.
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0], "ttl": bson::DateTime::from_millis(1_000) },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [4.0, 5.0, 6.0], "ttl": bson::DateTime::from_millis(900_000) },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "c", "embedding": [7.0, 8.0, 9.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    // Only the live doc 'b' and the TTL-free doc 'c' are yielded — 'a' is skipped
+    // even though it was never purged.
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![
+            ("b".to_string(), vec![4.0, 5.0, 6.0]),
+            ("c".to_string(), vec![7.0, 8.0, 9.0]),
+        ]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn scan_vectors_unaffected_when_no_ttl() {
+    // Documents with no TTL field are never expired, so a vector scan yields all
+    // of them regardless of the clock — the fast path stays correct (and pays only
+    // a single tag-byte check per entry).
+    let engine = KvEngine::with_clock(MemoryStore::new(), || i64::MAX);
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 0.0, 0.0] },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [0.0, 1.0, 0.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.0]),
+            ("b".to_string(), vec![0.0, 1.0, 0.0]),
+        ]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
+fn scan_vectors_skips_expired_after_backfill() {
+    // Backfill must frame the TTL into the vector entry too: a doc inserted (with
+    // a past TTL) *before* the index exists is backfilled, then skipped by a scan.
+    let engine = KvEngine::with_clock(MemoryStore::new(), || 10_000);
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 2.0, 3.0], "ttl": bson::DateTime::from_millis(1_000) },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [4.0, 5.0, 6.0] },
+    )
+    .unwrap();
+
+    // Build the index after the rows exist — the backfill path frames the TTL.
+    txn.create_vector_index(DEFAULT_CF, "photos", &embedding_spec())
+        .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+
+    // The expired 'a' is skipped by the scan even straight after backfill.
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![("b".to_string(), vec![4.0, 5.0, 6.0])]
     );
     txn.rollback().unwrap();
 }

@@ -39,10 +39,10 @@ pub mod validate;
 pub use lower::lower;
 pub use plan::{
     AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey, IndexScanRange,
-    LogicalOp, Node, Plan, RowBinding, ScanDirection, UpsertMode,
+    LogicalOp, Node, Plan, RowBinding, ScanDirection, UpsertMode, VectorMetric,
 };
 pub use planner::{PlanContext, plan};
-pub use sargable::CollectionMeta;
+pub use sargable::{CollectionMeta, VectorIndexMeta};
 pub use slate_ast::Statement;
 pub use stats::PlanStats;
 pub use validate::{PlanError, validate_bindings, validate_grouping};

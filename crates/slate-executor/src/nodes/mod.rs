@@ -39,6 +39,7 @@ pub(crate) mod unwind;
 pub(crate) mod upsert;
 pub(crate) mod validate;
 pub(crate) mod values;
+pub(crate) mod vector_topk;
 
 #[cfg(test)]
 pub(crate) mod test_support;

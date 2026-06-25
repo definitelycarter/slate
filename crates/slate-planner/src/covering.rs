@@ -496,6 +496,7 @@ mod tests {
         CollectionMeta {
             indexes: indexes.iter().map(|s| s.to_string()).collect(),
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -760,6 +761,7 @@ mod tests {
         CollectionMeta {
             indexes: Vec::new(),
             compound_indexes,
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }

@@ -1022,10 +1022,11 @@ numbers. `metric` is an optional string (case-insensitive): `"cosine"` (default)
   `ORDER BY … ASC`). Undefined, non-array, empty, unequal-length, or non-numeric
   input → undefined; an unknown metric → error.
 - **Note:** the application supplies the embeddings (Slate stores and compares,
-  never generates them). This is the *function-first* slice — a full scan
-  evaluates it per document; a flat vector index that turns nearest-neighbour
-  search into a seek is planned (see the
-  [Vector Index RFC](./rfcs/vector-index.md)).
+  never generates them). With a flat vector index on the field,
+  `ORDER BY VECTORDISTANCE(c.embedding, @q) [DESC|ASC] LIMIT k` is an exact top-k
+  *seek* rather than a full scan — see [Vector Search](./querying.md#vector-search).
+  Without an index (or on a metric/direction mismatch) it falls back to a full-scan
+  evaluation per document.
 - **Example:** `[1,2,3]·[4,5,6]` (dot product) → `32.0`
 
 ```slate-sql

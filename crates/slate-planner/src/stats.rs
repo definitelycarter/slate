@@ -114,6 +114,10 @@ fn count_node(node: &Node) -> usize {
 
         Node::IndexMerge { lhs, rhs, .. } => count_node(lhs) + count_node(rhs),
 
+        // `VectorTopK` is a source; its only child is the optional pre-filter,
+        // counted when present (the renderer/analyze walks descend into it too).
+        Node::VectorTopK { source, .. } => source.as_ref().map_or(0, |s| count_node(s)),
+
         // `Subquery` visits `source` then `subplan`, matching the renderer.
         Node::Subquery {
             source, subplan, ..

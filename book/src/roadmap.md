@@ -120,13 +120,22 @@ uninstrumented:
   Geohash/S2 candidate-cell scan + recheck for `ST_DISTANCE`/`ST_WITHIN`.
 - **[Index Intersection Strategy](./rfcs/index-intersection-strategy.md)** —
   *proposed.* How `IndexMerge` chooses and combines indexes.
-- **[Vector Index & `VECTORDISTANCE`](./rfcs/vector-index.md)** — *function shipped;
-  index proposed (design spike).* The `VECTORDISTANCE` scalar
-  (cosine/dotproduct/euclidean) has shipped in `slate-eval` (function-first,
-  full-scan kNN via `ORDER BY … LIMIT`); on-device nearest-neighbour for RAG /
-  semantic search. The flat (brute-force) `scan_range` + top-k *index* — exact,
-  KV-native, filter-friendly — is next; quantization and ANN deferred to later
-  phases.
+- **[Vector Index & `VECTORDISTANCE`](./rfcs/vector-index.md)** — *function + flat
+  index (Phase 1) done; quantization (Phase 2) + ANN (Phase 3) deferred.* The
+  `VECTORDISTANCE` scalar (cosine/dotproduct/euclidean) plus a flat (exact,
+  brute-force) vector index have shipped: `ORDER BY VECTORDISTANCE(c.field, @q)
+  [DESC|ASC] LIMIT k` seeks a per-field index — a `doc_id → packed-f32` keyspace
+  (TTL-header expiry-filtered) scanned into a bounded top-k heap, with a `WHERE`
+  constraining the candidate set *before* the top-k (exact, no recall loss).
+  Created via `create_vector_index(cf, collection, &VectorIndexSpec{path, dims,
+  metric, dtype})` (no SQL `CREATE INDEX` grammar yet); the planner only seeks when
+  the call's metric matches the index and the `ORDER BY` direction is the metric's
+  nearest-first sense, else falls back to a correct full scan. The math is one
+  shared definition (`slate-eval::VectorMetric`) the scalar function and the index
+  both call, result-validated against an independent MongoDB Atlas exact-kNN oracle
+  (the Cosmos emulator can't validate vector search). On-device nearest-neighbour
+  for RAG / semantic search. Quantization (float16/int8/binary widths) and ANN
+  (IVF/HNSW) deferred to later phases.
 - **Full-text indexes** — *proposed.* BM25 full-text (`FULLTEXTCONTAINS`,
   `FULLTEXTSCORE`, `RRF`); see the [SQL Query Surface RFC](./rfcs/sql-query-surface.md).
 
@@ -135,7 +144,7 @@ uninstrumented:
 - **[SQL Query Surface](./rfcs/sql-query-surface.md)** — *partially implemented.*
   CosmosDB-style SQL; core `SELECT`/`WHERE`/`GROUP BY`/`HAVING`/`ORDER BY`/`JOIN … IN`,
   aggregates (incl. `ARRAY_AGG`/`COLLECT`), `DOCUMENTID`, and subqueries shipped.
-  Full-text and vector remain (each needs its index).
+  Vector search shipped (flat index — see Indexing); full-text remains (needs its index).
 - **[Collect Node](./rfcs/collect-node.md)** — *proposed.* Make plan materialization
   points explicit; asymmetric `IndexMerge(And)`.
 - **Plan Inspection (EXPLAIN / EXPLAIN ANALYZE)** — *done.* `Plan::explain()` /

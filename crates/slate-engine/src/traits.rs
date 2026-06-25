@@ -5,6 +5,7 @@ use bson::RawBson;
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 
 use crate::error::EngineError;
+use crate::vector::VectorIndexSpec;
 
 // ── Function types ──────────────────────────────────────────
 
@@ -38,6 +39,9 @@ struct CollectionHandleInner<Cf> {
     cf: Cf,
     indexes: Vec<String>,
     unique_indexes: Vec<String>,
+    /// Flat vector indexes, keyed per field — parallel to `indexes` so the hot
+    /// secondary path is untouched. Usually empty.
+    vector_indexes: Vec<VectorIndexSpec>,
     pk_path: String,
     ttl_path: String,
 }
@@ -65,6 +69,7 @@ impl<Cf: fmt::Debug> fmt::Debug for CollectionHandle<Cf> {
             .field("cf", &self.inner.cf)
             .field("indexes", &self.inner.indexes)
             .field("unique_indexes", &self.inner.unique_indexes)
+            .field("vector_indexes", &self.inner.vector_indexes)
             .field("pk_path", &self.inner.pk_path)
             .field("ttl_path", &self.inner.ttl_path)
             .finish()
@@ -79,6 +84,7 @@ impl<Cf: Clone> CollectionHandle<Cf> {
         cf: Cf,
         indexes: Vec<String>,
         unique_indexes: Vec<String>,
+        vector_indexes: Vec<VectorIndexSpec>,
         pk_path: String,
         ttl_path: String,
     ) -> Self {
@@ -89,6 +95,7 @@ impl<Cf: Clone> CollectionHandle<Cf> {
                 cf,
                 indexes,
                 unique_indexes,
+                vector_indexes,
                 pk_path,
                 ttl_path,
             }),
@@ -116,6 +123,11 @@ impl<Cf: Clone> CollectionHandle<Cf> {
         &self.inner.unique_indexes
     }
 
+    /// The flat vector indexes defined on this collection (usually empty).
+    pub fn vector_indexes(&self) -> &[VectorIndexSpec] {
+        &self.inner.vector_indexes
+    }
+
     pub fn pk_path(&self) -> &str {
         &self.inner.pk_path
     }
@@ -126,6 +138,10 @@ impl<Cf: Clone> CollectionHandle<Cf> {
 }
 
 // ── Engine + Transaction traits ─────────────────────────────
+
+/// One entry yielded by [`EngineTransaction::scan_vectors`]: a document id paired
+/// with its decoded vector (the packed `f32` blob unpacked).
+pub type VectorScanEntry = (RawBson, Vec<f32>);
 
 pub trait Engine {
     type Txn<'a>: EngineTransaction
@@ -207,6 +223,26 @@ pub trait EngineTransaction {
         range: CompoundRange<'_>,
         reverse: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>;
+
+    // ── Vector operations ──────────────────────────────────────
+
+    /// Scan a flat vector index, yielding `(doc_id, vector)` for every document
+    /// that carries an embedding in `field`. The brute-force top-k source: the
+    /// caller measures each vector against the query and keeps the best k.
+    ///
+    /// `field` must name a vector index on the collection. Vectors are returned
+    /// fully decoded (the packed `f32` blob unpacked). Expired documents are
+    /// skipped here — a vector entry carries the document's TTL inline (like an
+    /// index entry's metadata), so the scan drops an expired-but-unpurged doc with
+    /// an O(1) check, reading only the vector keyspace. This keeps a top-k from
+    /// returning fewer than k when the downstream document fetch would have dropped
+    /// the expired rows. Bridges to the store's raw range scan, which the executor
+    /// cannot reach directly.
+    fn scan_vectors<'a>(
+        &'a self,
+        handle: &CollectionHandle<Self::Cf>,
+        field: &str,
+    ) -> Result<Box<dyn Iterator<Item = Result<VectorScanEntry, EngineError>> + 'a>, EngineError>;
 
     // ── Purge ──────────────────────────────────────────────────
 
@@ -535,6 +571,24 @@ pub trait Catalog: EngineTransaction {
     }
 
     fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), EngineError>;
+
+    /// Create a flat vector index from `spec` and backfill existing records.
+    ///
+    /// Persists a self-describing serialized [`VectorIndexSpec`] in the catalog
+    /// and writes a packed-`f32` data entry for every existing document that
+    /// carries a well-formed embedding at `spec.path`. Fails if a vector index on
+    /// that field already exists, or if any existing document's vector has the
+    /// wrong dimensionality (the whole create rolls back).
+    fn create_vector_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        spec: &VectorIndexSpec,
+    ) -> Result<(), EngineError>;
+
+    /// Drop a vector index: delete its config and every packed-vector entry.
+    fn drop_vector_index(&self, cf: &str, collection: &str, field: &str)
+    -> Result<(), EngineError>;
 
     /// Store a named function (trigger, validator, or computed field) for a collection.
     fn create_function(

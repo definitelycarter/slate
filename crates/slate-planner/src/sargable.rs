@@ -31,6 +31,21 @@ use crate::plan::{
     ScanDirection,
 };
 
+/// A flat vector index visible to the planner: the field it is on plus the
+/// metric it was built for. The planner needs only these two — the field to
+/// route a `VECTORDISTANCE(c.<field>, …)` call to the right index, and the
+/// metric to check the call's metric and `ORDER BY` direction agree before
+/// seeking it (a self-contained subset of the engine's `VectorIndexSpec`, kept
+/// here so the planner needn't depend on `slate-engine`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorIndexMeta {
+    /// The document field the embedding lives on (e.g. `"embedding"`).
+    pub field: String,
+    /// The metric the index is built for; a `VECTORDISTANCE` call's metric must
+    /// match it for the index to be used (else a correct full scan).
+    pub metric: crate::plan::VectorMetric,
+}
+
 /// Index metadata for the queried collection, used to choose a scan source.
 #[derive(Debug, Clone, Default)]
 pub struct CollectionMeta {
@@ -42,6 +57,10 @@ pub struct CollectionMeta {
     /// leftmost-prefix rule). The identity is passed through opaquely so the
     /// planner never has to know the join encoding.
     pub compound_indexes: Vec<(String, Vec<String>)>,
+    /// Flat vector indexes, keyed per field — the planner routes a
+    /// `VECTORDISTANCE(c.<field>, …)` kNN to a matching one (see
+    /// [`crate::lower`]). Empty for a collection with no vector index.
+    pub vector_indexes: Vec<VectorIndexMeta>,
     /// Primary-key field path (e.g. `"_id"`).
     pub pk_path: String,
 }
@@ -946,6 +965,7 @@ mod tests {
         CollectionMeta {
             indexes: indexes.iter().map(|s| s.to_string()).collect(),
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -963,6 +983,7 @@ mod tests {
         CollectionMeta {
             indexes: Vec::new(),
             compound_indexes,
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }

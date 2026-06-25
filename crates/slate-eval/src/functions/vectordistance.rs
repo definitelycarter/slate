@@ -24,6 +24,7 @@ use bson::Bson;
 
 use crate::error::{EvalError, Result};
 use crate::value::Value;
+use crate::vector::VectorMetric;
 
 pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
     if args.len() != 2 && args.len() != 3 {
@@ -33,8 +34,8 @@ pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
     }
 
     let metric = match args.get(2) {
-        None => Metric::Cosine,
-        Some(Value::Defined(Bson::String(s))) => match Metric::parse(s) {
+        None => VectorMetric::Cosine,
+        Some(Value::Defined(Bson::String(s))) => match VectorMetric::parse(s) {
             Some(m) => m,
             None => {
                 return Err(EvalError {
@@ -56,51 +57,6 @@ pub(super) fn eval(name: &str, args: Vec<Value>) -> Result<Value> {
         return Ok(Value::Undefined);
     }
     Ok(Value::Defined(Bson::Double(metric.measure(&a, &b))))
-}
-
-#[derive(Clone, Copy)]
-enum Metric {
-    Cosine,
-    DotProduct,
-    Euclidean,
-}
-
-impl Metric {
-    fn parse(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "cosine" => Some(Metric::Cosine),
-            "dotproduct" => Some(Metric::DotProduct),
-            "euclidean" => Some(Metric::Euclidean),
-            _ => None,
-        }
-    }
-
-    /// Equal-length, non-empty vectors (checked by the caller).
-    fn measure(self, a: &[f64], b: &[f64]) -> f64 {
-        match self {
-            Metric::DotProduct => dot(a, b),
-            Metric::Euclidean => a
-                .iter()
-                .zip(b)
-                .map(|(x, y)| (x - y) * (x - y))
-                .sum::<f64>()
-                .sqrt(),
-            Metric::Cosine => {
-                let denom = norm(a) * norm(b);
-                // A zero-magnitude vector has no direction; define its cosine
-                // similarity as 0 rather than NaN.
-                if denom == 0.0 { 0.0 } else { dot(a, b) / denom }
-            }
-        }
-    }
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-fn norm(a: &[f64]) -> f64 {
-    dot(a, a).sqrt()
 }
 
 /// A vector argument: a defined BSON array whose every element is a number,

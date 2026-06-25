@@ -19,8 +19,8 @@ pub use export::{
 };
 pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};
 pub use slate_engine::{
-    DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport, join_index_fields,
-    split_index_fields,
+    DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport, VectorDataType, VectorIndexSpec,
+    VectorMetric, join_index_fields, split_index_fields,
 };
 pub use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 pub use slate_store::Durability;

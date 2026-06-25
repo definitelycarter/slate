@@ -18,12 +18,13 @@
 //! Index selection (which conjuncts are pushed into a scan) lives in
 //! [`crate::sargable`]; semantic validation in [`crate::validate`].
 
-use bson::{RawBson, RawDocumentBuf};
+use bson::{Bson, RawBson, RawDocumentBuf};
 use slate_ast::{
-    Expression, FromClause, FromSource, Join, Literal, OrderByItem, Query, SubqueryKind,
+    Expression, FromClause, FromSource, Join, Literal, OrderByItem, Query, SortDirection,
+    SubqueryKind,
 };
 
-use crate::plan::{AggregateExpr, CollectionRef, GroupKey, Node, Plan, RowBinding};
+use crate::plan::{AggregateExpr, CollectionRef, GroupKey, Node, Plan, RowBinding, VectorMetric};
 use crate::sargable::{CollectionMeta, plan_source, scan};
 use crate::validate::{contains_aggregate, is_aggregate_name};
 
@@ -102,6 +103,13 @@ pub(crate) fn lower_query(
         offset,
         limit,
     } = query;
+
+    // Whether the query carries a `WHERE` at all. A constraining `WHERE` is the
+    // *pre-filter* of a vector-index kNN: its candidate doc-ids must shrink the
+    // set *before* the top-k (a global top-k then filtered would under-return),
+    // so the kNN recogniser routes this candidate pipeline into `VectorTopK`'s
+    // `source`. Captured before `filter` is moved into the sargability pass.
+    let had_where = filter.is_some();
 
     // Desugar `DOCUMENTID(x)` → `x.<pk>` in the `WHERE` up front, before the
     // sargability pass consumes it — so `WHERE DOCUMENTID(c) = v` is recognised
@@ -404,21 +412,64 @@ pub(crate) fn lower_query(
             source: Box::new(node),
         };
     } else {
-        // ORDER BY  →  Sort (before projection — keys reference the row environment)
-        if !order_by.is_empty() {
-            node = Node::Sort {
-                keys: order_by,
-                binding: binding.clone(),
-                source: Box::new(node),
-            };
-        }
+        // kNN seek: `ORDER BY VECTORDISTANCE(c.<field>, <q>[, <m>]) LIMIT k` over
+        // a matching flat vector index lowers to a `VectorTopK` source +
+        // `KeyLookup`, *in place of* `Sort`+`Limit` (the LIMIT folds into `k`).
+        // `recognize_vector_topk` decides; `None` keeps the `Sort`+`Limit`
+        // fallback (correct, just a full scan).
+        match recognize_vector_topk(&order_by, limit, offset, &binding, meta) {
+            Some(knn) => {
+                // The pre-filter: a constraining WHERE makes the candidate pipeline
+                // (`node`) the top-k's `source`, so the filter shrinks the set
+                // *before* the top-k. No WHERE → scan the whole field (drop `node`,
+                // a bare scan).
+                let source = had_where.then(|| Box::new(node));
+                let topk = Node::VectorTopK {
+                    collection: container.clone(),
+                    field: knn.field,
+                    query_vector: knn.query_vector,
+                    metric: knn.metric,
+                    k: knn.k,
+                    source,
+                };
+                // The top-k emits exactly the k nearest doc-ids in nearest-first
+                // order, so the LIMIT is already honoured — fetch + project, with
+                // no `Sort` and no trailing `Limit`.
+                node = Node::KeyLookup {
+                    collection: container.clone(),
+                    source: Box::new(topk),
+                };
+                node = Node::Project {
+                    expr: project_expr,
+                    binding,
+                    source: Box::new(node),
+                };
+                if distinct {
+                    node = Node::Distinct {
+                        source: Box::new(node),
+                        flatten: false,
+                    };
+                }
+                return node;
+            }
+            None => {
+                // ORDER BY  →  Sort (before projection — keys reference the env)
+                if !order_by.is_empty() {
+                    node = Node::Sort {
+                        keys: order_by,
+                        binding: binding.clone(),
+                        source: Box::new(node),
+                    };
+                }
 
-        // SELECT ...  →  Project (resolved above)
-        node = Node::Project {
-            expr: project_expr,
-            binding,
-            source: Box::new(node),
-        };
+                // SELECT ...  →  Project (resolved above)
+                node = Node::Project {
+                    expr: project_expr,
+                    binding,
+                    source: Box::new(node),
+                };
+            }
+        }
     }
 
     // SELECT DISTINCT  →  dedup the projected rows (whole-value, no array
@@ -440,6 +491,129 @@ pub(crate) fn lower_query(
     }
 
     node
+}
+
+/// The recognised pieces of a kNN seek — the small data the caller needs to
+/// build a [`Node::VectorTopK`] (it owns the `node` that becomes the pre-filter
+/// `source`, so the recogniser returns no `Node`).
+struct RecognizedKnn {
+    field: String,
+    query_vector: Expression,
+    metric: VectorMetric,
+    k: usize,
+}
+
+/// Recognise `ORDER BY VECTORDISTANCE(c.<field>, <q>[, <m>]) LIMIT k` as a flat
+/// vector-index seek, returning the pieces to build a [`Node::VectorTopK`], or
+/// `None` so the caller builds the correct `Sort`+`Limit` fallback (also correct,
+/// just a full scan). Recognises only when **all** hold:
+///
+/// - the *sole* `ORDER BY` key is `VECTORDISTANCE(<alias>.<field>, <q>[, <m>])`;
+/// - `<field>` has a flat vector index on the collection (`meta.vector_indexes`);
+/// - the metric arg, if present, matches the index's metric (a literal string);
+///   absent, the index's metric is used;
+/// - the `ORDER BY` direction is the metric's nearest-first sense — `ASC` for
+///   euclidean (lower = nearer), `DESC` for cosine/dotproduct (higher = nearer);
+/// - there is a `LIMIT k` and no `OFFSET` (a non-zero offset over a top-k is left
+///   to the generic path; `k` alone is the clean seek).
+fn recognize_vector_topk(
+    order_by: &[OrderByItem],
+    limit: Option<u64>,
+    offset: Option<u64>,
+    binding: &RowBinding,
+    meta: &CollectionMeta,
+) -> Option<RecognizedKnn> {
+    // Need exactly one ORDER BY key, a LIMIT, and no OFFSET.
+    let ([item], Some(k), None) = (order_by, limit, offset) else {
+        return None;
+    };
+    let k = k as usize;
+
+    // The alias the row binds to — `VECTORDISTANCE(c.…)` references it. An `Env`
+    // binding (joins/aggregates/subqueries) has no single alias to strip, so the
+    // kNN seek isn't attempted there.
+    let RowBinding::Alias(alias) = binding else {
+        return None;
+    };
+
+    // The sort key must be a VECTORDISTANCE(...) call.
+    let Expression::Function { name, args } = &item.expr else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("VECTORDISTANCE") || !(args.len() == 2 || args.len() == 3) {
+        return None;
+    }
+
+    // arg0 must be `<alias>.<field>` (possibly dotted) → the indexed field path.
+    let field = member_path(&args[0], alias)?;
+
+    // The field must have a flat vector index on this collection.
+    let index = meta.vector_indexes.iter().find(|v| v.field == field)?;
+
+    // arg2 (the metric), when present, must be a string literal that names a
+    // metric matching the index's. Absent → use the index's metric.
+    let metric = index.metric;
+    if let Some(arg) = args.get(2) {
+        match metric_literal(arg) {
+            Some(m) if m == metric => {}
+            // Present but mismatched (or not a recognisable metric string) →
+            // fall back; the function would still measure by the named metric, so
+            // the index (built for a different one) can't serve it.
+            _ => return None,
+        }
+    }
+
+    // The ORDER BY direction must be the metric's nearest-first sense.
+    let wants_desc = metric.higher_is_closer();
+    let dir_ok = match item.direction {
+        SortDirection::Desc => wants_desc,
+        SortDirection::Asc => !wants_desc,
+    };
+    if !dir_ok {
+        return None;
+    }
+
+    Some(RecognizedKnn {
+        field,
+        // The query vector is arg1, evaluated once by the executor.
+        query_vector: args[1].clone(),
+        metric,
+        k,
+    })
+}
+
+/// Flatten an `<alias>.<a>.<b>…` member chain rooted at `alias` into the dotted
+/// field path `"a.b…"` (the path inside a `VECTORDISTANCE` call). `None` for any
+/// other shape (a bare identifier, a different root, an array index, a function).
+fn member_path(expr: &Expression, alias: &str) -> Option<String> {
+    match expr {
+        Expression::Member { base, field } => match base.as_ref() {
+            Expression::Identifier(root) if root == alias => Some(field.clone()),
+            Expression::Member { .. } => {
+                let prefix = member_path(base, alias)?;
+                Some(format!("{prefix}.{field}"))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The [`VectorMetric`] named by a string-literal metric argument, or `None` for
+/// a non-string or unrecognised metric. Accepts both the SQL form
+/// (`Literal::Str`) and the Mongo front-end form (`Value(Bson::String)`).
+fn metric_literal(expr: &Expression) -> Option<VectorMetric> {
+    let s = match expr {
+        Expression::Literal(Literal::Str(s)) => s.as_str(),
+        Expression::Value(Bson::String(s)) => s.as_str(),
+        _ => return None,
+    };
+    match s.to_ascii_lowercase().as_str() {
+        "cosine" => Some(VectorMetric::Cosine),
+        "dotproduct" => Some(VectorMetric::DotProduct),
+        "euclidean" => Some(VectorMetric::Euclidean),
+        _ => None,
+    }
 }
 
 /// Pull subqueries out of `expr`: each `(SELECT …)`/`EXISTS`/`ARRAY` becomes a
@@ -676,6 +850,7 @@ mod tests {
         CollectionMeta {
             indexes: vec![],
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -684,6 +859,7 @@ mod tests {
         CollectionMeta {
             indexes: vec!["age".into()],
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -890,6 +1066,7 @@ mod tests {
         CollectionMeta {
             indexes: vec!["age".into(), "status".into()],
             compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             pk_path: "_id".into(),
         }
     }
@@ -1339,5 +1516,198 @@ mod tests {
             panic!("expected Filter");
         };
         assert!(matches!(*source, Node::Scan { .. }));
+    }
+
+    // ── Vector kNN recognition (VectorTopK) ─────────────────────
+
+    /// Meta with a flat vector index on `embedding` of the given metric (plus an
+    /// `age` secondary index, to exercise a WHERE pre-filter that pushes down).
+    fn vector_indexed(metric: VectorMetric) -> CollectionMeta {
+        CollectionMeta {
+            indexes: vec!["age".into()],
+            compound_indexes: Vec::new(),
+            vector_indexes: vec![crate::sargable::VectorIndexMeta {
+                field: "embedding".into(),
+                metric,
+            }],
+            pk_path: "_id".into(),
+        }
+    }
+
+    /// Pull the `VectorTopK` out of a lowered `Project(KeyLookup(VectorTopK))`,
+    /// or `None` if the plan didn't take the kNN-seek shape (a fallback).
+    fn vector_topk_of(node: Node) -> Option<Node> {
+        let Node::Project { source, .. } = node else {
+            return None;
+        };
+        let Node::KeyLookup { source, .. } = *source else {
+            return None;
+        };
+        match *source {
+            n @ Node::VectorTopK { .. } => Some(n),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn knn_no_where_emits_vector_topk_whole_field() {
+        // cosine → DESC is nearest-first; no WHERE → `source` is None.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        match vector_topk_of(node) {
+            Some(Node::VectorTopK {
+                field,
+                metric,
+                k,
+                source,
+                ..
+            }) => {
+                assert_eq!(field, "embedding");
+                assert_eq!(metric, VectorMetric::Cosine);
+                assert_eq!(k, 5);
+                assert!(source.is_none(), "no WHERE → no pre-filter source");
+            }
+            other => panic!("expected VectorTopK, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn knn_with_where_carries_prefilter_source() {
+        // CORRECTNESS TRAP 1: a constraining WHERE becomes the candidate `source`
+        // so the filter shrinks the set *before* the top-k. The source is the
+        // pushed-down candidate pipeline (here an index path on `age`).
+        let node = lower_with(
+            "SELECT VALUE c FROM c WHERE c.age = 40 \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC LIMIT 3",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        match vector_topk_of(node) {
+            Some(Node::VectorTopK { source, k, .. }) => {
+                assert_eq!(k, 3);
+                assert!(
+                    source.is_some(),
+                    "a WHERE must hand its candidate ids to the top-k as `source`"
+                );
+            }
+            other => panic!("expected VectorTopK with a pre-filter source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn knn_euclidean_asc_is_recognized() {
+        // euclidean is a distance → ASC is nearest-first.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) ASC LIMIT 2",
+            &vector_indexed(VectorMetric::Euclidean),
+        );
+        assert!(
+            matches!(vector_topk_of(node), Some(Node::VectorTopK { metric, .. }) if metric == VectorMetric::Euclidean)
+        );
+    }
+
+    #[test]
+    fn knn_explicit_metric_arg_matching_index_is_recognized() {
+        let node = lower_with(
+            "SELECT VALUE c FROM c \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0], 'dotproduct') DESC LIMIT 4",
+            &vector_indexed(VectorMetric::DotProduct),
+        );
+        assert!(
+            matches!(vector_topk_of(node), Some(Node::VectorTopK { metric, .. }) if metric == VectorMetric::DotProduct)
+        );
+    }
+
+    #[test]
+    fn knn_wrong_direction_falls_back_to_sort_limit() {
+        // CORRECTNESS TRAP 2: cosine wants DESC; an ASC order is *not* the
+        // nearest-first sense → must NOT use the index. Fall back to Sort+Limit.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) ASC LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node.clone()).is_none(), "must not seek");
+        // The fallback is a correct Sort + Limit over the projected rows.
+        assert_plan_has_sort_and_limit(node);
+    }
+
+    #[test]
+    fn knn_wrong_metric_arg_falls_back() {
+        // CORRECTNESS TRAP 2: the call names 'euclidean' but the index is cosine —
+        // the index can't serve a different metric → fall back.
+        let node = lower_with(
+            "SELECT VALUE c FROM c \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0], 'euclidean') DESC LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node.clone()).is_none());
+        assert_plan_has_sort_and_limit(node);
+    }
+
+    #[test]
+    fn knn_non_indexed_field_falls_back() {
+        // `other` has no vector index → fall back to the full Sort+Limit.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.other, [1.0,0.0]) DESC LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node.clone()).is_none());
+        assert_plan_has_sort_and_limit(node);
+    }
+
+    #[test]
+    fn knn_without_limit_falls_back() {
+        // No LIMIT → no k → the seek isn't applicable; a plain Sort.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node.clone()).is_none());
+        let Node::Project { source, .. } = node else {
+            panic!("expected Project");
+        };
+        assert!(
+            matches!(*source, Node::Sort { .. }),
+            "fallback keeps the Sort"
+        );
+    }
+
+    #[test]
+    fn knn_with_offset_falls_back() {
+        // A non-zero OFFSET over a top-k is left to the generic path.
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC \
+             OFFSET 2 LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node.clone()).is_none());
+        assert_plan_has_sort_and_limit(node);
+    }
+
+    #[test]
+    fn knn_two_order_keys_falls_back() {
+        // The VECTORDISTANCE key must be the *sole* ORDER BY key.
+        let node = lower_with(
+            "SELECT VALUE c FROM c \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC, c.age ASC LIMIT 5",
+            &vector_indexed(VectorMetric::Cosine),
+        );
+        assert!(vector_topk_of(node).is_none());
+    }
+
+    /// Assert the plan fell back to the generic `Sort` + `Limit` shape:
+    /// `Limit(Project(Sort(...)))`.
+    fn assert_plan_has_sort_and_limit(node: Node) {
+        let Node::Limit { source, .. } = node else {
+            panic!("expected a trailing Limit, got {node:?}");
+        };
+        let Node::Project { source, .. } = *source else {
+            panic!("expected Project under Limit");
+        };
+        assert!(
+            matches!(*source, Node::Sort { .. }),
+            "expected a Sort under the Project in the fallback"
+        );
     }
 }
