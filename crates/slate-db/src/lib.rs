@@ -12,7 +12,10 @@ pub use cursor::{Cursor, CursorIter, RawCursorIter, RawValuesIter, ValuesIter};
 pub use database::{Database, DatabaseBuilder, Transaction as DatabaseTransaction};
 pub use error::DbError;
 pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};
-pub use slate_engine::{DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport};
+pub use slate_engine::{
+    DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport, join_index_fields,
+    split_index_fields,
+};
 pub use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 pub use slate_store::Durability;
 pub use slate_vm::VmError;

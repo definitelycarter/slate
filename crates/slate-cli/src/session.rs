@@ -138,7 +138,7 @@ impl<S: BackupStore> Session<S> {
             Command::Distinct { field, filter } => self.distinct(field, filter),
             Command::CreateIndex(fields) => self.create_index(fields),
             Command::CreateUniqueIndex(fields) => self.create_unique_index(fields),
-            Command::DropIndex(field) => self.drop_index(field),
+            Command::DropIndex(fields) => self.drop_index(fields),
             Command::ListIndexes => self.list_indexes(),
             Command::Count(filter) => self.count(filter),
             Command::Schema(name) => self.schema(name),
@@ -340,12 +340,24 @@ impl<S: BackupStore> Session<S> {
         )))
     }
 
-    fn drop_index(&self, field: String) -> Result<Output, String> {
+    fn drop_index(&self, fields: Vec<String>) -> Result<Output, String> {
         let collection = self.require_collection()?;
+        // An index is keyed by its identity: a single field is itself; a compound
+        // index joins its components. Reconstruct the identity from the fields.
+        let identity = slate_db::join_index_fields(&fields);
         let txn = self.db.begin(false).map_err(es)?;
-        txn.drop_index(DEFAULT_CF, collection, &field).map_err(es)?;
+        txn.drop_index(DEFAULT_CF, collection, &identity)
+            .map_err(es)?;
         txn.commit().map_err(es)?;
-        Ok(Output::Message(format!("dropped index on `{field}`")))
+        let kind = if fields.len() == 1 {
+            "index"
+        } else {
+            "compound index"
+        };
+        Ok(Output::Message(format!(
+            "dropped {kind} on `{}`",
+            fields.join(", ")
+        )))
     }
 
     fn list_indexes(&self) -> Result<Output, String> {
@@ -866,6 +878,18 @@ mod tests {
                 )
             }
             other => panic!("expected message, got {other:?}"),
+        }
+        // Drop the compound index by naming its component fields in order.
+        match run(&mut s, ".drop-index status created_at") {
+            Output::Message(m) => assert!(m.contains("compound index"), "got {m:?}"),
+            other => panic!("expected message, got {other:?}"),
+        }
+        match run(&mut s, ".indexes") {
+            Output::Indexes(fields) => assert!(
+                !fields.iter().any(|f| f == "status\u{1}created_at"),
+                "compound index should be gone: {fields:?}"
+            ),
+            other => panic!("expected indexes, got {other:?}"),
         }
     }
 

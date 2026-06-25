@@ -45,8 +45,10 @@ pub enum Command {
     /// Create a unique index on one or more fields of the current collection.
     /// Multiple fields constrain uniqueness of the combination.
     CreateUniqueIndex(Vec<String>),
-    /// Drop an index on a field of the current collection.
-    DropIndex(String),
+    /// Drop an index on the current collection. A single field drops a plain
+    /// index; multiple fields (in the same order used to create it) drop the
+    /// matching compound index.
+    DropIndex(Vec<String>),
     /// List indexes on the current collection.
     ListIndexes,
     /// Count documents in the current collection, optionally filtered.
@@ -100,7 +102,7 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
             args,
             "unique-index",
         )?)),
-        "drop-index" => Ok(Command::DropIndex(name_arg(args, "drop-index")?)),
+        "drop-index" => Ok(Command::DropIndex(fields_arg(args, "drop-index")?)),
         "indexes" => Ok(Command::ListIndexes),
         "schema" => {
             if args.trim().is_empty() {
@@ -416,17 +418,21 @@ mod tests {
     }
 
     #[test]
-    fn unique_and_drop_index_take_a_field() {
+    fn unique_and_drop_index_take_fields() {
         assert_eq!(
             Command::parse(".unique-index email").unwrap(),
             Command::CreateUniqueIndex(vec!["email".to_string()])
         );
         assert_eq!(
             Command::parse(".drop-index email").unwrap(),
-            Command::DropIndex("email".to_string())
+            Command::DropIndex(vec!["email".to_string()])
+        );
+        assert_eq!(
+            Command::parse(".drop-index user.id status").unwrap(),
+            Command::DropIndex(vec!["user.id".to_string(), "status".to_string()])
         );
         assert!(Command::parse(".unique-index").is_err());
-        assert!(Command::parse(".drop-index a b").is_err());
+        assert!(Command::parse(".drop-index").is_err());
     }
 
     #[test]

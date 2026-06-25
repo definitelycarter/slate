@@ -10,6 +10,14 @@ use std::time::Duration;
 
 use bson::{Bson, RawBson};
 
+/// Render an index identity for display. A compound index's identity joins its
+/// component fields with a non-printable separator; split it back into a
+/// readable comma list (e.g. `user.id, status`). A single-field index is
+/// unchanged.
+pub fn index_label(identity: &str) -> String {
+    slate_db::split_index_fields(identity).join(", ")
+}
+
 /// Render one engine result value as a JSON string.
 pub fn render_value(raw: RawBson) -> Result<String, String> {
     let bson = Bson::try_from(raw).map_err(|e| e.to_string())?;
@@ -49,6 +57,12 @@ mod tests {
     fn scalar_string_is_quoted_inline() {
         let out = render_value(RawBson::String("ada".to_string())).unwrap();
         assert_eq!(out, "\"ada\"");
+    }
+
+    #[test]
+    fn index_label_renders_compound_readably() {
+        assert_eq!(index_label("email"), "email");
+        assert_eq!(index_label("user.id\u{1}status"), "user.id, status");
     }
 
     #[test]

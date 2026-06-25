@@ -56,7 +56,7 @@ Commands:
     .distinct <field> [filter]  distinct values of a field
     .index <field>...           create an index (2+ fields = compound)
     .unique-index <field>...    create a unique index (2+ fields = compound)
-    .drop-index <field>         drop an index on a field
+    .drop-index <field>...      drop an index (name all fields for a compound)
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
     .backup <dir>               back up the database (rocksdb/redb only)
@@ -317,7 +317,7 @@ fn print_output(output: &Output, elapsed: Duration) {
                 println!("(no indexes)");
             } else {
                 for field in fields {
-                    println!("{field}");
+                    println!("{}", slate_cli::format::index_label(field));
                 }
             }
         }
@@ -332,7 +332,7 @@ fn print_output(output: &Output, elapsed: Duration) {
                 println!("  indexes:");
                 for ix in &s.indexes {
                     let mark = if ix.unique { "  [unique]" } else { "" };
-                    println!("    {}{mark}", ix.field);
+                    println!("    {}{mark}", slate_cli::format::index_label(&ix.field));
                 }
             }
         }
