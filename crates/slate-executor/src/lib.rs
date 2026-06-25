@@ -522,6 +522,7 @@ mod end_to_end {
         let handle = txn.collection(DEFAULT_CF, "people").unwrap();
         let meta = CollectionMeta {
             indexes: handle.indexes().to_vec(),
+            compound_indexes: Vec::new(),
             pk_path: handle.pk_path().to_string(),
         };
         let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), people_ref(), &meta);
