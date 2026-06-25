@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
 use serde::Serialize;
-use slate_engine::{Catalog, Engine, EngineTransaction, FunctionKind, IntegrityReport, KvEngine};
+use slate_engine::{
+    Catalog, Engine, EngineTransaction, FunctionKind, IntegrityReport, KvEngine, VectorIndexSpec,
+};
 use slate_query::{DistinctOptions, FindOptions};
 use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
@@ -1034,6 +1036,26 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             fields,
             &slate_engine::IndexOptions { unique: true },
         )?;
+        Ok(())
+    }
+
+    /// Create a *flat vector index* from `spec` and backfill existing records.
+    ///
+    /// The `spec` carries the embedding field path, dimensionality, distance
+    /// metric, and element dtype (see [`VectorIndexSpec`]). Every existing
+    /// document with a well-formed embedding at `spec.path` is packed and
+    /// indexed; the index then serves `ORDER BY VECTORDISTANCE(field, q) LIMIT k`
+    /// top-k seeks. Fails with [`DbError::IndexExists`] if a vector index on
+    /// that field already exists, and with [`DbError::InvalidDocument`] if any
+    /// existing document's vector has the wrong dimensionality (the whole
+    /// create rolls back).
+    pub fn create_vector_index(
+        &self,
+        cf: &str,
+        collection: &str,
+        spec: &VectorIndexSpec,
+    ) -> Result<(), DbError> {
+        self.txn.create_vector_index(cf, collection, spec)?;
         Ok(())
     }
 

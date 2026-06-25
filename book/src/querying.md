@@ -199,6 +199,37 @@ The rule is **exact-path match**: a referenced path is served only if it string-
 `EXPLAIN` surfaces the decision: a covered scan prints `covering` and has no `KeyLookup` line. Covering is a physical-plan choice, invisible to results — a covered query returns exactly what the same query returns without the index.
 
 
+### Vector Search
+
+A **vector index** turns nearest-neighbour search over an embedding field into a seek. A vector is the numeric embedding an ML model produces for a piece of text or an image (an array of numbers); two pieces of similar content have embeddings that sit close together in that space. The application supplies the embeddings — Slate stores, indexes, and searches them, it never generates them.
+
+Create one programmatically with `create_vector_index`, declaring the field, dimensionality, and metric:
+
+```rust
+use slate_db::{VectorIndexSpec, VectorMetric};
+
+// cosine-similarity index over the 1536-dim `embedding` field
+txn.create_vector_index(
+    DEFAULT_CF, "photos",
+    &VectorIndexSpec::float32("embedding", 1536, VectorMetric::Cosine),
+)?;
+```
+
+The index is a derived `doc_id → packed-f32` copy of the field (the document's array stays canonical), maintained on every write. A kNN query is the CosmosDB shape — `VECTORDISTANCE` in `ORDER BY` with a `LIMIT`:
+
+```text
+vector index on `embedding` (cosine):
+  SELECT c.id FROM c ORDER BY VECTORDISTANCE(c.embedding, @q) DESC LIMIT 5
+    → VectorTopK (flat-index seek) → KeyLookup
+  SELECT c.id FROM c WHERE c.tenant = 'acme'
+                     ORDER BY VECTORDISTANCE(c.embedding, @q) DESC LIMIT 5
+    → VectorTopK { source: tenant index } → KeyLookup    -- WHERE pre-filters first
+```
+
+The planner seeks the index only when the call's **metric matches** the index's declared metric and the **`ORDER BY` direction is the metric's nearest-first sense** — `DESC` for the similarity metrics (`cosine` / `dotproduct`, higher is closer), `ASC` for `euclidean` (lower is closer). Any mismatch falls back to a correct full `Sort` + `Limit`.
+
+The search is **exact** — a brute-force scan over the candidate vectors into a bounded top-k heap, not an approximate ANN graph — so it returns precisely the rows a full scan would. A `WHERE` is applied as a **pre-filter**: its matches constrain the candidate set *before* the top-k, so a filtered kNN never under-returns or silently loses recall (a guarantee approximate vector stores can't make). Quantized and approximate (ANN) indexes are planned for later phases — see the [Vector Index RFC](./rfcs/vector-index.md).
+
 ## Plan Scenarios
 
 The planner's source selection — when a filter becomes an `IndexScan`, an `IndexMerge`, or falls back to a `Scan` — is catalogued with 20 worked examples (plus a full pipeline and limit placement) in **[Plan Scenarios](./plan-scenarios.md)**.

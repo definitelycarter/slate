@@ -9,6 +9,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
 - **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
 - **Indexed queries** — single-field, compound (multi-field, leftmost-prefix), and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
+- **Vector search** — flat (exact, brute-force) k-nearest-neighbour over embedding fields: `ORDER BY VECTORDISTANCE(c.embedding, @q) LIMIT k` seeks a per-field vector index (cosine / dot-product / euclidean), with `WHERE` pre-filtering before the top-k; on-device RAG / semantic search (the app supplies embeddings, Slate stores and searches them)
 - **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
