@@ -12,6 +12,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
+- **Logical export / import** — `db.export(path)` / `db.import(path)` write a portable BSON dump (manifest + per-collection document streams) that rebuilds indexes on load, for cross-backend migration (e.g. redb → RocksDB), seeding, and recovery
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
 - **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required), powering an in-browser [query playground](book/src/playground.md) in the docs

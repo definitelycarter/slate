@@ -63,6 +63,11 @@ pub enum Command {
     SeedFile { path: String, collection: String },
     /// Back up the database to a directory (persistent backends only).
     Backup(String),
+    /// Export the database to a logical dump directory (BSON manifest + streams),
+    /// portable across backends.
+    Export(String),
+    /// Import a logical dump directory into the database.
+    Import(String),
     /// Show the physical plan for a query without running it.
     Explain(String),
     /// Run a query and show its plan annotated with per-node execution stats
@@ -142,6 +147,23 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
                 return Err(".backup requires a destination path".to_string());
             }
             Ok(Command::Backup(path.to_string()))
+        }
+        "export" => {
+            // The whole remaining argument is the dump directory (spaces allowed,
+            // like `.backup`); the entire database is exported.
+            let path = args.trim();
+            if path.is_empty() {
+                return Err(".export requires a destination directory".to_string());
+            }
+            Ok(Command::Export(path.to_string()))
+        }
+        "import" => {
+            // The whole remaining argument is the dump directory to load.
+            let path = args.trim();
+            if path.is_empty() {
+                return Err(".import requires a dump directory".to_string());
+            }
+            Ok(Command::Import(path.to_string()))
         }
         "explain" => {
             // The whole remaining line is the query (like `.backup`'s path) — it
@@ -497,6 +519,25 @@ mod tests {
             Command::Backup("/tmp/my snap".to_string())
         );
         assert!(Command::parse(".backup").is_err());
+    }
+
+    #[test]
+    fn export_and_import_take_a_directory() {
+        assert_eq!(
+            Command::parse(".export /tmp/dump").unwrap(),
+            Command::Export("/tmp/dump".to_string())
+        );
+        assert_eq!(
+            Command::parse(".import /tmp/dump").unwrap(),
+            Command::Import("/tmp/dump".to_string())
+        );
+        // Directories with spaces are preserved.
+        assert_eq!(
+            Command::parse(".export /tmp/my dump").unwrap(),
+            Command::Export("/tmp/my dump".to_string())
+        );
+        assert!(Command::parse(".export").is_err());
+        assert!(Command::parse(".import").is_err());
     }
 
     #[test]

@@ -134,6 +134,39 @@ For a join-free query the planner binds the whole row to a single alias (`RowBin
 - **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).
 - **Runtime-agnostic scripting** — trigger/validator dispatch goes through `slate-vm`'s trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`); the executor never names a concrete runtime, so it builds without `mlua` and the whole query stack compiles to `wasm32`. Scripting is injected from above via `DatabaseBuilder::with_scripting`; tests register a `LuaScriptRuntime` through a dev-dependency.
 
+### Logical Export / Import
+
+`slate-db` also owns logical dump/reload — `Database::export(...)` and
+`Database::import(...)` — the backend-neutral counterpart to the physical
+`BackupStore::backup` in the [storage tier](./architecture-storage.md). It lives
+here because only this tier sees the collection catalog (`pk_path`, `ttl_path`,
+indexes and their unique subset); the store layer sees only keys and bytes.
+
+A dump is a directory:
+
+```
+dump/
+  manifest.bson            ← versioned collection definitions
+  <cf>.<collection>.bson   ← one streamed document file per collection (concatenated raw BSON)
+```
+
+`export` walks each collection through a read-only snapshot and streams native raw
+BSON. `import` recreates collections from the manifest, reloads documents, and
+**rebuilds index entries from the records** — index entries are never dumped. That
+is the same "records are the source of truth" contract used by repair and the
+encoding migration, and it means the target backend always gets correctly-encoded
+indexes for *its* current encoding version. Consequently a dump round-trips across
+backends (e.g. redb → RocksDB), which physical backup cannot do.
+
+Scope is whole-DB or per-collection in both directions. Collision behavior on an
+existing target is `OnCollision::Error` (default) / `Overwrite` / `Skip`. The BSON
+canonical format is lossless — ObjectId, DateTime, and Decimal128 survive a
+round-trip. Public types (`Manifest`, `CollectionDef`, `ExportOptions`,
+`ImportOptions`, `ExportReport`, `ImportReport`, `OnCollision`) are re-exported
+from `slate-db`. See the
+[Logical Export / Import RFC](./rfcs/logical-export-import.md). JSONL interop export
+is deferred; `.seed` already ingests JSONL.
+
 ## Platform Bindings
 
 ### `slate-uniffi` — Swift/Kotlin

@@ -175,7 +175,9 @@ slate(sample)> SELECT c.city, COUNT(1) AS n
           ...> FROM c GROUP BY c.city;
 slate(sample)> .explain SELECT VALUE c.name FROM c WHERE c.city = 'London'
 slate(sample)> .schema sample
-slate(sample)> .backup /tmp/snapshot      # rocksdb/redb only
+slate(sample)> .backup /tmp/snapshot      # physical snapshot; rocksdb/redb only
+slate(sample)> .export /tmp/dump          # logical dump; any backend
+slate(sample)> .import /tmp/dump          # reload a dump (errors on collision)
 ```
 
 ## Loading data
@@ -226,6 +228,33 @@ slate(movies)> SELECT c.title, c.year FROM c WHERE c.year > 2000 ORDER BY c.year
 To keep the loaded data, open a persistent backend first
 (`cargo run -p slate-cli -- --rocksdb /tmp/slate`); the import survives across
 sessions.
+
+### Export & import (logical dump)
+
+`.seed` loads documents from JSON/JSONL into one collection. To move a **whole
+database** — every collection, with its indexes, `pk_path`, and `ttl_path` — use
+`.export` / `.import`:
+
+```
+slate> .export /tmp/dump      # write a portable dump directory
+slate> .import /tmp/dump      # reload it (errors if a collection collides)
+```
+
+A dump is a directory holding a `manifest.bson` (the collection definitions) plus
+one `<cf>.<collection>.bson` document-stream file per collection. The format is
+**BSON canonical and lossless** — ObjectId, DateTime, and Decimal128 all survive a
+round-trip, unlike the JSON/JSONL `.seed` path, which is lossy on those
+BSON-specific types (the same `$oid` / `$date` caveats noted above). Indexes are
+not stored in the dump; `.import` **rebuilds them from the records**, so the
+imported database always has correctly-encoded indexes for its backend. That is
+what makes a dump portable **across backends** — export from a redb database,
+import into a RocksDB one. This is distinct from `.backup`, which is a fast
+*physical* copy that only the same backend can restore.
+
+(At the API level these are `Database::export` / `Database::import`, which also
+support per-collection scope and `Overwrite` / `Skip` collision modes; the CLI
+commands are whole-database and error on collision. A JSONL interop *export* is
+not yet available — use `mongoexport` / `.seed` for the lossy JSONL path.)
 
 ## Where next
 

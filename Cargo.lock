@@ -1482,6 +1482,7 @@ dependencies = [
  "slate-db",
  "slate-sql",
  "slate-store",
+ "tempfile",
 ]
 
 [[package]]

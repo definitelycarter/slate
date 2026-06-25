@@ -60,6 +60,8 @@ Commands:
     .indexes                    list indexes on the active collection
     .schema [collection]        show key paths, indexes, and document count
     .backup <dir>               back up the database (rocksdb/redb only)
+    .export <dir>               write a portable logical dump (BSON manifest)
+    .import <dir>               load a logical dump into the database
     .explain <query>            show a query's plan without running it
     .explain analyze <query>    run a query and show its plan with row counts
     .stats [collection]         show document/index size and cardinality stats
