@@ -19,6 +19,7 @@ use crate::plan::{
     AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey, IndexScanRange,
     LogicalOp, Node, Plan, ScanDirection, UpsertMode,
 };
+use crate::stats::PlanStats;
 
 impl Plan {
     /// Render this plan as an indented operator tree (see the module docs).
@@ -27,8 +28,76 @@ impl Plan {
     /// terminate it (the REPL prints it with `println!`).
     pub fn explain(&self) -> String {
         let mut lines = Vec::new();
-        render_plan(self, 0, &mut lines);
+        let mut ctx = RenderCtx::logical();
+        render_plan(self, 0, &mut lines, &mut ctx);
         lines.join("\n")
+    }
+
+    /// Render this plan as `EXPLAIN ANALYZE` — the same operator tree as
+    /// [`explain`](Self::explain), annotated with per-node *actuals* from a run.
+    ///
+    /// Each node line gains `rows=N` (rows it emitted) and, for non-source nodes,
+    /// `examined=M` (rows that flowed in, i.e. its child's emitted count). The
+    /// `stats` must have been collected against *this* plan (see [`PlanStats`]),
+    /// so the pre-order node indices line up with this walk.
+    pub fn explain_analyze(&self, stats: &PlanStats) -> String {
+        let mut lines = Vec::new();
+        let mut ctx = RenderCtx::analyze(stats);
+        render_plan(self, 0, &mut lines, &mut ctx);
+        lines.join("\n")
+    }
+}
+
+/// Threads the pre-order node index (and, in analyze mode, the collected
+/// [`PlanStats`]) through the render walk. The index advances per node in the
+/// exact pre-order the executor's analyze walk and `PlanStats::for_plan` use, so
+/// a node's counter lines up with its rendered line.
+struct RenderCtx<'a> {
+    /// Pre-order index of the *next* node to render. Bumped at each `render_node`
+    /// entry, before the node's children are visited.
+    next_index: usize,
+    /// `Some` in analyze mode (annotate with actuals), `None` for logical EXPLAIN.
+    stats: Option<&'a PlanStats>,
+}
+
+impl<'a> RenderCtx<'a> {
+    fn logical() -> Self {
+        Self {
+            next_index: 0,
+            stats: None,
+        }
+    }
+
+    fn analyze(stats: &'a PlanStats) -> Self {
+        Self {
+            next_index: 0,
+            stats: Some(stats),
+        }
+    }
+
+    /// Claim the next pre-order index for the node about to be rendered.
+    fn claim(&mut self) -> usize {
+        let index = self.next_index;
+        self.next_index += 1;
+        index
+    }
+
+    /// In analyze mode, the `rows`/`examined` suffix for the node at `index`
+    /// given its child's emitted count (`examined`). Empty string in logical mode.
+    fn annotate(&self, index: usize, examined: Option<u64>) -> String {
+        match self.stats {
+            None => String::new(),
+            Some(stats) => match examined {
+                Some(examined) => format!(" rows={} examined={}", stats.emitted(index), examined),
+                None => format!(" rows={}", stats.emitted(index)),
+            },
+        }
+    }
+
+    /// The emitted count of the node at `index` (its child's `examined`), or 0 in
+    /// logical mode.
+    fn emitted(&self, index: usize) -> u64 {
+        self.stats.map_or(0, |s| s.emitted(index))
     }
 }
 
@@ -39,16 +108,21 @@ fn line(lines: &mut Vec<String>, depth: usize, text: String) {
 
 /// Render a top-level [`Plan`] — a read query is just its node tree; a write
 /// names the target collection and then renders the source that feeds it.
-fn render_plan(plan: &Plan, depth: usize, lines: &mut Vec<String>) {
+///
+/// Write/trigger wrappers are not executor *nodes* (they are `Plan` variants), so
+/// they claim no pre-order index — only the `Node` tree under them does. This
+/// keeps the renderer's index walk aligned with the executor's, which only
+/// counts `Node`s.
+fn render_plan(plan: &Plan, depth: usize, lines: &mut Vec<String>, ctx: &mut RenderCtx) {
     match plan {
-        Plan::Query(node) => render_node(node, depth, lines),
+        Plan::Query(node) => render_node(node, depth, lines, ctx),
         Plan::Insert { collection, source } => {
             line(lines, depth, format!("Insert {}", coll(collection)));
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Plan::Delete { collection, source } => {
             line(lines, depth, format!("Delete {}", coll(collection)));
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Plan::Update {
             collection,
@@ -65,13 +139,13 @@ fn render_plan(plan: &Plan, depth: usize, lines: &mut Vec<String>) {
                 depth,
                 format!("Update {} SET {sets}", coll(collection)),
             );
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Plan::Replace {
             collection, source, ..
         } => {
             line(lines, depth, format!("Replace {}", coll(collection)));
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Plan::Upsert {
             collection,
@@ -88,23 +162,38 @@ fn render_plan(plan: &Plan, depth: usize, lines: &mut Vec<String>) {
                 depth,
                 format!("Upsert {} ({mode})", coll(collection)),
             );
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Plan::Trigger { action, plan, .. } => {
             line(lines, depth, format!("Trigger {action}"));
-            render_plan(plan, depth + 1, lines);
+            render_plan(plan, depth + 1, lines, ctx);
         }
     }
 }
 
 /// Render a read [`Node`] and its children.
-fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
+///
+/// Each node claims its pre-order index up front (so the index walk stays in
+/// lock-step with the executor), then — in analyze mode — annotates its line with
+/// `rows=` (its own emitted count) and, where it has a single source child,
+/// `examined=` (the child's emitted count, i.e. what flowed in). A node's single
+/// child always sits at `my_index + 1` in pre-order.
+fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut RenderCtx) {
+    let index = ctx.claim();
+    // The single-source child (when present) is the very next node in pre-order.
+    let child_examined = || Some(ctx.emitted(index + 1));
     match node {
         Node::Values(values) => {
-            line(lines, depth, format!("Values ({} rows)", values.len()));
+            let suffix = ctx.annotate(index, None);
+            line(
+                lines,
+                depth,
+                format!("Values ({} rows){suffix}", values.len()),
+            );
         }
         Node::Scan { collection } => {
-            line(lines, depth, format!("Scan {}", coll(collection)));
+            let suffix = ctx.annotate(index, None);
+            line(lines, depth, format!("Scan {}{suffix}", coll(collection)));
         }
         Node::IndexScan {
             collection,
@@ -122,6 +211,7 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
             if let Some(n) = limit {
                 text.push_str(&format!(" limit {n}"));
             }
+            text.push_str(&ctx.annotate(index, None));
             line(lines, depth, text);
         }
         Node::CompoundIndexScan {
@@ -147,8 +237,13 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
             line(lines, depth, text);
         }
         Node::KeyLookup { collection, source } => {
-            line(lines, depth, format!("KeyLookup {}", coll(collection)));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(
+                lines,
+                depth,
+                format!("KeyLookup {}{suffix}", coll(collection)),
+            );
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::IndexMerge {
             logical, lhs, rhs, ..
@@ -157,50 +252,68 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
                 LogicalOp::And => "AND",
                 LogicalOp::Or => "OR",
             };
-            line(lines, depth, format!("IndexMerge {op}"));
-            render_node(lhs, depth + 1, lines);
-            render_node(rhs, depth + 1, lines);
+            // Two arms: "examined" isn't a single child's count, so report only
+            // rows emitted for the merge itself.
+            let suffix = ctx.annotate(index, None);
+            line(lines, depth, format!("IndexMerge {op}{suffix}"));
+            render_node(lhs, depth + 1, lines, ctx);
+            render_node(rhs, depth + 1, lines, ctx);
         }
         Node::Bind { alias, source } => {
-            line(lines, depth, format!("Bind {alias}"));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Bind {alias}{suffix}"));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Unwind {
             alias,
             array,
             source,
         } => {
-            line(lines, depth, format!("Unwind {alias} IN {}", expr(array)));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(
+                lines,
+                depth,
+                format!("Unwind {alias} IN {}{suffix}", expr(array)),
+            );
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Project {
             expr: e, source, ..
         } => {
-            line(lines, depth, format!("Project {}", expr(e)));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Project {}{suffix}", expr(e)));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Filter {
             predicate, source, ..
         } => {
-            line(lines, depth, format!("Filter {}", expr(predicate)));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Filter {}{suffix}", expr(predicate)));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Sort { keys, source, .. } => {
-            line(lines, depth, format!("Sort {}", sort_keys(keys)));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Sort {}{suffix}", sort_keys(keys)));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Limit { skip, take, source } => {
             let take = match take {
                 Some(n) => n.to_string(),
                 None => "all".to_string(),
             };
-            line(lines, depth, format!("Limit skip={skip} take={take}"));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(
+                lines,
+                depth,
+                format!("Limit skip={skip} take={take}{suffix}"),
+            );
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Distinct { source, flatten } => {
             let tag = if *flatten { " (flatten)" } else { "" };
-            line(lines, depth, format!("Distinct{tag}"));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Distinct{tag}{suffix}"));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Aggregate {
             group_keys,
@@ -208,24 +321,27 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
             source,
             ..
         } => {
+            let suffix = ctx.annotate(index, child_examined());
             line(
                 lines,
                 depth,
                 format!(
-                    "Aggregate group=[{}] aggregates=[{}]",
+                    "Aggregate group=[{}] aggregates=[{}]{suffix}",
                     group_list(group_keys),
                     agg_list(aggregates),
                 ),
             );
-            render_node(source, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Trigger { action, source, .. } => {
-            line(lines, depth, format!("Trigger {action}"));
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Trigger {action}{suffix}"));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Validate { source, .. } => {
-            line(lines, depth, "Validate".to_string());
-            render_node(source, depth + 1, lines);
+            let suffix = ctx.annotate(index, child_examined());
+            line(lines, depth, format!("Validate{suffix}"));
+            render_node(source, depth + 1, lines, ctx);
         }
         Node::Subquery {
             slot,
@@ -233,16 +349,21 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>) {
             subplan,
             source,
         } => {
+            // `source` is the row stream that drives the apply; report its count
+            // as "examined". `subplan` re-runs per outer row, so its own counter
+            // accumulates across runs.
+            let suffix = ctx.annotate(index, child_examined());
             line(
                 lines,
                 depth,
-                format!("Subquery {slot} ({})", subquery_kind(*kind)),
+                format!("Subquery {slot} ({}){suffix}", subquery_kind(*kind)),
             );
-            render_node(source, depth + 1, lines);
-            render_node(subplan, depth + 1, lines);
+            render_node(source, depth + 1, lines, ctx);
+            render_node(subplan, depth + 1, lines, ctx);
         }
         Node::CurrentRow => {
-            line(lines, depth, "CurrentRow".to_string());
+            let suffix = ctx.annotate(index, None);
+            line(lines, depth, format!("CurrentRow{suffix}"));
         }
     }
 }
@@ -633,6 +754,49 @@ Filter (c.a = 1) AND (c.b = 2)
 Project UPPER(c.name)
   Scan default.users"
         );
+    }
+
+    #[test]
+    fn explain_analyze_annotates_rows_and_examined() {
+        // Project(c.name) <- Filter(c.age > 21) <- Scan
+        let plan = Plan::Query(Node::Project {
+            expr: member("c", "name"),
+            binding: RowBinding::Alias("c".to_string()),
+            source: Box::new(Node::Filter {
+                predicate: Expression::Binary {
+                    op: BinOp::Gt,
+                    lhs: Box::new(member("c", "age")),
+                    rhs: Box::new(Expression::Literal(Literal::Int(21))),
+                },
+                binding: RowBinding::Alias("c".to_string()),
+                source: Box::new(Node::Scan { collection: cref() }),
+            }),
+        });
+        // Pre-order indices: Project=0, Filter=1, Scan=2.
+        let stats = PlanStats::for_plan(&plan);
+        for _ in 0..120 {
+            stats.record_emit(2); // Scan emitted 120
+        }
+        for _ in 0..8 {
+            stats.record_emit(1); // Filter emitted 8
+            stats.record_emit(0); // Project emitted 8
+        }
+        assert_eq!(
+            plan.explain_analyze(&stats),
+            "\
+Project c.name rows=8 examined=8
+  Filter c.age > 21 rows=8 examined=120
+    Scan default.users rows=120"
+        );
+    }
+
+    #[test]
+    fn explain_analyze_unrun_plan_reads_zeros() {
+        // A plan whose stats were never populated annotates with zeros rather
+        // than panicking — a sane default if a caller renders before running.
+        let plan = Plan::Query(Node::Scan { collection: cref() });
+        let stats = PlanStats::for_plan(&plan);
+        assert_eq!(plan.explain_analyze(&stats), "Scan default.users rows=0");
     }
 
     #[test]

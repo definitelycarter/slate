@@ -189,6 +189,25 @@ The planner's source selection — when a filter becomes an `IndexScan`, an `Ind
 
 To see the plan a specific query lowers to, use `.explain <query>` in the `slate-cli` shell (or `Transaction::explain(cf, collection, sql)` in the library). It prints the chosen plan as an indented operator tree — the same lowering `query` uses, so the tree reflects what would actually run — without executing it. There is no SQL `EXPLAIN` keyword; plan inspection is a shell/library affair.
 
+### EXPLAIN ANALYZE
+
+To see what a run *actually did* — not just the plan shape — use `.explain analyze <query>` in the shell (or `Transaction::explain_analyze(cf, collection, sql)` in the library). It lowers exactly as `explain` (same parse, planner, and index choice), then **executes the query read-only**, collects and drops the rows, and renders the *same* operator tree annotated with per-node actuals:
+
+- `rows=N` — the rows that node emitted.
+- `examined=M` — for a non-source node, the rows that flowed *in* (its child's emitted count). Source nodes (`Scan`, `IndexScan`, `Values`) have no `examined=`.
+
+```
+Project c.name rows=8 examined=8
+  Filter c.age > 21 rows=8 examined=120
+    Scan default.users rows=120
+```
+
+The gap between a node's `examined=` and `rows=` is exactly what it filtered out — so a `Filter` examining 120 to emit 8 (or an `IndexScan` that seeks instead of scanning) is visible at a glance, which is what makes this the instrument for debugging a slow query and for the bench loop's rows-scanned / index-hit-rate questions.
+
+Like `query`, `explain_analyze` binds no `@parameters` (the plan shape never depends on a parameter's value), so a parameterized query is rejected. The instrumentation is on *only* for this path: the normal `query`/`find` execution never builds the counting wrappers, so ordinary queries pay zero per-row cost. For programmatic access to the raw counters, `Executor::execute_analyze(plan)` returns `(Vec<RawBson>, Rc<PlanStats>)`.
+
+A separate, off-by-default `trace` cargo feature (on `slate-executor` and `slate-db`) emits `tracing` spans/events at the execution seams for a host that wires its own subscriber; with it off, `tracing` is not even a dependency. See [Architecture — Query Stack](architecture-engine.md) and the [Observability RFC](rfcs/observability-and-introspection.md).
+
 ## Distinct Queries
 
 Distinct queries find the unique values of a single field. v2 builds a `Scan`-based pipeline and adds `Project` → `Distinct` to extract and deduplicate the values.

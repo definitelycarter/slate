@@ -16,7 +16,9 @@ use std::path::Path;
 use bson::Bson;
 use serde_json::{Value, json};
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DistinctOptions};
+use slate_db::{
+    CollectionConfig, CollectionStats, DEFAULT_CF, Database, DatabaseStats, DistinctOptions,
+};
 use slate_store::{BackupStore, Store};
 
 use crate::command::Command;
@@ -38,8 +40,10 @@ pub enum Output {
     Count(u64),
     /// Rendered query result rows (already JSON-formatted).
     Rows(Vec<String>),
-    /// A rendered query plan tree (from `.explain`).
+    /// A rendered query plan tree (from `.explain` / `.explain analyze`).
     Plan(String),
+    /// A rendered size/cardinality statistics report (from `.stats`).
+    Stats(String),
     /// `(cf, name)` pairs for every collection.
     Collections(Vec<(String, String)>),
     /// Indexed fields of the current collection.
@@ -79,6 +83,45 @@ pub struct Session<S: Store> {
 /// Stringify any displayable error — the shell surfaces errors as text.
 fn es<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
+}
+
+/// Render one collection's stats as an indented text block.
+fn render_collection_stats(s: &CollectionStats) -> String {
+    let mut out = String::new();
+    let approx = if s.approximate { " (approximate)" } else { "" };
+    out.push_str(&format!("collection `{}.{}`\n", s.cf, s.name));
+    out.push_str(&format!("  documents: {}{approx}\n", s.document_count));
+    if s.indexes.is_empty() {
+        out.push_str("  indexes: (none)");
+    } else {
+        out.push_str("  indexes:");
+        for ix in &s.indexes {
+            out.push_str(&format!(
+                "\n    {} — {} entries, {} distinct",
+                ix.field, ix.entry_count, ix.cardinality
+            ));
+        }
+    }
+    out
+}
+
+/// Render database-wide stats: a per-collection breakdown plus totals.
+fn render_database_stats(s: &DatabaseStats) -> String {
+    let mut out = String::new();
+    if s.collections.is_empty() {
+        out.push_str("(no collections)\n");
+    } else {
+        for c in &s.collections {
+            out.push_str(&render_collection_stats(c));
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!("total documents: {}", s.total_documents));
+    match s.disk_size_bytes {
+        Some(bytes) => out.push_str(&format!("\ndisk size: {bytes} bytes")),
+        None => out.push_str("\ndisk size: (unavailable)"),
+    }
+    out
 }
 
 // The session requires `BackupStore` (not just `Store`) so `.backup` can reach
@@ -146,6 +189,8 @@ impl<S: BackupStore> Session<S> {
             Command::SeedFile { path, collection } => self.seed_file(path, collection),
             Command::Backup(dest) => self.backup(dest),
             Command::Explain(query) => self.explain(&query),
+            Command::ExplainAnalyze(query) => self.explain_analyze(&query),
+            Command::Stats(name) => self.stats(name),
             Command::Sql(sql) => self.sql(&sql),
         }
     }
@@ -445,6 +490,41 @@ impl<S: BackupStore> Session<S> {
         let plan = txn.explain(DEFAULT_CF, collection, query).map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(Output::Plan(plan))
+    }
+
+    /// Run a query and render its plan annotated with per-node execution stats
+    /// (`.explain analyze`). Collection resolution matches [`explain`](Self::explain).
+    fn explain_analyze(&self, query: &str) -> Result<Output, String> {
+        let needs_collection = matches!(slate_sql::parse(query), Ok(q) if q.from.is_some());
+        let collection = if needs_collection {
+            self.require_collection()?
+        } else {
+            self.current.as_deref().unwrap_or("")
+        };
+        let txn = self.db.begin(true).map_err(es)?;
+        let plan = txn
+            .explain_analyze(DEFAULT_CF, collection, query)
+            .map_err(es)?;
+        txn.rollback().map_err(es)?;
+        Ok(Output::Plan(plan))
+    }
+
+    /// Render size/cardinality statistics. `None` targets the whole database; a
+    /// name targets one collection.
+    fn stats(&self, name: Option<String>) -> Result<Output, String> {
+        let txn = self.db.begin(true).map_err(es)?;
+        let report = match &name {
+            Some(collection) => {
+                let s = txn.collection_stats(DEFAULT_CF, collection).map_err(es)?;
+                render_collection_stats(&s)
+            }
+            None => {
+                let s = txn.stats().map_err(es)?;
+                render_database_stats(&s)
+            }
+        };
+        txn.rollback().map_err(es)?;
+        Ok(Output::Stats(report))
     }
 
     fn seed(&mut self) -> Result<Output, String> {

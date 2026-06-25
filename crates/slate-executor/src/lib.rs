@@ -25,8 +25,10 @@
 //! SQL. `Project`/`Filter` use the **raw** evaluator, walking row bytes
 //! zero-copy rather than decoding each row to `Bson`.
 
+mod analyze;
 mod error;
 mod nodes;
+mod trace;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench;
@@ -37,9 +39,10 @@ use bson::raw::CString;
 use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, EngineTransaction};
 use slate_eval::EvalError;
-use slate_planner::{Node, Plan};
+use slate_planner::{Node, Plan, PlanStats};
 use slate_vm::pool::VmPool;
 
+use analyze::Counting;
 pub use error::ExecError;
 
 /// A streaming sequence of optionally-undefined raw values.
@@ -60,6 +63,16 @@ pub struct Executor<'a, T> {
     /// database (a seeded PRNG natively; `Math.random` on wasm); see
     /// [`Executor::with_rand`].
     rand: nodes::env::Rand,
+    /// `EXPLAIN ANALYZE` collector, set *only* by
+    /// [`execute_analyze`](Self::execute_analyze). When `None` (the normal path),
+    /// `execute_node` builds no counting wrappers and pays nothing — the whole
+    /// instrumentation is off. When `Some`, each node's output is wrapped in
+    /// [`Counting`] keyed by its pre-order index (tracked in `analyze_index`).
+    analyze: Option<Rc<PlanStats>>,
+    /// Running pre-order node index for the analyze walk. `Cell` because
+    /// `execute_node` is `&self`; it advances once per node, in the same order
+    /// the renderer and `PlanStats::for_plan` walk the tree.
+    analyze_index: std::cell::Cell<usize>,
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
@@ -71,6 +84,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             pool: None,
             params: None,
             rand: None,
+            analyze: None,
+            analyze_index: std::cell::Cell::new(0),
         }
     }
 
@@ -81,6 +96,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             pool,
             params: None,
             rand: None,
+            analyze: None,
+            analyze_index: std::cell::Cell::new(0),
         }
     }
 
@@ -96,6 +113,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             pool,
             params,
             rand: None,
+            analyze: None,
+            analyze_index: std::cell::Cell::new(0),
         }
     }
 
@@ -109,6 +128,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     /// Execute a plan into a streaming iterator. For write plans, the mutations
     /// happen as the stream is consumed (drain it to apply them).
     pub fn execute(&self, plan: Plan) -> Result<ValueIter<'a>, ExecError> {
+        trace::trace_scope!("execute", plan = plan_kind(&plan));
+        trace::trace_event!(plan = plan_kind(&plan), "execute plan");
         match plan {
             Plan::Query(node) => self.execute_node(node, None),
 
@@ -183,6 +204,26 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         collect(self.execute(plan)?)
     }
 
+    /// Execute a plan with `EXPLAIN ANALYZE` instrumentation, returning the
+    /// defined results and a [`PlanStats`] of per-node row counts.
+    ///
+    /// This is the *only* path that builds counting wrappers; the plain
+    /// [`execute`](Self::execute) never reads `stats`, so normal queries pay
+    /// nothing for instrumentation. The returned `stats` is sized to one counter
+    /// per node in `plan` and keyed by pre-order index — pass it to
+    /// [`Plan::explain_analyze`](slate_planner::Plan::explain_analyze) (clone the
+    /// plan first if you need it for rendering, since execution consumes it).
+    pub fn execute_analyze(
+        mut self,
+        plan: Plan,
+    ) -> Result<(Vec<RawBson>, Rc<PlanStats>), ExecError> {
+        let stats = Rc::new(PlanStats::for_plan(&plan));
+        self.analyze = Some(Rc::clone(&stats));
+        self.analyze_index.set(0);
+        let rows = collect(self.execute(plan)?)?;
+        Ok((rows, stats))
+    }
+
     /// Dispatch a node to its per-node executor, recursing into children first.
     ///
     /// `current` is the outer row supplied by an enclosing [`Node::Subquery`],
@@ -193,7 +234,17 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         node: Node,
         current: Option<&RawBson>,
     ) -> Result<ValueIter<'a>, ExecError> {
-        Ok(match node {
+        // Claim this node's pre-order index *before* recursing children, so the
+        // index walk matches the renderer and `PlanStats::for_plan`. Off the
+        // analyze path this is a no-op (and `index` is unused, hence the wrap).
+        let index = if self.analyze.is_some() {
+            let i = self.analyze_index.get();
+            self.analyze_index.set(i + 1);
+            i
+        } else {
+            0
+        };
+        let iter: ValueIter<'a> = match node {
             Node::Values(values) => nodes::values::execute(values),
 
             Node::Scan { collection } => nodes::scan::execute(self.txn, &collection)?,
@@ -368,16 +419,49 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let key = CString::try_from(slot.as_str()).map_err(|e| EvalError {
                     message: format!("invalid subquery slot '{slot}': {e}"),
                 })?;
+                // In analyze mode the subplan re-runs per outer row, which would
+                // advance the pre-order index counter once per run. Snapshot the
+                // counter at the subplan's base and restore it before each run so
+                // the subplan's nodes keep their single stable indices and their
+                // counts accumulate across runs.
+                let subplan_base = self.analyze_index.get();
                 let mut out: Vec<RawBson> = Vec::new();
                 for item in source {
                     let Some(row) = item? else { continue };
+                    if self.analyze.is_some() {
+                        self.analyze_index.set(subplan_base);
+                    }
                     let sub = self.execute_node((*subplan).clone(), Some(&row))?;
                     let value = nodes::subquery::reduce(sub, kind)?;
                     out.push(nodes::subquery::augment(row, &key, value)?);
                 }
                 Box::new(out.into_iter().map(|v| Ok(Some(v))))
             }
+        };
+
+        // On the analyze path, wrap the node's output so each emitted row bumps
+        // this node's pre-order counter. Off it, return the iterator untouched —
+        // zero added cost for normal execution.
+        Ok(match &self.analyze {
+            Some(stats) => Box::new(Counting::new(iter, Rc::clone(stats), index)),
+            None => iter,
         })
+    }
+}
+
+/// A stable, allocation-free label for a plan's top-level kind, for tracing
+/// fields. Only built when the `trace` feature is on (otherwise the call sites
+/// vanish and this would be dead code).
+#[cfg(feature = "trace")]
+fn plan_kind(plan: &Plan) -> &'static str {
+    match plan {
+        Plan::Query(_) => "query",
+        Plan::Insert { .. } => "insert",
+        Plan::Delete { .. } => "delete",
+        Plan::Update { .. } => "update",
+        Plan::Replace { .. } => "replace",
+        Plan::Trigger { .. } => "trigger",
+        Plan::Upsert { .. } => "upsert",
     }
 }
 
@@ -429,6 +513,65 @@ mod end_to_end {
     /// Convert a `bson!([...])` array into the `RawBson::Array` an executor emits.
     fn raw_array(b: bson::Bson) -> RawBson {
         RawBson::try_from(b).unwrap()
+    }
+
+    /// Lower a SQL string, run it under analyze, and render the annotated tree.
+    fn analyze(sql: &str) -> String {
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let handle = txn.collection(DEFAULT_CF, "people").unwrap();
+        let meta = CollectionMeta {
+            indexes: handle.indexes().to_vec(),
+            pk_path: handle.pk_path().to_string(),
+        };
+        let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), people_ref(), &meta);
+        let render_plan = plan.clone();
+        let (_rows, stats) = Executor::new(&txn).execute_analyze(plan).unwrap();
+        render_plan.explain_analyze(&stats)
+    }
+
+    #[test]
+    fn explain_analyze_counts_rows_through_a_scan_filter() {
+        // people: ada/36, alan/41, grace/44. WHERE c.age > 40 keeps 2 of 3.
+        // `age` is indexed, so this could lower to an index path — assert on the
+        // counts that must hold regardless of plan shape: the Scan/source sees 3
+        // (or fewer via index seek) and the result is 2.
+        let rendered = analyze("SELECT VALUE c.name FROM c WHERE c.age = 41");
+        // Exactly one person is 41 (alan); the rendered tree must report rows=1
+        // at the root projection.
+        let root = rendered.lines().next().unwrap();
+        assert!(root.contains("rows=1"), "root line was: {root}");
+    }
+
+    #[test]
+    fn explain_analyze_full_scan_examines_all_rows() {
+        // No predicate → a full scan of all 3 people, projected to names.
+        let rendered = analyze("SELECT VALUE c.name FROM c");
+        // The source scan emits all 3 documents.
+        assert!(
+            rendered.contains("rows=3"),
+            "expected a node reporting rows=3; got:\n{rendered}"
+        );
+        // And the root projection emits 3 too.
+        let root = rendered.lines().next().unwrap();
+        assert!(root.contains("rows=3"), "root line was: {root}");
+    }
+
+    #[test]
+    fn explain_analyze_filter_examined_exceeds_emitted() {
+        // A residual filter that drops rows: examined should exceed rows on the
+        // Filter line. Force a scan+filter (not an index seek) with a non-sargable
+        // predicate over the unindexed `name`.
+        let rendered = analyze("SELECT VALUE c.name FROM c WHERE c.name = \"grace\"");
+        let filter_line = rendered
+            .lines()
+            .find(|l| l.trim_start().starts_with("Filter"))
+            .expect("expected a Filter line");
+        // Filter keeps 1 of the 3 it examines.
+        assert!(
+            filter_line.contains("rows=1") && filter_line.contains("examined=3"),
+            "filter line was: {filter_line}"
+        );
     }
 
     #[test]

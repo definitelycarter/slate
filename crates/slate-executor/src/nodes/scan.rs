@@ -16,6 +16,11 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     collection: &CollectionRef,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
+    crate::trace::trace_event!(
+        cf = collection.cf.as_str(),
+        collection = collection.collection.as_str(),
+        "scan opened"
+    );
     let iter = txn.scan(&handle)?;
     Ok(Box::new(iter.map(|result| match result {
         Ok(doc) => Ok(Some(RawBson::Document(doc))),

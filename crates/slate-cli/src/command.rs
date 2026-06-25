@@ -65,6 +65,12 @@ pub enum Command {
     Backup(String),
     /// Show the physical plan for a query without running it.
     Explain(String),
+    /// Run a query and show its plan annotated with per-node execution stats
+    /// (`.explain analyze <query>`).
+    ExplainAnalyze(String),
+    /// Show size/cardinality statistics: for one collection (`Some(name)`) or the
+    /// whole database (`None`).
+    Stats(Option<String>),
     /// A SQL statement to run against the current collection.
     Sql(String),
 }
@@ -138,16 +144,32 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
             Ok(Command::Backup(path.to_string()))
         }
         "explain" => {
-            // The whole remaining line is the query (like `.backup`'s path) —
-            // it contains spaces and its own syntax, so it is not tokenized.
-            // Strip a trailing `;` so `.explain SELECT … ;` works like a bare
-            // SQL statement (the input layer strips it for SQL, but a one-line
+            // The whole remaining line is the query (like `.backup`'s path) — it
+            // contains spaces and its own syntax, so it is not tokenized. A leading
+            // `analyze` keyword switches to EXPLAIN ANALYZE (run + count). A trailing
+            // `;` is stripped so `.explain SELECT … ;` works like a bare SQL
+            // statement (the input layer strips it for SQL, but a one-line
             // meta-command bypasses that path).
-            let query = args.trim().trim_end_matches(';').trim();
-            if query.is_empty() {
+            let rest = args.trim().trim_end_matches(';').trim();
+            if let Some(query) = strip_keyword(rest, "analyze") {
+                if query.is_empty() {
+                    return Err(".explain analyze requires a query".to_string());
+                }
+                return Ok(Command::ExplainAnalyze(query.to_string()));
+            }
+            if rest.is_empty() {
                 return Err(".explain requires a query".to_string());
             }
-            Ok(Command::Explain(query.to_string()))
+            Ok(Command::Explain(rest.to_string()))
+        }
+        "stats" => {
+            // No argument → whole-database stats; one bare name → that collection.
+            let name = args.trim();
+            if name.is_empty() {
+                Ok(Command::Stats(None))
+            } else {
+                Ok(Command::Stats(Some(name_arg(name, "stats")?)))
+            }
         }
         "insert" => {
             let [doc] = exactly(
@@ -213,6 +235,21 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
             }
         }
         other => Err(format!("unknown command `.{other}` (try `.help`)")),
+    }
+}
+
+/// If `s` starts with the case-insensitive bare word `keyword` (followed by
+/// whitespace or end of string), return the remainder trimmed; else `None`. Used
+/// to peel `analyze` off `.explain analyze <query>` without tokenizing the query.
+fn strip_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
+    let (head, rest) = match s.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim_start()),
+        None => (s, ""),
+    };
+    if head.eq_ignore_ascii_case(keyword) {
+        Some(rest)
+    } else {
+        None
     }
 }
 
@@ -505,6 +542,36 @@ mod tests {
         );
         assert!(Command::parse(".explain").is_err());
         assert!(Command::parse(".explain ;").is_err());
+    }
+
+    #[test]
+    fn explain_analyze_peels_the_keyword() {
+        assert_eq!(
+            Command::parse(".explain analyze SELECT VALUE c.name FROM c").unwrap(),
+            Command::ExplainAnalyze("SELECT VALUE c.name FROM c".to_string())
+        );
+        // The keyword is case-insensitive.
+        assert_eq!(
+            Command::parse(".explain ANALYZE SELECT 1").unwrap(),
+            Command::ExplainAnalyze("SELECT 1".to_string())
+        );
+        // A plain explain keeps the whole query, including a query that merely
+        // mentions analyze elsewhere.
+        assert_eq!(
+            Command::parse(".explain SELECT analyze FROM c").unwrap(),
+            Command::Explain("SELECT analyze FROM c".to_string())
+        );
+        assert!(Command::parse(".explain analyze").is_err());
+    }
+
+    #[test]
+    fn stats_collection_is_optional() {
+        assert_eq!(Command::parse(".stats").unwrap(), Command::Stats(None));
+        assert_eq!(
+            Command::parse(".stats people").unwrap(),
+            Command::Stats(Some("people".to_string()))
+        );
+        assert!(Command::parse(".stats a b").is_err());
     }
 
     #[test]
