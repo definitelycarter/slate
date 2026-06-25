@@ -41,8 +41,13 @@ uninstrumented:
   reserved key-provider seam (value-only encryption leaks indexed values, which live
   in keys).
 - **[Observability & Introspection](./rfcs/observability-and-introspection.md)** —
-  feature-gated `tracing`, EXPLAIN ANALYZE execution stats, and a `stats()`
-  size/cardinality surface.
+  *A + B + C done; D + disk-size deferred.* Feature-gated `tracing` (the `trace`
+  feature, off by default, zero-cost when off), EXPLAIN ANALYZE execution stats
+  (`Transaction::explain_analyze` / `Executor::execute_analyze`, CLI
+  `.explain analyze`), and a `stats()` size/cardinality surface
+  (`Database::stats` / `Transaction::collection_stats`, CLI `.stats`). Remaining:
+  the slow-query log (thread D) and `disk_size_bytes` backend plumbing (the slot
+  is a reserved `Option`, `None` today).
 - **[Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)**
   — query deadline, materialization cap (the OOM guard), and document/key size
   limits, so the store can't take down its host.
@@ -83,10 +88,12 @@ uninstrumented:
   Full-text and vector remain (each needs its index).
 - **[Collect Node](./rfcs/collect-node.md)** — *proposed.* Make plan materialization
   points explicit; asymmetric `IndexMerge(And)`.
-- **Plan Inspection (EXPLAIN)** — *done.* `Plan::explain()` / `Transaction::explain`
-  render the logical operator tree; REPL `.explain`. No SQL `EXPLAIN` keyword (kept
-  out of the grammar). Runtime stats are the
-  [Observability RFC](./rfcs/observability-and-introspection.md).
+- **Plan Inspection (EXPLAIN / EXPLAIN ANALYZE)** — *done.* `Plan::explain()` /
+  `Transaction::explain` render the logical operator tree; REPL `.explain`. Runtime
+  stats now ship too: `Transaction::explain_analyze` (REPL `.explain analyze`)
+  renders the same tree annotated with per-node `rows=`/`examined=` counts, via the
+  [Observability RFC](./rfcs/observability-and-introspection.md). No SQL `EXPLAIN`
+  keyword (kept out of the grammar) — plan inspection stays a shell/library affair.
 - **[Raw BSON Robustness](./rfcs/rawbson-robustness.md)** — *done.* A malformed-input
   contract (typed errors at the public boundary; a total, bounds-checked scanner) and
   a differential fuzz against the `bson` crate for the byte scanner.
@@ -129,9 +136,10 @@ uninstrumented:
   The full stack compiles to `wasm32`; MemoryStore + the JS scripting bridge work.
   Platform adapters, browser storage (OPFS/IndexedDB), and `getrandom` entropy remain.
 - **Interactive Shell (CLI)** — *done.* `slate-cli` REPL: meta-commands + SQL,
-  `.seed` bulk-load, online `.backup`, multi-line statements, tab-completion,
-  persistent history. Not yet: hook management, a `.plan`/`.ast` inspector,
-  multi-statement transactions, and Mongo-style `.find`.
+  `.seed` bulk-load, online `.backup`, `.explain` / `.explain analyze`, `.stats`,
+  multi-line statements, tab-completion, persistent history. Not yet: hook
+  management, a `.plan`/`.ast` inspector, multi-statement transactions, and
+  Mongo-style `.find`.
 - **Browser Playground** — *shipped.* A client-side `slate-wasm` single-page app
   (create/insert/query/hooks/plans, no backend). See the live
   [Playground](./playground.md).

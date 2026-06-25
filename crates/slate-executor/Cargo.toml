@@ -10,6 +10,12 @@ edition = "2024"
 # code, and dev-deps aren't visible there, so the memory store is an optional
 # normal dependency activated by this feature rather than `[]`.
 bench-internals = ["dep:slate-store"]
+# Emit `tracing` spans/events at the execution seams (plan dispatch, store-backed
+# sources). OFF by default and wasm-safe: with the feature off, `tracing` is not a
+# dependency and the `trace_span!`/event call sites expand to nothing, so the
+# default build carries zero instrumentation cost. The host wires its own
+# subscriber.
+trace = ["dep:tracing"]
 
 [dependencies]
 bson = { workspace = true }
@@ -18,6 +24,11 @@ slate-eval = { path = "../slate-eval" }
 slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
 slate-rawbson = { path = "../slate-rawbson" }
+# Optional: only pulled in by the `trace` feature. `default-features = false`
+# keeps it lean — the executor only *emits*; the host owns the subscriber.
+tracing = { version = "0.1", optional = true, default-features = false, features = [
+    "std",
+] }
 # Runtime-agnostic: scripting is injected as `dyn ScriptRuntime` via a pre-built
 # `VmPool`, so the executor needs only `slate-vm`'s traits/errors — never a
 # concrete runtime. Leaving `lua` off here keeps mlua's vendored C out of the

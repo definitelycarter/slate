@@ -95,6 +95,13 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     };
     let reverse = matches!(direction, ScanDirection::Reverse);
 
+    crate::trace::trace_event!(
+        cf = collection.cf.as_str(),
+        collection = collection.collection.as_str(),
+        field = field.as_str(),
+        reverse = reverse,
+        "index scan opened"
+    );
     let mut iter = txn.scan_index(&handle, &field, engine_range, reverse)?;
     let mut count = 0usize;
     let mut done = false;

@@ -285,6 +285,32 @@ impl<S: Store> Database<S> {
         Ok(pairs)
     }
 
+    /// Database-wide size/cardinality statistics as of a fresh read snapshot.
+    ///
+    /// A convenience over [`Transaction::stats`](Transaction::stats) that opens
+    /// and rolls back its own read transaction. See
+    /// [`DatabaseStats`](crate::DatabaseStats) for the exact/approximate contract.
+    pub fn stats(&self) -> Result<crate::stats::DatabaseStats, DbError> {
+        let txn = self.begin(true)?;
+        let stats = txn.stats();
+        let _ = txn.rollback();
+        stats
+    }
+
+    /// Size/cardinality statistics for one collection, as of a fresh read
+    /// snapshot. A convenience over
+    /// [`Transaction::collection_stats`](Transaction::collection_stats).
+    pub fn collection_stats(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Result<crate::stats::CollectionStats, DbError> {
+        let txn = self.begin(true)?;
+        let stats = txn.collection_stats(cf, collection);
+        let _ = txn.rollback();
+        stats
+    }
+
     /// Gracefully stop background tasks.
     #[cfg(feature = "runtime")]
     pub fn shutdown(&mut self) {
@@ -431,6 +457,124 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn explain(&self, cf: &str, collection: &str, sql: &str) -> Result<String, DbError> {
         let plan = self.lower_sql(cf, collection, sql, None)?;
         Ok(plan.explain())
+    }
+
+    /// Run a query and render its plan as an `EXPLAIN ANALYZE` tree — the same
+    /// shape [`explain`](Self::explain) prints, annotated with per-node *actuals*
+    /// (`rows=` emitted and, for non-source nodes, `examined=` rows that flowed
+    /// in). Unlike `explain`, this *executes* the query (read-only), so it sees
+    /// real cardinalities; the rows are collected and dropped — only the counts
+    /// are returned.
+    ///
+    /// Lowering matches [`query`](Self::query) exactly (same parse, planner, index
+    /// choice). Like `query` it binds no `@parameters`, so a parameterized query
+    /// is rejected (the plan shape never depends on a parameter's value).
+    pub fn explain_analyze(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql: &str,
+    ) -> Result<String, DbError> {
+        let plan = self.lower_sql(cf, collection, sql, None)?;
+        // Clone the plan to render after execution consumes it. Justified: the
+        // analyze path is a debugging/observability surface, not the query hot
+        // path — a one-off plan clone here is well outside any inner loop.
+        let render_plan = plan.clone();
+
+        // Inject `$now` so the SQL `GETCURRENT*` functions resolve, mirroring the
+        // cursor's normal execution setup.
+        let mut doc = bson::Document::new();
+        doc.insert("$now", self.txn.now_millis());
+        let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
+
+        let (_rows, stats) =
+            slate_executor::Executor::with_pool_and_params(&self.txn, self.pool, params)
+                .with_rand(rand_rc(&self.rand))
+                .execute_analyze(plan)?;
+        Ok(render_plan.explain_analyze(&stats))
+    }
+
+    /// Gather size/cardinality statistics for one collection as of this
+    /// transaction's read snapshot: live document count, plus per-index entry and
+    /// distinct-value (cardinality) counts.
+    ///
+    /// Computed by scanning, so the numbers are **exact** but the call is
+    /// O(documents + index entries) — an introspection surface, not a hot path.
+    /// See [`CollectionStats`](crate::CollectionStats) for the exact/approximate
+    /// contract.
+    pub fn collection_stats(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Result<crate::stats::CollectionStats, DbError> {
+        use std::collections::HashSet;
+
+        let handle = self.txn.collection(cf, collection)?;
+
+        // Live document count via a full scan.
+        let mut document_count: u64 = 0;
+        for doc in self.txn.scan(&handle)? {
+            doc?;
+            document_count += 1;
+        }
+
+        // Per-index: entries and distinct values. Each index value is deduped by
+        // its canonical BSON bytes to count cardinality without decoding to `Bson`.
+        // The single-field wrapper key is the same for every value, so build it
+        // once.
+        let value_key =
+            bson::raw::CString::try_from("v").map_err(|e| DbError::InvalidQuery(e.to_string()))?;
+        let mut indexes = Vec::with_capacity(handle.indexes().len());
+        for field in handle.indexes() {
+            let mut entry_count: u64 = 0;
+            let mut distinct: HashSet<Vec<u8>> = HashSet::new();
+            let iter =
+                self.txn
+                    .scan_index(&handle, field, slate_engine::IndexRange::Full, false)?;
+            for entry in iter {
+                let entry = entry?;
+                entry_count += 1;
+                // Wrap the value in a single-field raw document and key the dedup
+                // set on the document bytes. The index stores one sortable key per
+                // value, so identical values serialize identically — an exact
+                // distinct count.
+                let value = entry.value()?;
+                let mut doc = RawDocumentBuf::new();
+                doc.append(&value_key, value);
+                distinct.insert(doc.into_bytes());
+            }
+            indexes.push(crate::stats::IndexStats {
+                // `field` is borrowed from the catalog handle's `&[String]`, so it
+                // must be cloned to own it in the report — off the hot path.
+                field: field.clone(),
+                entry_count,
+                cardinality: distinct.len() as u64,
+            });
+        }
+
+        Ok(crate::stats::CollectionStats {
+            cf: cf.to_string(),
+            name: collection.to_string(),
+            document_count,
+            indexes,
+            approximate: false,
+        })
+    }
+
+    /// Gather statistics for every collection visible to this transaction and
+    /// roll them up into a [`DatabaseStats`](crate::DatabaseStats).
+    ///
+    /// On-disk size is `None` (a backend property not yet plumbed through the
+    /// store trait); the per-collection counts are exact as of the snapshot.
+    pub fn stats(&self) -> Result<crate::stats::DatabaseStats, DbError> {
+        let mut collections = Vec::new();
+        for (cf, name) in self.list_collections()? {
+            collections.push(self.collection_stats(&cf, &name)?);
+        }
+        Ok(crate::stats::DatabaseStats::from_collections(
+            collections,
+            None,
+        ))
     }
 
     /// Parse and lower a SQL string into a plan (shared by `query` and
@@ -881,6 +1025,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         };
 
         self.txn.commit()?;
+        crate::trace::trace_event!("transaction committed");
 
         // Swap the new snapshot into the registry after a successful commit.
         if let (Some(snapshot), Some(registry)) = (new_snapshot, self.registry) {

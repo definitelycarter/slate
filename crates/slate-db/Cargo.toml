@@ -13,6 +13,11 @@ runtime = ["dep:rand"]
 bench-internals = []
 lua = ["slate-vm/lua"]
 js = ["slate-vm/js"]
+# Feature-gated `tracing` instrumentation (see the executor's `trace` feature).
+# OFF by default; turns on spans/events in `slate-db` *and* `slate-executor`, so
+# a host enables tracing for the whole query stack with one flag. Zero cost when
+# off — `tracing` is not pulled in.
+trace = ["dep:tracing", "slate-executor/trace"]
 
 [dependencies]
 slate-engine = { path = "../slate-engine" }
@@ -27,6 +32,11 @@ serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
 regex = "1"
 arc-swap = "1.8.2"
+# Optional: only via the `trace` feature. `default-features = false` keeps it
+# lean — `slate-db` only emits; the host owns the subscriber.
+tracing = { version = "0.1", optional = true, default-features = false, features = [
+    "std",
+] }
 # Native default random source for `RAND()` (a seeded `SmallRng`). Optional and
 # gated by `runtime` so it is excluded from the wasm build; `small_rng` selects
 # the lightweight non-crypto PRNG.

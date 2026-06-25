@@ -32,6 +32,7 @@ pub mod lower;
 pub mod plan;
 pub mod planner;
 pub mod sargable;
+pub mod stats;
 pub mod validate;
 
 pub use lower::lower;
@@ -42,4 +43,5 @@ pub use plan::{
 pub use planner::{PlanContext, plan};
 pub use sargable::CollectionMeta;
 pub use slate_ast::Statement;
+pub use stats::PlanStats;
 pub use validate::{PlanError, validate_bindings, validate_grouping};

@@ -9,6 +9,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
 - **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
 - **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
+- **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
@@ -72,7 +73,13 @@ slate> .seed
 slate(sample)> SELECT c.city, COUNT(1) AS n
           ...> FROM c GROUP BY c.city;
 slate(sample)> .insert {"_id":"5","name":"linus","city":"Helsinki"}
+slate(sample)> .explain analyze SELECT VALUE c.name FROM c WHERE c.age > 30
+slate(sample)> .stats sample
 ```
+
+`.explain <query>` shows a query's plan; `.explain analyze <query>` runs it and
+annotates each plan node with `rows=`/`examined=` counts; `.stats [collection]`
+reports document, index-entry, and cardinality numbers.
 
 ## Usage
 
