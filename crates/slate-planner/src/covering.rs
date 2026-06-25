@@ -1,14 +1,14 @@
-//! Covering-index analysis (RFC: Covering Index Scans, Part B — phase 1).
+//! Covering-index analysis (RFC: Covering Index Scans, Part B — phases 1–2).
 //!
 //! A conservative post-pass over a lowered read [`Plan::Query`](crate::plan::Plan)
-//! tree. When every field the query reads is the scanned index field or the
-//! primary key, the document fetch is pure overhead: the index entry already
-//! carries the value and the doc-id. This pass proves that condition for the
-//! simplest shape — a single-field `IndexScan` under a `KeyLookup`, beneath a
-//! linear chain of binding-aware nodes — and, when it holds, flips the scan to
-//! [`covering`](crate::plan::Node::IndexScan::covering) and drops the
-//! `KeyLookup`. The executor then synthesizes each row from the entry instead of
-//! fetching the document.
+//! tree. When every field the query reads is a component of the scanned index or
+//! the primary key, the document fetch is pure overhead: the index entry already
+//! carries the value(s) and the doc-id. This pass proves that condition for two
+//! shapes — a single-field `IndexScan` (phase 1) or a multi-field
+//! `CompoundIndexScan` (phase 2), each under a `KeyLookup` beneath a linear chain
+//! of binding-aware nodes — and, when it holds, flips the scan to covering and
+//! drops the `KeyLookup`. The executor then synthesizes each row from the entry
+//! instead of fetching the document.
 //!
 //! ## The one invariant
 //!
@@ -16,31 +16,33 @@
 //! the analysis is one-directional: it returns **uncoverable** the instant it
 //! sees any node, binding, or expression shape it does not fully understand. It
 //! covers only when it can name every referenced path and show each **exactly
-//! equals** the index field or the pk. It handles a single index source:
+//! equals** an index component or the pk. It handles two index sources:
 //!
-//! - a **single** index source (`KeyLookup(IndexScan)`) — not `IndexMerge`, not a
-//!   compound scan, not a multikey (`.[]`) scan (which lowers under a `Distinct`);
-//! - a **scalar** index field — top-level (`status`) or a dotted path
-//!   (`user.id`), synthesized as the nested object `{user: {id: value}}`; never a
-//!   multikey `.[]` path, whose array fan-out a single scalar entry can't rebuild;
+//! - a single-field scan (`KeyLookup(IndexScan)`) or a compound scan
+//!   (`KeyLookup(CompoundIndexScan)`) — not `IndexMerge`, not a multikey (`.[]`)
+//!   scan (which lowers under a `Distinct`);
+//! - **scalar** index components — top-level (`status`) or dotted paths
+//!   (`user.id`), synthesized as nested objects (`{user: {id: value}}`, merging
+//!   shared prefixes for a compound index); never a multikey `.[]` component,
+//!   whose array fan-out a single scalar entry can't rebuild;
 //! - **one alias**, bound by [`RowBinding::Alias`] — an [`RowBinding::Env`] row
 //!   means a join / unwind / aggregate / subquery, all out of scope here;
 //! - references that are **clean alias-rooted member chains** (`alias.a`,
 //!   `alias.a.b`, …) whose reconstructed dotted path *string-equals* the index
 //!   field or the pk. A bare `alias` (whole row), an `alias[i]` index, a
 //!   `PathGet`/`MultikeyEq`, or a correlated subquery on the alias all force
-//!   uncoverable — as does a parent, extension, or sibling of the index field
+//!   uncoverable — as does a parent, extension, or sibling of any index component
 //!   (`user` / `user.id.x` / `user.name` against an index on `user.id`).
 //!
-//! Compound covering and covered aggregates are later phases (they add multi-
-//! component synthesis and the aggregate binding-shift, respectively); the RFC
-//! has the full design.
+//! Covered aggregates are a later phase (they add the aggregate binding-shift);
+//! the RFC has the full design.
 
 use std::collections::BTreeSet;
 
 use slate_ast::Expression;
 
 use crate::plan::{Node, RowBinding};
+use crate::sargable::CollectionMeta;
 
 /// Rewrite `node` so a provably-covered single-field index scan serves the query
 /// from index entries (no `KeyLookup`).
@@ -49,25 +51,26 @@ use crate::plan::{Node, RowBinding};
 /// plan untouched and pays only a cheap read-only walk: [`is_coverable`] decides
 /// by reference (no allocation), and only a coverable plan is rebuilt by
 /// [`rewrite`]. The optimization never taxes the paths it doesn't help.
-pub(crate) fn apply(node: Node, pk_path: &str) -> Node {
+pub(crate) fn apply(node: Node, meta: &CollectionMeta) -> Node {
     // The synthesized covering document carries the pk under its flat `pk_path`
     // key; a dotted pk would need a nested object the entry's scalar doc-id can't
-    // reproduce, so a dotted pk is never coverable in phase 1.
-    if pk_path.contains('.') {
+    // reproduce, so a dotted pk is never coverable.
+    if meta.pk_path.contains('.') {
         return node;
     }
-    if is_coverable(&node, pk_path) {
-        rewrite(node)
+    if is_coverable(&node, meta) {
+        rewrite(node, &meta.compound_indexes)
     } else {
         node
     }
 }
 
 /// Decide, without mutating or allocating beyond the analysis, whether `node` is
-/// a coverable single-field-index plan.
-fn is_coverable(node: &Node, pk_path: &str) -> bool {
+/// a coverable single-field- or compound-index plan.
+fn is_coverable(node: &Node, meta: &CollectionMeta) -> bool {
     let mut analysis = Analysis {
-        pk_path,
+        pk_path: &meta.pk_path,
+        compound_indexes: &meta.compound_indexes,
         alias: None,
         refs: Refs::Fields(BTreeSet::new()),
     };
@@ -78,6 +81,9 @@ fn is_coverable(node: &Node, pk_path: &str) -> bool {
 /// The alias is *borrowed* from the plan — the walk holds the tree, so no clone.
 struct Analysis<'a> {
     pk_path: &'a str,
+    /// Compound-index `(identity, components)` pairs — to resolve a compound
+    /// scan's opaque joined `field` back to the component paths it carries.
+    compound_indexes: &'a [(String, Vec<String>)],
     /// The single alias the binding-aware nodes read, pinned at the first one.
     alias: Option<&'a str>,
     /// Field references gathered so far, or the uncoverable poison state.
@@ -144,6 +150,45 @@ impl<'a> Analysis<'a> {
             Refs::Fields(paths) => paths.iter().all(|p| p == field || p == self.pk_path),
         }
     }
+
+    /// Whether the compound index with joined `identity` covers everything
+    /// collected so far. Resolves the identity to its ordered component paths,
+    /// then — exactly like the single-field [`covers`](Self::covers) — requires
+    /// every collected reference to string-equal one of those components or the
+    /// pk (the settled exact-path-match rule, now over a set of components).
+    fn covers_compound(&self, identity: &str) -> bool {
+        if self.alias.is_none() {
+            return false;
+        }
+        let Some((_, components)) = self.compound_indexes.iter().find(|(id, _)| id == identity)
+        else {
+            return false;
+        };
+        for c in components {
+            // A multikey component (`tags.[]`) fans one document out across many
+            // entries; a single scalar value can't rebuild the array.
+            if c.contains("[]") {
+                return false;
+            }
+            // A component whose synthesized top-level key collides with the
+            // (always top-level) pk key would emit two conflicting keys — leave it
+            // to the fetch. Covers `_id` itself and any `_id.*` dotted component.
+            if c == self.pk_path {
+                return false;
+            }
+            if let Some((root, _)) = c.split_once('.')
+                && root == self.pk_path
+            {
+                return false;
+            }
+        }
+        match &self.refs {
+            Refs::Uncoverable => false,
+            Refs::Fields(paths) => paths
+                .iter()
+                .all(|p| p == self.pk_path || components.iter().any(|c| c == p)),
+        }
+    }
 }
 
 /// Descend the linear wrapper chain by reference, collecting refs, and report
@@ -185,35 +230,45 @@ fn analyze<'a>(node: &'a Node, a: &mut Analysis<'a>) -> bool {
             analyze(source, a)
         }
 
-        // The source: coverable iff it is a single-field, non-covering index scan
-        // and every collected reference is its field or the pk.
+        // The source: coverable iff it is a non-covering single-field or compound
+        // index scan and every collected reference is one of its components or the
+        // pk. A compound scan's `field` is the opaque joined identity; `covers_compound`
+        // resolves it back to component paths via the metadata.
         Node::KeyLookup { source, .. } => match source.as_ref() {
             Node::IndexScan {
                 field,
                 covering: false,
                 ..
             } => a.covers(field),
+            Node::CompoundIndexScan {
+                field,
+                covering: None,
+                ..
+            } => a.covers_compound(field),
             _ => false,
         },
 
         // Anything else (Bind, Unwind, Aggregate, Subquery, Scan, a bare
-        // IndexScan, CompoundIndexScan, IndexMerge, …) is not the coverable chain.
+        // IndexScan/CompoundIndexScan with no KeyLookup, IndexMerge, …) is not the
+        // coverable chain.
         _ => false,
     }
 }
 
 /// Rebuild a plan [`is_coverable`] has approved: drop the `KeyLookup` and flip its
-/// single-field `IndexScan` to covering, leaving the rest of the spine intact.
-/// Only ever called on a coverable plan, so the `KeyLookup(IndexScan)` is present.
-fn rewrite(node: Node) -> Node {
+/// single-field `IndexScan` or compound `CompoundIndexScan` to covering, leaving
+/// the rest of the spine intact. Only ever called on a coverable plan, so the
+/// `KeyLookup(scan)` is present. `compound_indexes` resolves a compound scan's
+/// joined identity back to the component paths the covering marker carries.
+fn rewrite(node: Node, compound_indexes: &[(String, Vec<String>)]) -> Node {
     match node {
         Node::Limit { skip, take, source } => Node::Limit {
             skip,
             take,
-            source: Box::new(rewrite(*source)),
+            source: Box::new(rewrite(*source, compound_indexes)),
         },
         Node::Distinct { source, flatten } => Node::Distinct {
-            source: Box::new(rewrite(*source)),
+            source: Box::new(rewrite(*source, compound_indexes)),
             flatten,
         },
         Node::Project {
@@ -223,7 +278,7 @@ fn rewrite(node: Node) -> Node {
         } => Node::Project {
             expr,
             binding,
-            source: Box::new(rewrite(*source)),
+            source: Box::new(rewrite(*source, compound_indexes)),
         },
         Node::Sort {
             keys,
@@ -232,7 +287,7 @@ fn rewrite(node: Node) -> Node {
         } => Node::Sort {
             keys,
             binding,
-            source: Box::new(rewrite(*source)),
+            source: Box::new(rewrite(*source, compound_indexes)),
         },
         Node::Filter {
             predicate,
@@ -241,7 +296,7 @@ fn rewrite(node: Node) -> Node {
         } => Node::Filter {
             predicate,
             binding,
-            source: Box::new(rewrite(*source)),
+            source: Box::new(rewrite(*source, compound_indexes)),
         },
         Node::KeyLookup { collection, source } => match *source {
             Node::IndexScan {
@@ -259,8 +314,42 @@ fn rewrite(node: Node) -> Node {
                 limit,
                 covering: true,
             },
-            // Defensive: a coverable plan always has the single-field scan here,
-            // so this only guards against an unexpected shape — re-wrap intact.
+            Node::CompoundIndexScan {
+                collection: ic,
+                field,
+                range,
+                direction,
+                limit,
+                covering: None,
+            } => match compound_indexes.iter().find(|(id, _)| *id == field) {
+                // Carry the component paths on the marker — the node's `field` is
+                // the opaque joined identity, so the executor can't recover them.
+                // `is_coverable` already proved the identity is present; the clone
+                // is an owned copy of 2–4 short component strings (the metadata is
+                // only borrowed here), mirroring `field`/`range` ownership.
+                Some((_, components)) => Node::CompoundIndexScan {
+                    collection: ic,
+                    field,
+                    range,
+                    direction,
+                    limit,
+                    covering: Some(components.clone()),
+                },
+                // Defensive: identity unexpectedly absent — keep the fetch.
+                None => Node::KeyLookup {
+                    collection,
+                    source: Box::new(Node::CompoundIndexScan {
+                        collection: ic,
+                        field,
+                        range,
+                        direction,
+                        limit,
+                        covering: None,
+                    }),
+                },
+            },
+            // Defensive: a coverable plan always has a recognized scan here, so
+            // this only guards against an unexpected shape — re-wrap intact.
             other => Node::KeyLookup {
                 collection,
                 source: Box::new(other),
@@ -651,6 +740,180 @@ mod tests {
         assert!(has_key_lookup(
             "SELECT VALUE c.tags FROM c WHERE ARRAY_CONTAINS(c.tags, 'x')",
             &["tags.[]"]
+        ));
+    }
+
+    // ── Compound covering (phase 2): same exact-path match, N components ──────
+
+    /// A meta whose only indexes are the given compound indexes, each `&[&str]`
+    /// its ordered component paths. The identity mirrors `join_index_fields`
+    /// (components joined by `\x01`), so the lowered `CompoundIndexScan.field`
+    /// matches what the covering pass resolves against `compound_indexes`.
+    fn meta_compound(compound: &[&[&str]]) -> CollectionMeta {
+        let compound_indexes = compound
+            .iter()
+            .map(|components| {
+                let comps: Vec<String> = components.iter().map(|s| s.to_string()).collect();
+                (comps.join("\u{1}"), comps)
+            })
+            .collect();
+        CollectionMeta {
+            indexes: Vec::new(),
+            compound_indexes,
+            pk_path: "_id".into(),
+        }
+    }
+
+    /// Lower `sql` against `compound` and report the covering state of the first
+    /// compound scan: `Some(true)` covered, `Some(false)` indexed-but-fetched,
+    /// `None` no compound scan at all.
+    fn compound_covering(sql: &str, compound: &[&[&str]]) -> Option<bool> {
+        let Plan::Query(node) = lower(
+            slate_sql::parse(sql).unwrap(),
+            container(),
+            &meta_compound(compound),
+        ) else {
+            panic!("lower always produces a Query");
+        };
+        fn find(node: &Node) -> Option<bool> {
+            match node {
+                Node::CompoundIndexScan { covering, .. } => Some(covering.is_some()),
+                Node::KeyLookup { source, .. }
+                | Node::Project { source, .. }
+                | Node::Filter { source, .. }
+                | Node::Sort { source, .. }
+                | Node::Limit { source, .. }
+                | Node::Distinct { source, .. }
+                | Node::Aggregate { source, .. }
+                | Node::Bind { source, .. } => find(source),
+                _ => None,
+            }
+        }
+        find(&node)
+    }
+
+    /// Whether a compound-indexed plan still contains the document fetch.
+    fn compound_has_key_lookup(sql: &str, compound: &[&[&str]]) -> bool {
+        let Plan::Query(node) = lower(
+            slate_sql::parse(sql).unwrap(),
+            container(),
+            &meta_compound(compound),
+        ) else {
+            panic!("lower always produces a Query");
+        };
+        fn walk(node: &Node) -> bool {
+            match node {
+                Node::KeyLookup { .. } => true,
+                Node::Project { source, .. }
+                | Node::Filter { source, .. }
+                | Node::Sort { source, .. }
+                | Node::Limit { source, .. }
+                | Node::Distinct { source, .. }
+                | Node::Aggregate { source, .. }
+                | Node::Bind { source, .. } => walk(source),
+                _ => false,
+            }
+        }
+        walk(&node)
+    }
+
+    #[test]
+    fn compound_all_components_projection_is_covered() {
+        // Reads both components of `(status, created_at)` → covered, no fetch.
+        assert_eq!(
+            compound_covering(
+                "SELECT c.status, c.created_at FROM c WHERE c.status = 'active'",
+                &[&["status", "created_at"]]
+            ),
+            Some(true)
+        );
+        assert!(!compound_has_key_lookup(
+            "SELECT c.status, c.created_at FROM c WHERE c.status = 'active'",
+            &[&["status", "created_at"]]
+        ));
+    }
+
+    #[test]
+    fn compound_leading_component_only_is_covered() {
+        // A leftmost-prefix query that reads only the leading component is covered
+        // (the entry carries every component regardless of which the query reads).
+        assert_eq!(
+            compound_covering(
+                "SELECT VALUE c.status FROM c WHERE c.status = 'active'",
+                &[&["status", "created_at"]]
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn compound_pk_reference_is_covered() {
+        // `c._id` rides on the entry's doc-id, so a `SELECT VALUE c._id` over a
+        // compound leading-prefix scan is covered.
+        assert_eq!(
+            compound_covering(
+                "SELECT VALUE c._id FROM c WHERE c.status = 'active'",
+                &[&["status", "created_at"]]
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn compound_unindexed_field_is_not_covered() {
+        // `name` is neither a component nor the pk → the fetch stays.
+        assert_eq!(
+            compound_covering(
+                "SELECT VALUE c.name FROM c WHERE c.status = 'active'",
+                &[&["status", "created_at"]]
+            ),
+            Some(false)
+        );
+        assert!(compound_has_key_lookup(
+            "SELECT VALUE c.name FROM c WHERE c.status = 'active'",
+            &[&["status", "created_at"]]
+        ));
+    }
+
+    #[test]
+    fn compound_whole_row_is_not_covered() {
+        // `SELECT VALUE c` needs every field — keep the fetch.
+        assert_eq!(
+            compound_covering(
+                "SELECT VALUE c FROM c WHERE c.status = 'active'",
+                &[&["status", "created_at"]]
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn compound_dotted_components_are_covered_by_exact_match() {
+        // Dotted components covered by the same exact-path rule; `c.user.id`
+        // string-equals component `user.id`.
+        assert_eq!(
+            compound_covering(
+                "SELECT c.user.id, c.status FROM c WHERE c.user.id = 'x'",
+                &[&["user.id", "status"]]
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn compound_parent_of_dotted_component_is_not_covered() {
+        // Projecting the parent subdoc `c.user` needs more than the `user.id`
+        // component carries — bail, exactly like single-field dotted covering.
+        assert_eq!(
+            compound_covering(
+                "SELECT c.user, c.status FROM c WHERE c.user.id = 'x'",
+                &[&["user.id", "status"]]
+            ),
+            Some(false)
+        );
+        assert!(compound_has_key_lookup(
+            "SELECT c.user, c.status FROM c WHERE c.user.id = 'x'",
+            &[&["user.id", "status"]]
         ));
     }
 }

@@ -224,6 +224,7 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             range,
             direction,
             limit,
+            covering,
         } => {
             let mut text = format!(
                 "CompoundIndexScan {}.{field} {}",
@@ -237,6 +238,9 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             });
             if let Some(n) = limit {
                 text.push_str(&format!(" limit {n}"));
+            }
+            if covering.is_some() {
+                text.push_str(" covering");
             }
             line(lines, depth, text);
         }

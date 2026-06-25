@@ -272,6 +272,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 range,
                 direction,
                 limit,
+                covering,
             } => nodes::compound_index_scan::execute(
                 self.txn,
                 &collection,
@@ -279,6 +280,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 &range,
                 direction,
                 limit,
+                covering,
             )?,
 
             Node::KeyLookup { collection, source } => {

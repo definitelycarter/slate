@@ -46,11 +46,11 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
             validate_bindings(&query)?;
             validate_grouping(&query)?;
             let node = lower_query(query, ctx.container.clone(), &ctx.meta, &[]);
-            // Covering applies only to reads: a single-field index scan whose
-            // query touches only the indexed field and the pk skips the document
-            // fetch (RFC Part B). Writes lower through `write_source` and never
-            // reach here, so a write always sees the real documents.
-            Ok(Plan::Query(crate::covering::apply(node, &ctx.meta.pk_path)))
+            // Covering applies only to reads: a single-field or compound index
+            // scan whose query touches only indexed components and the pk skips
+            // the document fetch (RFC Part B). Writes lower through `write_source`
+            // and never reach here, so a write always sees the real documents.
+            Ok(Plan::Query(crate::covering::apply(node, &ctx.meta)))
         }
 
         Statement::Insert { docs } => {

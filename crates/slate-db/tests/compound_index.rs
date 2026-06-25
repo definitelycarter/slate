@@ -163,6 +163,81 @@ fn eq_then_range_selects_the_right_rows() {
     );
 }
 
+// ── Covering: serve the query from index entries (RFC Part B, phase 2) ──────
+//
+// A compound scan whose query reads only the index's components (plus the pk)
+// is *covering*: the planner drops the `KeyLookup` and the executor synthesizes
+// each row from the entry's per-component values. As with phase 1, this must be
+// invisible to results — a covered query returns exactly what the materialized
+// (unindexed full-scan) plan returns — and must NOT fire when the query reads
+// the whole row or any non-component field.
+
+/// Sorted debug forms of the values a SQL query returns from `orders`, for
+/// comparing a covered plan against the materialized (unindexed) one.
+fn vals(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
+    let txn = db.begin(true).unwrap();
+    let mut out = txn
+        .query(DEFAULT_CF, "orders", sql)
+        .unwrap()
+        .iter_values::<bson::Bson>()
+        .unwrap()
+        .map(|r| format!("{:?}", r.unwrap()))
+        .collect::<Vec<_>>();
+    out.sort();
+    out
+}
+
+#[test]
+fn covered_compound_projection_matches_materialized() {
+    // Both components projected, filtered on the leading one — covered. The
+    // synthesized rows must match the materialized full-scan plan exactly.
+    for sql in [
+        "SELECT c.status, c.created_at FROM c WHERE c.status = 'active'",
+        "SELECT VALUE c.created_at FROM c WHERE c.status = 'active' AND c.created_at > 15",
+        "SELECT c.status, c.created_at, c._id FROM c WHERE c.status = 'archived'",
+    ] {
+        assert_eq!(
+            vals(&seed(true), sql),
+            vals(&seed(false), sql),
+            "covered/materialized mismatch for `{sql}`",
+        );
+    }
+}
+
+#[test]
+fn covered_compound_plan_drops_key_lookup() {
+    let plan = explain(
+        &seed(true),
+        "SELECT c.status, c.created_at FROM c WHERE c.status = 'active'",
+    );
+    assert!(
+        plan.contains("CompoundIndexScan") && plan.contains("covering"),
+        "expected a covering compound scan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("KeyLookup"),
+        "a covered plan must drop the KeyLookup:\n{plan}"
+    );
+}
+
+#[test]
+fn whole_row_compound_query_keeps_key_lookup() {
+    // `SELECT VALUE c` needs every field — the compound entry can't serve it, so
+    // the fetch stays (the bail half of the invariant).
+    let plan = explain(
+        &seed(true),
+        "SELECT VALUE c FROM c WHERE c.status = 'active'",
+    );
+    assert!(
+        !plan.contains("covering"),
+        "whole-row read must not cover:\n{plan}"
+    );
+    assert!(
+        plan.contains("KeyLookup"),
+        "whole-row read needs the fetch:\n{plan}"
+    );
+}
+
 // ── Index maintenance on update / delete ────────────────────────
 
 #[test]

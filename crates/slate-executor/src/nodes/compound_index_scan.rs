@@ -1,9 +1,16 @@
 //! The `CompoundIndexScan` source — yields bare document IDs from a compound
-//! (multi-field) index over its leftmost-prefix range.
+//! (multi-field) index over its leftmost-prefix range, or — when `covering` —
+//! synthesized documents served entirely from the index entries.
 //!
 //! Maps the IR's [`CompoundScanRange`] onto the engine's [`CompoundRange`] and
 //! streams the matching entries' doc-IDs. Pair with [`super::key_lookup`] to
-//! fetch the documents.
+//! fetch the documents — unless the scan is **covering**, in which case it emits a
+//! synthesized document per entry, built from each index component's value placed
+//! at its dotted path (merging shared prefixes, so `(user.id, user.name)` →
+//! `{user: {id, name}}`) plus the doc-id under the pk path, and the planner omits
+//! the `KeyLookup` (RFC: Covering Index Scans, Part B, phase 2). The planner only
+//! sets `covering` after proving the query reads nothing but the index's
+//! components and the pk, so the entry's values are all it needs.
 //!
 //! ## Post-filter: keeping the compound scan exact
 //!
@@ -19,12 +26,92 @@
 
 use std::cmp::Ordering;
 
-use bson::Bson;
-use slate_engine::{Catalog, CompoundRange, CompoundTail, EngineTransaction};
+use bson::raw::CString;
+use bson::{Bson, RawBson, RawDocumentBuf};
+use slate_engine::{
+    Catalog, CompoundRange, CompoundTail, EngineError, EngineTransaction, IndexEntry,
+};
 use slate_eval::compare_bson;
 use slate_planner::{CollectionRef, CompoundScanRange, CompoundScanTail, ScanDirection};
 
 use crate::{ExecError, ValueIter};
+
+/// Build the covering row for one compound entry: each `component` path carries
+/// the entry's value at that index position (`component_value(idx)`), and the
+/// doc-id rides under the (always top-level) `pk_path`. Component paths are merged
+/// into one nested tree first — so `(user.id, user.name)` becomes a single
+/// `{user: {id, name}}` rather than two conflicting `user` keys — then serialized
+/// into the append-only `RawDocumentBuf`. A component absent from the entry
+/// (`component_value` → `None`, e.g. a sparse trailing field) is simply omitted,
+/// matching a missing field in the fetched document. The planner proved the query
+/// reads nothing but these components and the pk, so the row is a drop-in.
+fn synthesize_row(
+    entry: &IndexEntry,
+    components: &[String],
+    pk_path: &str,
+) -> Result<RawBson, EngineError> {
+    let mut tree: Vec<(String, SynthNode)> = Vec::new();
+    for (idx, path) in components.iter().enumerate() {
+        if let Some(value) = entry.component_value(idx)? {
+            insert_path(&mut tree, path, value);
+        }
+    }
+    let mut doc = build_doc(tree)?;
+    // The pk rides on the doc-id; skip it if a component already wrote that key
+    // (the covering pass bails on a pk-colliding component, so this is defensive).
+    if !components.iter().any(|c| c == pk_path) {
+        let pk_key = CString::try_from(pk_path)
+            .map_err(|e| EngineError::InvalidKey(format!("pk path {pk_path:?}: {e}")))?;
+        doc.append(pk_key, entry.doc_id()?);
+    }
+    Ok(RawBson::Document(doc))
+}
+
+/// An intermediate node while merging dotted component paths that share a prefix,
+/// before serializing into the append-only `RawDocumentBuf`. A `Leaf` holds a
+/// synthesized value; a `Branch` holds ordered child segments.
+enum SynthNode {
+    Leaf(RawBson),
+    Branch(Vec<(String, SynthNode)>),
+}
+
+/// Insert `value` at the dotted `path` into `tree`, materializing/merging
+/// intermediate objects: a top-level `path` becomes a `Leaf`, while `user.id`
+/// descends (and reuses an existing `user` `Branch` so a later `user.name` merges
+/// into the same object). A segment that collides with an existing `Leaf` simply
+/// appends a new entry (a pathological shape the covering pass never approves).
+fn insert_path(tree: &mut Vec<(String, SynthNode)>, path: &str, value: RawBson) {
+    match path.split_once('.') {
+        None => tree.push((path.to_string(), SynthNode::Leaf(value))),
+        Some((head, rest)) => {
+            if let Some((_, SynthNode::Branch(inner))) = tree
+                .iter_mut()
+                .find(|(k, n)| k == head && matches!(n, SynthNode::Branch(_)))
+            {
+                insert_path(inner, rest, value);
+            } else {
+                let mut inner = Vec::new();
+                insert_path(&mut inner, rest, value);
+                tree.push((head.to_string(), SynthNode::Branch(inner)));
+            }
+        }
+    }
+}
+
+/// Serialize a merged [`SynthNode`] tree into a `RawDocumentBuf`, recursing into
+/// each `Branch` to build the nested objects bottom-up.
+fn build_doc(tree: Vec<(String, SynthNode)>) -> Result<RawDocumentBuf, EngineError> {
+    let mut doc = RawDocumentBuf::new();
+    for (key, node) in tree {
+        let cstr = CString::try_from(key.as_str())
+            .map_err(|e| EngineError::InvalidKey(format!("index path segment {key:?}: {e}")))?;
+        match node {
+            SynthNode::Leaf(value) => doc.append(cstr, value),
+            SynthNode::Branch(inner) => doc.append(cstr, RawBson::Document(build_doc(inner)?)),
+        }
+    }
+    Ok(doc)
+}
 
 /// The exact, in-memory recheck of a compound entry: each leading equality must
 /// match its stored component value, and the trailing range (if any) must hold.
@@ -98,9 +185,15 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     range: &CompoundScanRange,
     direction: ScanDirection,
     limit: Option<usize>,
+    covering: Option<Vec<String>>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
     let post_filter = CompoundFilter::for_range(range);
+
+    // A covering scan synthesizes rows from entries, so it needs the pk path; own
+    // it (a short string) since the closure outlives the borrowed handle. The
+    // common non-covering scan pays nothing.
+    let pk_path = covering.as_ref().map(|_| handle.pk_path().to_string());
 
     // Borrow the IR bounds into the engine's `CompoundRange` (no value clone).
     let tail = match &range.tail {
@@ -167,8 +260,14 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             }
             count += 1;
 
-            return match entry.doc_id() {
-                Ok(id) => Some(Ok(Some(id))),
+            // Covering: emit the synthesized `{components…, pk}` row; otherwise the
+            // bare doc-id for the paired `KeyLookup` to fetch.
+            let yielded = match (covering.as_deref(), pk_path.as_deref()) {
+                (Some(components), Some(pk)) => synthesize_row(&entry, components, pk),
+                _ => entry.doc_id(),
+            };
+            return match yielded {
+                Ok(row) => Some(Ok(Some(row))),
                 Err(e) => {
                     done = true;
                     Some(Err(ExecError::Engine(e)))
@@ -182,9 +281,9 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
 #[cfg(test)]
 mod tests {
-    use super::execute;
+    use super::{SynthNode, build_doc, execute, insert_path};
     use crate::collect;
-    use bson::{RawBson, rawdoc};
+    use bson::{RawBson, RawDocumentBuf, rawdoc};
     use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
     use slate_planner::{CollectionRef, CompoundScanRange, CompoundScanTail, ScanDirection};
     use slate_store::MemoryStore;
@@ -248,6 +347,7 @@ mod tests {
             &range,
             ScanDirection::Forward,
             None,
+            None,
         )
         .unwrap();
         collect(iter).unwrap()
@@ -295,5 +395,100 @@ mod tests {
             tail: CompoundScanTail::Unbounded,
         });
         assert_eq!(ids, vec![id("d")]);
+    }
+
+    // ── Covering synthesis ───────────────────────────────────────────────────
+
+    /// Collect the synthesized documents a covering compound scan emits for
+    /// `range`, covering the two components `["status", "created_at"]`.
+    fn scan_covering(range: CompoundScanRange) -> Vec<RawDocumentBuf> {
+        let engine = seeded_orders();
+        let txn = engine.begin(true).unwrap();
+        let components = vec!["status".to_string(), "created_at".to_string()];
+        let identity = slate_engine::join_index_fields(&components);
+        let iter = execute(
+            &txn,
+            &orders_ref(),
+            identity,
+            &range,
+            ScanDirection::Forward,
+            None,
+            Some(components),
+        )
+        .unwrap();
+        collect(iter)
+            .unwrap()
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d,
+                other => panic!("covering scan must yield documents, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn covering_synthesizes_components_and_pk() {
+        // status = "active" → the three active docs, each synthesized with its
+        // two components and the pk from the entry's doc-id (no fetch).
+        let docs = scan_covering(CompoundScanRange {
+            eq_prefix: vec![bson::Bson::String("active".into())],
+            tail: CompoundScanTail::Unbounded,
+        });
+        assert_eq!(docs.len(), 3);
+        for d in &docs {
+            assert_eq!(d.get_str("status").unwrap(), "active");
+            assert!(d.get_i64("created_at").is_ok() || d.get_i32("created_at").is_ok());
+            assert!(d.get_str("_id").is_ok(), "carries the pk: {d:?}");
+        }
+        // The doc-ids recovered from the entries are exactly a, b, c.
+        let mut ids: Vec<String> = docs
+            .iter()
+            .map(|d| d.get_str("_id").unwrap().to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn covering_still_applies_the_recheck() {
+        // The byte-prefix collision (`active2`) must still be excluded by the
+        // recheck even on the covering path — synthesis runs *after* it.
+        let docs = scan_covering(CompoundScanRange {
+            eq_prefix: vec![bson::Bson::String("active".into())],
+            tail: CompoundScanTail::Range {
+                lower: Some((bson::Bson::Int64(15), false)),
+                upper: None,
+            },
+        });
+        let ids: Vec<String> = docs
+            .iter()
+            .map(|d| d.get_str("_id").unwrap().to_string())
+            .collect();
+        assert_eq!(ids, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn insert_path_merges_shared_prefix() {
+        // `(user.id, user.name)` must merge into one `user` object, not two keys.
+        let mut tree: Vec<(String, SynthNode)> = Vec::new();
+        insert_path(&mut tree, "user.id", RawBson::String("u1".into()));
+        insert_path(&mut tree, "user.name", RawBson::String("ada".into()));
+        let doc = build_doc(tree).unwrap();
+        assert_eq!(doc.iter().count(), 1, "one top-level `user` key: {doc:?}");
+        let user = doc.get_document("user").unwrap();
+        assert_eq!(user.get_str("id").unwrap(), "u1");
+        assert_eq!(user.get_str("name").unwrap(), "ada");
+    }
+
+    #[test]
+    fn insert_path_keeps_disjoint_top_level_keys() {
+        // `(status, created_at)` → two distinct top-level fields, types preserved.
+        let mut tree: Vec<(String, SynthNode)> = Vec::new();
+        insert_path(&mut tree, "status", RawBson::String("active".into()));
+        insert_path(&mut tree, "created_at", RawBson::Int32(20));
+        let doc = build_doc(tree).unwrap();
+        assert_eq!(doc.get_str("status").unwrap(), "active");
+        assert_eq!(doc.get_i32("created_at").unwrap(), 20);
+        assert_eq!(doc.iter().count(), 2);
     }
 }
