@@ -1,18 +1,20 @@
 # RFC: Covering Index Scans & Engine-Level Recheck
 
-> **Status: Part A implemented; Part B phase 1 (single-field, non-aggregate —
-> top-level *and* dotted paths) implemented; phases 2–3 (compound, covered
+> **Status: Part A implemented; Part B phases 1–2 (single-field *and* compound,
+> non-aggregate — top-level and dotted paths) implemented; phase 3 (covered
 > aggregate) specified, deferred.**
 > A query/execution optimization for index access, surfaced while benchmarking
 > compound indexes. Part A shipped as a small planner change (below). Part B (the
-> covering scan) is a larger, correctness-critical change; its first, smallest
-> phase — covering a single-field index scan — has now shipped, measured at
-> **−15% (1k) / −21% (10k)** on a covered string projection and **−10% / −27%**
-> on a covered numeric projection, and since extended to **dotted single-field
-> paths** (`user.id`, synthesized as `{user: {id: value}}`) under an
-> exact-path-match rule — measured at **−7 % (1k) / −15 % (10k)** on a covered
-> dotted projection over realistic documents (`query_indexed_eq_dotted_proj`). The
-> remaining phases are fully designed here before their implementation pass. The
+> covering scan) is a larger, correctness-critical change; its first phase —
+> covering a single-field index scan — shipped first, measured at **−15% (1k) /
+> −21% (10k)** on a covered string projection and **−10% / −27%** on a covered
+> numeric projection, then extended to **dotted single-field paths** (`user.id`,
+> synthesized as `{user: {id: value}}`) under an exact-path-match rule (**−7 % /
+> −15 %** on `query_indexed_eq_dotted_proj`). **Phase 2 (compound)** now reuses the
+> same analysis to cover a multi-field `CompoundIndexScan` — a query reading only
+> the index's components and the pk skips the fetch, synthesizing each row from the
+> entry's per-component values (merging shared dotted prefixes). The remaining
+> phase 3 is fully designed here before its implementation pass. The
 > [roadmap](../roadmap.md) tracks status at a glance.
 
 ## Concept
@@ -93,7 +95,7 @@ rechecks exactly those — a 1:1 correspondence — so consuming them is sound.
   unaffected (the executor recheck already enforced the equality; A only removes
   the redundant second check), which the end-to-end suites confirm.
 
-## Part B — covering scan: skip the `KeyLookup` *(phase 1 implemented, incl. dotted paths)*
+## Part B — covering scan: skip the `KeyLookup` *(phases 1–2 implemented, incl. dotted paths)*
 
 When the set of fields a query references is a subset of the chosen index's
 components (plus `_id`/pk, which the entry carries as its doc_id), the planner
@@ -153,7 +155,45 @@ index scan whose query reads only that field and the pk. Concretely:
   fetch saved) it washes out, which is why the bench nests the indexed path inside
   the realistic corpus, not a minimal one.
 
-Phases 2 (compound) and 3 (covered aggregate) remain as designed below.
+Phase 3 (covered aggregate) remains as designed below.
+
+### What shipped (phase 2: compound, non-aggregate)
+
+Phase 2 extends covering to a multi-field `CompoundIndexScan`, reusing phase 1's
+analysis wholesale — the only new logic is resolving a compound index's identity
+to its components and synthesizing several values per row. Concretely:
+
+- **IR:** `Node::CompoundIndexScan` gained `covering: Option<Vec<String>>` (not a
+  bare bool, as the single-field scan got). A compound node's `field` is the
+  opaque joined identity (`f1\x01f2`), so the marker carries the **component
+  paths** explicitly; `None` is the id-yielding default, `Some(components)` the
+  covering set.
+- **Planner** (`covering.rs`): the same two-phase pass now also recognizes
+  `KeyLookup(CompoundIndexScan)`. `covers_compound` resolves the joined identity
+  back to its component paths via the collection metadata (`compound_indexes`
+  already carries `(identity, components)` — no new engine dependency), then
+  applies the **identical exact-path-match rule** per component: every referenced
+  path must string-equal a component or the pk. It bails on any `[]` multikey
+  component or a component whose synthesized key would collide with the pk.
+- **Executor** (`compound_index_scan.rs`): a covering compound scan synthesizes a
+  row from each component's `IndexEntry::component_value(idx)`, placed at its
+  dotted path, plus the pk from the doc-id — **after** the existing leading-equality
+  recheck. Component paths that share a prefix are merged into one nested object
+  (`(user.id, user.name)` → `{user: {id, name}}`) via a small intermediate tree,
+  since `RawDocumentBuf` is append-only. A component absent from a (sparse) entry
+  is simply omitted, matching a missing field in the fetched document.
+- **Safety:** same invariant, same differential. The shipped `compound_index.rs`
+  differential — which projects `c._id` over a compound scan — now exercises the
+  covering path automatically (covered `_id` ≡ full-scan `_id`), joined by new
+  tests that a covered component projection matches the materialized plan and that
+  `EXPLAIN` drops the `KeyLookup` while a whole-row read keeps it.
+- **Bench** (`query_compound_covering`, a covered `(status, contacts_count)`
+  projection over realistic documents): the before/after harness is in place,
+  toggled by the same covered-vs-fetched mechanism as phase 1. A headline number
+  has not yet been captured on a quiet machine; structurally the win is the same
+  per-matched-row document fetch removed as phase 1, slightly offset by
+  synthesizing N component values per row instead of one — so it tracks the phase-1
+  result, scaling with matched-row count.
 
 ### Measured opportunity
 
@@ -171,15 +211,15 @@ find(filter = {status: "active"}, columns = ["status"])   -- status is indexed
 Part B removes the per-matched-row document fetch; the win scales with the number
 of matched rows.
 
-### B.1 — IR change *(settled: `covering: bool` for single-field)*
+### B.1 — IR change *(settled: `bool` for single-field, `Option<Vec<String>>` for compound)*
 
-Phase 1 added `covering: bool` to `Node::IndexScan` (not the
-`Option<Vec<String>>` below): the single-field scan already names its `field`, so
-the executor synthesizes `{field, pk}` from a bool alone. The spike's original
-sketch — carrying component names — is the right shape for **compound** covering
-(phase 2), whose `field` is the opaque joined identity `f1\x01f2`, so
-`Node::CompoundIndexScan` will gain its own covering marker then. The original
-analysis follows:
+Phase 1 added `covering: bool` to `Node::IndexScan`: the single-field scan already
+names its `field`, so the executor synthesizes `{field, pk}` from a bool alone.
+Phase 2 then added `covering: Option<Vec<String>>` to `Node::CompoundIndexScan` —
+the spike's original component-name sketch — because a compound node's `field` is
+the opaque joined identity `f1\x01f2`, so the marker must carry the component paths
+to synthesize. `None` is the id-yielding default; `Some(components)` covers. The
+original analysis follows:
 
 Add a covering marker to `Node::IndexScan` and `Node::CompoundIndexScan` carrying
 the component field names to synthesize (e.g. `covering: Option<Vec<String>>`,
@@ -254,11 +294,12 @@ not present in plain projections — is why aggregates are a later phase.
    below was scoped down to a single-field scan (no compound, no `IndexMerge`, no
    multikey) and a single `Alias`-bound source. Dotted scalar paths were added
    under the exact-path-match rule (above), nesting the synthesized value.
-2. **Compound, non-aggregate.** *Same* coverage analysis; synthesize N components;
-   covered set = the component list. A small increment over (1) — the executor
-   reads several component values instead of one — **not** a from-scratch effort.
-   Adds a covering marker to `Node::CompoundIndexScan` (carrying component names,
-   since its `field` is the opaque joined identity).
+2. **Compound, non-aggregate.** ✅ **Shipped.** *Same* coverage analysis;
+   synthesize N components; covered set = the component list. A small increment
+   over (1) — the executor reads several component values instead of one (merging
+   shared dotted prefixes into one nested object) — **not** a from-scratch effort.
+   Added the `covering: Option<Vec<String>>` marker to `Node::CompoundIndexScan`
+   (carrying component names, since its `field` is the opaque joined identity).
 3. **Covered aggregate.** The RFC's headline `GROUP BY` (e.g.
    `SELECT c.status, COUNT(1) … GROUP BY c.status` over compound `(user.id,
    status)`). Adds the B.4 binding-aware collection. Largest win, most analysis.
@@ -276,7 +317,10 @@ field), and — for a dotted index (`meta.note`) — the covered nested projecti
 alongside its parent/extension/sibling bails (`c.meta` / `c.meta.note.deeper` /
 `c.meta.tag`). It uses `EXPLAIN` to confirm the covered plan actually drops the
 `KeyLookup` while the bail cases keep it (so the differential can't pass vacuously
-by never covering). The compound and aggregate cases join it as phases 2–3 land. This is the guard against the one dangerous failure mode (a
+by never covering). The **compound** case joined it in phase 2 (`compound_index.rs`:
+a covered component projection ≡ the materialized plan, plus the pre-existing
+`c._id` differential, which now runs through the covering path); the aggregate case
+joins as phase 3 lands. This is the guard against the one dangerous failure mode (a
 too-eager cover returning wrong rows).
 
 ## Benefits
@@ -302,19 +346,23 @@ too-eager cover returning wrong rows).
 
 ## Spike (for the Part B pass)
 
-Phase 1 resolved all three for the single-field case; they recur for phases 2–3:
+Phase 1 resolved all three for the single-field case; phase 2 reused them for
+compound; they recur for phase 3:
 
 1. ✅ IR representation settled — `covering: bool` on `Node::IndexScan` (the
-   single-field scan names its field). Compound will add a component-name marker
-   on `Node::CompoundIndexScan` (B.1).
+   single-field scan names its field) and `covering: Option<Vec<String>>` on
+   `Node::CompoundIndexScan` (carrying the component names its opaque joined
+   identity can't recover) (B.1).
 2. ✅ The conservative referenced-field collector + bail rules shipped as
    `covering.rs`, gated by the differential test (B.6) before the executor
-   synthesis was trusted. Since extended to dotted scalar paths via exact-path
-   match + nested synthesis (`append_path`), with the same differential guard.
+   synthesis was trusted. Extended to dotted scalar paths via exact-path match +
+   nested synthesis (`append_path`), then to compound indexes via the same
+   per-component exact-path match + a prefix-merging synthesizer, with the same
+   differential guard throughout.
 3. ✅ Phase (1) single-field landed and was measured against a clean-`main`
-   baseline (−15%/−21% string, −10%/−27% numeric covered projections). Dotted
-   single-field paths followed (same synthesize-vs-fetch win, structurally). Phases
-   (2) compound and (3) aggregate remain.
+   baseline (−15%/−21% string, −10%/−27% numeric covered projections); dotted
+   single-field paths followed (−7%/−15%). Phase (2) compound reuses the same
+   synthesize-vs-fetch win (`query_compound_covering`). Phase (3) aggregate remains.
 
 ## Cosmos, for reference
 

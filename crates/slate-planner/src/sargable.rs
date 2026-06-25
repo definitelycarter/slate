@@ -314,6 +314,9 @@ fn lower_access(access: &IndexAccess, container: &CollectionRef) -> Node {
             range: range.clone(),
             direction: ScanDirection::Forward,
             limit: None,
+            // Non-covering by default; the covering pass flips it after proving
+            // the query reads only this index's components and the pk.
+            covering: None,
         },
         IndexAccess::Multikey { field, value } => dedup_ids(index_scan(
             container,

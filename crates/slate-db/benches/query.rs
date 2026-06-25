@@ -735,6 +735,33 @@ fn bench_query_compound_eq(c: &mut Criterion) {
     group.finish();
 }
 
+/// Covered compound projection over `(status, contacts_count)`: reading only the
+/// two index components (`SELECT c.status, c.contacts_count … WHERE c.status =
+/// "active"`) is served entirely from the index entries — the planner drops the
+/// `KeyLookup` and the executor synthesizes each row from the entry's per-component
+/// values (RFC Part B, phase 2). Same engine as `query_compound_eq`, but a *covered
+/// projection* rather than the whole-row read that bails to a fetch, so this is the
+/// before/after for compound covering. The realistic (heavy) documents make the
+/// skipped fetch material — on tiny docs the synthesis cost ≈ the fetch saved.
+fn bench_query_compound_covering(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_compound_covering");
+    let sql = r#"SELECT c.status, c.contacts_count FROM c WHERE c.status = "active""#;
+    for n in [1_000, 10_000] {
+        let engine = compound_indexed_engine(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_raw()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 /// IN-style disjunction on an indexed field (`$or` of several `{field: value}`
 /// equalities). Should plan to `IndexMerge(Or)` over the indexed candidates, not
 /// a full scan.
@@ -777,6 +804,7 @@ criterion_group!(
     bench_query_or_indexed,
     bench_query_sql,
     bench_query_compound_eq,
+    bench_query_compound_covering,
     bench_query_null_filter,
     bench_query_sort_indexed,
     bench_query_sort_indexed_take,

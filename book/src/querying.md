@@ -182,6 +182,22 @@ The engine seeks the leading-equality prefix as a conservative superset (a strin
 
 **Scalar components only (Phase 1).** Every component must resolve to a single scalar; a multikey (`[]`) component is rejected at creation, since an array component would fan one document across a cross-product of keys a leftmost-prefix seek can't address. Multikey compound indexes are tracked in the [roadmap](roadmap.md). A single-field index is exactly the one-component case of the same encoding.
 
+### Covered scans
+
+An index scan normally yields document IDs that a `KeyLookup` then resolves to full documents. But an index entry already carries its indexed value(s) **and** the owning document's pk (`_id`). So when a query reads **nothing but indexed columns and the pk**, the document fetch is pure overhead: the planner marks the scan **covering** and drops the `KeyLookup`, and the executor synthesizes each row directly from the entry. The win scales with the number of matched rows — it removes one document fetch per result.
+
+```text
+index on (user.id, status):
+  SELECT c.user.id, c.status FROM c WHERE c.user.id = @u AND c.status = 'active'
+    → CompoundIndexScan (user.id, status) covering        -- no KeyLookup
+  SELECT c.user.id, c.status FROM c … ORDER BY c.status
+    → Sort → CompoundIndexScan … covering                 -- sort key is a component, still covered
+```
+
+The rule is **exact-path match**: a referenced path is served only if it string-equals an indexed component or the pk. Covering therefore fires for any combination of indexed columns and the pk — including a *subset* of a compound index's columns — and a dotted index (`meta.note`) reconstructs the nested shape (`{meta: {note}}`). It **bails to a normal fetch** the moment a query touches anything the entry can't reproduce — the whole row (`SELECT c`), an unindexed field, or a parent / sibling / extension of an indexed path (`c.meta`, `c.meta.tag`, `c.meta.note.x` against an index on `meta.note`). A reference *anywhere* the query reads — projection, residual `WHERE`, `ORDER BY`, — counts, so a sort or filter on a non-indexed field keeps the fetch.
+
+`EXPLAIN` surfaces the decision: a covered scan prints `covering` and has no `KeyLookup` line. Covering is a physical-plan choice, invisible to results — a covered query returns exactly what the same query returns without the index.
+
 
 ## Plan Scenarios
 

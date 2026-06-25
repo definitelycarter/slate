@@ -88,7 +88,7 @@ uninstrumented:
   components (see [Multikey RFC](./rfcs/multikey-indexes.md)); a SQL `CREATE INDEX`
   surface is not planned.
 - **[Covering Index Scans & Engine-Level Recheck](./rfcs/covering-index-scans.md)**
-  — *Part A done; Part B phase 1 done; phases 2–3 deferred.* **Part A** (drop the
+  — *Part A done; Part B phases 1–2 done; phase 3 deferred.* **Part A** (drop the
   redundant residual `Filter`): a planner-only change — the executor's
   `CompoundIndexScan` already rechecks each equality against the index entry, so the
   planner now *consumes* the compound-covered conjuncts instead of re-checking them
@@ -100,13 +100,18 @@ uninstrumented:
   rebuild only if coverable) drops the fetch when the query reads only the indexed
   field and the pk. Measured **−15 % (1k) / −21 % (10k)** on a covered string
   projection, **−10 % / −27 %** on a covered numeric projection (`query_indexed_eq_proj`,
-  `_numeric_proj`), with a covered-≡-materialized differential test. Now also covers
+  `_numeric_proj`), with a covered-≡-materialized differential test. Also covers
   **dotted single-field paths** (`user.id`): an exact-path-match rule (a reference
   covers iff its reconstructed dotted path string-equals the index field or pk —
   parent/extension/sibling bail) plus nested synthesis (`{user: {id: value}}`),
-  measured **−7 % (1k) / −15 % (10k)** on a covered dotted projection over realistic
-  documents (`query_indexed_eq_dotted_proj`). Phases 2 (compound) and 3 (covered
-  aggregate) stay designed in the RFC, deferred.
+  measured **−7 % (1k) / −15 % (10k)** (`query_indexed_eq_dotted_proj`). **Phase 2
+  shipped** — a `CompoundIndexScan` gains a `covering: Option<Vec<String>>` marker
+  (carrying the component paths, since its `field` is the opaque joined identity),
+  and the same analysis covers a query reading only the index's components and the
+  pk, synthesizing each row from the entry's per-component values (merging shared
+  dotted prefixes); a `query_compound_covering` before/after harness is in place
+  (headline number not yet captured). Phase 3 (covered aggregate) stays designed in
+  the RFC, deferred.
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of

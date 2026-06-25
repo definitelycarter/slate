@@ -209,13 +209,25 @@ pub enum Node {
     /// multi-field index, bounded by the leftmost-prefix [`CompoundScanRange`].
     /// `field` is the joined compound identity (`f1\x01f2`). Pair with
     /// [`Node::KeyLookup`] to fetch the documents; the planner keeps a residual
-    /// recheck since the byte seek is a conservative superset.
+    /// recheck since the byte seek is a conservative superset — unless the scan is
+    /// **covering** (RFC: Covering Index Scans, Part B, phase 2).
     CompoundIndexScan {
         collection: CollectionRef,
         field: String,
         range: CompoundScanRange,
         direction: ScanDirection,
         limit: Option<usize>,
+        /// When `Some(components)`, yield a synthesized document per entry built
+        /// from each component's value placed at its dotted path (merging shared
+        /// prefixes, e.g. `user.id` + `user.name` → `{user: {id, name}}`) plus the
+        /// doc-id under the pk path — so a query referencing only these components
+        /// and the pk needs no `KeyLookup`. `None` yields a bare doc-id for the
+        /// paired `KeyLookup`. The component paths are carried explicitly because
+        /// the node's `field` is the opaque joined identity (`f1\x01f2`), not the
+        /// component names. Set solely by the covering pass ([`crate::covering`]),
+        /// which proves every referenced field is a component or the pk before
+        /// flipping it.
+        covering: Option<Vec<String>>,
     },
 
     /// Point read by ID — takes IDs (or documents, from which the pk is

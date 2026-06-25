@@ -283,19 +283,18 @@ No indexed fields, no equality — full scan. Both conditions are evaluated lazi
 
 ---
 
-### 18. Projection Over an Index Scan
+### 18. Covered Projection Over an Index Scan
 
 **Query:** `find({ status = "active", columns: ["status"] })`
 
 ```
 Project([_id, status])
-  └── KeyLookup
-        └── IndexScan(status = "active")
+  └── IndexScan(status = "active") covering
 ```
 
-`IndexScan` yields document IDs, `KeyLookup` fetches the documents, and `Project` builds `{ _id, status }` from them.
+The query reads only the indexed field and the pk, both of which the index entry already carries (its value and its doc-id). So the planner marks the scan **covering** and drops the `KeyLookup` entirely — the executor synthesizes each `{ status, _id }` row from the entry instead of fetching the document. See [Covered scans](querying.md#covered-scans) for the full rule.
 
-> **Covered-index projection is future work in v2.** Even when every projected column is the indexed field, v2 still fetches the document via `KeyLookup` — it does not yet serve a projection directly from the index entry's value. The deferred optimization (and the approaches to extend it to multiple columns — composite indexes, or secondary index lookups) is tracked in the [Roadmap](roadmap.md).
+> **Covering applies to compound and dotted-path indexes too.** A query reading only components of a compound index — e.g. `SELECT c.user.id, c.status FROM c WHERE c.user.id = … AND c.status = …` over `(user.id, status)` — is served entirely from the entry (`CompoundIndexScan … covering`, no `KeyLookup`), and a dotted index like `meta.note` synthesizes the nested `{meta: {note}}`. Covering bails — keeping the fetch — the moment the query reads anything the entry can't serve: the whole row, an unindexed field, or a parent/sibling/extension of an indexed path.
 
 ---
 
