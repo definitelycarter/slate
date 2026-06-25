@@ -140,7 +140,10 @@ fn parse_meta(rest: &str) -> Result<Command, String> {
         "explain" => {
             // The whole remaining line is the query (like `.backup`'s path) —
             // it contains spaces and its own syntax, so it is not tokenized.
-            let query = args.trim();
+            // Strip a trailing `;` so `.explain SELECT … ;` works like a bare
+            // SQL statement (the input layer strips it for SQL, but a one-line
+            // meta-command bypasses that path).
+            let query = args.trim().trim_end_matches(';').trim();
             if query.is_empty() {
                 return Err(".explain requires a query".to_string());
             }
@@ -495,7 +498,13 @@ mod tests {
             Command::parse(r#".explain SELECT VALUE c.name FROM c WHERE c.name = "x""#).unwrap(),
             Command::Explain(r#"SELECT VALUE c.name FROM c WHERE c.name = "x""#.to_string())
         );
+        // A trailing `;` (habit from SQL) is stripped, like a bare statement.
+        assert_eq!(
+            Command::parse(".explain select 1 ;").unwrap(),
+            Command::Explain("select 1".to_string())
+        );
         assert!(Command::parse(".explain").is_err());
+        assert!(Command::parse(".explain ;").is_err());
     }
 
     #[test]
