@@ -15,22 +15,26 @@
 //! *A missed cover is a lost optimization; a wrong cover is wrong results.* So
 //! the analysis is one-directional: it returns **uncoverable** the instant it
 //! sees any node, binding, or expression shape it does not fully understand. It
-//! covers only when it can name every referenced field and show each is the
-//! index field or the pk. Phase 1 deliberately handles only:
+//! covers only when it can name every referenced path and show each **exactly
+//! equals** the index field or the pk. It handles a single index source:
 //!
 //! - a **single** index source (`KeyLookup(IndexScan)`) — not `IndexMerge`, not a
 //!   compound scan, not a multikey (`.[]`) scan (which lowers under a `Distinct`);
-//! - a **top-level scalar** index field (no dot-path / `.[]` — the flat entry
-//!   value can't reproduce nested navigation);
+//! - a **scalar** index field — top-level (`status`) or a dotted path
+//!   (`user.id`), synthesized as the nested object `{user: {id: value}}`; never a
+//!   multikey `.[]` path, whose array fan-out a single scalar entry can't rebuild;
 //! - **one alias**, bound by [`RowBinding::Alias`] — an [`RowBinding::Env`] row
 //!   means a join / unwind / aggregate / subquery, all out of scope here;
-//! - **depth-1** field references (`alias.field`) only — a bare `alias` (whole
-//!   row), a deeper `alias.a.b`, an `alias[i]` index, a `PathGet`/`MultikeyEq`,
-//!   or a correlated subquery on the alias all force uncoverable.
+//! - references that are **clean alias-rooted member chains** (`alias.a`,
+//!   `alias.a.b`, …) whose reconstructed dotted path *string-equals* the index
+//!   field or the pk. A bare `alias` (whole row), an `alias[i]` index, a
+//!   `PathGet`/`MultikeyEq`, or a correlated subquery on the alias all force
+//!   uncoverable — as does a parent, extension, or sibling of the index field
+//!   (`user` / `user.id.x` / `user.name` against an index on `user.id`).
 //!
-//! Compound covering and covered aggregates are later phases (they add component
-//! synthesis and the aggregate binding-shift, respectively); the RFC has the
-//! full design.
+//! Compound covering and covered aggregates are later phases (they add multi-
+//! component synthesis and the aggregate binding-shift, respectively); the RFC
+//! has the full design.
 
 use std::collections::BTreeSet;
 
@@ -116,14 +120,28 @@ impl<'a> Analysis<'a> {
     }
 
     /// Whether a single-field scan on `field` covers everything collected so far.
+    /// `field` may be a dotted scalar path (`user.id`); every collected reference
+    /// must string-equal it or the pk (the settled exact-path-match rule).
     fn covers(&self, field: &str) -> bool {
-        // A dotted / `.[]` index field can't be rebuilt from the flat entry value.
-        if field.contains('.') || self.alias.is_none() {
+        if self.alias.is_none() {
+            return false;
+        }
+        // A multikey array path (`tags.[]`) fans one document out across many
+        // entries; a single scalar entry value can't reconstruct the array.
+        if field.contains("[]") {
+            return false;
+        }
+        // A dotted field is synthesized as a nested object rooted at its first
+        // segment. If that root collides with the (always top-level) pk key,
+        // synthesis would emit two conflicting top-level keys — leave it to the fetch.
+        if let Some((root, _)) = field.split_once('.')
+            && root == self.pk_path
+        {
             return false;
         }
         match &self.refs {
             Refs::Uncoverable => false,
-            Refs::Fields(fields) => fields.iter().all(|f| f == field || f == self.pk_path),
+            Refs::Fields(paths) => paths.iter().all(|p| p == field || p == self.pk_path),
         }
     }
 }
@@ -266,20 +284,23 @@ fn collect_alias_refs(expr: &Expression, alias: &str, refs: &mut Refs) {
             }
         }
         Expression::Literal(_) | Expression::Value(_) | Expression::Parameter(_) => {}
-        Expression::Member { base, field } => match base.as_ref() {
-            // `alias.field` — a clean depth-1 scalar reference. Owning the field
-            // name is intrinsic: we collect from a borrowed expression tree.
-            Expression::Identifier(a) if a == alias => {
-                if let Refs::Fields(fields) = refs {
-                    fields.insert(field.clone());
+        Expression::Member { base, .. } => {
+            // A clean alias-rooted member chain (`alias.a`, `alias.a.b`, …) is one
+            // dotted-path reference; collect its full reconstructed path so the
+            // exact-match in `covers` can compare it to the index field. Owning the
+            // path string is intrinsic — we collect from a borrowed expression tree.
+            if let Some(path) = alias_rooted_path(expr, alias) {
+                if let Refs::Fields(paths) = refs {
+                    paths.insert(path);
                 }
+            } else {
+                // Not alias-rooted (e.g. `f(alias.x).y`): descend into the base so
+                // any nested alias reference is still collected — or poisoned, if
+                // it reaches the alias through an index / path-get / subquery the
+                // scalar entry can't serve.
+                collect_alias_refs(base, alias, refs);
             }
-            // `<alias-rooted>.field` (depth ≥ 2) — nested navigation the scalar
-            // entry value can't reproduce.
-            base if touches_alias(base, alias) => *refs = Refs::Uncoverable,
-            // The base never touches the alias — nothing alias-related to collect.
-            base => collect_alias_refs(base, alias, refs),
-        },
+        }
         // Indexing into / array-distributing over the alias can't be served from
         // a scalar component value.
         Expression::Index { base, index } => {
@@ -324,8 +345,24 @@ fn collect_alias_refs(expr: &Expression, alias: &str, refs: &mut Refs) {
     }
 }
 
+/// If `expr` is a clean alias-rooted member chain (`alias.a`, `alias.a.b`, …),
+/// return the dotted path below the alias (`a`, `a.b`, …). `None` for the bare
+/// alias or any shape that isn't a pure `Member`-over-`alias` chain — cases
+/// [`collect_alias_refs`] handles (and poisons) on its own. Mirrors the planner's
+/// `path_of`, so a covered reference reconstructs the same path string the index
+/// field carries, making the exact-match in [`Analysis::covers`] sound.
+fn alias_rooted_path(expr: &Expression, alias: &str) -> Option<String> {
+    match expr {
+        Expression::Member { base, field } => match base.as_ref() {
+            Expression::Identifier(a) if a == alias => Some(field.clone()),
+            base => alias_rooted_path(base, alias).map(|p| format!("{p}.{field}")),
+        },
+        _ => None,
+    }
+}
+
 /// Whether `alias` appears anywhere in `expr` — used to reject any alias access
-/// that isn't a clean depth-1 member.
+/// that isn't a clean member chain.
 fn touches_alias(expr: &Expression, alias: &str) -> bool {
     match expr {
         Expression::Identifier(name) => name == alias,
@@ -525,5 +562,95 @@ mod tests {
             ),
             Some(false)
         );
+    }
+
+    // ── Dotted-path covering: exact-path-string match ────────────────────────
+
+    #[test]
+    fn dotted_indexed_path_projection_is_covered() {
+        // Index on `user.id`; the query reads only `c.user.id`. Its reconstructed
+        // path string-equals the index field → covered, KeyLookup dropped.
+        assert_eq!(
+            covering_flag(
+                "SELECT VALUE c.user.id FROM c WHERE c.user.id = 'x'",
+                &["user.id"]
+            ),
+            Some(true)
+        );
+        assert!(!has_key_lookup(
+            "SELECT VALUE c.user.id FROM c WHERE c.user.id = 'x'",
+            &["user.id"]
+        ));
+    }
+
+    #[test]
+    fn dotted_pk_reference_alongside_dotted_index_is_covered() {
+        // The pk (`_id`) rides on the entry's doc-id, so a covered dotted query
+        // can also project it.
+        assert_eq!(
+            covering_flag(
+                "SELECT c.user.id, c._id FROM c WHERE c.user.id = 'x'",
+                &["user.id"]
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parent_subdoc_of_dotted_index_is_not_covered() {
+        // Projecting `c.user` (the whole subdoc) needs more than `user.id` carries
+        // — the user called this case out explicitly.
+        assert_eq!(
+            covering_flag(
+                "SELECT VALUE c.user FROM c WHERE c.user.id = 'x'",
+                &["user.id"]
+            ),
+            Some(false)
+        );
+        assert!(has_key_lookup(
+            "SELECT VALUE c.user FROM c WHERE c.user.id = 'x'",
+            &["user.id"]
+        ));
+    }
+
+    #[test]
+    fn extension_of_dotted_index_is_not_covered() {
+        // `c.user.id.x` navigates past the scalar value the entry stores.
+        assert_eq!(
+            covering_flag(
+                "SELECT VALUE c.user.id.x FROM c WHERE c.user.id = 'x'",
+                &["user.id"]
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn sibling_of_dotted_index_is_not_covered() {
+        // `c.user.name` is a sibling path the `user.id` entry doesn't carry.
+        assert_eq!(
+            covering_flag(
+                "SELECT VALUE c.user.name FROM c WHERE c.user.id = 'x'",
+                &["user.id"]
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn multikey_path_index_is_not_covered() {
+        // A multikey (`tags.[]`) scan fans out under a Distinct; the array can't
+        // be rebuilt from one scalar entry, so it keeps the fetch.
+        assert_eq!(
+            covering_flag(
+                "SELECT VALUE c.tags FROM c WHERE ARRAY_CONTAINS(c.tags, 'x')",
+                &["tags.[]"]
+            ),
+            Some(false)
+        );
+        assert!(has_key_lookup(
+            "SELECT VALUE c.tags FROM c WHERE ARRAY_CONTAINS(c.tags, 'x')",
+            &["tags.[]"]
+        ));
     }
 }

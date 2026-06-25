@@ -110,6 +110,29 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
     group.finish();
 }
 
+/// Covered *dotted* projection: index on the dotted path `meta.note`, query reads
+/// only `c.meta.note` (+ pk). On the branch the scan covers (synthesizes
+/// `{meta: {note}}`, no `KeyLookup`); on `main` it fetches each matched document.
+/// Mirrors `query_indexed_eq_proj`'s selectivity for a direct comparison.
+fn bench_query_indexed_eq_dotted_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_indexed_eq_dotted_proj");
+    let sql = r#"SELECT VALUE c.meta.note FROM c WHERE c.meta.note = "active""#;
+    for n in [1_000, 10_000] {
+        let engine = nested_indexed_engine(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                txn.query(DEFAULT_CF, "bench", sql)
+                    .unwrap()
+                    .iter_values::<bson::Bson>()
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_query_multi_field_and(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_multi_and");
     for n in [1_000, 10_000] {
@@ -749,6 +772,7 @@ criterion_group!(
     bench_query_indexed_eq_projection,
     bench_query_indexed_eq_numeric,
     bench_query_indexed_eq_numeric_projection,
+    bench_query_indexed_eq_dotted_projection,
     bench_query_multi_field_and,
     bench_query_or_indexed,
     bench_query_sql,

@@ -1,11 +1,12 @@
-//! Covering index scans (RFC: Covering Index Scans, Part B — phase 1).
+//! Covering index scans (RFC: Covering Index Scans, Part B).
 //!
-//! When a query reads only an indexed field (and the pk), the scan serves it
-//! from index entries and the planner drops the document fetch. The optimization
-//! must be **invisible to results**: a covered query returns exactly what the
+//! When a query reads only an indexed path (and the pk), the scan serves it from
+//! index entries and the planner drops the document fetch. The optimization must
+//! be **invisible to results**: a covered query returns exactly what the
 //! materialized (unindexed → full-scan) plan returns. And it must **not** fire
-//! when the query reads anything else (the whole row, an unindexed field, or a
-//! deeper path) — those keep the `KeyLookup`.
+//! when the query reads anything the entry can't serve — the whole row, an
+//! unindexed field, or (for a dotted index like `meta.note`) a parent, extension,
+//! or sibling of the indexed path — those keep the `KeyLookup`.
 //!
 //! These pin both halves: a differential (`indexed == unindexed`) for the value
 //! invariant, and `EXPLAIN` assertions that the covering scan actually replaces
@@ -217,5 +218,114 @@ fn unindexed_field_query_keeps_key_lookup() {
     assert!(
         plan.contains("KeyLookup"),
         "must fetch to read `name`:\n{plan}"
+    );
+}
+
+// ── Dotted-path covering: nested synthesis, exact-path match ─────────────────
+
+/// Seed `people` with a nested `meta.{note,tag}`, indexed at `meta.note` only
+/// when `indexed`. Two rows share note `x`; row 4 omits `meta` entirely (a
+/// missing indexed path). The sibling `meta.tag` and the parent `meta` exercise
+/// the not-covered dotted shapes; `name` is an unindexed top-level sibling.
+fn seed_dotted(indexed: bool) -> Database<MemoryStore> {
+    let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+    let txn = db.begin(false).unwrap();
+    txn.create_collection(&CollectionConfig {
+        name: "people".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    if indexed {
+        txn.create_index(DEFAULT_CF, "people", "meta.note").unwrap();
+    }
+    txn.insert_many(
+        DEFAULT_CF,
+        "people",
+        vec![
+            doc! { "_id": "1", "meta": { "note": "x", "tag": "t1" }, "name": "ada" },
+            doc! { "_id": "2", "meta": { "note": "y", "tag": "t2" }, "name": "bob" },
+            doc! { "_id": "3", "meta": { "note": "x", "tag": "t3" }, "name": "cy" },
+            doc! { "_id": "4", "name": "dee" },
+        ],
+    )
+    .unwrap()
+    .drain()
+    .unwrap();
+    txn.commit().unwrap();
+    db
+}
+
+#[test]
+fn covered_dotted_projection_matches_materialized() {
+    // Index on `meta.note`; reading only `c.meta.note` covers and synthesizes
+    // `{meta: {note}}`. The covered values must match the materialized plan.
+    let sql = "SELECT VALUE c.meta.note FROM c WHERE c.meta.note = 'x'";
+    let covered = query_sorted(&seed_dotted(true), sql);
+    assert_eq!(covered, query_sorted(&seed_dotted(false), sql));
+    // Sanity: the two `x` rows (1 and 3).
+    assert_eq!(covered.len(), 2, "two rows share note `x`: {covered:?}");
+}
+
+#[test]
+fn covered_dotted_query_plan_drops_key_lookup() {
+    let plan = explain(
+        &seed_dotted(true),
+        "SELECT VALUE c.meta.note FROM c WHERE c.meta.note = 'x'",
+    );
+    assert!(
+        plan.contains("covering"),
+        "expected a covering scan:\n{plan}"
+    );
+    assert!(!plan.contains("KeyLookup"), "covered, no fetch:\n{plan}");
+}
+
+#[test]
+fn dotted_bail_cases_match_materialized() {
+    // Parent subdoc, an extension past the scalar, and a sibling path: each must
+    // bail (keep the fetch) and return identical values indexed vs unindexed.
+    for sql in [
+        "SELECT VALUE c.meta FROM c WHERE c.meta.note = 'x'",
+        "SELECT VALUE c.meta.note.deeper FROM c WHERE c.meta.note = 'x'",
+        "SELECT VALUE c.meta.tag FROM c WHERE c.meta.note = 'x'",
+    ] {
+        assert_eq!(
+            query_sorted(&seed_dotted(true), sql),
+            query_sorted(&seed_dotted(false), sql),
+            "indexed/unindexed mismatch for `{sql}`",
+        );
+    }
+}
+
+#[test]
+fn dotted_parent_subdoc_keeps_key_lookup() {
+    // Projecting the whole `c.meta` subdoc needs more than `meta.note` carries.
+    let plan = explain(
+        &seed_dotted(true),
+        "SELECT VALUE c.meta FROM c WHERE c.meta.note = 'x'",
+    );
+    assert!(
+        !plan.contains("covering"),
+        "parent subdoc must not cover:\n{plan}"
+    );
+    assert!(
+        plan.contains("KeyLookup"),
+        "needs the fetch for the whole subdoc:\n{plan}"
+    );
+}
+
+#[test]
+fn dotted_sibling_keeps_key_lookup() {
+    // `c.meta.tag` is a sibling of the indexed `meta.note` — not covered.
+    let plan = explain(
+        &seed_dotted(true),
+        "SELECT VALUE c.meta.tag FROM c WHERE c.meta.note = 'x'",
+    );
+    assert!(
+        !plan.contains("covering"),
+        "sibling path must not cover:\n{plan}"
+    );
+    assert!(
+        plan.contains("KeyLookup"),
+        "needs the fetch for `meta.tag`:\n{plan}"
     );
 }

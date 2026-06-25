@@ -4,10 +4,12 @@
 //! Maps the IR's [`IndexScanRange`] onto the engine's `IndexRange` and streams
 //! the matching entries' doc-IDs. Pair with [`super::key_lookup`] to fetch the
 //! documents — unless the scan is **covering**, in which case it emits a
-//! synthesized `{field: entry.value(), <pk>: doc_id}` document per entry and the
-//! planner omits the `KeyLookup` (RFC: Covering Index Scans, Part B). The
-//! planner only sets `covering` after proving the query reads nothing but
-//! `field` and the pk, so the two fields the entry carries are all it needs.
+//! synthesized document per entry — `{field: entry.value(), <pk>: doc_id}`, with
+//! the value nested when `field` is a dotted path (`user.id` →
+//! `{user: {id: value}}`) — and the planner omits the `KeyLookup` (RFC: Covering
+//! Index Scans, Part B). The planner only sets `covering` after proving the query
+//! reads nothing but `field` and the pk, so the two values the entry carries are
+//! all it needs.
 //!
 //! ## Post-filter: keeping the index identical to a scan
 //!
@@ -35,21 +37,45 @@ use slate_planner::{CollectionRef, IndexScanRange, ScanDirection};
 
 use crate::{ExecError, ValueIter};
 
-/// Build the covering row for one entry: the indexed value under `field`, and
-/// the doc-id under `pk_path`. The pk is skipped when the index field *is* the
-/// pk (avoiding a duplicate key); the planner proved the query reads nothing but
-/// these two fields, so the synthesized document is a drop-in for the fetched one.
+/// Build the covering row for one entry: the indexed value at `field` — nested
+/// when `field` is a dotted path (`user.id` → `{user: {id: value}}`) — and the
+/// doc-id under the (always top-level) `pk_path`. The pk is skipped when the
+/// index field *is* the pk (avoiding a duplicate key); the planner proved the
+/// query reads nothing but these two paths, so the synthesized document is a
+/// drop-in for the fetched one.
 fn synthesize_row(entry: &IndexEntry, field: &str, pk_path: &str) -> Result<RawBson, EngineError> {
-    let field_key = CString::try_from(field)
-        .map_err(|e| EngineError::InvalidKey(format!("index field {field:?}: {e}")))?;
     let mut doc = RawDocumentBuf::new();
-    doc.append(field_key, entry.value()?);
+    append_path(&mut doc, field, entry.value()?)?;
     if pk_path != field {
         let pk_key = CString::try_from(pk_path)
             .map_err(|e| EngineError::InvalidKey(format!("pk path {pk_path:?}: {e}")))?;
         doc.append(pk_key, entry.doc_id()?);
     }
     Ok(RawBson::Document(doc))
+}
+
+/// Append `value` at the dotted `path` into `doc`, materializing intermediate
+/// nested objects: a top-level `path` (no `.`) appends directly, while `user.id`
+/// builds `{user: {id: value}}`. Single-component synthesis only — one value per
+/// call — so the nested objects never need merging (compound covering, a later
+/// phase, does). The planner guarantees `path` carries no `.[]` multikey marker.
+fn append_path(doc: &mut RawDocumentBuf, path: &str, value: RawBson) -> Result<(), EngineError> {
+    match path.split_once('.') {
+        None => {
+            let key = CString::try_from(path)
+                .map_err(|e| EngineError::InvalidKey(format!("index path {path:?}: {e}")))?;
+            doc.append(key, value);
+        }
+        Some((head, rest)) => {
+            let key = CString::try_from(head).map_err(|e| {
+                EngineError::InvalidKey(format!("index path segment {head:?}: {e}"))
+            })?;
+            let mut inner = RawDocumentBuf::new();
+            append_path(&mut inner, rest, value)?;
+            doc.append(key, RawBson::Document(inner));
+        }
+    }
+    Ok(())
 }
 
 /// A bounded range predicate matched with the same coercing, type-bracketed
@@ -193,10 +219,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
 #[cfg(test)]
 mod tests {
-    use super::execute;
+    use super::{append_path, execute};
     use crate::collect;
     use crate::nodes::test_support::{people_ref, seeded_people};
-    use bson::{Bson, RawBson};
+    use bson::{Bson, RawBson, RawDocumentBuf};
     use slate_engine::Engine;
     use slate_planner::{IndexScanRange, ScanDirection};
 
@@ -308,5 +334,40 @@ mod tests {
             scan_ids(range, ScanDirection::Forward, None),
             vec![id("2"), id("3")]
         );
+    }
+
+    #[test]
+    fn append_path_top_level_appends_directly_and_keeps_type() {
+        // A top-level field appends directly; Int32 stays Int32 (40 ≠ 40.0), so
+        // synthesis preserves the entry value's type.
+        let mut doc = RawDocumentBuf::new();
+        append_path(&mut doc, "age", RawBson::Int32(40)).unwrap();
+        assert_eq!(doc.get_i32("age").unwrap(), 40);
+        assert_eq!(doc.iter().count(), 1);
+    }
+
+    #[test]
+    fn append_path_builds_nested_object_for_dotted_field() {
+        // `user.id` → `{user: {id: value}}`, navigable to the same path the query
+        // reads.
+        let mut doc = RawDocumentBuf::new();
+        append_path(&mut doc, "user.id", RawBson::String("u1".into())).unwrap();
+        let user = doc.get_document("user").unwrap();
+        assert_eq!(user.get_str("id").unwrap(), "u1");
+    }
+
+    #[test]
+    fn append_path_handles_three_segments() {
+        // Deeper paths nest one object per segment.
+        let mut doc = RawDocumentBuf::new();
+        append_path(&mut doc, "a.b.c", RawBson::Boolean(true)).unwrap();
+        let c = doc
+            .get_document("a")
+            .unwrap()
+            .get_document("b")
+            .unwrap()
+            .get_bool("c")
+            .unwrap();
+        assert!(c);
     }
 }
