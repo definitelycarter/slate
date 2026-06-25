@@ -1,12 +1,22 @@
 # RFC: On-Disk Format Versioning
 
-> **Status: proposed.** Surfaced in the same "what's missing for a *proper
-> embedded database*" survey as the [Database Hardening](../roadmap.md#database-hardening--proposed)
-> track. Slate persists three independent on-disk formats — index entries, record
-> blobs, and the catalog — but only *one* (index encoding) carries a version and a
-> migration path. The other two have no compatibility story, so the first time
-> either needs to evolve, there is no "newer binary opens an older file, or refuses
-> cleanly" mechanism — versioning would be retrofitted under pressure, against
+> **Status: v1 implemented.** The lone index-encoding version marker is now a
+> small `_sys_` format registry (`kv/formats.rs`): a `Format` enum
+> (`index_encoding`, `catalog`), a shared `refuse_if_too_new` gate, and a
+> `check_and_migrate_formats` open pass that runs in place of the old
+> index-encoding-only migration. The catalog carries a version
+> (`CATALOG_VERSION = 1`, store-level marker + a `#[serde(default)]`
+> `CollectionMeta.version`); a too-new store on disk refuses cleanly with the
+> typed `EngineError::UnsupportedFormatVersion`. The **record-format version is
+> design-reserved** (documented seam, no marker stamped — the tag byte stays the
+> backstop), per the scope discipline below. Surfaced in the same "what's missing
+> for a *proper embedded database*" survey as the
+> [Database Hardening](../roadmap.md#database-hardening--proposed) track. Slate
+> persists three independent on-disk formats — index entries, record blobs, and
+> the catalog — but only *one* (index encoding) carried a version and a migration
+> path. The other two had no compatibility story, so the first time either needed
+> to evolve, there was no "newer binary opens an older file, or refuses cleanly"
+> mechanism — versioning would be retrofitted under pressure, against
 > already-written user data. This RFC generalises the precedent that already
 > exists, before it is needed a second time. No format changes for their own sake:
 > the deliverable is the *contract* and the seam, not new encodings.

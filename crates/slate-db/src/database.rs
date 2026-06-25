@@ -141,9 +141,10 @@ impl DatabaseBuilder {
             None => Arc::new(KvEngine::new(store)),
         };
 
-        // Upgrade any index entries written by an older encoding before serving
-        // transactions — an un-migrated string index would silently undercount.
-        engine.migrate_index_encoding()?;
+        // Validate and migrate every on-disk format before serving transactions:
+        // an un-migrated string index would silently undercount, and a store
+        // written by a newer binary is refused cleanly rather than mis-read.
+        engine.check_and_migrate_formats()?;
 
         // Resolve the `RAND()` source: an injected one wins; otherwise the native
         // build falls back to the seeded PRNG. With the `runtime` feature off

@@ -1,4 +1,5 @@
 mod catalog;
+mod formats;
 mod migrate;
 mod transaction;
 mod verify;
@@ -26,6 +27,14 @@ pub const DEFAULT_CF: &str = "default_cf";
 pub(crate) struct CollectionMeta {
     pub pk: String,
     pub ttl: String,
+    /// Catalog format version that wrote this metadata. `#[serde(default)]` so a
+    /// pre-versioning blob (no field) reads as `0`; new collections stamp the
+    /// current [`formats::CATALOG_VERSION`]. Informational in v1 — the
+    /// authoritative open-time gate is the store-level `catalog` format marker
+    /// (see [`formats`]) — but it lets a future catalog change branch
+    /// per-collection without a store-wide migration.
+    #[serde(default)]
+    pub version: u8,
 }
 
 fn default_clock() -> i64 {

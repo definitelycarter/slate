@@ -19,20 +19,8 @@ use crate::error::EngineError;
 use crate::traits::{Engine, EngineTransaction};
 
 use super::KvEngine;
+use super::formats::{Format, INDEX_ENCODING_VERSION, refuse_if_too_new};
 use super::transaction::KvTransaction;
-
-/// Current index-key encoding version. Bumped whenever the on-disk index entry
-/// layout changes in a way that requires a re-index migration.
-///
-/// - `1` — variable-width (string) index values carry a trailing `u32`
-///   value-length suffix, making the value/doc_id boundary exact (it was
-///   previously located by an ambiguous backward scan that could undercount).
-pub(crate) const INDEX_ENCODING_VERSION: u8 = 1;
-
-/// Reserved `_sys_` key holding the stored [`INDEX_ENCODING_VERSION`]. The `m`
-/// ("meta") tag byte is distinct from every [`Key`] tag, so the key is inert to
-/// `Key::decode` and never collides with collection/index/function metadata.
-const INDEX_ENCODING_VERSION_KEY: &[u8] = b"m\x00index_encoding_version";
 
 impl<S: Store> KvEngine<S> {
     /// Bring the store's index entries up to [`INDEX_ENCODING_VERSION`].
@@ -40,17 +28,21 @@ impl<S: Store> KvEngine<S> {
     /// A no-op when the store is already current (a single read-only peek). When
     /// behind, it reindexes every collection in one write transaction and bumps
     /// the stored version, committing atomically — a failure rolls back and is
-    /// retried on the next open, so the store is never left half-migrated.
+    /// retried on the next open, so the store is never left half-migrated. When
+    /// the stored version is *newer* than this binary supports, it refuses
+    /// cleanly via [`refuse_if_too_new`] rather than proceeding over an encoding
+    /// it cannot read.
     ///
-    /// Run on open, before serving transactions, since an un-migrated string
-    /// index would silently undercount.
+    /// Run on open (via [`KvEngine::check_and_migrate_formats`]), before serving
+    /// transactions, since an un-migrated string index would silently undercount.
     pub fn migrate_index_encoding(&self) -> Result<(), EngineError> {
         // Fast path: avoid opening a write transaction when already current.
         {
             let txn = self.begin(true)?;
             let current = txn.index_encoding_version()?;
             txn.rollback()?;
-            if current >= INDEX_ENCODING_VERSION {
+            refuse_if_too_new(Format::IndexEncoding, current)?;
+            if current == INDEX_ENCODING_VERSION {
                 return Ok(());
             }
         }
@@ -64,14 +56,11 @@ impl<S: Store> KvEngine<S> {
 
 impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     /// Read the stored index-encoding version (`0` when the marker is absent,
-    /// i.e. a store written before versioning existed).
+    /// i.e. a store written before versioning existed). A thin alias over
+    /// [`format_version`](Self::format_version) for [`Format::IndexEncoding`],
+    /// kept for call-site clarity in the migration and its tests.
     fn index_encoding_version(&self) -> Result<u8, EngineError> {
-        let sys = self.sys_cf()?;
-        Ok(self
-            .txn
-            .get(&sys, INDEX_ENCODING_VERSION_KEY)?
-            .and_then(|v| v.first().copied())
-            .unwrap_or(0))
+        self.format_version(Format::IndexEncoding)
     }
 
     /// Reindex every collection (across all CFs) and stamp the current version.
@@ -94,9 +83,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
             self.reindex_collection_indexes(cf, name)?;
         }
 
-        let sys = self.sys_cf()?;
-        self.txn
-            .put(&sys, INDEX_ENCODING_VERSION_KEY, &[INDEX_ENCODING_VERSION])?;
+        self.stamp_format_version(Format::IndexEncoding)?;
         Ok(())
     }
 

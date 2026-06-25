@@ -11,6 +11,7 @@ use crate::traits::{
     IndexSpec,
 };
 
+use super::formats::CATALOG_VERSION;
 use super::transaction::{KvTransaction, unique_violation};
 use super::{CollectionMeta, SYS_CF};
 
@@ -190,6 +191,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
                 .ttl_path
                 .clone()
                 .unwrap_or_else(|| "ttl".to_string()),
+            version: CATALOG_VERSION,
         };
         let sys = self.sys_cf()?;
         let key = Key::Collection(Cow::Borrowed(cf), Cow::Borrowed(name)).encode();
