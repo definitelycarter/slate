@@ -1,15 +1,28 @@
 # RFC: Encryption at Rest
 
-> **Status: proposed.** Surfaced in the same "what's missing for a *proper embedded
+> **Status: v1 done (documentation deliverable); backend crypto deferred.** The v1
+> deliverable for this RFC was always to **decide the layer and document the
+> guarantee**, not to write crypto — and that decision is now made and written down.
+> The supported at-rest story is OS / device-level encryption (iOS Data Protection,
+> FileVault/APFS, equivalents elsewhere), and the guarantee + honest threat model are
+> documented in
+> [Architecture → Storage Layer → Encryption at Rest](../architecture-storage.md#encryption-at-rest).
+> Slate ships **zero crypto code**. What remains **deferred** is any code: backend
+> page-level encryption (alternative 2) and the reserved `KeyProvider` seam
+> (described below as a future design, **not** a shipped API) — to be built only if a
+> threat model demands more than OS trust. The full design body below is retained as
+> the record of *why* this is the answer.
+>
+> Surfaced in the same "what's missing for a *proper embedded
 > database*" survey as the [Database Hardening](../roadmap.md#database-hardening--proposed)
 > track, as its missing companion. That track answered *can I trust my data
 > survives a crash* ([Durability & Crash Safety](./durability-and-crash-safety.md)).
 > It never answered *is my data protected if someone reads the file*. For a database
 > that embeds in a native app on a user's device, the on-disk file is exactly what
-> an attacker with device or backup access reads. There is zero coverage today, and
-> the default backend (redb) has no native cipher. This RFC's job is to **decide the
-> layer and document the guarantee** before writing any crypto — the right answer
-> for an *indexed* store is not the obvious one.
+> an attacker with device or backup access reads. There was zero coverage before this
+> RFC, and the default backend (redb) has no native cipher. This RFC's job was to
+> **decide the layer and document the guarantee** before writing any crypto — the
+> right answer for an *indexed* store is not the obvious one.
 
 ## Problem
 
@@ -135,13 +148,16 @@ value-level) must be in that design.
 
 ## Recommendation
 
-1. **Adopt OS-level encryption as the documented at-rest story now.** It is cheap,
-   strong on the target Apple platform, and covers keys+values+backup without the
-   index-key leak. Write down the guarantee and the iOS Data Protection class —
-   that documentation *is* the deliverable for v1.
+1. **Adopt OS-level encryption as the documented at-rest story now.** *(Done.)* It is
+   cheap, strong on the target Apple platform, and covers keys+values+backup without
+   the index-key leak. Write down the guarantee and the iOS Data Protection class —
+   that documentation *is* the deliverable for v1, and it now lives in
+   [Architecture → Storage Layer → Encryption at Rest](../architecture-storage.md#encryption-at-rest).
 2. **Reserve a `KeyProvider` seam** on the builder/bindings for a future
    page-level option, but build no crypto until a threat model demands more than OS
-   trust.
+   trust. *(Deferred — a reserved future design, not a shipped API. No
+   `with_encryption`, `KeyProvider`, or `open_encrypted` exists today; the open
+   surface still takes a path only.)*
 3. **Spike, only if (2) is greenfield-justified:** assess whether exposing the
    `rust-rocksdb` encryption `Env` is tractable, and prototype the iOS Data
    Protection class selection end-to-end so the documented guarantee is real, not

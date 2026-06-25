@@ -11,6 +11,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Indexed queries** — single-field and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
+- **Encryption at rest via the OS** — relies on the device's full-disk / file-level encryption (iOS Data Protection, FileVault/APFS, equivalents), which protects the whole on-disk file — keys, values, and `_id`s — on a locked or powered-off device; no app-level crypto. See [the guarantee and threat model](book/src/architecture-storage.md#encryption-at-rest)
 - **Three storage backends** — RocksDB (fast), redb (pure Rust, no C dependencies), in-memory (ephemeral, default)
 - **Swift/Apple embedding** — UniFFI bindings, XCFramework builds for macOS and iOS
 - **WebAssembly** — wasm-bindgen bindings with JS-native object interface (no BSON library required), powering an in-browser [query playground](book/src/playground.md) in the docs
