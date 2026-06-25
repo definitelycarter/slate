@@ -102,8 +102,12 @@ uninstrumented:
   Geohash/S2 candidate-cell scan + recheck for `ST_DISTANCE`/`ST_WITHIN`.
 - **[Index Intersection Strategy](./rfcs/index-intersection-strategy.md)** —
   *proposed.* How `IndexMerge` chooses and combines indexes.
-- **Full-text & vector indexes** — *proposed.* BM25 full-text and `VECTORDISTANCE`;
-  see the [SQL Query Surface RFC](./rfcs/sql-query-surface.md).
+- **[Vector Index & `VECTORDISTANCE`](./rfcs/vector-index.md)** — *proposed (design
+  spike).* On-device nearest-neighbour search for RAG / semantic search. Flat
+  (brute-force) `scan_range` + top-k first — exact, KV-native, filter-friendly,
+  Cosmos `VECTORDISTANCE` parity; quantization and ANN deferred to later phases.
+- **Full-text indexes** — *proposed.* BM25 full-text (`FULLTEXTCONTAINS`,
+  `FULLTEXTSCORE`, `RRF`); see the [SQL Query Surface RFC](./rfcs/sql-query-surface.md).
 
 ## Query & Execution
 
