@@ -8,6 +8,7 @@ pub(crate) mod hooks;
 pub(crate) mod runtime;
 pub(crate) mod stats;
 pub(crate) mod trace;
+pub mod v2;
 pub(crate) mod watch;
 
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};

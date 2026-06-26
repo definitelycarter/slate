@@ -808,7 +808,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// Index identities split into single-field (the flat `indexes`) and compound
     /// (`compound_indexes`, each carried as `(identity, components)` so the
     /// planner passes the engine's stored identity through opaquely).
-    fn collection_meta(
+    pub(crate) fn collection_meta(
         &self,
         cf: &str,
         collection: &str,
@@ -938,6 +938,30 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             self.rand.clone(),
             self.watch_sink.clone(),
         ))
+    }
+
+    // ── v2 surface accessors ─────────────────────────────────────
+    //
+    // The `slate-db/src/v2` module builds its own read/write bodies (lower →
+    // plan → cursor) instead of calling the public verbs above, so it reaches
+    // this transaction's execution state through these crate-internal accessors.
+    // It shares the engine transaction and `collection_meta` (catalog reads),
+    // nothing else of v1's glue.
+
+    pub(crate) fn engine_txn(&self) -> &<KvEngine<S> as Engine>::Txn<'db> {
+        &self.txn
+    }
+
+    pub(crate) fn pool(&self) -> Option<&'db VmPool> {
+        self.pool
+    }
+
+    pub(crate) fn rand(&self) -> Option<&RandFn> {
+        self.rand.as_ref()
+    }
+
+    pub(crate) fn watch_sink(&self) -> Option<&Rc<WatchSink>> {
+        self.watch_sink.as_ref()
     }
 
     /// Find the first document matching a filter.
