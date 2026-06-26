@@ -15,7 +15,7 @@ use std::fs;
 
 use bson::Bson;
 use serde_json::{Value, json};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn main() {
@@ -35,16 +35,15 @@ fn main() {
         .expect("open db");
     {
         let txn = db.begin(false).expect("begin");
-        txn.create_collection(&CollectionConfig {
-            name: "c".into(),
-            pk_path: "id".into(), // match Cosmos's system primary key
-            ..Default::default()
-        })
-        .expect("create collection");
-        txn.insert_many(DEFAULT_CF, "c", docs)
-            .expect("insert")
-            .drain()
-            .expect("drain");
+        db.collections()
+            .create("c")
+            .pk_path("id") // match Cosmos's system primary key
+            .execute(&txn)
+            .expect("create collection");
+        db.collection("c")
+            .insert_many(docs)
+            .execute(&txn)
+            .expect("insert");
         txn.commit().expect("commit");
     }
 
@@ -63,11 +62,7 @@ fn run_one(db: &Database<MemoryStore>, sql: &str) -> Value {
         Ok(t) => t,
         Err(e) => return err(sql, &e.to_string()),
     };
-    let cursor = match txn.query(DEFAULT_CF, "c", sql) {
-        Ok(c) => c,
-        Err(e) => return err(sql, &e.to_string()),
-    };
-    let iter = match cursor.iter_raw_values() {
+    let iter = match db.collection("c").query(sql).iter_raw(&txn) {
         Ok(it) => it,
         Err(e) => return err(sql, &e.to_string()),
     };

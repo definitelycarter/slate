@@ -12,7 +12,7 @@ use std::path::Path;
 
 use bson::Bson;
 use serde_json::{Value, json};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn main() {
@@ -60,18 +60,10 @@ fn run_one(name: &str, sql: &str, folder: &Path) -> Value {
             Ok(t) => t,
             Err(e) => return err(name, &e.to_string()),
         };
-        let config = CollectionConfig {
-            name: "c".into(),
-            pk_path: "id".into(),
-            ..Default::default()
-        };
-        if let Err(e) = txn.create_collection(&config) {
+        if let Err(e) = db.collections().create("c").pk_path("id").execute(&txn) {
             return err(name, &e.to_string());
         }
-        if let Err(e) = txn
-            .insert_many(DEFAULT_CF, "c", docs)
-            .and_then(|c| c.drain())
-        {
+        if let Err(e) = db.collection("c").insert_many(docs).execute(&txn) {
             return err(name, &e.to_string());
         }
         if let Err(e) = txn.commit() {
@@ -87,11 +79,7 @@ fn run_query(db: &Database<MemoryStore>, name: &str, sql: &str) -> Value {
         Ok(t) => t,
         Err(e) => return err(name, &e.to_string()),
     };
-    let cursor = match txn.query(DEFAULT_CF, "c", sql) {
-        Ok(c) => c,
-        Err(e) => return err(name, &e.to_string()),
-    };
-    let iter = match cursor.iter_raw_values() {
+    let iter = match db.collection("c").query(sql).iter_raw(&txn) {
         Ok(i) => i,
         Err(e) => return err(name, &e.to_string()),
     };

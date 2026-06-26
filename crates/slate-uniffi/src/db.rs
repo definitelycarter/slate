@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use bson::RawDocumentBuf;
-use slate_db::{
-    CollectionConfig, Database, DatabaseBuilder, DatabaseTransaction, DbError, FindOptions,
-    DEFAULT_CF,
-};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder, DatabaseTransaction, DbError, FindOptions};
 
 use crate::error::SlateError;
 
@@ -108,7 +106,12 @@ impl SlateDatabase {
     pub fn insert_one(&self, collection: String, doc: Vec<u8>) -> Result<u64, SlateError> {
         let doc = parse_doc(doc)?;
         self.write(|txn| {
-            let affected = txn.insert_one(DEFAULT_CF, &collection, doc)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .insert_one(doc)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -116,7 +119,12 @@ impl SlateDatabase {
     pub fn insert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         let docs = parse_docs(docs)?;
         self.write(|txn| {
-            let affected = txn.insert_many(DEFAULT_CF, &collection, docs)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .insert_many(docs)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -132,9 +140,22 @@ impl SlateDatabase {
         let filter = parse_doc(filter)?;
         let options = Self::parse_options(options)?;
         self.read(|txn| {
-            let results: Vec<Vec<u8>> = txn
-                .find(DEFAULT_CF, &collection, filter, options)?
-                .iter_raw()?
+            let coll = self.db.collection(&collection);
+            let mut builder = coll.find(filter);
+            for sort in options.sort {
+                builder = builder.sort(&sort.field, sort.direction);
+            }
+            if let Some(skip) = options.skip {
+                builder = builder.offset(skip);
+            }
+            if let Some(take) = options.take {
+                builder = builder.limit(take);
+            }
+            if let Some(columns) = options.columns {
+                builder = builder.project(columns);
+            }
+            let results: Vec<Vec<u8>> = builder
+                .iter_raw(txn)?
                 .map(|r| r.map(|doc| doc.into_bytes()))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(results)
@@ -148,7 +169,13 @@ impl SlateDatabase {
     ) -> Result<Option<Vec<u8>>, SlateError> {
         let filter = parse_doc(filter)?;
         self.read(|txn| {
-            let raw = txn.find_one(DEFAULT_CF, &collection, filter)?;
+            let raw = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .iter_raw(txn)?
+                .next()
+                .transpose()?;
             Ok(raw.map(|r| r.into_bytes()))
         })
     }
@@ -164,9 +191,14 @@ impl SlateDatabase {
         let filter = parse_doc(filter)?;
         let update = parse_doc(update)?;
         self.write(|txn| {
-            let affected = txn
-                .update_one(DEFAULT_CF, &collection, filter, update)?
-                .drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .update(update)
+                .one()
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -180,9 +212,13 @@ impl SlateDatabase {
         let filter = parse_doc(filter)?;
         let update = parse_doc(update)?;
         self.write(|txn| {
-            let affected = txn
-                .update_many(DEFAULT_CF, &collection, filter, update)?
-                .drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .update(update)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -196,9 +232,13 @@ impl SlateDatabase {
         let filter = parse_doc(filter)?;
         let replacement = parse_doc(replacement)?;
         self.write(|txn| {
-            let affected = txn
-                .replace_one(DEFAULT_CF, &collection, filter, replacement)?
-                .drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .replace(replacement)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -208,7 +248,14 @@ impl SlateDatabase {
     pub fn delete_one(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
         let filter = parse_doc(filter)?;
         self.write(|txn| {
-            let affected = txn.delete_one(DEFAULT_CF, &collection, filter)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .delete()
+                .one()
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -216,7 +263,13 @@ impl SlateDatabase {
     pub fn delete_many(&self, collection: String, filter: Vec<u8>) -> Result<u64, SlateError> {
         let filter = parse_doc(filter)?;
         self.write(|txn| {
-            let affected = txn.delete_many(DEFAULT_CF, &collection, filter)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .delete()
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -229,8 +282,13 @@ impl SlateDatabase {
             None => bson::rawdoc! {},
         };
         self.read(|txn| {
-            let count = txn.count(DEFAULT_CF, &collection, filter)?;
-            Ok(count)
+            let count = self
+                .db
+                .collection(&collection)
+                .find(filter)
+                .iter_raw(txn)?
+                .count();
+            Ok(count as u64)
         })
     }
 
@@ -239,7 +297,12 @@ impl SlateDatabase {
     pub fn upsert_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         let docs = parse_docs(docs)?;
         self.write(|txn| {
-            let affected = txn.upsert_many(DEFAULT_CF, &collection, docs)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .upsert_many(docs)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -247,7 +310,12 @@ impl SlateDatabase {
     pub fn merge_many(&self, collection: String, docs: Vec<Vec<u8>>) -> Result<u64, SlateError> {
         let docs = parse_docs(docs)?;
         self.write(|txn| {
-            let affected = txn.merge_many(DEFAULT_CF, &collection, docs)?.drain()?;
+            let affected = self
+                .db
+                .collection(&collection)
+                .merge_many(docs)
+                .execute(txn)?
+                .affected;
             Ok(affected)
         })
     }
@@ -256,13 +324,12 @@ impl SlateDatabase {
 
     pub fn create_collection(&self, name: String, indexes: Vec<String>) -> Result<(), SlateError> {
         self.write(|txn| {
-            let config = CollectionConfig {
-                name: name.clone(),
-                ..Default::default()
-            };
-            txn.create_collection(&config)?;
+            self.db.collections().create(&name).execute(txn)?;
+            let coll = self.db.collection(&name);
             for field in &indexes {
-                txn.create_index(DEFAULT_CF, &name, field)?;
+                coll.indexes()
+                    .create(field.as_str(), IndexOptions::default())
+                    .execute(txn)?;
             }
             Ok(())
         })
@@ -270,13 +337,14 @@ impl SlateDatabase {
 
     pub fn drop_collection(&self, collection: String) -> Result<(), SlateError> {
         self.write(|txn| {
-            txn.drop_collection(DEFAULT_CF, &collection)?;
+            self.db.collections().remove(&collection).execute(txn)?;
             Ok(())
         })
     }
 
     pub fn list_collections(&self) -> Result<Vec<String>, SlateError> {
         self.read(|txn| {
+            // v2: no global list (collections().list() is cf-scoped); keep flat
             let collections = txn.list_collections()?;
             Ok(collections.into_iter().map(|(_, name)| name).collect())
         })
@@ -286,21 +354,29 @@ impl SlateDatabase {
 
     pub fn create_index(&self, collection: String, field: String) -> Result<(), SlateError> {
         self.write(|txn| {
-            txn.create_index(DEFAULT_CF, &collection, &field)?;
+            self.db
+                .collection(&collection)
+                .indexes()
+                .create(field.as_str(), IndexOptions::default())
+                .execute(txn)?;
             Ok(())
         })
     }
 
     pub fn drop_index(&self, collection: String, field: String) -> Result<(), SlateError> {
         self.write(|txn| {
-            txn.drop_index(DEFAULT_CF, &collection, &field)?;
+            self.db
+                .collection(&collection)
+                .indexes()
+                .remove(field.as_str())
+                .execute(txn)?;
             Ok(())
         })
     }
 
     pub fn list_indexes(&self, collection: String) -> Result<Vec<String>, SlateError> {
         self.read(|txn| {
-            let indexes = txn.list_indexes(DEFAULT_CF, &collection)?;
+            let indexes = self.db.collection(&collection).indexes().list(txn)?;
             Ok(indexes)
         })
     }
