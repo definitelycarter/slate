@@ -38,9 +38,8 @@ use serde::{Deserialize, Serialize};
 use slate_store::Store;
 
 use crate::Database;
-use crate::collection::CollectionConfig;
-use crate::cursor::Cursor;
 use crate::error::DbError;
+use crate::v2::IndexOptions;
 
 /// File name of the manifest within a dump directory.
 const MANIFEST_FILE: &str = "manifest.bson";
@@ -219,8 +218,8 @@ impl<S: Store> Database<S> {
         let mut defs = Vec::with_capacity(targets.len());
         let mut report = Vec::with_capacity(targets.len());
         for (cf, name) in &targets {
-            let schema = txn.collection_schema(cf, name)?;
-            let count = write_collection_stream(dir, &txn, cf, name)?;
+            let schema = self.cf(cf).collection(name).schema(&txn)?;
+            let count = write_collection_stream(dir, self, &txn, cf, name)?;
             defs.push(CollectionDef {
                 cf: schema.cf,
                 name: schema.name,
@@ -284,11 +283,11 @@ impl<S: Store> Database<S> {
             // Clone the names to build a lookup key; the `HashSet` is keyed by
             // owned `(String, String)` and `def` is borrowed and reused below.
             if !existing.contains(&(def.cf.clone(), def.name.clone())) {
-                create_collection_from_def(&txn, def)?;
+                create_collection_from_def(self, &txn, def)?;
             }
 
             let count =
-                read_collection_stream(dir, &txn, &def.cf, &def.name, options.on_collision)?;
+                read_collection_stream(dir, self, &txn, &def.cf, &def.name, options.on_collision)?;
             // Clone the names into the report; `def` is borrowed from the
             // manifest and reused by the remaining iterations.
             report.push((def.cf.clone(), def.name.clone(), count));
@@ -306,30 +305,34 @@ impl<S: Store> Database<S> {
 /// by `create_collection`; creating it again is harmless (`IndexExists` is
 /// ignored by `create_collection`, and we skip it here too).
 fn create_collection_from_def<S: Store>(
+    db: &Database<S>,
     txn: &crate::database::Transaction<'_, S>,
     def: &CollectionDef,
 ) -> Result<(), DbError> {
-    txn.create_collection(&CollectionConfig {
-        // Owned strings: the config takes ownership, and `def` is borrowed and
-        // reused for index creation below, so its fields can't be moved out.
-        name: def.name.clone(),
-        cf: def.cf.clone(),
-        pk_path: def.pk_path.clone(),
-        ttl_path: def.ttl_path.clone(),
-    })?;
+    db.cf(&def.cf)
+        .collections()
+        .create(&def.name)
+        .pk_path(&def.pk_path)
+        .ttl_path(&def.ttl_path)
+        .execute(txn)?;
 
     let unique: std::collections::HashSet<&str> =
         def.unique_indexes.iter().map(String::as_str).collect();
     for field in &def.indexes {
-        // The TTL index is created by `create_collection`; don't redefine it.
+        // The TTL index is auto-created with the collection; don't redefine it.
         if field == &def.ttl_path {
             continue;
         }
-        if unique.contains(field.as_str()) {
-            txn.create_unique_index(&def.cf, &def.name, field)?;
+        let options = if unique.contains(field.as_str()) {
+            IndexOptions::unique()
         } else {
-            txn.create_index(&def.cf, &def.name, field)?;
-        }
+            IndexOptions::default()
+        };
+        db.cf(&def.cf)
+            .collection(&def.name)
+            .indexes()
+            .create(field.as_str(), options)
+            .execute(txn)?;
     }
     Ok(())
 }
@@ -339,6 +342,7 @@ fn create_collection_from_def<S: Store>(
 /// transaction (the export snapshot) so the file is coherent with the manifest.
 fn write_collection_stream<S: Store>(
     dir: &Path,
+    db: &Database<S>,
     txn: &crate::database::Transaction<'_, S>,
     cf: &str,
     collection: &str,
@@ -350,9 +354,13 @@ fn write_collection_stream<S: Store>(
 
     // A full scan with no filter yields every document; iterate raw so each one
     // is written in its native BSON representation with no deserialize round-trip.
-    let cursor = txn.find(cf, collection, bson::Document::new(), Default::default())?;
     let mut count = 0u64;
-    for doc in cursor.iter_raw()? {
+    for doc in db
+        .cf(cf)
+        .collection(collection)
+        .find(bson::Document::new())
+        .iter_raw(txn)?
+    {
         let doc = doc?;
         writer.write_all(doc.as_bytes()).map_err(|e| {
             DbError::InvalidDocument(format!("cannot write {}: {e}", path.display()))
@@ -371,6 +379,7 @@ fn write_collection_stream<S: Store>(
 /// and inserted in bounded batches so a large dump never fully materializes.
 fn read_collection_stream<S: Store>(
     dir: &Path,
+    db: &Database<S>,
     txn: &crate::database::Transaction<'_, S>,
     cf: &str,
     collection: &str,
@@ -386,16 +395,17 @@ fn read_collection_stream<S: Store>(
     while let Some(doc) = reader.next_doc()? {
         batch.push(doc);
         if batch.len() >= IMPORT_BATCH {
-            count += flush_batch(txn, cf, collection, &mut batch, on_collision)?;
+            count += flush_batch(db, txn, cf, collection, &mut batch, on_collision)?;
         }
     }
-    count += flush_batch(txn, cf, collection, &mut batch, on_collision)?;
+    count += flush_batch(db, txn, cf, collection, &mut batch, on_collision)?;
     Ok(count)
 }
 
 /// Apply one batch of documents under the chosen collision policy and clear it,
 /// returning how many were loaded.
 fn flush_batch<S: Store>(
+    db: &Database<S>,
     txn: &crate::database::Transaction<'_, S>,
     cf: &str,
     collection: &str,
@@ -408,18 +418,30 @@ fn flush_batch<S: Store>(
     let loaded = match on_collision {
         // Plain insert: a pre-existing `_id` surfaces as `DuplicateKey`, which
         // aborts the whole import (the transaction is dropped uncommitted).
-        OnCollision::Error => txn.insert_many(cf, collection, batch.drain(..))?.drain()?,
+        OnCollision::Error => {
+            db.cf(cf)
+                .collection(collection)
+                .insert_many(batch.drain(..))
+                .execute(txn)?
+                .affected
+        }
         // Replace whatever is there.
-        OnCollision::Overwrite => txn.upsert_many(cf, collection, batch.drain(..))?.drain()?,
+        OnCollision::Overwrite => {
+            db.cf(cf)
+                .collection(collection)
+                .upsert_many(batch.drain(..))
+                .execute(txn)?
+                .affected
+        }
         // Insert only those whose `_id` is absent. Done one at a time so a
-        // collision skips just that document instead of failing the batch. The
-        // duplicate-key error surfaces when the insert cursor is *drained* (the
-        // mutation is lazy), so the match is on `insert_one(..).drain()`.
+        // collision skips just that document instead of failing the batch — the
+        // duplicate-key error is returned (not committed) per document.
         OnCollision::Skip => {
+            let coll = db.cf(cf).collection(collection);
             let mut loaded = 0u64;
             for doc in batch.drain(..) {
-                match txn.insert_one(cf, collection, doc).and_then(Cursor::drain) {
-                    Ok(n) => loaded += n,
+                match coll.insert_one(doc).execute(txn) {
+                    Ok(result) => loaded += result.affected,
                     Err(DbError::DuplicateKey(_)) => {}
                     Err(e) => return Err(e),
                 }
@@ -504,18 +526,19 @@ mod tests {
         let db = mem_db();
         let txn = db.begin(false).unwrap();
 
-        txn.create_collection(&CollectionConfig {
-            name: "users".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.create_index(DEFAULT_CF, "users", "city").unwrap();
-        txn.create_unique_index(DEFAULT_CF, "users", "email")
+        db.collections().create("users").execute(&txn).unwrap();
+        db.collection("users")
+            .indexes()
+            .create("city", IndexOptions::default())
+            .execute(&txn)
             .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "users",
-            vec![
+        db.collection("users")
+            .indexes()
+            .create("email", IndexOptions::unique())
+            .execute(&txn)
+            .unwrap();
+        db.collection("users")
+            .insert_many(vec![
                 doc! { "_id": "1", "name": "ada", "city": "London",
                 "email": "ada@x.io", "joined": bson::DateTime::from_millis(1_000),
                 "oid": bson::oid::ObjectId::new(),
@@ -524,31 +547,24 @@ mod tests {
                 "email": "alan@x.io" },
                 doc! { "_id": "3", "name": "grace", "city": "York",
                 "email": "grace@x.io" },
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
 
         // A second collection with a non-default pk/ttl path.
-        txn.create_collection(&CollectionConfig {
-            name: "events".to_string(),
-            pk_path: "key".to_string(),
-            ttl_path: "expires".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "events",
-            vec![
+        db.collections()
+            .create("events")
+            .pk_path("key")
+            .ttl_path("expires")
+            .execute(&txn)
+            .unwrap();
+        db.collection("events")
+            .insert_many(vec![
                 doc! { "key": "e1", "kind": "click" },
                 doc! { "key": "e2", "kind": "view" },
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
 
         txn.commit().unwrap();
         db
@@ -563,11 +579,11 @@ mod tests {
         pk: &str,
     ) -> Vec<bson::Document> {
         let txn = db.begin(true).unwrap();
-        let cursor = txn
-            .find(cf, collection, doc! {}, Default::default())
-            .unwrap();
-        let mut docs: Vec<bson::Document> = cursor
-            .iter::<bson::Document>()
+        let mut docs: Vec<bson::Document> = db
+            .cf(cf)
+            .collection(collection)
+            .find(doc! {})
+            .iter::<bson::Document>(&txn)
             .unwrap()
             .map(|d| d.unwrap())
             .collect();
@@ -605,29 +621,16 @@ mod tests {
 
         // Catalog is identical (pk/ttl paths and indexes), proving the manifest
         // round-trips the full definition, not just documents.
-        let s_users = src
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, "users")
-            .unwrap();
-        let d_users = dst
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, "users")
-            .unwrap();
-        assert_eq!(s_users, d_users);
-
-        let s_events = src
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, "events")
-            .unwrap();
-        let d_events = dst
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, "events")
-            .unwrap();
-        assert_eq!(s_events, d_events);
+        let s_txn = src.begin(true).unwrap();
+        let d_txn = dst.begin(true).unwrap();
+        assert_eq!(
+            src.collection("users").schema(&s_txn).unwrap(),
+            dst.collection("users").schema(&d_txn).unwrap()
+        );
+        assert_eq!(
+            src.collection("events").schema(&s_txn).unwrap(),
+            dst.collection("events").schema(&d_txn).unwrap()
+        );
     }
 
     #[test]
@@ -642,14 +645,10 @@ mod tests {
         // The `city` index was rebuilt from the records on import: a query that
         // would use it returns the right rows.
         let txn = dst.begin(true).unwrap();
-        let names: Vec<String> = txn
-            .query(
-                DEFAULT_CF,
-                "users",
-                "SELECT VALUE c.name FROM c WHERE c.city = 'London' ORDER BY c.name",
-            )
-            .unwrap()
-            .iter_values::<String>()
+        let names: Vec<String> = dst
+            .collection("users")
+            .query("SELECT VALUE c.name FROM c WHERE c.city = 'London' ORDER BY c.name")
+            .iter::<String>(&txn)
             .unwrap()
             .map(|n| n.unwrap())
             .collect();
@@ -667,15 +666,11 @@ mod tests {
         dst.import(dir.path(), ImportOptions::default()).unwrap();
 
         // The unique `email` index was recreated: inserting a duplicate fails.
-        // The mutation is lazy, so the violation surfaces when the cursor drains.
         let txn = dst.begin(false).unwrap();
-        let err = txn
-            .insert_one(
-                DEFAULT_CF,
-                "users",
-                doc! { "_id": "99", "email": "ada@x.io" },
-            )
-            .and_then(|c| c.drain());
+        let err = dst
+            .collection("users")
+            .insert_one(doc! { "_id": "99", "email": "ada@x.io" })
+            .execute(&txn);
         assert!(matches!(err, Err(DbError::UniqueViolation { .. })));
         txn.rollback().unwrap();
     }
@@ -750,14 +745,10 @@ mod tests {
         let dst = mem_db();
         {
             let txn = dst.begin(false).unwrap();
-            txn.create_collection(&CollectionConfig {
-                name: "users".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-            txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "1", "name": "PRE" })
-                .unwrap()
-                .drain()
+            dst.collections().create("users").execute(&txn).unwrap();
+            dst.collection("users")
+                .insert_one(doc! { "_id": "1", "name": "PRE" })
+                .execute(&txn)
                 .unwrap();
             txn.commit().unwrap();
         }
@@ -773,11 +764,13 @@ mod tests {
 
         // The whole import rolled back: the pre-existing doc is untouched and no
         // new docs landed.
+        let txn = dst.begin(true).unwrap();
         assert_eq!(
-            dst.begin(true)
+            dst.collection("users")
+                .find(doc! {})
+                .iter_raw(&txn)
                 .unwrap()
-                .count(DEFAULT_CF, "users", doc! {})
-                .unwrap(),
+                .count(),
             1
         );
     }
@@ -791,14 +784,10 @@ mod tests {
         let dst = mem_db();
         {
             let txn = dst.begin(false).unwrap();
-            txn.create_collection(&CollectionConfig {
-                name: "users".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-            txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "1", "name": "PRE" })
-                .unwrap()
-                .drain()
+            dst.collections().create("users").execute(&txn).unwrap();
+            dst.collection("users")
+                .insert_one(doc! { "_id": "1", "name": "PRE" })
+                .execute(&txn)
                 .unwrap();
             txn.commit().unwrap();
         }
@@ -814,14 +803,10 @@ mod tests {
 
         // `_id` "1" now holds the dumped document (name "ada"), not "PRE".
         let txn = dst.begin(true).unwrap();
-        let name: Vec<String> = txn
-            .query(
-                DEFAULT_CF,
-                "users",
-                "SELECT VALUE c.name FROM c WHERE c._id = '1'",
-            )
-            .unwrap()
-            .iter_values::<String>()
+        let name: Vec<String> = dst
+            .collection("users")
+            .query("SELECT VALUE c.name FROM c WHERE c._id = '1'")
+            .iter::<String>(&txn)
             .unwrap()
             .map(|n| n.unwrap())
             .collect();
@@ -838,14 +823,10 @@ mod tests {
         let dst = mem_db();
         {
             let txn = dst.begin(false).unwrap();
-            txn.create_collection(&CollectionConfig {
-                name: "users".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-            txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "1", "name": "PRE" })
-                .unwrap()
-                .drain()
+            dst.collections().create("users").execute(&txn).unwrap();
+            dst.collection("users")
+                .insert_one(doc! { "_id": "1", "name": "PRE" })
+                .execute(&txn)
                 .unwrap();
             txn.commit().unwrap();
         }
@@ -863,18 +844,21 @@ mod tests {
         assert_eq!(report.total_documents(), 2);
 
         let txn = dst.begin(true).unwrap();
-        let name: Vec<String> = txn
-            .query(
-                DEFAULT_CF,
-                "users",
-                "SELECT VALUE c.name FROM c WHERE c._id = '1'",
-            )
-            .unwrap()
-            .iter_values::<String>()
+        let name: Vec<String> = dst
+            .collection("users")
+            .query("SELECT VALUE c.name FROM c WHERE c._id = '1'")
+            .iter::<String>(&txn)
             .unwrap()
             .map(|n| n.unwrap())
             .collect();
-        assert_eq!(txn.count(DEFAULT_CF, "users", doc! {}).unwrap(), 3);
+        assert_eq!(
+            dst.collection("users")
+                .find(doc! {})
+                .iter_raw(&txn)
+                .unwrap()
+                .count(),
+            3
+        );
         txn.rollback().unwrap();
         assert_eq!(name, vec!["PRE".to_string()]);
     }
@@ -899,11 +883,7 @@ mod tests {
         let src = mem_db();
         {
             let txn = src.begin(false).unwrap();
-            txn.create_collection(&CollectionConfig {
-                name: "empty".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
+            src.collections().create("empty").execute(&txn).unwrap();
             txn.commit().unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
@@ -918,11 +898,13 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n == "empty")
         );
+        let txn = dst.begin(true).unwrap();
         assert_eq!(
-            dst.begin(true)
+            dst.collection("empty")
+                .find(doc! {})
+                .iter_raw(&txn)
                 .unwrap()
-                .count(DEFAULT_CF, "empty", doc! {})
-                .unwrap(),
+                .count(),
             0
         );
     }
