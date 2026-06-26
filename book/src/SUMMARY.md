@@ -44,3 +44,4 @@
 - [MemoryStore Persistence](./rfcs/memorystore-persistence.md)
 - [Change Detection (Watch Queries)](./rfcs/watch-queries.md)
 - [WebAssembly Support](./rfcs/webassembly-support.md)
+- [Public API Ergonomics (Collection handle)](./rfcs/db-api-cleanup.md)
