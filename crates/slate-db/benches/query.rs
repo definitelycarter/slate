@@ -171,9 +171,9 @@ fn bench_query_string_like(c: &mut Criterion) {
     group.finish();
 }
 
-/// End-to-end CosmosDB-style SQL (`Transaction::query`): lex + parse + lower +
-/// execute + value iteration, over an indexed `WHERE`. The find-equivalent is
-/// `query_indexed_eq`; the delta is mostly the SQL front-end (lex/parse) vs the
+/// End-to-end CosmosDB-style SQL (`query()`): lex + parse + lower + execute +
+/// value iteration, over an indexed `WHERE`. The find-equivalent is
+/// `find_indexed_eq`; the delta is mostly the SQL front-end (lex/parse) vs the
 /// Mongo translation.
 fn bench_query_sql(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_sql");

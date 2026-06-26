@@ -7,8 +7,8 @@ use slate_query::*;
 
 // ── Query Benchmarks ────────────────────────────────────────
 
-fn bench_query_scan(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_scan");
+fn bench_find_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_scan");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -26,8 +26,8 @@ fn bench_query_scan(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_indexed_eq(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_eq");
+fn bench_find_indexed_eq(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_eq");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active" };
@@ -46,8 +46,8 @@ fn bench_query_indexed_eq(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_indexed_eq_projection(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_eq_proj");
+fn bench_find_indexed_eq_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_eq_proj");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active" };
@@ -72,8 +72,8 @@ fn bench_query_indexed_eq_projection(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_multi_field_and(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_multi_and");
+fn bench_find_multi_field_and(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_multi_and");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! {
@@ -96,8 +96,8 @@ fn bench_query_multi_field_and(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_null_filter(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_null_filter");
+fn bench_find_null_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_null_filter");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "last_contacted_at": { "$exists": false } };
@@ -116,8 +116,8 @@ fn bench_query_null_filter(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_sort_indexed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_sort_indexed");
+fn bench_find_sort_indexed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_sort_indexed");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active" };
@@ -137,8 +137,8 @@ fn bench_query_sort_indexed(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_sort_indexed_take(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_sort_indexed_take");
+fn bench_find_sort_indexed_take(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_sort_indexed_take");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -158,8 +158,8 @@ fn bench_query_sort_indexed_take(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_sort_multi(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_sort_multi");
+fn bench_find_sort_multi(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_sort_multi");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -180,8 +180,8 @@ fn bench_query_sort_multi(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_pagination(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_pagination");
+fn bench_find_pagination(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_pagination");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active" };
@@ -203,8 +203,8 @@ fn bench_query_pagination(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_point_lookup(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_point_lookup");
+fn bench_find_point_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_point_lookup");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         // Pick 100 evenly-spaced IDs to look up
@@ -235,8 +235,8 @@ fn bench_query_point_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_projection(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_projection");
+fn bench_find_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_projection");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let options = FindOptions {
@@ -260,8 +260,8 @@ fn bench_query_projection(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_array_match(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_array_match");
+fn bench_find_array_match(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_array_match");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "tags": "renewal_due" };
@@ -286,8 +286,8 @@ fn bench_query_array_match(c: &mut Criterion) {
 /// so `= 50` matches ~1% of rows). Today numeric `Eq` is not sargable as a tight
 /// seek — it routes to a full scan + `CoercingFilter` — so this measures the
 /// full-scan cost the unified numeric key is meant to turn into a seek.
-fn bench_query_indexed_eq_numeric(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_eq_numeric");
+fn bench_find_indexed_eq_numeric(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_eq_numeric");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "contacts_count": 50 };
@@ -309,8 +309,8 @@ fn bench_query_indexed_eq_numeric(c: &mut Criterion) {
 /// Covered numeric projection: numeric `Eq` projecting only `contacts_count`, so
 /// the value is served from the index — exercises numeric-key decode under the
 /// unified key.
-fn bench_query_indexed_eq_numeric_projection(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_eq_numeric_proj");
+fn bench_find_indexed_eq_numeric_projection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_eq_numeric_proj");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "contacts_count": 50 };
@@ -335,8 +335,8 @@ fn bench_query_indexed_eq_numeric_projection(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_indexed_range(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_range");
+fn bench_find_indexed_range(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_range");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "contacts_count": { "$gt": 50 } };
@@ -355,8 +355,8 @@ fn bench_query_indexed_range(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_indexed_range_dual(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_range_dual");
+fn bench_find_indexed_range_dual(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_range_dual");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "contacts_count": { "$gt": 20, "$lt": 80 } };
@@ -375,8 +375,8 @@ fn bench_query_indexed_range_dual(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_indexed_eq_plus_range");
+fn bench_find_indexed_eq_plus_range(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_indexed_eq_plus_range");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active", "contacts_count": { "$gt": 50 } };
@@ -398,8 +398,8 @@ fn bench_query_indexed_eq_plus_range(c: &mut Criterion) {
 /// IN-style disjunction on an indexed field (`$or` of several `{field: value}`
 /// equalities). Should plan to `IndexMerge(Or)` over the indexed candidates, not
 /// a full scan.
-fn bench_query_or_indexed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("query_or_indexed");
+fn bench_find_or_indexed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("find_or_indexed");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! {
@@ -427,23 +427,23 @@ fn bench_query_or_indexed(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_query_scan,
-    bench_query_indexed_eq,
-    bench_query_indexed_eq_projection,
-    bench_query_indexed_eq_numeric,
-    bench_query_indexed_eq_numeric_projection,
-    bench_query_multi_field_and,
-    bench_query_or_indexed,
-    bench_query_null_filter,
-    bench_query_sort_indexed,
-    bench_query_sort_indexed_take,
-    bench_query_sort_multi,
-    bench_query_pagination,
-    bench_query_point_lookup,
-    bench_query_projection,
-    bench_query_array_match,
-    bench_query_indexed_range,
-    bench_query_indexed_range_dual,
-    bench_query_indexed_eq_plus_range,
+    bench_find_scan,
+    bench_find_indexed_eq,
+    bench_find_indexed_eq_projection,
+    bench_find_indexed_eq_numeric,
+    bench_find_indexed_eq_numeric_projection,
+    bench_find_multi_field_and,
+    bench_find_or_indexed,
+    bench_find_null_filter,
+    bench_find_sort_indexed,
+    bench_find_sort_indexed_take,
+    bench_find_sort_multi,
+    bench_find_pagination,
+    bench_find_point_lookup,
+    bench_find_projection,
+    bench_find_array_match,
+    bench_find_indexed_range,
+    bench_find_indexed_range_dual,
+    bench_find_indexed_eq_plus_range,
 );
 criterion_main!(benches);
