@@ -14,16 +14,23 @@
 //! Slice B: the write builders — `find(f).update/.delete/.replace` and the
 //! direct `insert_*`/`upsert_many`/`merge_many` — finished with
 //! `.execute(&txn)` → [`WriteResult`] (or `.explain`/`.analyze`).
+//!
+//! Slice C: the [`Indexes`] sub-handle — `indexes().create(paths, opts)` (one
+//! constructor for all index kinds) / `.remove(field)` / `.list(&txn)`.
 
 mod collection;
 mod distinct;
 mod exec;
+mod index;
 mod query;
 mod read;
 mod write;
 
 pub use collection::{CfScope, Collection};
 pub use distinct::DistinctBuilder;
+pub use index::{
+    CreateIndex, IndexBuild, IndexOptions, IndexPaths, Indexes, RemoveIndex, VectorIndexOptions,
+};
 pub use query::QueryBuilder;
 pub use read::FindBuilder;
 pub use write::{

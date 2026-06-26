@@ -10,6 +10,7 @@
 use serde::Serialize;
 use slate_store::Store;
 
+use super::index::Indexes;
 use super::query::QueryBuilder;
 use super::read::FindBuilder;
 use super::write::{InsertBuilder, UpsertBuilder};
@@ -80,6 +81,12 @@ impl Collection {
             docs.into_iter().collect(),
             UpsertMode::Merge,
         )
+    }
+
+    /// The collection's index-management sub-handle:
+    /// `indexes().create(...)` / `.remove(...)` / `.list(&txn)`.
+    pub fn indexes(&self) -> Indexes<'_> {
+        Indexes::new(&self.cf, &self.collection)
     }
 }
 
