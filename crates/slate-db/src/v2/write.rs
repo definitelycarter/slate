@@ -1,0 +1,611 @@
+//! v2 write surface: the mutation builders and their `.execute` terminal.
+//!
+//! Phase 0, slice B. A write is a builder finished with one of three terminals:
+//! `.execute(&txn)` runs it and returns a [`WriteResult`], `.explain(&txn)`
+//! renders the mutation plan without running it, and `.analyze(&txn)` runs it
+//! under `EXPLAIN ANALYZE`. Each builder carries a **real, self-contained body**
+//! — it lowers the request and plans it itself (via [`super::exec`]) rather than
+//! calling `Transaction::update_*`/`delete_*`/`insert_many`/etc.
+//!
+//! Two families:
+//! - **filter writes** chain off [`FindBuilder`](super::FindBuilder):
+//!   `find(f).update(spec)` / `.delete()` / `.replace(doc)`. `.update`/`.delete`
+//!   default to *all* matching rows; `.one()` restricts to the first.
+//!   `replace` has only a single-row form (v1 has no `replace_many`).
+//! - **document writes** hang directly off the [`Collection`](super::Collection):
+//!   `insert_one`/`insert_many` and the bulk `upsert_many`/`merge_many` — they
+//!   take documents, not a filter.
+
+use serde::Serialize;
+use slate_store::Store;
+
+use crate::RawBson;
+use crate::database::Transaction;
+use crate::error::DbError;
+use slate_planner::UpsertMode;
+
+/// The outcome of a write. Carries the number of documents the mutation
+/// affected — inserted, updated, replaced, deleted, or upserted — which is the
+/// row count the mutation plan emits (v1 surfaces the same number by `.drain`ing
+/// the cursor a mutation returns).
+///
+/// `#[non_exhaustive]`: future slices may surface more (e.g. the generated `_id`s
+/// of an insert, which the mutation plan already yields) without a breaking
+/// change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WriteResult {
+    /// The number of documents the write affected.
+    pub affected: u64,
+}
+
+// ── Filter writes: update / delete / replace ─────────────────────────
+
+/// An `update` write, built by [`FindBuilder::update`](super::FindBuilder::update).
+/// Applies `spec` (a Mongo-style update document) to the matched rows. Defaults
+/// to *all* matches; [`one`](Self::one) restricts it to the first.
+#[must_use = "an update builder does nothing until a terminal (.execute/.explain/.analyze) runs it"]
+pub struct UpdateBuilder<'a, F, U> {
+    cf: &'a str,
+    collection: &'a str,
+    filter: F,
+    update: U,
+    one: bool,
+}
+
+impl<'a, F, U> UpdateBuilder<'a, F, U> {
+    pub(super) fn new(cf: &'a str, collection: &'a str, filter: F, update: U) -> Self {
+        Self {
+            cf,
+            collection,
+            filter,
+            update,
+            one: false,
+        }
+    }
+
+    /// Update only the first matching document (`= update_one`).
+    pub fn one(mut self) -> Self {
+        self.one = true;
+        self
+    }
+}
+
+impl<F: Serialize, U: Serialize> UpdateBuilder<'_, F, U> {
+    fn build_plan<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
+        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
+        let update_raw = bson::serialize_to_raw_document_buf(&self.update)?;
+        let assignments = slate_query::update_to_assignments(&update_raw)?;
+        let query = super::exec::write_query(&filter_raw, self.one.then_some(1))?;
+        let ctx = super::exec::write_context(
+            txn,
+            self.cf,
+            self.collection,
+            txn.collection_meta(self.cf, self.collection)?,
+        );
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Update { query, assignments },
+            &ctx,
+        )?)
+    }
+
+    /// Run the update, returning how many documents it changed.
+    pub fn execute<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<WriteResult, DbError> {
+        Ok(WriteResult {
+            affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
+        })
+    }
+
+    /// Render the mutation plan without running it.
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the update and render its plan annotated with per-node actuals.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+}
+
+/// A `delete` write, built by [`FindBuilder::delete`](super::FindBuilder::delete).
+/// Removes the matched rows. Defaults to *all* matches; [`one`](Self::one)
+/// restricts it to the first.
+#[must_use = "a delete builder does nothing until a terminal (.execute/.explain/.analyze) runs it"]
+pub struct DeleteBuilder<'a, F> {
+    cf: &'a str,
+    collection: &'a str,
+    filter: F,
+    one: bool,
+}
+
+impl<'a, F> DeleteBuilder<'a, F> {
+    pub(super) fn new(cf: &'a str, collection: &'a str, filter: F) -> Self {
+        Self {
+            cf,
+            collection,
+            filter,
+            one: false,
+        }
+    }
+
+    /// Delete only the first matching document (`= delete_one`).
+    pub fn one(mut self) -> Self {
+        self.one = true;
+        self
+    }
+}
+
+impl<F: Serialize> DeleteBuilder<'_, F> {
+    fn build_plan<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
+        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
+        let query = super::exec::write_query(&filter_raw, self.one.then_some(1))?;
+        let ctx = super::exec::write_context(
+            txn,
+            self.cf,
+            self.collection,
+            txn.collection_meta(self.cf, self.collection)?,
+        );
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Delete { query },
+            &ctx,
+        )?)
+    }
+
+    /// Run the delete, returning how many documents it removed.
+    pub fn execute<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<WriteResult, DbError> {
+        Ok(WriteResult {
+            affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
+        })
+    }
+
+    /// Render the mutation plan without running it.
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the delete and render its plan annotated with per-node actuals.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+}
+
+/// A `replace` write, built by
+/// [`FindBuilder::replace`](super::FindBuilder::replace). Replaces the first
+/// matched document with `replacement` entirely (no field merge), preserving its
+/// primary key. There is only a single-row form, matching v1's `replace_one`, so
+/// it has no `.one()`.
+#[must_use = "a replace builder does nothing until a terminal (.execute/.explain/.analyze) runs it"]
+pub struct ReplaceBuilder<'a, F, R> {
+    cf: &'a str,
+    collection: &'a str,
+    filter: F,
+    replacement: R,
+}
+
+impl<'a, F, R> ReplaceBuilder<'a, F, R> {
+    pub(super) fn new(cf: &'a str, collection: &'a str, filter: F, replacement: R) -> Self {
+        Self {
+            cf,
+            collection,
+            filter,
+            replacement,
+        }
+    }
+}
+
+impl<F: Serialize, R: Serialize> ReplaceBuilder<'_, F, R> {
+    fn build_plan<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
+        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
+        let replacement = bson::serialize_to_raw_document_buf(&self.replacement)?;
+        // Replace targets a single document, mirroring v1's `replace_one`.
+        let query = super::exec::write_query(&filter_raw, Some(1))?;
+        let ctx = super::exec::write_context(
+            txn,
+            self.cf,
+            self.collection,
+            txn.collection_meta(self.cf, self.collection)?,
+        );
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Replace { query, replacement },
+            &ctx,
+        )?)
+    }
+
+    /// Run the replace, returning how many documents it replaced (0 or 1).
+    pub fn execute<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<WriteResult, DbError> {
+        Ok(WriteResult {
+            affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
+        })
+    }
+
+    /// Render the mutation plan without running it.
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the replace and render its plan annotated with per-node actuals.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+}
+
+// ── Document writes: insert / upsert / merge ─────────────────────────
+
+/// An `insert` write, built by [`Collection::insert_one`](super::Collection::insert_one)
+/// / [`insert_many`](super::Collection::insert_many). Inserts each document
+/// (generating an `_id` when absent), failing on a duplicate key.
+#[must_use = "an insert builder does nothing until a terminal (.execute/.explain/.analyze) runs it"]
+pub struct InsertBuilder<'a, D> {
+    cf: &'a str,
+    collection: &'a str,
+    docs: Vec<D>,
+}
+
+impl<'a, D> InsertBuilder<'a, D> {
+    pub(super) fn new(cf: &'a str, collection: &'a str, docs: Vec<D>) -> Self {
+        Self {
+            cf,
+            collection,
+            docs,
+        }
+    }
+}
+
+impl<D: Serialize> InsertBuilder<'_, D> {
+    fn build_plan<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
+        let docs = serialize_docs(&self.docs)?;
+        // Insert scans nothing, so an empty meta suffices.
+        let ctx = super::exec::write_context(
+            txn,
+            self.cf,
+            self.collection,
+            slate_planner::CollectionMeta::default(),
+        );
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Insert { docs },
+            &ctx,
+        )?)
+    }
+
+    /// Run the insert, returning how many documents it inserted.
+    pub fn execute<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<WriteResult, DbError> {
+        Ok(WriteResult {
+            affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
+        })
+    }
+
+    /// Render the mutation plan without running it.
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the insert and render its plan annotated with per-node actuals.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+}
+
+/// An `upsert`/`merge` write, built by
+/// [`Collection::upsert_many`](super::Collection::upsert_many) /
+/// [`merge_many`](super::Collection::merge_many). Each document is inserted if
+/// its `_id` is absent, otherwise the existing document is replaced
+/// ([`UpsertMode::Replace`], from `upsert_many`) or field-merged
+/// ([`UpsertMode::Merge`], from `merge_many`).
+#[must_use = "an upsert builder does nothing until a terminal (.execute/.explain/.analyze) runs it"]
+pub struct UpsertBuilder<'a, D> {
+    cf: &'a str,
+    collection: &'a str,
+    docs: Vec<D>,
+    mode: UpsertMode,
+}
+
+impl<'a, D> UpsertBuilder<'a, D> {
+    pub(super) fn new(cf: &'a str, collection: &'a str, docs: Vec<D>, mode: UpsertMode) -> Self {
+        Self {
+            cf,
+            collection,
+            docs,
+            mode,
+        }
+    }
+}
+
+impl<D: Serialize> UpsertBuilder<'_, D> {
+    fn build_plan<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
+        let docs = serialize_docs(&self.docs)?;
+        // Upsert keys by `_id` rather than scanning, so an empty meta suffices.
+        let ctx = super::exec::write_context(
+            txn,
+            self.cf,
+            self.collection,
+            slate_planner::CollectionMeta::default(),
+        );
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Upsert {
+                docs,
+                mode: self.mode,
+            },
+            &ctx,
+        )?)
+    }
+
+    /// Run the upsert/merge, returning how many documents it wrote.
+    pub fn execute<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<WriteResult, DbError> {
+        Ok(WriteResult {
+            affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
+        })
+    }
+
+    /// Render the mutation plan without running it.
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the upsert/merge and render its plan annotated with per-node actuals.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+}
+
+/// Serialize a batch of input documents into the `RawBson::Document` list the
+/// `Insert`/`Upsert` statements take.
+fn serialize_docs<D: Serialize>(docs: &[D]) -> Result<Vec<RawBson>, DbError> {
+    docs.iter()
+        .map(|doc| {
+            bson::serialize_to_raw_document_buf(doc)
+                .map(RawBson::Document)
+                .map_err(DbError::from)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use bson::doc;
+    use slate_store::MemoryStore;
+
+    use crate::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+
+    fn db_with_users() -> Database<MemoryStore> {
+        let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
+        let txn = db.begin(false).unwrap();
+        txn.create_collection(&CollectionConfig {
+            name: "users".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        txn.commit().unwrap();
+        db
+    }
+
+    fn seed_three(db: &Database<MemoryStore>) {
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_many(vec![
+                doc! { "_id": 1, "name": "ana", "age": 30 },
+                doc! { "_id": 2, "name": "bo", "age": 20 },
+                doc! { "_id": 3, "name": "cy", "age": 40 },
+            ])
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn insert_then_read_back() {
+        let db = db_with_users();
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        let res = users
+            .insert_many(vec![
+                doc! { "_id": 1, "name": "ana" },
+                doc! { "_id": 2, "name": "bo" },
+            ])
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(res.affected, 2);
+
+        // insert_one
+        let res1 = users
+            .insert_one(doc! { "_id": 3, "name": "cy" })
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(res1.affected, 1);
+
+        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 3);
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn update_many_and_one() {
+        let db = db_with_users();
+        seed_three(&db);
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        // update_many: everyone over 25 gets active=true → ana(30), cy(40)
+        let many = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .update(doc! { "$set": { "active": true } })
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(many.affected, 2);
+
+        // update_one: only the first match flips
+        let one = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .update(doc! { "$set": { "vip": true } })
+            .one()
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(one.affected, 1);
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn delete_one_and_many() {
+        let db = db_with_users();
+        seed_three(&db);
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        // delete_one
+        let one = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .delete()
+            .one()
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(one.affected, 1);
+        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 2);
+
+        // delete_many: remove the rest
+        let many = users.find(doc! {}).delete().execute(&txn).unwrap();
+        assert_eq!(many.affected, 2);
+        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 0);
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn replace_one_swaps_the_document() {
+        let db = db_with_users();
+        seed_three(&db);
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        let res = users
+            .find(doc! { "_id": 2 })
+            .replace(doc! { "name": "bohdan", "age": 21 })
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(res.affected, 1);
+
+        let bo = users
+            .find(doc! { "_id": 2 })
+            .first(&txn)
+            .unwrap()
+            .expect("a row");
+        assert_eq!(bo.get_str("name").unwrap(), "bohdan");
+        // replace is a full swap — the old `name`/`age` are gone, pk preserved
+        assert_eq!(bo.get_i32("age").unwrap(), 21);
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn upsert_and_merge() {
+        let db = db_with_users();
+        seed_three(&db);
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        // upsert: insert id=4, replace id=1 entirely
+        let up = users
+            .upsert_many(vec![
+                doc! { "_id": 4, "name": "di", "age": 50 },
+                doc! { "_id": 1, "name": "ana2" },
+            ])
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(up.affected, 2);
+        // replace semantics: id=1 lost its `age`
+        let ana = users.find(doc! { "_id": 1 }).first(&txn).unwrap().unwrap();
+        assert!(ana.get("age").unwrap().is_none());
+
+        // merge: patch id=4's name, keep its age
+        let mg = users
+            .merge_many(vec![doc! { "_id": 4, "name": "dina" }])
+            .execute(&txn)
+            .unwrap();
+        assert_eq!(mg.affected, 1);
+        let di = users.find(doc! { "_id": 4 }).first(&txn).unwrap().unwrap();
+        assert_eq!(di.get_str("name").unwrap(), "dina");
+        assert_eq!(di.get_i32("age").unwrap(), 50); // merge kept it
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn writes_match_v1_counts() {
+        // v2 update vs v1 update_many over the same data + filter.
+        let db_v2 = db_with_users();
+        seed_three(&db_v2);
+        let txn_v2 = db_v2.begin(false).unwrap();
+        let v2 = db_v2
+            .collection("users")
+            .find(doc! { "age": { "$gte": 30 } })
+            .update(doc! { "$set": { "seen": true } })
+            .execute(&txn_v2)
+            .unwrap()
+            .affected;
+        txn_v2.commit().unwrap();
+
+        let db_v1 = db_with_users();
+        seed_three(&db_v1);
+        let txn_v1 = db_v1.begin(false).unwrap();
+        let v1 = txn_v1
+            .update_many(
+                DEFAULT_CF,
+                "users",
+                doc! { "age": { "$gte": 30 } },
+                doc! { "$set": { "seen": true } },
+            )
+            .unwrap()
+            .drain()
+            .unwrap();
+        txn_v1.commit().unwrap();
+
+        assert_eq!(v2, v1);
+        assert_eq!(v2, 2);
+    }
+
+    #[test]
+    fn write_explain_does_not_mutate_but_analyze_does() {
+        let db = db_with_users();
+        seed_three(&db);
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        // explain renders the plan without running it — the row is untouched.
+        let explained = users
+            .find(doc! { "age": 30 })
+            .update(doc! { "$set": { "x": 1 } })
+            .explain(&txn)
+            .unwrap();
+        assert!(!explained.is_empty());
+        let row = users.find(doc! { "age": 30 }).first(&txn).unwrap().unwrap();
+        assert!(row.get("x").unwrap().is_none(), "explain must not mutate");
+
+        // analyze runs the plan to capture actuals, so on a write it *executes*
+        // the mutation (EXPLAIN ANALYZE on DML, like Postgres) — the change lands.
+        let analyzed = users
+            .find(doc! { "age": 30 })
+            .update(doc! { "$set": { "x": 1 } })
+            .analyze(&txn)
+            .unwrap();
+        assert!(!analyzed.is_empty());
+        assert_ne!(explained, analyzed);
+        let row = users.find(doc! { "age": 30 }).first(&txn).unwrap().unwrap();
+        assert_eq!(row.get_i32("x").unwrap(), 1, "analyze executes the write");
+
+        txn.commit().unwrap();
+    }
+}

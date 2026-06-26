@@ -1,18 +1,22 @@
-//! Shared v2 execution helper: `EXPLAIN ANALYZE`.
+//! Shared v2 execution helpers: `EXPLAIN ANALYZE` plus the write plumbing
+//! (write `PlanContext` assembly, write-query lowering, and execute-and-count).
 //!
 //! `find` and `query` both render a plan (`.explain`) and run-and-measure it
 //! (`.analyze`). Plain explain is just [`Plan::explain`], but analyze must
 //! execute the plan to capture per-node actuals, so it sets up an `Executor`
 //! exactly as the cursor does (`$now` injection + rand + pool) and calls
-//! `execute_analyze`. This lives in v2 (not borrowed from v1) so the surface
-//! stays self-contained; it shares only the engine transaction and the lower
-//! crates.
+//! `execute_analyze`. The write side ([`super::write`]) lowers each mutation to
+//! a plan and drains it for the affected count here. All of this lives in v2
+//! (not borrowed from v1) so the surface stays self-contained; it shares only
+//! the engine transaction, the catalog reads (`collection_meta` / `validators`
+//! / `triggers`), and the lower crates.
 
 use slate_store::Store;
 
-use crate::RawDocumentBuf;
+use crate::cursor::Cursor;
 use crate::database::Transaction;
 use crate::error::DbError;
+use crate::{FindOptions, RawDocumentBuf};
 
 /// Run `plan` under EXPLAIN ANALYZE and render the annotated operator tree.
 ///
@@ -39,4 +43,64 @@ pub(super) fn analyze_plan<S: Store>(
             .with_rand(txn.exec_rand())
             .execute_analyze(plan)?;
     Ok(render_plan.explain_analyze(&stats))
+}
+
+/// Assemble the catalog context a write plans against: the container plus the
+/// collection's validators and triggers (so the planner wraps the mutation in
+/// the same hook nodes v1 does). `meta` is the caller's choice — filter-bearing
+/// writes pass real index metadata so the matched-document source can use an
+/// index; insert/upsert, which scan nothing, pass `CollectionMeta::default()`.
+pub(super) fn write_context<S: Store>(
+    txn: &Transaction<'_, S>,
+    cf: &str,
+    collection: &str,
+    meta: slate_planner::CollectionMeta,
+) -> slate_planner::PlanContext {
+    slate_planner::PlanContext {
+        container: slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        },
+        meta,
+        validators: txn.validators(cf, collection),
+        triggers: txn.triggers(cf, collection),
+    }
+}
+
+/// Lower a write's filter to the `Query` that selects the documents it targets.
+/// This is the exact translation `find` uses (`take`-limited for the `.one()`
+/// variants), so a write matches the same rows the equivalent `find` would; a
+/// filter the front-end can't translate is a hard error.
+pub(super) fn write_query(
+    filter_raw: &RawDocumentBuf,
+    take: Option<usize>,
+) -> Result<slate_ast::Query, DbError> {
+    let options = FindOptions {
+        take,
+        ..Default::default()
+    };
+    Ok(slate_query::find_to_query(filter_raw, &options)?)
+}
+
+/// Build a cursor over a mutation plan, drain it, and return the affected count
+/// — v2's own write body, the same handoff `Transaction::run_plan` + `drain`
+/// makes. The mutation plan yields the written documents; here only their count
+/// is kept.
+pub(super) fn execute_write<'db, S>(
+    plan: slate_planner::Plan,
+    txn: &Transaction<'db, S>,
+) -> Result<u64, DbError>
+where
+    S: Store + 'db,
+{
+    // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand and
+    // watch handles — the same handoff the v1 mutation path makes.
+    let cursor = Cursor::new(
+        txn.engine_txn(),
+        plan,
+        txn.pool(),
+        txn.rand().cloned(),
+        txn.watch_sink().cloned(),
+    );
+    cursor.drain()
 }

@@ -12,8 +12,10 @@ use slate_store::Store;
 
 use super::query::QueryBuilder;
 use super::read::FindBuilder;
+use super::write::{InsertBuilder, UpsertBuilder};
 use crate::DEFAULT_CF;
 use crate::database::Database;
+use slate_planner::UpsertMode;
 
 /// A lightweight handle to one collection. Build it with
 /// [`Database::collection`] (default column family) or
@@ -35,6 +37,49 @@ impl Collection {
     /// nothing runs until a terminal (`.iter`/`.collect`/`.explain`) runs it.
     pub fn query<'a>(&'a self, sql: &'a str) -> QueryBuilder<'a> {
         QueryBuilder::new(&self.cf, &self.collection, sql)
+    }
+
+    /// Insert a single document (generating an `_id` when absent). Returns a
+    /// builder; nothing runs until `.execute(&txn)`.
+    pub fn insert_one<D: Serialize>(&self, doc: D) -> InsertBuilder<'_, D> {
+        InsertBuilder::new(&self.cf, &self.collection, vec![doc])
+    }
+
+    /// Insert a batch of documents. Returns a builder; nothing runs until
+    /// `.execute(&txn)`.
+    pub fn insert_many<D: Serialize>(
+        &self,
+        docs: impl IntoIterator<Item = D>,
+    ) -> InsertBuilder<'_, D> {
+        InsertBuilder::new(&self.cf, &self.collection, docs.into_iter().collect())
+    }
+
+    /// Upsert (insert-or-replace) a batch of documents by `_id`. Returns a
+    /// builder; nothing runs until `.execute(&txn)`.
+    pub fn upsert_many<D: Serialize>(
+        &self,
+        docs: impl IntoIterator<Item = D>,
+    ) -> UpsertBuilder<'_, D> {
+        UpsertBuilder::new(
+            &self.cf,
+            &self.collection,
+            docs.into_iter().collect(),
+            UpsertMode::Replace,
+        )
+    }
+
+    /// Merge (insert-or-patch) a batch of partial documents by `_id`. Returns a
+    /// builder; nothing runs until `.execute(&txn)`.
+    pub fn merge_many<D: Serialize>(
+        &self,
+        docs: impl IntoIterator<Item = D>,
+    ) -> UpsertBuilder<'_, D> {
+        UpsertBuilder::new(
+            &self.cf,
+            &self.collection,
+            docs.into_iter().collect(),
+            UpsertMode::Merge,
+        )
     }
 }
 

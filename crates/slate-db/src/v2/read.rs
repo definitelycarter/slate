@@ -69,6 +69,26 @@ impl<'a, F> FindBuilder<'a, F> {
     pub fn distinct(self, field: &str) -> super::DistinctBuilder<'a, F> {
         super::DistinctBuilder::new(self.cf, self.collection, field, self.filter)
     }
+
+    /// Apply a Mongo-style `update` to the matched documents. Defaults to *all*
+    /// matches; chain [`one`](super::UpdateBuilder::one) for the first only. Any
+    /// read stages set above (sort/limit/project) don't apply to a write — the
+    /// filter is what carries over.
+    pub fn update<U>(self, update: U) -> super::UpdateBuilder<'a, F, U> {
+        super::UpdateBuilder::new(self.cf, self.collection, self.filter, update)
+    }
+
+    /// Delete the matched documents. Defaults to *all* matches; chain
+    /// [`one`](super::DeleteBuilder::one) for the first only.
+    pub fn delete(self) -> super::DeleteBuilder<'a, F> {
+        super::DeleteBuilder::new(self.cf, self.collection, self.filter)
+    }
+
+    /// Replace the first matched document with `replacement` entirely (no merge),
+    /// preserving its primary key.
+    pub fn replace<R>(self, replacement: R) -> super::ReplaceBuilder<'a, F, R> {
+        super::ReplaceBuilder::new(self.cf, self.collection, self.filter, replacement)
+    }
 }
 
 impl<F: Serialize> FindBuilder<'_, F> {

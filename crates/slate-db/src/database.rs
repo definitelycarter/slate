@@ -862,14 +862,17 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         }
     }
 
-    fn validators(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+    // `pub(crate)` so v2's write builders can assemble their own write
+    // `PlanContext` (container + validators + triggers) without calling a v1
+    // verb — the hook snapshot is transaction state, reached like rand/watch.
+    pub(crate) fn validators(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
         self.snapshot
             .as_ref()
             .map(|s| s.validators_for(cf, collection).to_vec())
             .unwrap_or_default()
     }
 
-    fn triggers(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+    pub(crate) fn triggers(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
         self.snapshot
             .as_ref()
             .map(|s| s.triggers_for(cf, collection).to_vec())

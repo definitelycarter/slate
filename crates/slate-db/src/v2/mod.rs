@@ -8,16 +8,24 @@
 //! engine transaction and the catalog read (`collection_meta`), reached through
 //! crate-internal accessors on [`Transaction`](crate::DatabaseTransaction).
 //!
-//! Slice A: the [`Collection`] handle plus the `find` read builder
-//! ([`FindBuilder`]) and its cursor terminals.
+//! Slice A: the [`Collection`] handle plus the `find`/`query`/`distinct` read
+//! builders and their cursor terminals.
+//!
+//! Slice B: the write builders — `find(f).update/.delete/.replace` and the
+//! direct `insert_*`/`upsert_many`/`merge_many` — finished with
+//! `.execute(&txn)` → [`WriteResult`] (or `.explain`/`.analyze`).
 
 mod collection;
 mod distinct;
 mod exec;
 mod query;
 mod read;
+mod write;
 
 pub use collection::{CfScope, Collection};
 pub use distinct::DistinctBuilder;
 pub use query::QueryBuilder;
 pub use read::FindBuilder;
+pub use write::{
+    DeleteBuilder, InsertBuilder, ReplaceBuilder, UpdateBuilder, UpsertBuilder, WriteResult,
+};
