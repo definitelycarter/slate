@@ -1,8 +1,10 @@
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 use bson::RawDocumentBuf;
 use serde::de::DeserializeOwned;
 use slate_engine::{EngineTransaction, KvEngine};
+use slate_executor::watch::WatchSink;
 use slate_store::Store;
 
 use crate::database::RandFn;
@@ -30,6 +32,10 @@ pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     params: Option<RawDocumentBuf>,
     /// Random source for `RAND()`, inherited from the transaction.
     rand: Option<RandFn>,
+    /// The transaction's watch-capture sink, threaded into the executor so the
+    /// mutation nodes buffer matching changes. `None` for reads and when no
+    /// watches are registered.
+    watch: Option<Rc<WatchSink>>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
@@ -38,6 +44,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         plan: slate_planner::Plan,
         pool: Option<&'txn VmPool>,
         rand: Option<RandFn>,
+        watch: Option<Rc<WatchSink>>,
     ) -> Self {
         Self {
             txn,
@@ -45,6 +52,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
             pool,
             params: None,
             rand,
+            watch,
         }
     }
 
@@ -54,6 +62,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         pool: Option<&'txn VmPool>,
         params: RawDocumentBuf,
         rand: Option<RandFn>,
+        watch: Option<Rc<WatchSink>>,
     ) -> Self {
         Self {
             txn,
@@ -61,6 +70,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
             pool,
             params: Some(params),
             rand,
+            watch,
         }
     }
 
@@ -79,6 +89,7 @@ impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
         let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
         let iter = slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
             .with_rand(crate::database::rand_rc(&self.rand))
+            .with_watch(self.watch)
             .execute(self.plan)?;
         Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
     }

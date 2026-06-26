@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bson::{RawBson, RawDocumentBuf};
@@ -6,6 +7,7 @@ use serde::Serialize;
 use slate_engine::{
     Catalog, Engine, EngineTransaction, FunctionKind, IntegrityReport, KvEngine, VectorIndexSpec,
 };
+use slate_executor::watch::WatchSink;
 use slate_query::{DistinctOptions, FindOptions};
 use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
@@ -14,6 +16,7 @@ use crate::collection::{CollectionConfig, CollectionSchema};
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
+use crate::watch::{WatchHandle, WatchRegistry, WatchSnapshot};
 
 /// The injected random source backing the SQL `RAND()` function: a callable
 /// returning a fresh value in `[0, 1)` per call. Shared (`Arc`) so it outlives
@@ -180,6 +183,7 @@ impl DatabaseBuilder {
             engine,
             pool: self.pool,
             registry,
+            watch_registry: Arc::new(WatchRegistry::new()),
             rand,
             durability: self.durability,
             #[cfg(feature = "runtime")]
@@ -194,6 +198,10 @@ pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
     pool: Option<VmPool>,
     registry: Option<HookRegistry>,
+    /// Ephemeral registry of watch queries. Always present (cheap when empty);
+    /// behind an `Arc` so a [`WatchHandle`] outlives any database borrow and can
+    /// unregister itself on `Drop`.
+    watch_registry: Arc<WatchRegistry>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
     /// The builder-level durability default applied to every write transaction,
@@ -224,7 +232,7 @@ impl<S: Store> Database<S> {
             (false, Some(level)) => self.engine.begin_with_durability(level)?,
             _ => self.engine.begin(read_only)?,
         };
-        self.wrap_txn(txn)
+        self.wrap_txn(txn, read_only)
     }
 
     /// Begin a write transaction at an explicit durability level, overriding
@@ -235,7 +243,7 @@ impl<S: Store> Database<S> {
     /// asks for [`Durability::Strict`].
     pub fn begin_with(&self, durability: Durability) -> Result<Transaction<'_, S>, DbError> {
         let txn = self.engine.begin_with_durability(durability)?;
-        self.wrap_txn(txn)
+        self.wrap_txn(txn, false)
     }
 
     /// Wrap an engine transaction in a database [`Transaction`] (the shared tail
@@ -243,8 +251,27 @@ impl<S: Store> Database<S> {
     fn wrap_txn<'db>(
         &'db self,
         txn: <KvEngine<S> as Engine>::Txn<'db>,
+        read_only: bool,
     ) -> Result<Transaction<'db, S>, DbError> {
         let snapshot = self.registry.as_ref().map(|r| r.snapshot());
+
+        // Watch capture only applies to writes. Snapshot the watch registry at
+        // `begin` (so the transaction sees a frozen set even if a watch is
+        // registered/dropped mid-transaction) and build the executor sink only
+        // when there is at least one watch — read transactions and the
+        // no-watches common case pay nothing.
+        let (watch_snapshot, watch_sink) = if read_only {
+            (None, None)
+        } else {
+            let snap = self.watch_registry.snapshot();
+            if snap.is_empty() {
+                (None, None)
+            } else {
+                let sink = snap.build_sink();
+                (Some(snap), sink)
+            }
+        };
+
         Ok(Transaction {
             txn,
             pool: self.pool.as_ref(),
@@ -252,7 +279,134 @@ impl<S: Store> Database<S> {
             registry: self.registry.as_ref(),
             rand: self.rand.clone(),
             hooks_dirty: Cell::new(false),
+            watch_snapshot,
+            watch_sink,
         })
+    }
+
+    /// Register a **watch** with a BSON (`find`-style) filter and a callback
+    /// fired once per committed transaction with the batch of matching changes,
+    /// in write order.
+    ///
+    /// This is the BSON counterpart of [`watch_query`](Self::watch_query): the
+    /// `filter` is the same Mongo filter document `find` takes (translated by
+    /// `slate_query`), so the two surfaces share semantics. The BSON surface is
+    /// **filter-only** — there is no projection (use `watch_query` for that).
+    /// An empty filter (`doc! {}`) is match-all.
+    ///
+    /// Each change is recast against the filter's set boundary: a document
+    /// *entering* the filtered set surfaces as [`ChangeEvent::Insert`], one
+    /// *leaving* as [`ChangeEvent::Delete`], and one modified while staying in
+    /// as [`ChangeEvent::Update`] (carrying both old and new).
+    ///
+    /// The returned [`WatchHandle`] unregisters the watch on `Drop` (or via
+    /// [`WatchHandle::unwatch`]). The callback runs **inline on the writer
+    /// thread** after commit; it should be fast and non-panicking (a panic is
+    /// caught and isolated) — offload heavy work via [`stream`](Self::stream).
+    pub fn watch<F: Serialize>(
+        &self,
+        cf: &str,
+        collection: &str,
+        filter: F,
+        callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
+    ) -> Result<WatchHandle, DbError> {
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+        WatchRegistry::watch_bson(
+            &self.watch_registry,
+            cf,
+            collection,
+            &filter_raw,
+            Arc::new(callback),
+        )
+    }
+
+    /// Register a **watch query**: a SQL `WHERE` filter against `(cf,
+    /// collection)` whose `callback` fires once per committed transaction with
+    /// the batch of matching changes, in write order.
+    ///
+    /// This is the SQL counterpart of [`watch`](Self::watch) (bare name =
+    /// BSON filter; `_query` = SQL, mirroring `find`/`query`). `sql_filter` is a
+    /// `SELECT` whose `WHERE` clause is the filter (`SELECT * FROM c WHERE c.temp
+    /// > 80`); only `WHERE` and an identity projection apply. Set operations
+    /// (`ORDER BY` / `GROUP BY` / `HAVING` / aggregates / `LIMIT` / `OFFSET` /
+    /// `DISTINCT`) and joins are rejected.
+    ///
+    /// Each change is recast against the filter's set boundary: a document
+    /// *entering* the filtered set surfaces as [`ChangeEvent::Insert`], one
+    /// *leaving* as [`ChangeEvent::Delete`], and one modified while staying in
+    /// as [`ChangeEvent::Update`] (carrying both old and new).
+    ///
+    /// The returned [`WatchHandle`] unregisters the watch on `Drop` (or via
+    /// [`WatchHandle::unwatch`]). The callback runs **inline on the writer
+    /// thread** after commit; it should be fast and non-panicking (a panic is
+    /// caught and isolated) — offload heavy work via
+    /// [`stream_query`](Self::stream_query).
+    pub fn watch_query(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql_filter: &str,
+        callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
+    ) -> Result<WatchHandle, DbError> {
+        WatchRegistry::watch_sql(
+            &self.watch_registry,
+            cf,
+            collection,
+            sql_filter,
+            Arc::new(callback),
+        )
+    }
+
+    /// Open a **watch stream** with a BSON (`find`-style) filter: the pull
+    /// (cursor) counterpart of [`watch`](Self::watch).
+    ///
+    /// Returns a long-lived [`WatchStream`] subscription the consumer drains on
+    /// its own thread — decoupled from the writer, the FFI-clean delivery shape.
+    /// The stream is backed by a bounded buffer with the **non-blocking lag-drop**
+    /// policy: a slow consumer that fills the buffer causes further batches to be
+    /// dropped and the stream marked [`lagged`](WatchStream::lagged), never
+    /// blocking the writer. On a lag signal the consumer re-snapshots current
+    /// state. Dropping the stream unregisters the watch.
+    ///
+    /// See [`watch`](Self::watch) for filter and set-transition semantics (they
+    /// are identical — only the delivery differs).
+    pub fn stream<F: Serialize>(
+        &self,
+        cf: &str,
+        collection: &str,
+        filter: F,
+    ) -> Result<crate::watch::WatchStream, DbError> {
+        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
+        WatchRegistry::stream_bson(
+            &self.watch_registry,
+            cf,
+            collection,
+            &filter_raw,
+            crate::watch::DEFAULT_STREAM_CAPACITY,
+        )
+    }
+
+    /// Open a **watch stream** with a SQL `WHERE` filter: the pull (cursor)
+    /// counterpart of [`watch_query`](Self::watch_query).
+    ///
+    /// Returns a long-lived [`WatchStream`] subscription with the same
+    /// bounded-buffer, non-blocking lag-drop semantics as [`stream`](Self::stream)
+    /// (see there). The SQL clause restrictions match
+    /// [`watch_query`](Self::watch_query). Dropping the stream unregisters the
+    /// watch.
+    pub fn stream_query(
+        &self,
+        cf: &str,
+        collection: &str,
+        sql_filter: &str,
+    ) -> Result<crate::watch::WatchStream, DbError> {
+        WatchRegistry::stream_sql(
+            &self.watch_registry,
+            cf,
+            collection,
+            sql_filter,
+            crate::watch::DEFAULT_STREAM_CAPACITY,
+        )
     }
 
     /// Walk a collection's records and index structures and report any integrity
@@ -338,6 +492,14 @@ pub struct Transaction<'db, S: Store + 'db> {
     /// Random source for `RAND()`, handed to each cursor this transaction opens.
     rand: Option<RandFn>,
     hooks_dirty: Cell<bool>,
+    /// Watch registry snapshot frozen at `begin` — the source of callbacks at
+    /// emit time. `None` for read transactions and when no watches are
+    /// registered.
+    watch_snapshot: Option<Arc<WatchSnapshot>>,
+    /// The per-transaction capture sink, shared (`Rc`) into each cursor's
+    /// executor so the mutation nodes buffer matching changes. Drained at
+    /// commit. `None` when there is nothing to watch.
+    watch_sink: Option<Rc<WatchSink>>,
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
@@ -417,7 +579,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         sql: &str,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = self.lower_sql(cf, collection, sql, None)?;
-        Ok(Cursor::new(&self.txn, plan, self.pool, self.rand.clone()))
+        Ok(Cursor::new(
+            &self.txn,
+            plan,
+            self.pool,
+            self.rand.clone(),
+            self.watch_sink.clone(),
+        ))
     }
 
     /// Execute a SQL query with values for its `@name` parameters.
@@ -446,6 +614,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             self.pool,
             params,
             self.rand.clone(),
+            self.watch_sink.clone(),
         ))
     }
 
@@ -762,7 +931,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         ctx: slate_planner::PlanContext,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let plan = slate_planner::plan(stmt, &ctx)?;
-        Ok(Cursor::new(&self.txn, plan, self.pool, self.rand.clone()))
+        Ok(Cursor::new(
+            &self.txn,
+            plan,
+            self.pool,
+            self.rand.clone(),
+            self.watch_sink.clone(),
+        ))
     }
 
     /// Find the first document matching a filter.
@@ -1126,6 +1301,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         // Swap the new snapshot into the registry after a successful commit.
         if let (Some(snapshot), Some(registry)) = (new_snapshot, self.registry) {
             registry.swap(snapshot);
+        }
+
+        // Fire watch callbacks on the just-committed state, in the same
+        // post-commit side-effect position as the hook `registry.swap` above.
+        // The commit has already succeeded, so a panicking callback is isolated
+        // and cannot poison the transaction.
+        if let (Some(snapshot), Some(sink)) = (&self.watch_snapshot, &self.watch_sink) {
+            crate::watch::emit(snapshot, sink);
         }
 
         Ok(())

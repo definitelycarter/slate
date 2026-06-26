@@ -4,11 +4,14 @@
 //! type is kept); all other fields come from `replacement`. Yields the new
 //! documents.
 
+use std::rc::Rc;
+
 use bson::RawBson;
 use bson::raw::{CString, RawDocumentBuf};
 use slate_engine::{CollectionHandle, EngineTransaction};
 use slate_eval::EvalError;
 
+use crate::watch::WatchSink;
 use crate::{ExecError, ValueIter};
 
 pub(crate) fn execute<'a, T: EngineTransaction>(
@@ -16,6 +19,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     handle: CollectionHandle<T::Cf>,
     replacement: RawDocumentBuf,
     source: ValueIter<'a>,
+    watch: Option<Rc<WatchSink>>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let pk_key = CString::try_from(handle.pk_path()).map_err(|e| EvalError {
         message: format!("invalid pk path: {e}"),
@@ -50,6 +54,16 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         }
 
         txn.put(&handle, &buf)?;
+        // Replace has both states (old matched row, rebuilt new doc).
+        if let Some(sink) = &watch {
+            sink.capture(
+                handle.cf_name(),
+                handle.name(),
+                handle.pk_path(),
+                Some(&old),
+                Some(&buf),
+            )?;
+        }
         Ok(Some(RawBson::Document(buf)))
     })))
 }

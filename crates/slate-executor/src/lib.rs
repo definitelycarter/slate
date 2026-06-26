@@ -29,6 +29,7 @@ mod analyze;
 mod error;
 mod nodes;
 mod trace;
+pub mod watch;
 
 #[cfg(feature = "bench-internals")]
 pub mod bench;
@@ -44,6 +45,7 @@ use slate_vm::pool::VmPool;
 
 use analyze::Counting;
 pub use error::ExecError;
+pub use watch::{CapturedEvent, ChangeEvent, Compiled, CompiledWatch, WatchSink};
 
 /// Map the planner's [`VectorMetric`](slate_planner::VectorMetric) onto
 /// [`slate_eval::VectorMetric`], which the vector-distance math is keyed on — the
@@ -87,6 +89,11 @@ pub struct Executor<'a, T> {
     /// `execute_node` is `&self`; it advances once per node, in the same order
     /// the renderer and `PlanStats::for_plan` walk the tree.
     analyze_index: std::cell::Cell<usize>,
+    /// Change-detection sink for watch queries, threaded (by `Rc`) into the
+    /// mutation nodes so they can buffer matching before/after documents as the
+    /// write stream drains. `None` when no watches are registered. See
+    /// [`watch`].
+    watch: Option<Rc<WatchSink>>,
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
@@ -100,6 +107,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             rand: None,
             analyze: None,
             analyze_index: std::cell::Cell::new(0),
+            watch: None,
         }
     }
 
@@ -112,6 +120,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             rand: None,
             analyze: None,
             analyze_index: std::cell::Cell::new(0),
+            watch: None,
         }
     }
 
@@ -129,6 +138,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             rand: None,
             analyze: None,
             analyze_index: std::cell::Cell::new(0),
+            watch: None,
         }
     }
 
@@ -136,6 +146,14 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     /// closure owns its PRNG state, so the executor only ever *calls* it.
     pub fn with_rand(mut self, rand: Option<Rc<dyn Fn() -> f64>>) -> Self {
         self.rand = rand;
+        self
+    }
+
+    /// Attach a change-detection sink so the mutation nodes buffer matching
+    /// before/after documents for registered watch queries. `None` (the
+    /// default) disables capture at zero cost. See [`watch::WatchSink`].
+    pub fn with_watch(mut self, watch: Option<Rc<WatchSink>>) -> Self {
+        self.watch = watch;
         self
     }
 
@@ -152,7 +170,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::insert::execute(self.txn, handle, source)
+                nodes::insert::execute(self.txn, handle, source, self.watch.clone())
             }
 
             Plan::Delete { collection, source } => {
@@ -160,7 +178,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::delete::execute(self.txn, handle, source)
+                nodes::delete::execute(self.txn, handle, source, self.watch.clone())
             }
 
             Plan::Replace {
@@ -172,7 +190,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::replace::execute(self.txn, handle, replacement, source)
+                nodes::replace::execute(self.txn, handle, replacement, source, self.watch.clone())
             }
 
             Plan::Update {
@@ -184,7 +202,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::mutate::execute(self.txn, handle, assignments, source)
+                nodes::mutate::execute(self.txn, handle, assignments, source, self.watch.clone())
             }
 
             Plan::Trigger {
@@ -207,7 +225,15 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::upsert::execute(self.txn, self.pool, hooks, handle, mode, source)
+                nodes::upsert::execute(
+                    self.txn,
+                    self.pool,
+                    hooks,
+                    handle,
+                    mode,
+                    source,
+                    self.watch.clone(),
+                )
             }
         }
     }
