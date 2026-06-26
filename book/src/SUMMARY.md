@@ -41,6 +41,7 @@
 - [Collect Node](./rfcs/collect-node.md)
 - [Decimal128 in Query Evaluation](./rfcs/decimal128-evaluation.md)
 - [User-Defined Logic](./rfcs/user-defined-logic.md)
+- [Native Functions (first-class Rust hooks)](./rfcs/native-functions.md)
 - [MemoryStore Persistence](./rfcs/memorystore-persistence.md)
 - [Change Detection (Watch Queries)](./rfcs/watch-queries.md)
 - [WebAssembly Support](./rfcs/webassembly-support.md)
