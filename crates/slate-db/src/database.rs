@@ -2,15 +2,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use serde::Serialize;
 use slate_engine::{Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine};
 use slate_executor::watch::WatchSink;
-use slate_query::FindOptions;
 use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
 
-use crate::collection::{CollectionConfig, CollectionSchema};
-use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
 use crate::watch::{WatchRegistry, WatchSnapshot};
@@ -383,76 +379,6 @@ pub struct Transaction<'db, S: Store + 'db> {
 }
 
 impl<'db, S: Store + 'db> Transaction<'db, S> {
-    // ── Insert operations ───────────────────────────────────────
-
-    /// Insert a single document. Fails with DuplicateKey if `_id` already exists.
-    /// If the document has no `_id`, an ObjectId is generated.
-    pub fn insert_one<D: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        doc: D,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let raw = bson::serialize_to_raw_document_buf(&doc)?;
-        self.insert_many(cf, collection, vec![raw])
-    }
-
-    /// Insert multiple documents. Fails per-doc on duplicate `_id`.
-    pub fn insert_many<D: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        docs: impl IntoIterator<Item = D>,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let docs: Vec<D> = docs.into_iter().collect();
-        let plan = crate::v2::insert_plan(cf, collection, &docs, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    // ── Query operations ────────────────────────────────────────
-
-    /// Find documents matching a filter with optional sort, skip, take, and projection.
-    ///
-    /// Returns a [`Cursor`] that can be iterated lazily via [`.iter()`](Cursor::iter)
-    /// or drained via [`.drain()`](Cursor::drain) for a count.
-    ///
-    /// The Mongo filter is translated to the shared AST (`slate-query`), lowered
-    /// (`slate-planner`), and run on `slate-executor`. A filter using an operator
-    /// the front-end doesn't support yet is a hard error.
-    pub fn find<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-        options: FindOptions,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        crate::v2::find_cursor(cf, collection, &filter, &options, self)
-    }
-
-    /// Execute a CosmosDB-style SQL query (`SELECT VALUE <expr> FROM <alias>
-    /// [JOIN ...] [WHERE ...] [ORDER BY ...] [OFFSET/LIMIT]`) and return a
-    /// [`Cursor`] over the resulting values.
-    ///
-    /// SQL is read-only and shares the stack with `find` — it parses to the same
-    /// AST (`slate-sql`), lowers with the same planner, and runs on the same
-    /// executor, so the two surfaces can't drift. The `FROM` clause names only
-    /// the row alias; the container is `(cf, collection)`, chosen here (matching
-    /// Cosmos, where the container is external to the query text).
-    ///
-    /// ```ignore
-    /// let cursor = txn.query(DEFAULT_CF, "users",
-    ///     "SELECT VALUE c.name FROM c WHERE c.age > 21 ORDER BY c.age DESC")?;
-    /// for name in cursor.iter::<String>()? { /* ... */ }
-    /// ```
-    pub fn query(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql: &str,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        crate::v2::query_cursor(cf, collection, sql, None, self)
-    }
-
     /// Gather size/cardinality statistics for one collection as of this
     /// transaction's read snapshot: live document count, plus per-index entry and
     /// distinct-value (cardinality) counts.
@@ -592,84 +518,11 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         self.hooks_dirty.set(true);
     }
 
-    // ── Bulk upsert / merge operations ────────────────────────────
-
-    /// Upsert (insert-or-replace) a batch of documents by `_id`.
-    pub fn upsert_many<D: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        docs: impl IntoIterator<Item = D>,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        self.upsert_with_mode(cf, collection, docs, slate_planner::UpsertMode::Replace)
-    }
-
-    fn upsert_with_mode<D: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        docs: impl IntoIterator<Item = D>,
-        mode: slate_planner::UpsertMode,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let docs: Vec<D> = docs.into_iter().collect();
-        let plan = crate::v2::upsert_plan(cf, collection, &docs, mode, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    // ── Count ───────────────────────────────────────────────────
-
-    /// Count documents matching a filter.
-    pub fn count<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-    ) -> Result<u64, DbError> {
-        self.find(cf, collection, filter, FindOptions::default())?
-            .drain()
-    }
-
     // ── TTL operations ──────────────────────────────────────────
 
     /// Purge expired documents from a collection.
     pub fn purge_expired(&self, cf: &str, collection: &str) -> Result<u64, DbError> {
         crate::v2::purge_core(cf, collection, self)
-    }
-
-    // ── Index operations ────────────────────────────────────────
-
-    /// Create an index on a field and backfill existing records.
-    pub fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .create(field, crate::v2::IndexOptions::default())
-            .execute(self)
-    }
-
-    /// Create a unique index on a field and backfill existing records.
-    ///
-    /// Enforces that no two live documents share the same value for `field`.
-    /// Fails with [`DbError::UniqueViolation`] if existing data already
-    /// contains a duplicate. Scalar paths only (no multikey `[]`).
-    pub fn create_unique_index(
-        &self,
-        cf: &str,
-        collection: &str,
-        field: &str,
-    ) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .create(field, crate::v2::IndexOptions::unique())
-            .execute(self)
-    }
-
-    /// Read a collection's catalog metadata: its key paths and indexed fields
-    /// (with the unique subset called out). Read-only; intended for schema
-    /// introspection rather than planning.
-    pub fn collection_schema(
-        &self,
-        cf: &str,
-        collection: &str,
-    ) -> Result<CollectionSchema, DbError> {
-        crate::v2::collection_schema_core(cf, collection, self)
     }
 
     // ── Collection operations ───────────────────────────────────
@@ -716,19 +569,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub fn rollback(self) -> Result<(), DbError> {
         self.txn.rollback()?;
         Ok(())
-    }
-
-    // ── Collection management ───────────────────────────────────
-
-    /// Create a collection with the given config.
-    pub fn create_collection(&self, config: &CollectionConfig) -> Result<(), DbError> {
-        crate::v2::create_collection_core(
-            &config.cf,
-            &config.name,
-            &config.pk_path,
-            &config.ttl_path,
-            self,
-        )
     }
 }
 

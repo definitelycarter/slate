@@ -55,12 +55,7 @@ pub use write::{
     DeleteBuilder, InsertBuilder, ReplaceBuilder, UpdateBuilder, UpsertBuilder, WriteResult,
 };
 
-// Shared read/write cores, used both by the builders above and by the inverted
-// flat `Transaction` methods (so the two surfaces run one body). `pub(crate)`,
-// not public — they are an internal seam, not part of the v2 API.
-pub(crate) use collections::create_collection_core;
-pub(crate) use exec::write_cursor;
-pub(crate) use meta::{collection_schema_core, collection_stats_core, purge_core};
-pub(crate) use query::query_cursor;
-pub(crate) use read::find_cursor;
-pub(crate) use write::{insert_plan, upsert_plan};
+// Shared read/write cores, used by the builders above and by the kept flat
+// `Transaction` metadata methods (so the two surfaces run one body).
+// `pub(crate)`, not public — they are an internal seam, not part of the v2 API.
+pub(crate) use meta::{collection_stats_core, purge_core};
