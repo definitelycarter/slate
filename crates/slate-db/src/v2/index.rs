@@ -295,16 +295,12 @@ mod tests {
     use slate_store::MemoryStore;
 
     use crate::v2::{IndexOptions, VectorIndexOptions};
-    use crate::{CollectionConfig, Database, DatabaseBuilder, VectorMetric, join_index_fields};
+    use crate::{Database, DatabaseBuilder, VectorMetric, join_index_fields};
 
     fn db_with_users() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "users".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
+        db.collections().create("users").execute(&txn).unwrap();
         txn.commit().unwrap();
         db
     }

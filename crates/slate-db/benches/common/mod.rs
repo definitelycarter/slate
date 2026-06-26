@@ -5,8 +5,9 @@ use bson::rawdoc;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use slate_db::DatabaseBuilder;
 use slate_db::bench::Database;
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -48,13 +49,18 @@ pub fn db_builder() -> DatabaseBuilder {
 pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "test".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "test", "status").unwrap();
-    txn.create_index(DEFAULT_CF, "test", "contacts_count")
+    engine.collections().create("test").execute(&txn).unwrap();
+    engine
+        .collection("test")
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    engine
+        .collection("test")
+        .indexes()
+        .create("contacts_count", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
@@ -67,9 +73,10 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
             }
         })
         .collect();
-    txn.insert_many(DEFAULT_CF, "test", docs)
-        .unwrap()
-        .drain()
+    engine
+        .collection("test")
+        .insert_many(docs)
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
     engine
@@ -122,13 +129,14 @@ pub fn generate_realistic_batch(count: usize) -> Vec<bson::Document> {
 pub fn array_tags_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "bench".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "bench", "tags.[]").unwrap();
+        engine
+            .collection("bench")
+            .indexes()
+            .create("tags.[]", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
     let mut rng = StdRng::seed_from_u64(7);
     let docs: Vec<bson::Document> = (0..n)
@@ -148,9 +156,10 @@ pub fn array_tags_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
         })
         .collect();
     for chunk in docs.chunks(1000) {
-        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
-            .unwrap()
-            .drain()
+        engine
+            .collection("bench")
+            .insert_many(chunk.to_vec())
+            .execute(&txn)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -165,13 +174,14 @@ pub fn array_tags_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
 pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "bench".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "bench", "name").unwrap();
+        engine
+            .collection("bench")
+            .indexes()
+            .create("name", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
@@ -182,9 +192,10 @@ pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
         })
         .collect();
     for chunk in docs.chunks(1000) {
-        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
-            .unwrap()
-            .drain()
+        engine
+            .collection("bench")
+            .insert_many(chunk.to_vec())
+            .execute(&txn)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -202,12 +213,13 @@ pub fn string_index_engine(n: usize, indexed: bool) -> Database<MemoryStore> {
 pub fn nested_indexed_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "bench".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "bench", "meta.note").unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
+    engine
+        .collection("bench")
+        .indexes()
+        .create("meta.note", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     let mut rng = StdRng::seed_from_u64(42);
     let docs: Vec<bson::Document> = (0..n)
         .map(|i| {
@@ -223,9 +235,10 @@ pub fn nested_indexed_engine(n: usize) -> Database<MemoryStore> {
         })
         .collect();
     for chunk in docs.chunks(1000) {
-        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
-            .unwrap()
-            .drain()
+        engine
+            .collection("bench")
+            .insert_many(chunk.to_vec())
+            .execute(&txn)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -241,22 +254,19 @@ pub fn nested_indexed_engine(n: usize) -> Database<MemoryStore> {
 pub fn compound_indexed_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "bench".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_compound_index(
-        DEFAULT_CF,
-        "bench",
-        &["status".to_string(), "contacts_count".to_string()],
-    )
-    .unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
+    engine
+        .collection("bench")
+        .indexes()
+        .create(["status", "contacts_count"], IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
-        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
-            .unwrap()
-            .drain()
+        engine
+            .collection("bench")
+            .insert_many(chunk.to_vec())
+            .execute(&txn)
             .unwrap();
     }
     txn.commit().unwrap();
@@ -266,19 +276,25 @@ pub fn compound_indexed_engine(n: usize) -> Database<MemoryStore> {
 pub fn realistic_seeded_engine(n: usize) -> Database<MemoryStore> {
     let engine = db_builder().open(MemoryStore::new()).unwrap();
     let txn = engine.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "bench".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
-    txn.create_index(DEFAULT_CF, "bench", "contacts_count")
+    engine.collections().create("bench").execute(&txn).unwrap();
+    engine
+        .collection("bench")
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    engine
+        .collection("bench")
+        .indexes()
+        .create("contacts_count", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
     let docs = generate_realistic_batch(n);
     for chunk in docs.chunks(1000) {
-        txn.insert_many(DEFAULT_CF, "bench", chunk.to_vec())
-            .unwrap()
-            .drain()
+        engine
+            .collection("bench")
+            .insert_many(chunk.to_vec())
+            .execute(&txn)
             .unwrap();
     }
     txn.commit().unwrap();

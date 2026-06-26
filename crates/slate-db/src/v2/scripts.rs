@@ -308,7 +308,7 @@ mod tests {
     use slate_store::MemoryStore;
     use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
-    use crate::{CollectionConfig, Database, DatabaseBuilder, RuntimeRegistry, VmPool};
+    use crate::{Database, DatabaseBuilder, RuntimeRegistry, VmPool};
 
     fn db_with_users() -> Database<MemoryStore> {
         with_users(DatabaseBuilder::new())
@@ -325,11 +325,7 @@ mod tests {
     fn with_users(builder: DatabaseBuilder) -> Database<MemoryStore> {
         let db = builder.open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "users".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
+        db.collections().create("users").execute(&txn).unwrap();
         txn.commit().unwrap();
         db
     }

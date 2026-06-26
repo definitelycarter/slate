@@ -2,7 +2,8 @@ mod common;
 use common::*;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder};
+use slate_db::DatabaseBuilder;
+use slate_db::v2::IndexOptions;
 use slate_store::MemoryStore;
 
 // ── Bulk Insert ─────────────────────────────────────────────
@@ -13,13 +14,18 @@ fn bench_bulk_insert(c: &mut Criterion) {
         let engine = {
             let engine = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
             let txn = engine.begin(false).unwrap();
-            txn.create_collection(&CollectionConfig {
-                name: "bench".into(),
-                ..Default::default()
-            })
-            .unwrap();
-            txn.create_index(DEFAULT_CF, "bench", "status").unwrap();
-            txn.create_index(DEFAULT_CF, "bench", "contacts_count")
+            engine.collections().create("bench").execute(&txn).unwrap();
+            engine
+                .collection("bench")
+                .indexes()
+                .create("status", IndexOptions::default())
+                .execute(&txn)
+                .unwrap();
+            engine
+                .collection("bench")
+                .indexes()
+                .create("contacts_count", IndexOptions::default())
+                .execute(&txn)
                 .unwrap();
             txn.commit().unwrap();
             engine

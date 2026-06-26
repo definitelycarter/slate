@@ -1,6 +1,7 @@
-use bson::{Bson, RawBson, doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF, DatabaseBuilder, DbError};
-use slate_query::{FindOptions, Sort, SortDirection};
+use bson::{Bson, doc, rawdoc};
+use slate_db::v2::IndexOptions;
+use slate_db::{DatabaseBuilder, DbError};
+use slate_query::SortDirection;
 use slate_store::MemoryStore;
 
 fn main() -> Result<(), DbError> {
@@ -9,54 +10,50 @@ fn main() -> Result<(), DbError> {
 
     // ── Create a collection ─────────────────────────────────────
     let txn = db.begin(false)?;
-    txn.create_collection(&CollectionConfig {
-        name: "users".into(),
-        ..Default::default()
-    })?;
+    db.collections().create("users").execute(&txn)?;
     txn.commit()?;
 
     // ── Insert documents ────────────────────────────────────────
     let txn = db.begin(false)?;
 
-    txn.insert_one(
-        DEFAULT_CF,
-        "users",
-        doc! {
+    db.collection("users")
+        .insert_one(doc! {
             "_id": "user-1",
             "name": "Alice",
             "age": 32,
             "role": "engineer",
             "address": { "city": "Austin", "state": "TX" }
-        },
-    )?
-    .drain()?;
+        })
+        .execute(&txn)?;
 
-    txn.insert_many(
-        DEFAULT_CF,
-        "users",
-        vec![
+    db.collection("users")
+        .insert_many(vec![
             doc! { "_id": "user-2", "name": "Bob",     "age": 28, "role": "designer",  "address": { "city": "Denver",  "state": "CO" } },
             doc! { "_id": "user-3", "name": "Charlie", "age": 45, "role": "engineer",  "address": { "city": "Austin",  "state": "TX" } },
             doc! { "_id": "user-4", "name": "Diana",   "age": 38, "role": "manager",   "address": { "city": "Seattle", "state": "WA" } },
             doc! { "_id": "user-5", "name": "Eve",     "age": 25, "role": "engineer",  "address": { "city": "Denver",  "state": "CO" } },
-        ],
-    )?
-    .drain()?;
+        ])
+        .execute(&txn)?;
 
     txn.commit()?;
     println!("Inserted 5 users.");
 
     // ── Find all documents ──────────────────────────────────────
     let txn = db.begin(true)?;
-    let all: Vec<_> = txn
-        .find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?
-        .iter_raw()?
+    let all: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! {})
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Total users: {}", all.len());
 
     // ── Find one by _id ─────────────────────────────────────────
-    let alice = txn
-        .find_one(DEFAULT_CF, "users", rawdoc! { "_id": "user-1" })?
+    let alice = db
+        .collection("users")
+        .find(rawdoc! { "_id": "user-1" })
+        .iter_raw(&txn)?
+        .next()
+        .transpose()?
         .expect("alice should exist");
     println!(
         "Found: {} (age {})",
@@ -65,58 +62,37 @@ fn main() -> Result<(), DbError> {
     );
 
     // ── Filter: equality ────────────────────────────────────────
-    let engineers: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! { "role": "engineer" },
-            FindOptions::default(),
-        )?
-        .iter_raw()?
+    let engineers: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! { "role": "engineer" })
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Engineers: {}", engineers.len());
 
     // ── Filter: comparison ($gt, $lte) ──────────────────────────
-    let over_30: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! { "age": { "$gt": 30 } },
-            FindOptions::default(),
-        )?
-        .iter_raw()?
+    let over_30: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! { "age": { "$gt": 30 } })
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Users over 30: {}", over_30.len());
 
     // ── Filter: dot-notation on nested fields ───────────────────
-    let in_austin: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! { "address.city": "Austin" },
-            FindOptions::default(),
-        )?
-        .iter_raw()?
+    let in_austin: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! { "address.city": "Austin" })
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Users in Austin: {}", in_austin.len());
 
     // ── Sort + pagination ───────────────────────────────────────
-    let page: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "age".into(),
-                    direction: SortDirection::Desc,
-                }],
-                skip: Some(1),
-                take: Some(2),
-                ..Default::default()
-            },
-        )?
-        .iter_raw()?
+    let page: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! {})
+        .sort("age", SortDirection::Desc)
+        .offset(1)
+        .limit(2)
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!(
         "Page (sorted by age desc, skip 1, take 2): {}",
@@ -127,17 +103,11 @@ fn main() -> Result<(), DbError> {
     );
 
     // ── Projection: only return specific fields ─────────────────
-    let names_only: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! {},
-            FindOptions {
-                columns: Some(vec!["name".into(), "role".into()]),
-                ..Default::default()
-            },
-        )?
-        .iter_raw()?
+    let names_only: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! {})
+        .project(vec!["name".into(), "role".into()])
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     for d in &names_only {
         // _id is always included; only projected columns are returned
@@ -149,7 +119,11 @@ fn main() -> Result<(), DbError> {
     );
 
     // ── Count ───────────────────────────────────────────────────
-    let count = txn.count(DEFAULT_CF, "users", rawdoc! { "role": "engineer" })?;
+    let count = db
+        .collection("users")
+        .find(rawdoc! { "role": "engineer" })
+        .iter_raw(&txn)?
+        .count();
     println!("Engineer count: {}", count);
     drop(txn);
 
@@ -157,99 +131,94 @@ fn main() -> Result<(), DbError> {
     let txn = db.begin(false)?;
 
     // $set a field
-    txn.update_one(
-        DEFAULT_CF,
-        "users",
-        rawdoc! { "_id": "user-1" },
-        rawdoc! { "$set": { "age": 33 } },
-    )?
-    .drain()?;
+    db.collection("users")
+        .find(rawdoc! { "_id": "user-1" })
+        .update(rawdoc! { "$set": { "age": 33 } })
+        .one()
+        .execute(&txn)?;
 
     // $inc a numeric field
-    txn.update_many(
-        DEFAULT_CF,
-        "users",
-        rawdoc! { "role": "engineer" },
-        rawdoc! { "$inc": { "age": 1 } },
-    )?
-    .drain()?;
+    db.collection("users")
+        .find(rawdoc! { "role": "engineer" })
+        .update(rawdoc! { "$inc": { "age": 1 } })
+        .execute(&txn)?;
 
     txn.commit()?;
     println!("Updated ages.");
 
     // ── Create an index ─────────────────────────────────────────
     let txn = db.begin(false)?;
-    txn.create_index(DEFAULT_CF, "users", "role")?;
+    db.collection("users")
+        .indexes()
+        .create("role", IndexOptions::default())
+        .execute(&txn)?;
     txn.commit()?;
     println!("Created index on 'role'.");
 
     // Queries on indexed fields are automatically accelerated
     let txn = db.begin(true)?;
-    let designers: Vec<_> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! { "role": "designer" },
-            FindOptions::default(),
-        )?
-        .iter_raw()?
+    let designers: Vec<_> = db
+        .collection("users")
+        .find(rawdoc! { "role": "designer" })
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Designers (via index scan): {}", designers.len());
     drop(txn);
 
     // ── Delete documents ────────────────────────────────────────
     let txn = db.begin(false)?;
-    txn.delete_one(DEFAULT_CF, "users", rawdoc! { "_id": "user-5" })?
-        .drain()?;
+    db.collection("users")
+        .find(rawdoc! { "_id": "user-5" })
+        .delete()
+        .one()
+        .execute(&txn)?;
     txn.commit()?;
 
     let txn = db.begin(true)?;
-    let remaining = txn.count(DEFAULT_CF, "users", rawdoc! {})?;
+    let remaining = db
+        .collection("users")
+        .find(rawdoc! {})
+        .iter_raw(&txn)?
+        .count();
     println!("Users after delete: {}", remaining);
     drop(txn);
 
     // ── Distinct values ─────────────────────────────────────────
     let txn = db.begin(true)?;
-    let raw = txn.distinct(DEFAULT_CF, "users", "role", rawdoc! {}, Default::default())?;
-    if let RawBson::Array(arr) = raw {
-        let roles: Vec<Bson> = arr
-            .into_iter()
-            .map(|r| Bson::try_from(r.unwrap()).unwrap())
-            .collect();
-        println!("Distinct roles: {:?}", roles);
-    }
+    let roles: Vec<Bson> = db
+        .collection("users")
+        .find(rawdoc! {})
+        .distinct("role")
+        .iter_raw(&txn)?
+        .map(|r| Bson::try_from(r.unwrap()).unwrap())
+        .collect();
+    println!("Distinct roles: {:?}", roles);
     drop(txn);
 
     // ── Custom column family ─────────────────────────────────────
     // Collections can be scoped to a column family instead of DEFAULT_CF.
     // The same collection name in different CFs are fully isolated.
     let txn = db.begin(false)?;
-    txn.create_collection(&CollectionConfig {
-        name: "events".into(),
-        cf: "analytics".into(),
-        ..Default::default()
-    })?;
-    txn.insert_many(
-        "analytics",
-        "events",
-        vec![
+    db.cf("analytics")
+        .collections()
+        .create("events")
+        .execute(&txn)?;
+    db.cf("analytics")
+        .collection("events")
+        .insert_many(vec![
             doc! { "_id": "e1", "type": "page_view", "url": "/home" },
             doc! { "_id": "e2", "type": "click",     "url": "/signup" },
             doc! { "_id": "e3", "type": "page_view", "url": "/docs" },
-        ],
-    )?
-    .drain()?;
+        ])
+        .execute(&txn)?;
     txn.commit()?;
 
     let txn = db.begin(true)?;
-    let views: Vec<_> = txn
-        .find(
-            "analytics",
-            "events",
-            rawdoc! { "type": "page_view" },
-            FindOptions::default(),
-        )?
-        .iter_raw()?
+    let views: Vec<_> = db
+        .cf("analytics")
+        .collection("events")
+        .find(rawdoc! { "type": "page_view" })
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
     println!("Events in 'analytics' CF: {} page views", views.len());
     drop(txn);

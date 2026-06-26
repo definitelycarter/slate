@@ -569,16 +569,12 @@ mod tests {
     use bson::doc;
     use slate_store::MemoryStore;
 
-    use crate::{CollectionConfig, Database, DatabaseBuilder};
+    use crate::{Database, DatabaseBuilder};
 
     fn db_with_users() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "users".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
+        db.collections().create("users").execute(&txn).unwrap();
         txn.commit().unwrap();
         db
     }

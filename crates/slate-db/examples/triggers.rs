@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bson::{doc, rawdoc};
-use slate_db::{CollectionConfig, DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
+use slate_db::{DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
 use slate_store::MemoryStore;
 use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
@@ -15,16 +15,8 @@ fn main() -> Result<(), DbError> {
 
     // ── Set up collections ────────────────────────────────────
     let txn = db.begin(false)?;
-    txn.create_collection(&CollectionConfig {
-        cf: "app".into(),
-        name: "users".into(),
-        ..Default::default()
-    })?;
-    txn.create_collection(&CollectionConfig {
-        cf: "app".into(),
-        name: "audit".into(),
-        ..Default::default()
-    })?;
+    db.cf("app").collections().create("users").execute(&txn)?;
+    db.cf("app").collections().create("audit").execute(&txn)?;
     txn.commit()?;
 
     // ── Register a trigger on "users" ─────────────────────────
@@ -32,11 +24,12 @@ fn main() -> Result<(), DbError> {
     // It logs each action to the "audit" collection and prints
     // the lifecycle event so you can see the before/after pairs.
     let txn = db.begin(false)?;
-    txn.register_trigger(
-        "app",
-        "users",
-        "audit_trigger",
-        r#"
+    db.cf("app")
+        .collection("users")
+        .triggers()
+        .create(
+            "audit_trigger",
+            r#"
         return function(ctx, event)
           local action = event.action
           local id     = event.doc._id
@@ -56,110 +49,107 @@ fn main() -> Result<(), DbError> {
           return event
         end
         "#,
-    )?;
+        )
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── INSERT ────────────────────────────────────────────────
     // Fires: inserting → inserted
     println!("--- insert_one ---");
     let txn = db.begin(false)?;
-    txn.insert_one(
-        "app",
-        "users",
-        doc! { "_id": "u1", "name": "Alice", "role": "engineer" },
-    )?
-    .drain()?;
+    db.cf("app")
+        .collection("users")
+        .insert_one(doc! { "_id": "u1", "name": "Alice", "role": "engineer" })
+        .execute(&txn)?;
 
     println!("\n--- insert_many ---");
-    txn.insert_many(
-        "app",
-        "users",
-        vec![
+    db.cf("app")
+        .collection("users")
+        .insert_many(vec![
             doc! { "_id": "u2", "name": "Bob",     "role": "designer" },
             doc! { "_id": "u3", "name": "Charlie", "role": "manager" },
-        ],
-    )?
-    .drain()?;
+        ])
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── UPDATE ────────────────────────────────────────────────
     // Fires: updating → updated
     println!("\n--- update_one ($set) ---");
     let txn = db.begin(false)?;
-    txn.update_one(
-        "app",
-        "users",
-        rawdoc! { "_id": "u1" },
-        rawdoc! { "$set": { "role": "senior engineer" } },
-    )?
-    .drain()?;
+    db.cf("app")
+        .collection("users")
+        .find(rawdoc! { "_id": "u1" })
+        .update(rawdoc! { "$set": { "role": "senior engineer" } })
+        .one()
+        .execute(&txn)?;
     txn.commit()?;
 
     println!("\n--- update_many ($set) ---");
     let txn = db.begin(false)?;
-    txn.update_many(
-        "app",
-        "users",
-        rawdoc! { "role": "designer" },
-        rawdoc! { "$set": { "active": true } },
-    )?
-    .drain()?;
+    db.cf("app")
+        .collection("users")
+        .find(rawdoc! { "role": "designer" })
+        .update(rawdoc! { "$set": { "active": true } })
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── REPLACE ───────────────────────────────────────────────
     // Fires: updating → updated (same lifecycle as update)
     println!("\n--- replace_one ---");
     let txn = db.begin(false)?;
-    txn.replace_one(
-        "app",
-        "users",
-        rawdoc! { "_id": "u2" },
-        doc! { "_id": "u2", "name": "Bob", "role": "lead designer", "active": true },
-    )?
-    .drain()?;
+    db.cf("app")
+        .collection("users")
+        .find(rawdoc! { "_id": "u2" })
+        .replace(doc! { "_id": "u2", "name": "Bob", "role": "lead designer", "active": true })
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── DELETE ─────────────────────────────────────────────────
     // Fires: deleting → deleted
     println!("\n--- delete_one ---");
     let txn = db.begin(false)?;
-    txn.delete_one("app", "users", rawdoc! { "_id": "u3" })?
-        .drain()?;
+    db.cf("app")
+        .collection("users")
+        .find(rawdoc! { "_id": "u3" })
+        .delete()
+        .one()
+        .execute(&txn)?;
     txn.commit()?;
 
     println!("\n--- delete_many ---");
     let txn = db.begin(false)?;
-    txn.insert_one(
-        "app",
-        "users",
-        doc! { "_id": "u4", "name": "Diana", "role": "intern" },
-    )?
-    .drain()?;
-    txn.delete_many("app", "users", rawdoc! { "role": "intern" })?
-        .drain()?;
+    db.cf("app")
+        .collection("users")
+        .insert_one(doc! { "_id": "u4", "name": "Diana", "role": "intern" })
+        .execute(&txn)?;
+    db.cf("app")
+        .collection("users")
+        .find(rawdoc! { "role": "intern" })
+        .delete()
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── UPSERT ────────────────────────────────────────────────
     // Fires inserting/inserted for new docs, updating/updated for existing ones.
     println!("\n--- upsert_many (insert new + update existing) ---");
     let txn = db.begin(false)?;
-    txn.upsert_many(
-        "app",
-        "users",
-        vec![
+    db.cf("app")
+        .collection("users")
+        .upsert_many(vec![
             doc! { "_id": "u1", "name": "Alice", "role": "staff engineer", "active": true }, // exists → update
             doc! { "_id": "u5", "name": "Eve",   "role": "engineer",       "active": true }, // new → insert
-        ],
-    )?
-    .drain()?;
+        ])
+        .execute(&txn)?;
     txn.commit()?;
 
     // ── Verify the audit trail ────────────────────────────────
     println!("\n--- audit log ---");
     let txn = db.begin(true)?;
-    let audit: Vec<_> = txn
-        .find("app", "audit", rawdoc! {}, Default::default())?
-        .iter_raw()?
+    let audit: Vec<_> = db
+        .cf("app")
+        .collection("audit")
+        .find(rawdoc! {})
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
 
     for entry in &audit {
@@ -178,9 +168,11 @@ fn main() -> Result<(), DbError> {
     // ── Final state of users ──────────────────────────────────
     println!("\n--- final users ---");
     let txn = db.begin(true)?;
-    let users: Vec<_> = txn
-        .find("app", "users", rawdoc! {}, Default::default())?
-        .iter_raw()?
+    let users: Vec<_> = db
+        .cf("app")
+        .collection("users")
+        .find(rawdoc! {})
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
 
     for u in &users {

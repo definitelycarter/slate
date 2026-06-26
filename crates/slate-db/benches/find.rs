@@ -51,14 +51,11 @@ fn bench_find_indexed_eq_projection(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "status": "active" };
-        let options = FindOptions {
-            columns: Some(vec!["status".into()]),
-            ..FindOptions::default()
-        };
+        let columns: Vec<String> = vec!["status".into()];
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let columns = options.columns.clone().unwrap();
+                let columns = columns.clone();
                 engine
                     .collection("bench")
                     .find(filter.clone())
@@ -240,14 +237,11 @@ fn bench_find_projection(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_projection");
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
-        let options = FindOptions {
-            columns: Some(vec!["name".into(), "status".into()]),
-            ..FindOptions::default()
-        };
+        let columns: Vec<String> = vec!["name".into(), "status".into()];
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let columns = options.columns.clone().unwrap();
+                let columns = columns.clone();
                 engine
                     .collection("bench")
                     .find(rawdoc! {})
@@ -315,14 +309,11 @@ fn bench_find_indexed_eq_numeric_projection(c: &mut Criterion) {
     for n in [1_000, 10_000] {
         let engine = realistic_seeded_engine(n);
         let filter = rawdoc! { "contacts_count": 50 };
-        let options = FindOptions {
-            columns: Some(vec!["contacts_count".into()]),
-            ..FindOptions::default()
-        };
+        let columns: Vec<String> = vec!["contacts_count".into()];
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
                 let txn = engine.begin(true).unwrap();
-                let columns = options.columns.clone().unwrap();
+                let columns = columns.clone();
                 engine
                     .collection("bench")
                     .find(filter.clone())

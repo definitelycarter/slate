@@ -282,28 +282,20 @@ mod tests {
     use bson::doc;
     use slate_store::MemoryStore;
 
-    use crate::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, SortDirection};
+    use crate::{Database, DatabaseBuilder, SortDirection};
 
     fn seed() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "users".to_string(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "users",
-            vec![
+        db.collections().create("users").execute(&txn).unwrap();
+        db.collection("users")
+            .insert_many(vec![
                 doc! { "_id": 1, "name": "ana", "age": 30 },
                 doc! { "_id": 2, "name": "bo", "age": 20 },
                 doc! { "_id": 3, "name": "cy", "age": 40 },
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
         txn.commit().unwrap();
         db
     }

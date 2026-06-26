@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bson::doc;
-use slate_db::{CollectionConfig, DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
+use slate_db::{DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
 use slate_store::MemoryStore;
 use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
@@ -15,11 +15,7 @@ fn main() -> Result<(), DbError> {
 
     // ── Create a "users" collection ─────────────────────────────
     let txn = db.begin(false)?;
-    txn.create_collection(&CollectionConfig {
-        cf: "app".into(),
-        name: "users".into(),
-        ..Default::default()
-    })?;
+    db.cf("app").collections().create("users").execute(&txn)?;
     txn.commit()?;
 
     // ── Register validators ─────────────────────────────────────
@@ -29,11 +25,12 @@ fn main() -> Result<(), DbError> {
     let txn = db.begin(false)?;
 
     // 1) "name" must be a non-empty string
-    txn.register_validator(
-        "app",
-        "users",
-        "require_name",
-        r#"
+    db.cf("app")
+        .collection("users")
+        .validators()
+        .create(
+            "require_name",
+            r#"
         return function(event)
           local doc = event.doc
           if type(doc.name) ~= "string" or doc.name == "" then
@@ -42,16 +39,18 @@ fn main() -> Result<(), DbError> {
           return { ok = true }
         end
         "#,
-    )?;
+        )
+        .execute(&txn)?;
 
     // 2) "age", if present, must be a non-negative number.
     //    BSON i32 values arrive in Lua as userdata with a :value() method,
     //    so we normalize before comparing.
-    txn.register_validator(
-        "app",
-        "users",
-        "valid_age",
-        r#"
+    db.cf("app")
+        .collection("users")
+        .validators()
+        .create(
+            "valid_age",
+            r#"
         return function(event)
           local raw = event.doc.age
           if raw == nil then return { ok = true } end
@@ -64,27 +63,28 @@ fn main() -> Result<(), DbError> {
           return { ok = true }
         end
         "#,
-    )?;
+        )
+        .execute(&txn)?;
 
     txn.commit()?;
 
     // ── Successful insert ───────────────────────────────────────
     println!("--- insert valid document ---");
     let txn = db.begin(false)?;
-    txn.insert_one(
-        "app",
-        "users",
-        doc! { "_id": "u1", "name": "Alice", "age": 30 },
-    )?
-    .drain()?;
+    db.cf("app")
+        .collection("users")
+        .insert_one(doc! { "_id": "u1", "name": "Alice", "age": 30 })
+        .execute(&txn)?;
     txn.commit()?;
     println!("  OK: inserted Alice\n");
 
     // ── Another successful insert (age is optional) ─────────────
     println!("--- insert valid document (no age) ---");
     let txn = db.begin(false)?;
-    txn.insert_one("app", "users", doc! { "_id": "u2", "name": "Bob" })?
-        .drain()?;
+    db.cf("app")
+        .collection("users")
+        .insert_one(doc! { "_id": "u2", "name": "Bob" })
+        .execute(&txn)?;
     txn.commit()?;
     println!("  OK: inserted Bob\n");
 
@@ -94,9 +94,11 @@ fn main() -> Result<(), DbError> {
     println!("--- insert document with missing name ---");
     {
         let txn = db.begin(false)?;
-        let result = txn
-            .insert_one("app", "users", doc! { "_id": "u3", "age": 25 })?
-            .drain();
+        let result = db
+            .cf("app")
+            .collection("users")
+            .insert_one(doc! { "_id": "u3", "age": 25 })
+            .execute(&txn);
         match result {
             Ok(_) => println!("  BUG: should have been rejected"),
             Err(e) => println!("  REJECTED: {e}\n"),
@@ -107,13 +109,11 @@ fn main() -> Result<(), DbError> {
     println!("--- insert document with negative age ---");
     {
         let txn = db.begin(false)?;
-        let result = txn
-            .insert_one(
-                "app",
-                "users",
-                doc! { "_id": "u4", "name": "Charlie", "age": -5 },
-            )?
-            .drain();
+        let result = db
+            .cf("app")
+            .collection("users")
+            .insert_one(doc! { "_id": "u4", "name": "Charlie", "age": -5 })
+            .execute(&txn);
         match result {
             Ok(_) => println!("  BUG: should have been rejected"),
             Err(e) => println!("  REJECTED: {e}\n"),
@@ -124,9 +124,11 @@ fn main() -> Result<(), DbError> {
     println!("--- insert document with empty name ---");
     {
         let txn = db.begin(false)?;
-        let result = txn
-            .insert_one("app", "users", doc! { "_id": "u5", "name": "", "age": 20 })?
-            .drain();
+        let result = db
+            .cf("app")
+            .collection("users")
+            .insert_one(doc! { "_id": "u5", "name": "", "age": 20 })
+            .execute(&txn);
         match result {
             Ok(_) => println!("  BUG: should have been rejected"),
             Err(e) => println!("  REJECTED: {e}\n"),
@@ -136,9 +138,11 @@ fn main() -> Result<(), DbError> {
     // ── Verify only valid documents were persisted ──────────────
     println!("--- final users ---");
     let txn = db.begin(true)?;
-    let users: Vec<_> = txn
-        .find("app", "users", bson::rawdoc! {}, Default::default())?
-        .iter_raw()?
+    let users: Vec<_> = db
+        .cf("app")
+        .collection("users")
+        .find(bson::rawdoc! {})
+        .iter_raw(&txn)?
         .collect::<Result<Vec<_>, _>>()?;
 
     for u in &users {
