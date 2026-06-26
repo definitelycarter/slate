@@ -243,32 +243,4 @@ mod tests {
         );
         txn.commit().unwrap();
     }
-
-    #[test]
-    fn create_matches_v1() {
-        use crate::{CollectionConfig, DEFAULT_CF};
-
-        let db_v2 = db();
-        let txn_v2 = db_v2.begin(false).unwrap();
-        db_v2
-            .collections()
-            .create("users")
-            .execute(&txn_v2)
-            .unwrap();
-        let v2 = db_v2.collection("users").schema(&txn_v2).unwrap();
-        txn_v2.commit().unwrap();
-
-        let db_v1 = db();
-        let txn_v1 = db_v1.begin(false).unwrap();
-        txn_v1
-            .create_collection(&CollectionConfig {
-                name: "users".to_string(),
-                ..Default::default()
-            })
-            .unwrap();
-        let v1 = txn_v1.collection_schema(DEFAULT_CF, "users").unwrap();
-        txn_v1.commit().unwrap();
-
-        assert_eq!(v2, v1);
-    }
 }

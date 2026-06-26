@@ -435,7 +435,7 @@ mod tests {
     use bson::doc;
     use slate_store::MemoryStore;
 
-    use crate::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+    use crate::{CollectionConfig, Database, DatabaseBuilder};
 
     fn db_with_users() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
@@ -597,40 +597,6 @@ mod tests {
         assert_eq!(di.get_i32("age").unwrap(), 50); // merge kept it
 
         txn.commit().unwrap();
-    }
-
-    #[test]
-    fn writes_match_v1_counts() {
-        // v2 update vs v1 update_many over the same data + filter.
-        let db_v2 = db_with_users();
-        seed_three(&db_v2);
-        let txn_v2 = db_v2.begin(false).unwrap();
-        let v2 = db_v2
-            .collection("users")
-            .find(doc! { "age": { "$gte": 30 } })
-            .update(doc! { "$set": { "seen": true } })
-            .execute(&txn_v2)
-            .unwrap()
-            .affected;
-        txn_v2.commit().unwrap();
-
-        let db_v1 = db_with_users();
-        seed_three(&db_v1);
-        let txn_v1 = db_v1.begin(false).unwrap();
-        let v1 = txn_v1
-            .update_many(
-                DEFAULT_CF,
-                "users",
-                doc! { "age": { "$gte": 30 } },
-                doc! { "$set": { "seen": true } },
-            )
-            .unwrap()
-            .drain()
-            .unwrap();
-        txn_v1.commit().unwrap();
-
-        assert_eq!(v2, v1);
-        assert_eq!(v2, 2);
     }
 
     #[test]

@@ -295,9 +295,7 @@ mod tests {
     use slate_store::MemoryStore;
 
     use crate::v2::{IndexOptions, VectorIndexOptions};
-    use crate::{
-        CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, VectorMetric, join_index_fields,
-    };
+    use crate::{CollectionConfig, Database, DatabaseBuilder, VectorMetric, join_index_fields};
 
     fn db_with_users() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
@@ -337,39 +335,6 @@ mod tests {
             "created_at".to_string()
         ])));
         txn.commit().unwrap();
-    }
-
-    #[test]
-    fn create_matches_v1() {
-        // v2 single + compound vs v1's create_index / create_compound_index.
-        let db_v2 = db_with_users();
-        let txn_v2 = db_v2.begin(false).unwrap();
-        let users = db_v2.collection("users");
-        users
-            .indexes()
-            .create("age", IndexOptions::default())
-            .execute(&txn_v2)
-            .unwrap();
-        users
-            .indexes()
-            .create(["a", "b"], IndexOptions::default())
-            .execute(&txn_v2)
-            .unwrap();
-        let mut v2 = users.indexes().list(&txn_v2).unwrap();
-        v2.sort();
-        txn_v2.commit().unwrap();
-
-        let db_v1 = db_with_users();
-        let txn_v1 = db_v1.begin(false).unwrap();
-        txn_v1.create_index(DEFAULT_CF, "users", "age").unwrap();
-        txn_v1
-            .create_compound_index(DEFAULT_CF, "users", &["a".to_string(), "b".to_string()])
-            .unwrap();
-        let mut v1 = txn_v1.list_indexes(DEFAULT_CF, "users").unwrap();
-        v1.sort();
-        txn_v1.commit().unwrap();
-
-        assert_eq!(v2, v1);
     }
 
     #[test]

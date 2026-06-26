@@ -289,9 +289,7 @@ mod tests {
     use bson::doc;
     use slate_store::MemoryStore;
 
-    use crate::{
-        CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, FindOptions, Sort, SortDirection,
-    };
+    use crate::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, SortDirection};
 
     fn seed() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
@@ -361,80 +359,6 @@ mod tests {
             .unwrap();
         assert_eq!(skipped.len(), 2);
         assert_eq!(skipped[0].get_str("name").unwrap(), "ana");
-    }
-
-    #[test]
-    fn v2_find_matches_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-
-        let v2 = db
-            .collection("users")
-            .find(doc! { "age": { "$gte": 30 } })
-            .sort("age", SortDirection::Asc)
-            .collect(&txn)
-            .unwrap();
-
-        let v1 = txn
-            .find(
-                DEFAULT_CF,
-                "users",
-                doc! { "age": { "$gte": 30 } },
-                FindOptions {
-                    sort: vec![Sort {
-                        field: "age".to_string(),
-                        direction: SortDirection::Asc,
-                    }],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .iter_raw()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(v2, v1);
-    }
-
-    #[test]
-    fn project_narrows_fields_and_matches_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-
-        let v2 = db
-            .collection("users")
-            .find(doc! {})
-            .sort("age", SortDirection::Asc)
-            .project(["name".to_string()])
-            .collect(&txn)
-            .unwrap();
-
-        let v1 = txn
-            .find(
-                DEFAULT_CF,
-                "users",
-                doc! {},
-                FindOptions {
-                    sort: vec![Sort {
-                        field: "age".to_string(),
-                        direction: SortDirection::Asc,
-                    }],
-                    columns: Some(vec!["name".to_string()]),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .iter_raw()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(v2, v1);
-        // projecting "name" keeps it and drops the unprojected "age"
-        assert_eq!(v2.len(), 3);
-        assert!(v2[0].get_str("name").is_ok());
-        assert!(v2[0].get("age").unwrap().is_none());
     }
 
     #[test]

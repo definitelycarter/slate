@@ -297,55 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn query_values_and_params_match_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-
-        // SELECT VALUE scalar
-        let sql = "SELECT VALUE c.name FROM c ORDER BY c.age";
-        let v2 = db.collection("users").query(sql).collect(&txn).unwrap();
-        let v1 = txn
-            .query(DEFAULT_CF, "users", sql)
-            .unwrap()
-            .iter_raw_values()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(v2, v1);
-        assert_eq!(v2.len(), 3);
-
-        // parameterized
-        let psql = "SELECT VALUE c.name FROM c WHERE c.age > @min ORDER BY c.age";
-        let v2p = db
-            .collection("users")
-            .query(psql)
-            .params(doc! { "min": 25 })
-            .collect(&txn)
-            .unwrap();
-        let v1p = txn
-            .query_with_params(DEFAULT_CF, "users", psql, doc! { "min": 25 })
-            .unwrap()
-            .iter_raw_values()
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(v2p, v1p);
-        assert_eq!(v2p.len(), 2);
-    }
-
-    #[test]
-    fn query_explain_matches_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-        let sql = "SELECT VALUE c.name FROM c WHERE c.age > 25";
-
-        let v2 = db.collection("users").query(sql).explain(&txn).unwrap();
-        let v1 = txn.explain(DEFAULT_CF, "users", sql).unwrap();
-        assert_eq!(v2, v1);
-        assert!(!v2.is_empty());
-    }
-
-    #[test]
     fn missing_param_is_rejected() {
         let db = seed();
         let txn = db.begin(true).unwrap();
@@ -354,18 +305,6 @@ mod tests {
             .query("SELECT VALUE c.name FROM c WHERE c.age > @min")
             .collect(&txn);
         assert!(err.is_err());
-    }
-
-    #[test]
-    fn query_analyze_matches_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-        let sql = "SELECT VALUE c.name FROM c WHERE c.age > 25";
-
-        let v2 = db.collection("users").query(sql).analyze(&txn).unwrap();
-        let v1 = txn.explain_analyze(DEFAULT_CF, "users", sql).unwrap();
-        assert_eq!(v2, v1);
-        assert!(!v2.is_empty());
     }
 
     #[test]

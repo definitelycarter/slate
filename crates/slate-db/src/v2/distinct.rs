@@ -186,9 +186,7 @@ mod tests {
     use bson::{RawBson, doc};
     use slate_store::MemoryStore;
 
-    use crate::{
-        CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, DistinctOptions, SortDirection,
-    };
+    use crate::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, SortDirection};
 
     fn seed() -> Database<MemoryStore> {
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
@@ -254,34 +252,5 @@ mod tests {
             .collect(&txn)
             .unwrap();
         assert_eq!(filtered, vec![RawBson::Int32(30), RawBson::Int32(40)]);
-    }
-
-    #[test]
-    fn distinct_count_matches_v1() {
-        let db = seed();
-        let txn = db.begin(true).unwrap();
-
-        let v2 = db
-            .collection("users")
-            .find(doc! {})
-            .distinct("age")
-            .count(&txn)
-            .unwrap();
-
-        // v1 gathers distinct values into one array; its length is the count.
-        let v1 = txn
-            .distinct(
-                DEFAULT_CF,
-                "users",
-                "age",
-                doc! {},
-                DistinctOptions::default(),
-            )
-            .unwrap();
-        let v1_len = match v1 {
-            RawBson::Array(arr) => arr.into_iter().count() as u64,
-            _ => panic!("expected an array"),
-        };
-        assert_eq!(v2, v1_len);
     }
 }

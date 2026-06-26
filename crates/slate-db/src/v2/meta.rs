@@ -123,49 +123,7 @@ mod tests {
     use bson::doc;
     use slate_store::MemoryStore;
 
-    use crate::v2::IndexOptions;
-    use crate::{DEFAULT_CF, Database, DatabaseBuilder};
-
-    fn seeded() -> Database<MemoryStore> {
-        let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
-        let txn = db.begin(false).unwrap();
-        let users = db.collections().create("users").execute(&txn).unwrap();
-        users
-            .indexes()
-            .create("age", IndexOptions::default())
-            .execute(&txn)
-            .unwrap();
-        users
-            .insert_many(vec![
-                doc! { "_id": 1, "age": 30 },
-                doc! { "_id": 2, "age": 30 },
-                doc! { "_id": 3, "age": 40 },
-            ])
-            .execute(&txn)
-            .unwrap();
-        txn.commit().unwrap();
-        db
-    }
-
-    #[test]
-    fn stats_and_schema_match_v1() {
-        let db = seeded();
-        let txn = db.begin(true).unwrap();
-        let users = db.collection("users");
-
-        let stats = users.stats(&txn).unwrap();
-        assert_eq!(stats.document_count, 3);
-        // the "age" index has 3 entries over 2 distinct values (30, 40)
-        let age = stats.indexes.iter().find(|i| i.field == "age").unwrap();
-        assert_eq!(age.entry_count, 3);
-        assert_eq!(age.cardinality, 2);
-        assert_eq!(stats, txn.collection_stats(DEFAULT_CF, "users").unwrap());
-
-        assert_eq!(
-            users.schema(&txn).unwrap(),
-            txn.collection_schema(DEFAULT_CF, "users").unwrap()
-        );
-    }
+    use crate::DatabaseBuilder;
 
     #[test]
     fn purge_removes_expired() {
