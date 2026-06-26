@@ -16,10 +16,8 @@ use std::path::Path;
 use bson::Bson;
 use serde_json::{Value, json};
 
-use slate_db::{
-    CollectionConfig, CollectionStats, DEFAULT_CF, Database, DatabaseStats, DistinctOptions,
-    ExportOptions, ImportOptions,
-};
+use slate_db::v2::IndexOptions;
+use slate_db::{CollectionStats, Database, DatabaseStats, ExportOptions, ImportOptions};
 use slate_store::{BackupStore, Store};
 
 use crate::command::Command;
@@ -157,7 +155,12 @@ impl<S: BackupStore> Session<S> {
             return Ok(Vec::new());
         };
         let txn = self.db.begin(true).map_err(es)?;
-        let fields = txn.list_indexes(DEFAULT_CF, collection).map_err(es)?;
+        let fields = self
+            .db
+            .collection(collection)
+            .indexes()
+            .list(&txn)
+            .map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(fields)
     }
@@ -229,15 +232,14 @@ impl<S: BackupStore> Session<S> {
     }
 
     fn create(&mut self, name: String) -> Result<Output, String> {
-        let config = CollectionConfig {
-            name,
-            ..Default::default()
-        };
         let txn = self.db.begin(false).map_err(es)?;
-        txn.create_collection(&config).map_err(es)?;
+        self.db
+            .collections()
+            .create(&name)
+            .execute(&txn)
+            .map_err(es)?;
         txn.commit().map_err(es)?;
 
-        let name = config.name;
         let msg = format!("created `{name}` (now in use)");
         self.current = Some(name);
         Ok(Output::Message(msg))
@@ -245,7 +247,11 @@ impl<S: BackupStore> Session<S> {
 
     fn drop(&mut self, name: String) -> Result<Output, String> {
         let txn = self.db.begin(false).map_err(es)?;
-        txn.drop_collection(DEFAULT_CF, &name).map_err(es)?;
+        self.db
+            .collections()
+            .remove(&name)
+            .execute(&txn)
+            .map_err(es)?;
         txn.commit().map_err(es)?;
 
         if self.current.as_deref() == Some(name.as_str()) {
@@ -263,16 +269,21 @@ impl<S: BackupStore> Session<S> {
                     .into_iter()
                     .map(to_bson_document)
                     .collect::<Result<Vec<_>, _>>()?;
-                txn.insert_many(DEFAULT_CF, collection, docs)
+                self.db
+                    .collection(collection)
+                    .insert_many(docs)
+                    .execute(&txn)
                     .map_err(es)?
-                    .drain()
-                    .map_err(es)?
+                    .affected
             }
-            object @ Value::Object(_) => txn
-                .insert_one(DEFAULT_CF, collection, to_bson_document(object)?)
-                .map_err(es)?
-                .drain()
-                .map_err(es)?,
+            object @ Value::Object(_) => {
+                self.db
+                    .collection(collection)
+                    .insert_one(to_bson_document(object)?)
+                    .execute(&txn)
+                    .map_err(es)?
+                    .affected
+            }
             _ => return Err("insert expects a JSON object or array of objects".into()),
         };
         txn.commit().map_err(es)?;
@@ -282,11 +293,14 @@ impl<S: BackupStore> Session<S> {
     fn update(&self, filter: Value, update: Value) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        let affected = txn
-            .update_many(DEFAULT_CF, collection, filter, update)
+        let affected = self
+            .db
+            .collection(collection)
+            .find(filter)
+            .update(update)
+            .execute(&txn)
             .map_err(es)?
-            .drain()
-            .map_err(es)?;
+            .affected;
         txn.commit().map_err(es)?;
         Ok(Output::Affected(affected))
     }
@@ -294,11 +308,14 @@ impl<S: BackupStore> Session<S> {
     fn replace(&self, filter: Value, replacement: Value) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        let affected = txn
-            .replace_one(DEFAULT_CF, collection, filter, replacement)
+        let affected = self
+            .db
+            .collection(collection)
+            .find(filter)
+            .replace(replacement)
+            .execute(&txn)
             .map_err(es)?
-            .drain()
-            .map_err(es)?;
+            .affected;
         txn.commit().map_err(es)?;
         Ok(Output::Affected(affected))
     }
@@ -306,11 +323,14 @@ impl<S: BackupStore> Session<S> {
     fn delete(&self, filter: Value) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        let affected = txn
-            .delete_many(DEFAULT_CF, collection, filter)
+        let affected = self
+            .db
+            .collection(collection)
+            .find(filter)
+            .delete()
+            .execute(&txn)
             .map_err(es)?
-            .drain()
-            .map_err(es)?;
+            .affected;
         txn.commit().map_err(es)?;
         Ok(Output::Affected(affected))
     }
@@ -319,40 +339,38 @@ impl<S: BackupStore> Session<S> {
         let collection = self.require_collection()?;
         let filter = filter.unwrap_or_else(|| json!({}));
         let txn = self.db.begin(true).map_err(es)?;
-        let result = txn
-            .distinct(
-                DEFAULT_CF,
-                collection,
-                &field,
-                filter,
-                DistinctOptions::default(),
-            )
+        let values: Vec<bson::RawBson> = self
+            .db
+            .collection(collection)
+            .find(filter)
+            .distinct(&field)
+            .iter_raw(&txn)
+            .map_err(es)?
+            .collect::<Result<_, _>>()
             .map_err(es)?;
         txn.rollback().map_err(es)?;
 
-        // `distinct` yields a BSON array of bare values; render one row per
-        // value so the result reads like a query (and gets a row count).
-        let rows = match Bson::try_from(result).map_err(es)? {
-            Bson::Array(items) => items.into_iter().map(format::render_bson).collect(),
-            other => vec![format::render_bson(other)],
-        };
+        // `distinct` yields the bare distinct values; render one row per value
+        // so the result reads like a query (and gets a row count).
+        let rows = values
+            .into_iter()
+            .map(|v| Bson::try_from(v).map_err(es).map(format::render_bson))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Output::Rows(rows))
     }
 
     fn create_index(&self, fields: Vec<String>) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        // A single field uses the plain index API; multiple fields a compound
-        // index. (The engine treats single-field as the one-component case, so
-        // these converge — the split is just for the clearer canonical API.)
-        match fields.as_slice() {
-            [single] => txn
-                .create_index(DEFAULT_CF, collection, single)
-                .map_err(es)?,
-            many => txn
-                .create_compound_index(DEFAULT_CF, collection, many)
-                .map_err(es)?,
-        }
+        // `indexes().create` takes the path set and dispatches by count: a single
+        // path is a secondary index, several a compound one (the engine treats
+        // single-field as the one-component case, so they converge).
+        self.db
+            .collection(collection)
+            .indexes()
+            .create(fields.as_slice(), IndexOptions::default())
+            .execute(&txn)
+            .map_err(es)?;
         txn.commit().map_err(es)?;
         let kind = if fields.len() == 1 {
             "index"
@@ -368,14 +386,12 @@ impl<S: BackupStore> Session<S> {
     fn create_unique_index(&self, fields: Vec<String>) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(false).map_err(es)?;
-        match fields.as_slice() {
-            [single] => txn
-                .create_unique_index(DEFAULT_CF, collection, single)
-                .map_err(es)?,
-            many => txn
-                .create_unique_compound_index(DEFAULT_CF, collection, many)
-                .map_err(es)?,
-        }
+        self.db
+            .collection(collection)
+            .indexes()
+            .create(fields.as_slice(), IndexOptions::unique())
+            .execute(&txn)
+            .map_err(es)?;
         txn.commit().map_err(es)?;
         let kind = if fields.len() == 1 {
             "unique index"
@@ -394,7 +410,11 @@ impl<S: BackupStore> Session<S> {
         // index joins its components. Reconstruct the identity from the fields.
         let identity = slate_db::join_index_fields(&fields);
         let txn = self.db.begin(false).map_err(es)?;
-        txn.drop_index(DEFAULT_CF, collection, &identity)
+        self.db
+            .collection(collection)
+            .indexes()
+            .remove(&identity)
+            .execute(&txn)
             .map_err(es)?;
         txn.commit().map_err(es)?;
         let kind = if fields.len() == 1 {
@@ -411,7 +431,12 @@ impl<S: BackupStore> Session<S> {
     fn list_indexes(&self) -> Result<Output, String> {
         let collection = self.require_collection()?;
         let txn = self.db.begin(true).map_err(es)?;
-        let indexes = txn.list_indexes(DEFAULT_CF, collection).map_err(es)?;
+        let indexes = self
+            .db
+            .collection(collection)
+            .indexes()
+            .list(&txn)
+            .map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(Output::Indexes(indexes))
     }
@@ -422,8 +447,9 @@ impl<S: BackupStore> Session<S> {
             None => self.require_collection()?,
         };
         let txn = self.db.begin(true).map_err(es)?;
-        let schema = txn.collection_schema(DEFAULT_CF, collection).map_err(es)?;
-        let count = txn.count(DEFAULT_CF, collection, json!({})).map_err(es)?;
+        let coll = self.db.collection(collection);
+        let schema = coll.schema(&txn).map_err(es)?;
+        let count = coll.find(json!({})).iter_raw(&txn).map_err(es)?.count() as u64;
         txn.rollback().map_err(es)?;
 
         // Move each index field into an entry, flagging the ones in the unique
@@ -450,7 +476,13 @@ impl<S: BackupStore> Session<S> {
         let collection = self.require_collection()?;
         let filter = filter.unwrap_or_else(|| json!({}));
         let txn = self.db.begin(true).map_err(es)?;
-        let n = txn.count(DEFAULT_CF, collection, filter).map_err(es)?;
+        let n = self
+            .db
+            .collection(collection)
+            .find(filter)
+            .iter_raw(&txn)
+            .map_err(es)?
+            .count() as u64;
         txn.rollback().map_err(es)?;
         Ok(Output::Count(n))
     }
@@ -467,9 +499,14 @@ impl<S: BackupStore> Session<S> {
         };
         let txn = self.db.begin(true).map_err(es)?;
         let rows = {
-            let cursor = txn.query(DEFAULT_CF, collection, sql).map_err(es)?;
             let mut rows = Vec::new();
-            for item in cursor.iter_raw_values().map_err(es)? {
+            for item in self
+                .db
+                .collection(collection)
+                .query(sql)
+                .iter_raw(&txn)
+                .map_err(es)?
+            {
                 rows.push(format::render_value(item.map_err(es)?)?);
             }
             rows
@@ -490,7 +527,12 @@ impl<S: BackupStore> Session<S> {
             self.current.as_deref().unwrap_or("")
         };
         let txn = self.db.begin(true).map_err(es)?;
-        let plan = txn.explain(DEFAULT_CF, collection, query).map_err(es)?;
+        let plan = self
+            .db
+            .collection(collection)
+            .query(query)
+            .explain(&txn)
+            .map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(Output::Plan(plan))
     }
@@ -505,8 +547,11 @@ impl<S: BackupStore> Session<S> {
             self.current.as_deref().unwrap_or("")
         };
         let txn = self.db.begin(true).map_err(es)?;
-        let plan = txn
-            .explain_analyze(DEFAULT_CF, collection, query)
+        let plan = self
+            .db
+            .collection(collection)
+            .query(query)
+            .analyze(&txn)
             .map_err(es)?;
         txn.rollback().map_err(es)?;
         Ok(Output::Plan(plan))
@@ -518,10 +563,11 @@ impl<S: BackupStore> Session<S> {
         let txn = self.db.begin(true).map_err(es)?;
         let report = match &name {
             Some(collection) => {
-                let s = txn.collection_stats(DEFAULT_CF, collection).map_err(es)?;
+                let s = self.db.collection(collection).stats(&txn).map_err(es)?;
                 render_collection_stats(&s)
             }
             None => {
+                // v2: no db-wide stats rollup yet — keep the flat Transaction::stats
                 let s = txn.stats().map_err(es)?;
                 render_database_stats(&s)
             }
@@ -541,14 +587,15 @@ impl<S: BackupStore> Session<S> {
 
         if !exists {
             let txn = self.db.begin(false).map_err(es)?;
-            txn.create_collection(&CollectionConfig {
-                name: NAME.to_string(),
-                ..Default::default()
-            })
-            .map_err(es)?;
-            txn.insert_many(DEFAULT_CF, NAME, seed_docs())
-                .map_err(es)?
-                .drain()
+            self.db
+                .collections()
+                .create(NAME)
+                .execute(&txn)
+                .map_err(es)?;
+            self.db
+                .collection(NAME)
+                .insert_many(seed_docs())
+                .execute(&txn)
                 .map_err(es)?;
             txn.commit().map_err(es)?;
         }
@@ -579,24 +626,26 @@ impl<S: BackupStore> Session<S> {
 
         let txn = self.db.begin(false).map_err(es)?;
         if !exists {
-            txn.create_collection(&CollectionConfig {
-                name: collection.clone(),
-                ..Default::default()
-            })
-            .map_err(es)?;
+            self.db
+                .collections()
+                .create(&collection)
+                .execute(&txn)
+                .map_err(es)?;
         }
 
-        // Insert one bounded batch, draining it so per-document errors (such as a
-        // duplicate `_id`) surface here. Scoped before the `commit` below so its
-        // borrow of `txn` is released in time.
+        // Insert one bounded batch, surfacing per-document errors (such as a
+        // duplicate `_id`) here. Scoped before the `commit` below so its borrow
+        // of `txn` is released in time.
         let flush = |batch: &[bson::Document]| -> Result<u64, String> {
             if batch.is_empty() {
                 return Ok(0);
             }
-            txn.insert_many(DEFAULT_CF, &collection, batch.iter())
-                .map_err(es)?
-                .drain()
+            self.db
+                .collection(&collection)
+                .insert_many(batch.iter())
+                .execute(&txn)
                 .map_err(es)
+                .map(|r| r.affected)
         };
 
         // Auto-detect the format from the first non-whitespace byte: `[` is a
