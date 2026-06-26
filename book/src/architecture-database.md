@@ -25,87 +25,99 @@ let doc = doc! {
 
 ### Database and Transactions
 
-The `Database` struct is generic over `Store` and provides a `begin()` method that returns a `DatabaseTransaction`. All operations go through the transaction:
+The `Database` is generic over `Store`. `begin(read_only)` returns a transaction;
+every collection-scoped operation hangs off a `db.collection(name)` handle (or
+`db.cf(cf).collection(name)` for a non-default column family) and runs against the
+transaction you pass to its terminal. Operations are **lazy builders** — nothing
+runs until a terminal (`.execute(&txn)`, `.iter::<T>(&txn)`, `.iter_raw(&txn)`).
 
 ```rust
-use slate_db::{DatabaseBuilder, DEFAULT_CF, CollectionConfig, FindOptions};
+use slate_db::{DatabaseBuilder, SortDirection};
+use slate_db::v2::IndexOptions;
+use bson::doc;
 
 let db = DatabaseBuilder::new().open(store)?;
 
-// Create a collection (uses DEFAULT_CF by default)
-let mut txn = db.begin(false)?;
-txn.create_collection(&CollectionConfig {
-    name: "users".into(),
-    ..Default::default()
-})?;
+// Create a collection (default column family; pk_path defaults to "_id")
+let txn = db.begin(false)?;
+db.collections().create("users").execute(&txn)?;
 
-// Insert — all operations take (cf, collection, ...) as first params
-txn.insert_one(DEFAULT_CF, "users", doc! {
-    "name": "Alice",
-    "status": "active",
-})?;
+// A reusable handle to the collection
+let users = db.collection("users");
 
-txn.insert_many(DEFAULT_CF, "users", vec![
-    doc! { "_id": "bob", "name": "Bob" },
+// Insert — builders finished with .execute(&txn) → WriteResult { affected }
+users.insert_one(doc! { "name": "Alice", "status": "active" }).execute(&txn)?;
+users.insert_many(vec![
+    doc! { "_id": "bob",   "name": "Bob" },
     doc! { "_id": "carol", "name": "Carol" },
-])?;
+]).execute(&txn)?;
 
-// Query — find() returns a Cursor for lazy iteration
-let cursor = txn.find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())?;
-for doc in cursor.iter::<User>()? {      // CursorIter<T> — deserializes into T
+// Query — find() is a lazy read; a terminal streams it as a std Iterator
+for doc in users.find(doc! {}).iter::<User>(&txn)? {  // iter::<T> — deserializes into T
     let doc = doc?;
 }
 // or raw access, no deserialization:
-for raw in cursor.iter_raw()? {          // RawCursorIter — yields RawDocumentBuf
+for raw in users.find(doc! {}).iter_raw(&txn)? {      // yields RawDocumentBuf
     let raw = raw?;
 }
 
-let one = txn.find_one(DEFAULT_CF, "users", rawdoc! { "_id": "bob" })?;
+// find_one — take the first row of the iterator
+let one = users.find(doc! { "_id": "bob" }).iter::<User>(&txn)?.next().transpose()?;
 
-// Update (merge — preserves unspecified fields)
-txn.update_one(DEFAULT_CF, "users", filter,
-    rawdoc! { "$set": { "status": "archived" } })?.drain()?;
-txn.update_many(DEFAULT_CF, "users", filter,
-    rawdoc! { "$set": { "status": "archived" } })?.drain()?;
+// Count — the std Iterator's own count (usize)
+let n = users.find(doc! {}).iter_raw(&txn)?.count();
 
-// Replace (full document swap)
-txn.replace_one(DEFAULT_CF, "users", filter,
-    rawdoc! { "name": "Alice", "status": "inactive" })?.drain()?;
+let filter = doc! { "status": "active" };
 
-// Delete
-txn.delete_one(DEFAULT_CF, "users", filter)?.drain()?;
-txn.delete_many(DEFAULT_CF, "users", filter)?.drain()?;
+// Update (merge — preserves unspecified fields). Defaults to ALL matches;
+// .one() restricts to the first.
+users.find(filter.clone())
+    .update(doc! { "$set": { "status": "archived" } }).execute(&txn)?;
+users.find(filter.clone())
+    .update(doc! { "$set": { "status": "archived" } }).one().execute(&txn)?;
 
-// Count
-let n = txn.count(DEFAULT_CF, "users", rawdoc! {})?;  // -> u64
+// Replace (full document swap, single row, pk preserved)
+users.find(filter.clone())
+    .replace(doc! { "name": "Alice", "status": "inactive" }).execute(&txn)?;
+
+// Delete — ALL matches, or .one() for the first
+users.find(filter.clone()).delete().execute(&txn)?;
+users.find(filter).delete().one().execute(&txn)?;
 
 // Index management
-txn.create_index(DEFAULT_CF, "users", "email")?;  // backfills existing records
-txn.drop_index(DEFAULT_CF, "users", "email")?;
-txn.list_indexes(DEFAULT_CF, "users")?;            // -> Vec<String>
+users.indexes().create("email", IndexOptions::default()).execute(&txn)?; // backfills
+users.indexes().remove("email").execute(&txn)?;
+users.indexes().list(&txn)?;                       // -> Vec<String>
 
 // Triggers and validators (requires DatabaseBuilder with scripting)
-txn.register_trigger("app", "users", "audit_trigger", r#"
+users.triggers().create("audit_trigger", r#"
     return function(ctx, event)
       ctx.put("audit", { _id = event.doc._id .. ":" .. event.action, action = event.action })
       return event
     end
-"#)?;
-txn.register_validator("app", "users", "require_name", r#"
+"#).execute(&txn)?;
+users.validators().create("require_name", r#"
     return function(event)
       if type(event.doc.name) ~= "string" then
         return { ok = false, reason = "name is required" }
       end
       return { ok = true }
     end
-"#)?;
+"#).execute(&txn)?;
 
 // Collection management
-txn.list_collections()?;                           // -> Vec<String>
-txn.drop_collection(DEFAULT_CF, "users")?;         // removes data, indexes, metadata
+db.collections().list(&txn)?;                      // -> Vec<String> (this column family)
+db.collections().remove("users").execute(&txn)?;   // removes data, indexes, metadata
 
 txn.commit()?;
 ```
+
+> **Still flat (db-level API).** A few operations have no builder yet and remain
+> methods on `Database`/`Transaction`, pending the db-level API redesign:
+> `db.verify(cf, coll)` / `db.repair(cf, coll)` (integrity), `db.stats()`, and the
+> db-global `db.list_collections()` (every column family, as `(cf, name)` pairs —
+> distinct from the cf-scoped `collections().list()` above). `list_collections`
+> will move to a handle in a later pass.
 
 ### Query Execution
 
@@ -120,7 +132,7 @@ Scan / (IndexScan|IndexMerge → KeyLookup) → [Bind/Unwind] → Filter → Sor
 **Two tiers:**
 
 1. **ID tier** — `Scan` streams documents; `IndexScan` and `IndexMerge` produce document IDs without touching document bytes, and `KeyLookup` fetches the documents for an ID stream.
-2. **Value tier** — the binding-aware nodes (`Filter`, `Sort`, `Project`) operate on `Option<RawBson>` values via the `slate-eval` raw evaluator, borrowing individual fields out of the row's bytes (through the `slate-rawbson` scanner) with no `bson::Document` materialization. `Project` builds `RawDocumentBuf` output with `append()`, copying selected fields by reference. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes into `T`, or `.iter_raw()` yields `RawDocumentBuf` with no deserialization.
+2. **Value tier** — the binding-aware nodes (`Filter`, `Sort`, `Project`) operate on `Option<RawBson>` values via the `slate-eval` raw evaluator, borrowing individual fields out of the row's bytes (through the `slate-rawbson` scanner) with no `bson::Document` materialization. `Project` builds `RawDocumentBuf` output with `append()`, copying selected fields by reference. A `find` terminal `.iter::<T>(&txn)` deserializes each row into `T`, or `.iter_raw(&txn)` yields `RawDocumentBuf` with no deserialization.
 
 For a join-free query the planner binds the whole row to a single alias (`RowBinding::Alias`) with no per-row environment wrapper; only joins materialize a multi-binding row environment via `Bind`/`Unwind`.
 

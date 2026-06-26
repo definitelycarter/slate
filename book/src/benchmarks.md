@@ -249,6 +249,6 @@ Distinct(Projection(Filter(ReadRecord(Scan | IndexScan))))
 
 - **Projection**: Builds `RawDocumentBuf` output using `append()` for selective field copying. Injects `_id` from the record ID. For scalar `RawValue` from index-covered queries, constructs `{ _id, field: value }` directly without any raw byte parsing. `find()` returns `Vec<RawDocumentBuf>` — no `bson::Document` materialization in the pipeline.
 
-**Index selection**: For AND groups, the planner picks the highest-priority indexed field (ordered by `CollectionConfig.indexes`) with an `Eq` condition. For OR groups, if every branch has at least one indexed `Eq`, the planner builds an `IndexMerge(Or)` tree with a residual `Filter` for recheck; if any branch lacks an indexed condition, the entire OR falls back to `Scan`.
+**Index selection**: For AND groups, the planner picks the highest-priority indexed field (ordered by the collection's index list) with an `Eq` condition. For OR groups, if every branch has at least one indexed `Eq`, the planner builds an `IndexMerge(Or)` tree with a residual `Filter` for recheck; if any branch lacks an indexed condition, the entire OR falls back to `Scan`.
 
 Index keys use the format `i:{field}\x00{value_bytes}\x00{_id}` and are maintained on insert/update/delete for indexed fields.

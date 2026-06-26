@@ -51,7 +51,7 @@ uninstrumented:
 - **[Observability & Introspection](./rfcs/observability-and-introspection.md)** —
   *A + B + C done; D + disk-size deferred.* Feature-gated `tracing` (the `trace`
   feature, off by default, zero-cost when off), EXPLAIN ANALYZE execution stats
-  (`Transaction::explain_analyze` / `Executor::execute_analyze`, CLI
+  (the `.analyze(&txn)` terminal / `Executor::execute_analyze`, CLI
   `.explain analyze`), and a `stats()` size/cardinality surface
   (`Database::stats` / `Transaction::collection_stats`, CLI `.stats`). Remaining:
   the slow-query log (thread D) and `disk_size_bytes` backend plumbing (the slot
@@ -78,8 +78,8 @@ uninstrumented:
   `into_index_value` micro-opt deferred.
 - **[Compound Indexes](./rfcs/compound-indexes.md)** — *done (Phase 1).* Multi-field
   keys, leftmost-prefix rule, compound-unique. Programmatic-only:
-  `create_compound_index` / `create_unique_compound_index` (no SQL `CREATE INDEX`
-  grammar). Identity = component field names joined by `\x01`; the key concatenates
+  `indexes().create(paths, …)` (unique via `IndexOptions::unique()`; no SQL
+  `CREATE INDEX` grammar). Identity = component field names joined by `\x01`; the key concatenates
   per-component sortable values with a trailing `u32` length suffix per string
   component, so single-field is the byte-identical N=1 case. The planner seeks the
   leftmost equality prefix as a conservative superset; the executor rechecks the
@@ -127,8 +127,8 @@ uninstrumented:
   [DESC|ASC] LIMIT k` seeks a per-field index — a `doc_id → packed-f32` keyspace
   (TTL-header expiry-filtered) scanned into a bounded top-k heap, with a `WHERE`
   constraining the candidate set *before* the top-k (exact, no recall loss).
-  Created via `create_vector_index(cf, collection, &VectorIndexSpec{path, dims,
-  metric, dtype})` (no SQL `CREATE INDEX` grammar yet); the planner only seeks when
+  Created via `indexes().create(path, VectorIndexOptions::float32(dims, metric))`
+  (no SQL `CREATE INDEX` grammar yet); the planner only seeks when
   the call's metric matches the index and the `ORDER BY` direction is the metric's
   nearest-first sense, else falls back to a correct full scan. The math is one
   shared definition (`slate-eval::VectorMetric`) the scalar function and the index
@@ -148,8 +148,8 @@ uninstrumented:
 - **[Collect Node](./rfcs/collect-node.md)** — *proposed.* Make plan materialization
   points explicit; asymmetric `IndexMerge(And)`.
 - **Plan Inspection (EXPLAIN / EXPLAIN ANALYZE)** — *done.* `Plan::explain()` /
-  `Transaction::explain` render the logical operator tree; REPL `.explain`. Runtime
-  stats now ship too: `Transaction::explain_analyze` (REPL `.explain analyze`)
+  the `.explain(&txn)` terminal render the logical operator tree; REPL `.explain`. Runtime
+  stats now ship too: the `.analyze(&txn)` terminal (REPL `.explain analyze`)
   renders the same tree annotated with per-node `rows=`/`examined=` counts, via the
   [Observability RFC](./rfcs/observability-and-introspection.md). No SQL `EXPLAIN`
   keyword (kept out of the grammar) — plan inspection stays a shell/library affair.

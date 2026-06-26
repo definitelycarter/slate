@@ -1,6 +1,6 @@
 # SQL Reference
 
-Slate's SQL surface (`Transaction::query`) implements the **CosmosDB SQL** dialect.
+Slate's SQL surface (`collection.query(sql)`) implements the **CosmosDB SQL** dialect.
 This page covers the grammar, keywords, and clauses; for the built-in scalar and
 aggregate functions, see the [Function Reference](./functions.md). For the query
 model and plan shapes, see [Querying](./querying.md).
@@ -17,12 +17,12 @@ SELECT [DISTINCT] [TOP n] VALUE <expr> | * | <expr> [AS k], …
 [OFFSET n] [LIMIT n]
 ```
 
-The `FROM` clause names only the **row alias**; the container is the
-`(cf, collection)` passed to `query()` (matching Cosmos, where the container is
-external to the query text). `WHERE` is the full scalar grammar (operators,
-function calls, object/array literals) plus the `IN` / `BETWEEN` / `LIKE` predicate
-forms below. `@name` placeholders are supplied via
-`query_with_params(cf, collection, sql, params)`.
+The `FROM` clause names only the **row alias**; the container is the collection
+the handle names (matching Cosmos, where the container is external to the query
+text). `WHERE` is the full scalar grammar (operators, function calls,
+object/array literals) plus the `IN` / `BETWEEN` / `LIKE` predicate forms below.
+`@name` placeholders are supplied via the `.params(params)` stage —
+`query(sql).params(doc! { ... })`.
 
 ## Type semantics
 

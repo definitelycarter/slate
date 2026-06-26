@@ -55,22 +55,19 @@ A write transaction is exclusive; readers see a consistent snapshot.
 
 ## Collections and the primary key
 
-Documents live in **collections**, addressed within a column family (use the
-built-in `DEFAULT_CF`). A collection has a **primary key path** (default `_id`)
-and an optional TTL path:
+Documents live in **collections**. A collection has a **primary key path**
+(default `_id`) and an optional TTL path. Create one through the `collections()`
+namespace:
 
 ```rust
-use slate_db::{CollectionConfig, DEFAULT_CF};
-
 let txn = db.begin(false)?;
-txn.create_collection(&CollectionConfig {
-    name: "accounts".into(),
-    ..Default::default()             // pk_path defaults to "_id"
-})?;
+db.collections().create("accounts").execute(&txn)?;   // pk_path defaults to "_id"
 txn.commit()?;
 ```
 
-To match CosmosDB's system key, set `pk_path: "id".into()`.
+To match CosmosDB's system key, add `.pk_path("id")` before `.execute`. A
+collection lives in a column family; `db.collections()` targets the default one,
+and `db.cf("other").collections()` targets another.
 
 ## Insert documents
 
@@ -78,17 +75,18 @@ To match CosmosDB's system key, set `pk_path: "id".into()`.
 use bson::doc;
 
 let txn = db.begin(false)?;
-txn.insert_one(DEFAULT_CF, "accounts", doc! {
+db.collection("accounts").insert_one(doc! {
     "_id": "acct-1",
     "name": "Acme Corp",
     "status": "active",
     "revenue": 50000.0,
-})?.drain()?;
+}).execute(&txn)?;
 txn.commit()?;
 ```
 
-`insert_many` takes an iterable of documents. Write operations return a result
-you `drain()` to surface per-document errors (e.g. a unique-index violation).
+`insert_many` takes an iterable of documents. A write builder runs with
+`.execute(&txn)` and returns a `WriteResult { affected }`; a failed write (e.g. a
+unique-index violation) surfaces as an `Err`.
 
 ## Query
 
@@ -98,32 +96,32 @@ Two surfaces, one engine. Use whichever fits.
 
 ```rust
 let txn = db.begin(true)?;
-let cursor = txn.query(DEFAULT_CF, "accounts",
-    "SELECT c.name, c.revenue FROM c WHERE c.status = 'active' ORDER BY c.revenue DESC")?;
-for row in cursor.iter_raw()? {
-    let row = row?;   // RawDocumentBuf — no deserialization
+let accounts = db.collection("accounts");
+for row in accounts
+    .query("SELECT c.name, c.revenue FROM c WHERE c.status = 'active' ORDER BY c.revenue DESC")
+    .iter_raw(&txn)?
+{
+    let row = row?;   // RawBson value — no deserialization
 }
 ```
 
 **Mongo `find`** (a BSON filter; see [Mongo Operators](./mongo-operators.md)):
 
 ```rust
-use bson::rawdoc;
-use slate_db::FindOptions;
+let accounts = db.collection("accounts");
 
-let cursor = txn.find(DEFAULT_CF, "accounts",
-    rawdoc! { "status": "active" }, FindOptions::default())?;
-
-for doc in cursor.iter::<serde_json::Value>()? {   // deserialize into any T
-    let doc = doc?;
+for doc in accounts.find(doc! { "status": "active" }).iter::<serde_json::Value>(&txn)? {
+    let doc = doc?;   // deserialize into any T
 }
 
-let one = txn.find_one(DEFAULT_CF, "accounts", rawdoc! { "_id": "acct-1" })?;
-let n   = txn.count(DEFAULT_CF, "accounts", rawdoc! {})?;
+let one = accounts.find(doc! { "_id": "acct-1" })
+    .iter::<serde_json::Value>(&txn)?.next().transpose()?;
+let n   = accounts.find(doc! {}).iter_raw(&txn)?.count();
 ```
 
-`iter::<T>()` deserializes each result into `T`; `iter_raw()` hands back
-`RawDocumentBuf` with no deserialization.
+`iter::<T>(&txn)` deserializes each result into `T`; `iter_raw(&txn)` hands back
+raw bytes with no deserialization (`RawDocumentBuf` for `find`, a `RawBson` value
+for SQL).
 
 ## Indexes
 
@@ -131,9 +129,12 @@ Indexes are per-field and speed up equality, range, and sort. A unique index als
 enforces a constraint:
 
 ```rust
+use slate_db::v2::IndexOptions;
+
 let txn = db.begin(false)?;
-txn.create_index(DEFAULT_CF, "accounts", "status")?;
-txn.create_unique_index(DEFAULT_CF, "accounts", "email")?;
+let accounts = db.collection("accounts");
+accounts.indexes().create("status", IndexOptions::default()).execute(&txn)?;
+accounts.indexes().create("email", IndexOptions::unique()).execute(&txn)?;
 txn.commit()?;
 ```
 
@@ -147,16 +148,16 @@ read-modify-write (see [Mongo Operators](./mongo-operators.md)):
 
 ```rust
 let txn = db.begin(false)?;
-txn.update_one(DEFAULT_CF, "accounts",
-    rawdoc! { "_id": "acct-1" },
-    rawdoc! { "$set": { "status": "archived" }, "$inc": { "revenue": 5000.0 } },
-)?.drain()?;
+let accounts = db.collection("accounts");
+accounts.find(doc! { "_id": "acct-1" })
+    .update(doc! { "$set": { "status": "archived" }, "$inc": { "revenue": 5000.0 } })
+    .one().execute(&txn)?;
 
-txn.delete_one(DEFAULT_CF, "accounts", rawdoc! { "_id": "acct-1" })?.drain()?;
+accounts.find(doc! { "_id": "acct-1" }).delete().one().execute(&txn)?;
 txn.commit()?;
 ```
 
-`update_many` / `delete_many` apply to every match.
+Drop the `.one()` to apply to every match (the default for `update`/`delete`).
 
 ## Try it interactively
 

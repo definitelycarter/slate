@@ -31,26 +31,27 @@ Plan::Trigger { action: "inserted" }        ← after-trigger (sees NEW doc)
 ```
 
 **ID tier** — `Scan` streams documents; `IndexScan`/`IndexMerge` produce record IDs without touching document bytes, and `KeyLookup` fetches the documents for an ID stream.
-**Value tier** — everything above `KeyLookup` operates on `Option<RawBson>` values, constructing `&RawDocument` views to access individual fields lazily (via the `slate-rawbson` scanner) with no full deserialization. `Project` builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. `find()` returns a `Cursor` whose `.iter::<T>()` deserializes each document into `T`, or `.iter_raw()` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
+**Value tier** — everything above `KeyLookup` operates on `Option<RawBson>` values, constructing `&RawDocument` views to access individual fields lazily (via the `slate-rawbson` scanner) with no full deserialization. `Project` builds `RawDocumentBuf` output using `append()` for selective field copying — no `bson::Document` materialization in the pipeline. A `find` terminal `.iter::<T>(&txn)` deserializes each document into `T`, or `.iter_raw(&txn)` yields `RawDocumentBuf` directly with no deserialization. For distinct queries, the pipeline emits a single `RawBson::Array` — Sort and Limit handle arrays natively by sorting/slicing elements in-place.
 
 ## Query Model (find)
 
-A `find` is a BSON filter document plus options:
+A `find` is a BSON filter document plus optional builder stages:
 
 ```rust
-FindOptions {
-    sort: Vec<Sort>,              // ORDER BY
-    skip: Option<usize>,          // OFFSET
-    take: Option<usize>,          // LIMIT
-    columns: Option<Vec<String>>, // projected columns
-}
+db.collection("people")
+    .find(doc! { /* filter */ })
+    .sort("age", SortDirection::Desc)  // ORDER BY
+    .offset(10)                        // OFFSET
+    .limit(5)                          // LIMIT
+    .project(["name".into()])          // projected columns
+    .iter::<Person>(&txn)?;            // terminal — run the read
 ```
 
 The filter is a Mongo-style `$`-operator document — `$and`, `$or`, `$eq`/`$gt`/`$gte`/`$lt`/`$lte`, `$regex`, `$exists`, and the implicit `{field: value}` equality (which matches a scalar *or* an array containing the value). `slate-query` translates it into the shared AST (`slate_ast::ScalarExpr`), which the planner lowers — the *same* AST a SQL query produces, so both surfaces share one planner, executor, and evaluator.
 
 ## SQL Queries
 
-`Transaction::query(cf, collection, sql)` runs a CosmosDB-style SQL query and returns a [`Cursor`]:
+`db.collection(name).query(sql)` runs a CosmosDB-style SQL query; a terminal streams the result values:
 
 ```
 SELECT VALUE <expr>                         -- one value per row
@@ -64,7 +65,7 @@ FROM <alias>
 [OFFSET <n>] [LIMIT <n>]
 ```
 
-The `FROM` clause names only the row alias; the container is the `(cf, collection)` passed to `query()` (matching Cosmos, where the container is external to the query text). SQL is read-only and always runs on the v2 engine.
+The `FROM` clause names only the row alias; the container is the collection the handle names (matching Cosmos, where the container is external to the query text). SQL is read-only.
 
 These run live against the playground's `products` and `families` collections —
 edit and run them (see the [Playground](./playground.md) for the data):
@@ -82,25 +83,25 @@ FROM products c GROUP BY c.category
 SELECT f.lastName, ch.firstName, ch.grade FROM families f JOIN ch IN f.children
 ```
 
-Supply values for `@name` placeholders with `query_with_params(cf, collection, sql, params)`, where `params` serializes to a document keyed by the bare parameter names (no leading `@`) — e.g. `WHERE c.age > @minAge` with `doc! { "minAge": 21 }`. A referenced parameter with no supplied value is a hard error (matching Cosmos), which catches a misspelled or forgotten name; the plain `query` API supplies no parameters, so any `@name` there is rejected too. Parameters are visible everywhere an expression is evaluated (`WHERE`, projections, `ORDER BY`, `JOIN … IN`).
+Supply values for `@name` placeholders with the `.params(params)` stage — `query(sql).params(doc! { ... })` — where `params` serializes to a document keyed by the bare parameter names (no leading `@`) — e.g. `WHERE c.age > @minAge` with `doc! { "minAge": 21 }`. A referenced parameter with no supplied value is a hard error (matching Cosmos), which catches a misspelled or forgotten name; the plain `query` API supplies no parameters, so any `@name` there is rejected too. Parameters are visible everywhere an expression is evaluated (`WHERE`, projections, `ORDER BY`, `JOIN … IN`).
 
 The `WHERE` expression is the full scalar grammar plus three predicate forms: `<expr> IN (a, b, …)`, `<expr> BETWEEN <lo> AND <hi>`, and `<expr> LIKE '<pattern>' [ESCAPE '<c>']` (each negatable with `NOT`). They are pure sugar — `IN` desugars to an OR of equalities and `BETWEEN` to an inclusive `>= lo AND <= hi`, so both reuse the planner's sargable paths unchanged (an `IN` over an indexed field becomes an `IndexMerge(Or)` and a `BETWEEN` a range `IndexScan`; see [Plan Scenarios](#plan-scenarios)). `LIKE` desugars to an anchored `RegexMatch`: the SQL wildcards `%` (any run) and `_` (any single character) and `[…]`/`[^…]` sets become regex constructs, while every other character — including regex metacharacters — is escaped to a literal, so a pattern is never a regex-injection vector. A `LIKE 'pre%'` with a literal anchored prefix is itself sargable: it plans as a `[pre, pre⁺)` prefix-range `IndexScan` over a string index (the same path `STARTSWITH(x, 'pre')` takes), with the full pattern kept as a recheck.
 
 There are three projection forms, all matching Cosmos semantics:
 
 ```rust
+let people = db.collection("people");
+
 // VALUE — one bare value per row (scalar, document, or array):
 //   SELECT VALUE c.name  ->  "ada", "alan", ...
-for name in txn.query(cf, "people", "SELECT VALUE c.name FROM c")?
-    .iter_values::<String>()? { /* ... */ }
+for name in people.query("SELECT VALUE c.name FROM c").iter::<String>(&txn)? { /* ... */ }
 
-// *  — the whole document:
-for doc in txn.query(cf, "people", "SELECT * FROM c")?.iter::<Document>()? { /* ... */ }
+// *  — the whole document (each value is a document):
+for doc in people.query("SELECT * FROM c").iter::<Document>(&txn)? { /* ... */ }
 
 // tabular — a document of the selected columns:
 //   SELECT c.name, c.age  ->  { "name": "ada", "age": 36 }
-for doc in txn.query(cf, "people", "SELECT c.name, c.age FROM c")?
-    .iter::<Document>()? { /* ... */ }
+for doc in people.query("SELECT c.name, c.age FROM c").iter::<Document>(&txn)? { /* ... */ }
 ```
 
 **Tabular projection keys** follow Cosmos: the last path segment of a member access (`c.address.city` → `"city"`), an explicit `AS <key>`, or a positional `$1`, `$2`, … for an unnamed computed column (`c.age + 1` → `"$1"`). Two columns that resolve to the **same key** are a parse error (use `AS` to disambiguate) — slate rejects the collision rather than silently dropping a value.
@@ -125,21 +126,23 @@ Comparison is **per-domain**: numbers compare to numbers, strings to strings, da
 
 ### Iterating results
 
-A `Cursor` — from `find` or `query` — exposes:
+A terminal turns a `find` or `query` builder into a std [`Iterator`], so
+`collect`/`count`/`next`/`map` come for free:
 
-| Accessor | Yields | Use for |
+| Terminal | Yields | Use for |
 |---|---|---|
-| `iter::<T>()` | `T` per **document** | `find`; `SELECT *`; tabular `SELECT a, b`; document-shaped `SELECT VALUE` |
-| `iter_raw()` | `RawDocumentBuf` per document | raw document access, no deserialization |
-| `iter_values::<T>()` | `T` per **value** | SQL scalar projections (`SELECT VALUE c.name`) |
-| `iter_raw_values()` | `RawBson` per value | raw scalar / document / array access, no deserialization |
-| `drain()` | row count | counting without materializing |
+| `find(f).iter::<T>(&txn)` | `T` per **document** | a typed `find` result |
+| `find(f).iter_raw(&txn)` | `RawDocumentBuf` per document | raw `find` access, no deserialization |
+| `query(sql).iter::<T>(&txn)` | `T` per **value** | a typed SQL result (`SELECT VALUE`, `*`, or tabular) |
+| `query(sql).iter_raw(&txn)` | `RawBson` per value | raw SQL access, no deserialization |
 
-`iter`/`iter_raw` error on a non-document value; `iter_values`/`iter_raw_values` accept any value.
+`find` terminals are document-oriented (they error on a non-document row); `query`
+terminals are value-oriented (SQL can `SELECT VALUE` any scalar). Count with the
+iterator's own `.count()`; take the first row with `.next().transpose()?`.
 
 ## Index Configuration
 
-Indexes are created per collection via `create_index(cf, collection, field)`. The order of indexed fields in the collection's handle determines **priority** — when multiple indexed fields appear in an AND group, the first one in the list wins.
+Indexes are created per collection via `collection.indexes().create(field, IndexOptions::default())`. The order of indexed fields in the collection's handle determines **priority** — when multiple indexed fields appear in an AND group, the first one in the list wins.
 
 ```rust
 // indexes: ["user_id", "status"]
@@ -148,7 +151,7 @@ Indexes are created per collection via `create_index(cf, collection, field)`. Th
 
 ### Unique Indexes
 
-A unique index additionally enforces that no two live documents share the same value for a field. Create one with `create_unique_index(cf, collection, field)`; an insert or update that lands on a value already held by another document fails with `UniqueViolation { index, value, existing_id }`.
+A unique index additionally enforces that no two live documents share the same value for a field. Create one with `indexes().create(field, IndexOptions::unique())`; an insert or update that lands on a value already held by another document fails with `UniqueViolation { index, value, existing_id }`.
 
 A unique index keeps its regular value-first `i` entry, so it serves index scans, range scans, and covered projections exactly like any other index. It additionally writes a point-lookup `u` entry — keyed by the value alone (`u\0{collection}\0{field}\0{type}{value}`) with the owning `_id` stored in the entry value. Enforcement is a point read on that `u` key before each write, backed by the store's write-write conflict detection for concurrent writers.
 
@@ -160,11 +163,12 @@ A unique index keeps its regular value-first `i` entry, so it serves index scans
 
 ### Compound Indexes
 
-A compound index spans **multiple fields in order**. Create one with `create_compound_index(cf, collection, fields)` (and `create_unique_compound_index(…)` to constrain the *combination* of values). There is no SQL `CREATE INDEX`; create them programmatically, or in the `slate-cli` REPL with `.index <a> <b> …` (two or more fields = compound; `.unique-index <a> <b> …` for compound-unique).
+A compound index spans **multiple fields in order** — pass several paths to `indexes().create(paths, …)` (single vs compound is by path count), and `IndexOptions::unique()` to constrain the *combination* of values. There is no SQL `CREATE INDEX`; create them programmatically, or in the `slate-cli` REPL with `.index <a> <b> …` (two or more fields = compound; `.unique-index <a> <b> …` for compound-unique).
 
 ```rust
 // compound index on (status, created_at)
-txn.create_compound_index(DEFAULT_CF, "orders", &["status".into(), "created_at".into()])?;
+db.collection("orders")
+    .indexes().create(["status", "created_at"], IndexOptions::default()).execute(&txn)?;
 ```
 
 The planner applies the **leftmost-prefix rule**: an index on `(a, b, c)` serves any query that constrains a leftmost prefix of its fields, with at most a trailing range on the last constrained field. A query that skips the leading field falls back to a `Scan`.
@@ -203,16 +207,17 @@ The rule is **exact-path match**: a referenced path is served only if it string-
 
 A **vector index** turns nearest-neighbour search over an embedding field into a seek. A vector is the numeric embedding an ML model produces for a piece of text or an image (an array of numbers); two pieces of similar content have embeddings that sit close together in that space. The application supplies the embeddings — Slate stores, indexes, and searches them, it never generates them.
 
-Create one programmatically with `create_vector_index`, declaring the field, dimensionality, and metric:
+Create one with `indexes().create(field, VectorIndexOptions::float32(dims, metric))`, declaring the field, dimensionality, and metric:
 
 ```rust
-use slate_db::{VectorIndexSpec, VectorMetric};
+use slate_db::VectorMetric;
+use slate_db::v2::VectorIndexOptions;
 
 // cosine-similarity index over the 1536-dim `embedding` field
-txn.create_vector_index(
-    DEFAULT_CF, "photos",
-    &VectorIndexSpec::float32("embedding", 1536, VectorMetric::Cosine),
-)?;
+db.collection("photos")
+    .indexes()
+    .create("embedding", VectorIndexOptions::float32(1536, VectorMetric::Cosine))
+    .execute(&txn)?;
 ```
 
 The index is a derived `doc_id → packed-f32` copy of the field (the document's array stays canonical), maintained on every write. A kNN query is the CosmosDB shape — `VECTORDISTANCE` in `ORDER BY` with a `LIMIT`:
@@ -234,11 +239,11 @@ The search is **exact** — a brute-force scan over the candidate vectors into a
 
 The planner's source selection — when a filter becomes an `IndexScan`, an `IndexMerge`, or falls back to a `Scan` — is catalogued with 20 worked examples (plus a full pipeline and limit placement) in **[Plan Scenarios](./plan-scenarios.md)**.
 
-To see the plan a specific query lowers to, use `.explain <query>` in the `slate-cli` shell (or `Transaction::explain(cf, collection, sql)` in the library). It prints the chosen plan as an indented operator tree — the same lowering `query` uses, so the tree reflects what would actually run — without executing it. There is no SQL `EXPLAIN` keyword; plan inspection is a shell/library affair.
+To see the plan a specific query lowers to, use `.explain <query>` in the `slate-cli` shell (or the `.explain(&txn)` terminal on a `find`/`query` builder in the library). It prints the chosen plan as an indented operator tree — the same lowering `query` uses, so the tree reflects what would actually run — without executing it. There is no SQL `EXPLAIN` keyword; plan inspection is a shell/library affair.
 
 ### EXPLAIN ANALYZE
 
-To see what a run *actually did* — not just the plan shape — use `.explain analyze <query>` in the shell (or `Transaction::explain_analyze(cf, collection, sql)` in the library). It lowers exactly as `explain` (same parse, planner, and index choice), then **executes the query read-only**, collects and drops the rows, and renders the *same* operator tree annotated with per-node actuals:
+To see what a run *actually did* — not just the plan shape — use `.explain analyze <query>` in the shell (or the `.analyze(&txn)` terminal in the library). It lowers exactly as `explain` (same parse, planner, and index choice), then **executes the query read-only**, collects and drops the rows, and renders the *same* operator tree annotated with per-node actuals:
 
 - `rows=N` — the rows that node emitted.
 - `examined=M` — for a non-source node, the rows that flowed *in* (its child's emitted count). Source nodes (`Scan`, `IndexScan`, `Values`) have no `examined=`.
@@ -251,24 +256,24 @@ Project c.name rows=8 examined=8
 
 The gap between a node's `examined=` and `rows=` is exactly what it filtered out — so a `Filter` examining 120 to emit 8 (or an `IndexScan` that seeks instead of scanning) is visible at a glance, which is what makes this the instrument for debugging a slow query and for the bench loop's rows-scanned / index-hit-rate questions.
 
-Like `query`, `explain_analyze` binds no `@parameters` (the plan shape never depends on a parameter's value), so a parameterized query is rejected. The instrumentation is on *only* for this path: the normal `query`/`find` execution never builds the counting wrappers, so ordinary queries pay zero per-row cost. For programmatic access to the raw counters, `Executor::execute_analyze(plan)` returns `(Vec<RawBson>, Rc<PlanStats>)`.
+The `.analyze(&txn)` terminal honors any bound `@parameters`, so a parameterized query can be analyzed (the plan shape never depends on a parameter's *value*, only its presence). The instrumentation is on *only* for this path: the normal `query`/`find` execution never builds the counting wrappers, so ordinary queries pay zero per-row cost. For programmatic access to the raw counters, `Executor::execute_analyze(plan)` returns `(Vec<RawBson>, Rc<PlanStats>)`.
 
 A separate, off-by-default `trace` cargo feature (on `slate-executor` and `slate-db`) emits `tracing` spans/events at the execution seams for a host that wires its own subscriber; with it off, `tracing` is not even a dependency. See [Architecture — Query Stack](architecture-engine.md) and the [Observability RFC](rfcs/observability-and-introspection.md).
 
 ## Distinct Queries
 
-Distinct queries find the unique values of a single field. v2 builds a `Scan`-based pipeline and adds `Project` → `Distinct` to extract and deduplicate the values.
+Distinct queries find the unique values of a single field. The planner builds a `Scan`-based pipeline and adds `Project` → `Distinct` to extract and deduplicate the values.
 
 ### Query Model
 
 ```rust
-DistinctQuery {
-    field: String,                     // The field to collect unique values from
-    filter: Option<RawDocumentBuf>,    // Optional BSON filter document (same as find)
-    sort: Option<SortDirection>,       // Optional sort on the distinct values
-    skip: Option<usize>,              // Skip first N unique values
-    take: Option<usize>,              // Take N unique values
-}
+db.collection("people")
+    .find(doc! { /* filter */ })   // predicate — same as a find filter
+    .distinct("city")              // the field to collect unique values of
+    .sort(SortDirection::Asc)      // optional sort on the distinct values
+    .offset(0)                     // optional skip
+    .limit(10)                     // optional take
+    .iter_raw(&txn)?;              // terminal — yields the unique values
 ```
 
 ### Pipeline

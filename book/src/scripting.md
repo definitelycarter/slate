@@ -71,5 +71,5 @@ Hooks are not discovered at execution time. The planner resolves them from the `
 3. If hooks exist, the planner wraps the pipeline with the appropriate nodes
 4. If no hooks exist, no wrapper nodes are added — zero overhead for collections without scripts
 
-When a transaction commits after modifying hooks (`register_trigger`, `register_validator`, `drop_trigger`, etc.), the `HookRegistry` is swapped with a fresh snapshot so subsequent transactions see the updated hooks.
+When a transaction commits after modifying hooks (`triggers().create`, `validators().create`, `triggers().remove`, etc.), the `HookRegistry` is swapped with a fresh snapshot so subsequent transactions see the updated hooks.
 

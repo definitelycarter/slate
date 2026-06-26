@@ -7,7 +7,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **BSON document storage** — schema-flexible documents; the query pipeline filters, projects, and sorts directly over raw BSON bytes, with no serde deserialization
 - **Atomic mutations** — `$set`, `$inc`, `$unset`, `$rename`, `$push`, `$pop`, `$lpush` with dot-path support — no read-modify-write required
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
-- **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
+- **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `collection.query()`) that lower to one shared planner/executor
 - **Change detection (watch queries)** — register a filter on a collection and get matching inserts/updates/deletes delivered as they commit, by callback (`watch`/`watch_query`) or a pull cursor (`stream`/`stream_query`); BSON or SQL filter, coalesced per-commit and recast to set enter/leave events — in-process reactivity for live UIs, IoT rules, and sync, with no server or polling
 - **Indexed queries** — single-field, compound (multi-field, leftmost-prefix), and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Vector search** — flat (exact, brute-force) k-nearest-neighbour over embedding fields: `ORDER BY VECTORDISTANCE(c.embedding, @q) LIMIT k` seeks a per-field vector index (cosine / dot-product / euclidean), with `WHERE` pre-filtering before the top-k; on-device RAG / semantic search (the app supplies embeddings, Slate stores and searches them)
@@ -88,49 +88,51 @@ reports document, index-entry, and cardinality numbers.
 ## Usage
 
 ```rust
-use bson::{doc, rawdoc};
-use slate_db::{DatabaseBuilder, DEFAULT_CF, FindOptions};
+use bson::doc;
+use slate_db::DatabaseBuilder;
+use slate_db::v2::IndexOptions;
 use slate_store::RocksStore; // or RedbStore for pure-Rust (no C deps)
 
 let store = RocksStore::open("/tmp/slate-data")?;
 let db = DatabaseBuilder::new().open(store)?;
 
 // Insert
-let mut txn = db.begin(false)?;
-txn.insert_one(DEFAULT_CF, "accounts", doc! {
+let txn = db.begin(false)?;
+db.collections().create("accounts").execute(&txn)?;
+db.collection("accounts").insert_one(doc! {
     "_id": "acct-1",
     "name": "Acme Corp",
     "status": "active",
     "revenue": 50000.0
-})?;
+}).execute(&txn)?;
 txn.commit()?;
 
 // Query
 let txn = db.begin(true)?;
-let cursor = txn.find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())?;
-for doc in cursor.iter::<MyStruct>()? {   // deserializes into T
+let accounts = db.collection("accounts");
+for doc in accounts.find(doc! {}).iter::<MyStruct>(&txn)? {   // deserializes into T
     let doc = doc?;
 }
 // or keep raw bytes:
-for raw in cursor.iter_raw()? {
+for raw in accounts.find(doc! {}).iter_raw(&txn)? {
     let raw = raw?; // RawDocumentBuf — zero deserialization
 }
-let doc = txn.find_one(DEFAULT_CF, "accounts", rawdoc! { "_id": "acct-1" })?;
-let count = txn.count(DEFAULT_CF, "accounts", rawdoc! {})?;
+let one = accounts.find(doc! { "_id": "acct-1" }).iter::<MyStruct>(&txn)?.next().transpose()?;
+let count = accounts.find(doc! {}).iter_raw(&txn)?.count();
 
 // Update — atomic mutations, no read-modify-write
-let mut txn = db.begin(false)?;
-txn.update_one(DEFAULT_CF, "accounts",
-    rawdoc! { "status": "active" },
-    rawdoc! { "$set": { "status": "archived" }, "$inc": { "revenue": 5000.0 } },
-)?.drain()?;
+let txn = db.begin(false)?;
+db.collection("accounts").find(doc! { "status": "active" })
+    .update(doc! { "$set": { "status": "archived" }, "$inc": { "revenue": 5000.0 } })
+    .execute(&txn)?;
 txn.commit()?;
 
 // Indexes
-let mut txn = db.begin(false)?;
-txn.create_index(DEFAULT_CF, "accounts", "status")?;
-txn.create_unique_index(DEFAULT_CF, "accounts", "email")?; // rejects duplicate emails
-txn.create_compound_index(DEFAULT_CF, "accounts", &["status".into(), "created_at".into()])?; // leftmost-prefix
+let txn = db.begin(false)?;
+let accounts = db.collection("accounts");
+accounts.indexes().create("status", IndexOptions::default()).execute(&txn)?;
+accounts.indexes().create("email", IndexOptions::unique()).execute(&txn)?; // rejects duplicate emails
+accounts.indexes().create(["status", "created_at"], IndexOptions::default()).execute(&txn)?; // leftmost-prefix compound
 txn.commit()?;
 ```
 
@@ -149,19 +151,21 @@ let db = DatabaseBuilder::new()
     .with_scripting(VmPool::new(reg))
     .open(store)?;
 
+let accounts = db.collection("accounts");
+
 // Validator — reject documents missing a "name" field
-let mut txn = db.begin(false)?;
-txn.register_validator("app", "accounts", "require_name", r#"
+let txn = db.begin(false)?;
+accounts.validators().create("require_name", r#"
     return function(event)
       if type(event.doc.name) ~= "string" or event.doc.name == "" then
         return { ok = false, reason = "name is required" }
       end
       return { ok = true }
     end
-"#)?;
+"#).execute(&txn)?;
 
 // Trigger — log every mutation to an audit collection
-txn.register_trigger("app", "accounts", "audit_log", r#"
+accounts.triggers().create("audit_log", r#"
     return function(ctx, event)
       ctx.put("audit", {
         _id       = tostring(event.doc._id) .. ":" .. event.action,
@@ -171,7 +175,7 @@ txn.register_trigger("app", "accounts", "audit_log", r#"
       })
       return event
     end
-"#)?;
+"#).execute(&txn)?;
 txn.commit()?;
 ```
 
