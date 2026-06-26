@@ -13,6 +13,7 @@ use slate_store::Store;
 use super::index::Indexes;
 use super::query::QueryBuilder;
 use super::read::FindBuilder;
+use super::scripts::{Functions, Triggers, Validators};
 use super::write::{InsertBuilder, UpsertBuilder};
 use crate::DEFAULT_CF;
 use crate::database::Database;
@@ -87,6 +88,24 @@ impl Collection {
     /// `indexes().create(...)` / `.remove(...)` / `.list(&txn)`.
     pub fn indexes(&self) -> Indexes<'_> {
         Indexes::new(&self.cf, &self.collection)
+    }
+
+    /// The collection's trigger sub-handle:
+    /// `triggers().create(name, src)` / `.remove(name)` / `.list(&txn)`.
+    pub fn triggers(&self) -> Triggers<'_> {
+        Triggers::new(&self.cf, &self.collection)
+    }
+
+    /// The collection's validator sub-handle:
+    /// `validators().create(name, src)` / `.remove(name)` / `.list(&txn)`.
+    pub fn validators(&self) -> Validators<'_> {
+        Validators::new(&self.cf, &self.collection)
+    }
+
+    /// The collection's user-defined-function sub-handle:
+    /// `functions().create(name, src)` / `.remove(name)` / `.list(&txn)`.
+    pub fn functions(&self) -> Functions<'_> {
+        Functions::new(&self.cf, &self.collection)
     }
 }
 

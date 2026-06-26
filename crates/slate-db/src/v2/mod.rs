@@ -17,6 +17,9 @@
 //!
 //! Slice C: the [`Indexes`] sub-handle — `indexes().create(paths, opts)` (one
 //! constructor for all index kinds) / `.remove(field)` / `.list(&txn)`.
+//!
+//! Slice D: the per-kind script sub-handles — [`Triggers`] / [`Validators`] /
+//! [`Functions`] — each `create(name, src)` / `.remove(name)` / `.list(&txn)`.
 
 mod collection;
 mod distinct;
@@ -24,6 +27,7 @@ mod exec;
 mod index;
 mod query;
 mod read;
+mod scripts;
 mod write;
 
 pub use collection::{CfScope, Collection};
@@ -33,6 +37,9 @@ pub use index::{
 };
 pub use query::QueryBuilder;
 pub use read::FindBuilder;
+pub use scripts::{
+    CreateFunction, CreateTrigger, CreateValidator, Functions, RemoveScript, Triggers, Validators,
+};
 pub use write::{
     DeleteBuilder, InsertBuilder, ReplaceBuilder, UpdateBuilder, UpsertBuilder, WriteResult,
 };

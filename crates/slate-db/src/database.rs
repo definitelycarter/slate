@@ -978,6 +978,14 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         rand_rc(&self.rand)
     }
 
+    /// Mark the trigger/validator hook snapshot stale — for v2's `triggers()` /
+    /// `validators()` sub-handles, which register/remove hooks that mutations
+    /// consult (UDFs don't, so `functions()` never calls this). Mirrors the
+    /// `hooks_dirty` flip v1's `register_trigger`/`drop_validator`/etc. make.
+    pub(crate) fn mark_hooks_dirty(&self) {
+        self.hooks_dirty.set(true);
+    }
+
     /// Find the first document matching a filter.
     pub fn find_one<F: Serialize>(
         &self,

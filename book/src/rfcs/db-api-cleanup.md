@@ -198,20 +198,35 @@ needs no `.one()`). Inserts have no filter, so they stay direct builders
 (`.first()` → `Option<T>`) while write-one is a *modifier* (`.one()`) — kept distinct
 because reads return rows and writes return a count (Decision 10).
 
-## Scripts — the `scripts()` sub-handle
+## Scripts — per-kind sub-handles (`triggers()` / `validators()` / `functions()`)
 
 ```rust
-collection.scripts().register_trigger(name, src).execute(&txn)?;
-collection.scripts().remove_trigger(name).execute(&txn)?;  // kind-specific: scripts keyed by (kind, name)
-collection.scripts().list(&txn)?;
+collection.triggers().create(name, src).execute(&txn)?;
+collection.validators().create(name, src).execute(&txn)?;
+collection.functions().create(name, src).execute(&txn)?;   // UDFs
+collection.triggers().remove(name).execute(&txn)?;
+collection.triggers().list(&txn)?;
 ```
 
-Six methods (`register_*` + `drop_*`) over three kinds group under `scripts()`, the same
-pattern as `indexes()` / `collections()`. Scripts are keyed by **(kind, name)** — a trigger
-and a UDF may share a name — so removal must name the kind
-(`remove_trigger`/`remove_validator`/`remove_udf`, or a single `remove(kind, name)`); a bare
-`remove(name)` would be ambiguous. (Decision 5: kind-specific `remove_*`, verb `remove`;
-collapsing both sides to a `(kind, …)` enum is left open.)
+The three script kinds get **their own** sub-handle each, not one `scripts()` grouping — a
+deliberate departure from `indexes()` (one handle for one concept). The kinds genuinely
+differ, and not just in name: triggers and validators feed the write-time hook snapshot (so
+registering or removing one marks it stale), while UDFs are query-time and touch no hooks —
+a split that already exists in v1 (`register_udf` skips the `hooks_dirty` flip the other two
+make). And they will diverge *more*: triggers in particular will grow timing (pre/post) and
+operation (insert/update/delete) options, eventually a runtime/language (`RuntimeKind::{Js,
+Wasm}` is reserved). Per-kind handles mean each `create` owns its own signature, so those
+options land as builder stages on `triggers().create` alone — `triggers().create(name,
+src).timing(Pre).on([Insert]).execute(&txn)` — with validators/functions untouched. The
+*structure* future-proofs the divergence rather than a speculative shared options type.
+
+This also dissolves the (kind, name) ambiguity that a single `scripts()` handle had:
+because the handle fixes the kind, `triggers().remove(name)` / `triggers().list(&txn)` are
+unambiguous with no `remove_trigger`/`remove_validator` split, and a per-kind `list` is more
+useful than a mixed one. Verb is `create`/`remove` (consistent with `indexes()` /
+`collections()`, the "create/remove for schema" rule), not `register`/`drop`. `remove` is
+uniform across kinds, so the three handles share one removal builder; each `create` is its
+own type. (This supersedes the original `scripts()` design and resolves Decision 5.)
 
 ## Collections — the `collections()` namespace
 
@@ -231,8 +246,9 @@ scope, so `CollectionConfig` no longer needs a `cf` field.
 
 - **Data ops on the collection; schema management under named sub-handles.** Frequency
   decides: `find` / `insert_many` / `update_*` are frequent → direct builders on the
-  handle; index/script management is infrequent → grouped under `indexes()` / `scripts()`
-  (and the collection set under `collections()`).
+  handle; index/script management is infrequent → grouped under `indexes()` and the per-kind
+  `triggers()` / `validators()` / `functions()` (and the collection set under
+  `collections()`).
 - **Reads consume (cursor terminals), writes/commands execute (`.execute`), reactive
   registers (no txn).** Every terminal takes `&txn` except the reactive ones. *Shape rule:*
   a read with many consumption modes (`find`/`query`) is a builder whose cursor terminal
@@ -241,8 +257,9 @@ scope, so `CollectionConfig` no longer needs a `cf` field.
   instead of running), uniformly, with no "simple command" exception (Decision 2).
 - **Verbs: `create` / `remove` for schema, `delete` for documents, no `drop`** — the word
   is too bound to Rust's `Drop` trait / `mem::drop` to read cleanly. `remove` lives only on
-  the sub-handles (`indexes().remove`, `scripts().remove_*`, `collections().remove`), never
-  on `collection` directly, so it never collides with document `delete`.
+  the sub-handles (`indexes().remove`, `triggers()`/`validators()`/`functions().remove`,
+  `collections().remove`), never on `collection` directly, so it never collides with document
+  `delete`.
 
 ## FFI bindings — plugged into v2 later, route TBD
 
@@ -296,9 +313,9 @@ Phasing:
   the de-facto v1. Each slice is types + real impl + v2 unit tests. Order by surface weight:
   (A) `Collection` + `find`/`query` read builders + cursor terminals — the 80% surface, do
   it first; (B) write builders + `.execute` / `WriteResult`; (C) `indexes()` (unified
-  `create`, the `IndexBuild` trait, `VectorIndexOptions` reshape); (D) `scripts()` +
-  `collections()` + the `db.cf(…)` sub-scope; (E) reactive `.watch` / `.stream` (folds the
-  quartet).
+  `create`, the `IndexBuild` trait, `VectorIndexOptions` reshape); (D) the per-kind
+  `triggers()`/`validators()`/`functions()` script handles + `collections()` + the
+  `db.cf(…)` sub-scope; (E) reactive `.watch` / `.stream` (folds the quartet).
 - **Phase 1 — vet v2.** New v2 tests exercise the API directly — this is where "are we
   satisfied" gets answered; benches confirm v2 is at **parity** with v1 (same composition, so
   no regression is expected and the bench proves it). v1 stays intact, so every existing
@@ -343,9 +360,10 @@ Every current public method and where it lands.
   `create(paths, opts)` — the options *type* selects the kind (`IndexOptions` for
   secondary / unique / compound, `VectorIndexOptions` for vector); `drop_index` →
   `remove(field)`; `list_indexes` → `list`.
-- *Scripts (`scripts()` sub-handle):* `register_*` → `register_*`; `drop_trigger` /
-  `drop_validator` / `drop_udf` → kind-specific `remove_*(name)` (scripts are keyed by
-  `(kind, name)`, so a bare `remove(name)` is ambiguous); + `list`.
+- *Scripts (per-kind sub-handles):* `register_trigger`/`register_validator`/`register_udf`
+  → `triggers()`/`validators()`/`functions()`.`create(name, src)`; `drop_trigger` /
+  `drop_validator` / `drop_udf` → the same handle's `remove(name)` (the handle fixes the
+  kind, so no ambiguity); + per-kind `list(&txn)`.
 - *Metadata:* `collection_stats` → `stats(&txn)`; `collection_schema` → `schema(&txn)`;
   `purge_expired` → `purge(&txn)` (already collection-scoped — `(cf, collection)` today).
 
@@ -399,10 +417,15 @@ Resolved here for review; genuinely-open sub-parts are flagged.
    moves out to the shared `create` arg (it reshapes to `VectorIndexOptions`). Extensible:
    partial / full-text add their own options type, no new method. *(Reverses the earlier
    keep-separate call.)*
-5. **Kind-specific script removal.** `remove_trigger` / `remove_validator` / `remove_udf`,
-   symmetric with `register_*`; verb is `remove` (not `unregister`). *Why:* scripts are
-   keyed by `(kind, name)`, so a bare `remove(name)` is ambiguous. *(Open: whether to later
-   collapse both sides to `register(kind, …)` / `remove(kind, name)` via an enum.)*
+5. **Per-kind script sub-handles (`triggers()` / `validators()` / `functions()`),
+   `create`/`remove`/`list` on each.** *Why:* the kinds genuinely differ — triggers/validators
+   feed the write-hook snapshot, UDFs don't (already true in v1), and triggers will grow
+   timing/operation/runtime options — so each kind owning its `create` lets that divergence
+   land as builder stages on one type without touching the others. As a bonus the handle fixes
+   the kind, so `remove(name)`/`list` need no kind suffix and the `(kind, name)` ambiguity that
+   forced `remove_*` disappears. *(Supersedes the original single-`scripts()` design; closes
+   the earlier open question about collapsing to a `(kind, …)` enum — per-kind handles are the
+   answer.)*
 6. **`cf` is a sub-scope, not a positional arg.** `db.collection("orders")` for the default
    cf; `db.cf("tenant_42").collection("orders")` (and `db.cf(…).collections()`) for an
    explicit one. *Why:* `db.collection(None, "orders")` put a usually-defaulted storage-ism
