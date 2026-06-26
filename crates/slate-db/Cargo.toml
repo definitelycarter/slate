@@ -56,6 +56,21 @@ serde_json = "1"
 bson = { workspace = true, features = ["serde_json-1"] }
 
 [[bench]]
+name = "find"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "query"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "write"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
+name = "distinct"
 harness = false
 required-features = ["bench-internals"]
