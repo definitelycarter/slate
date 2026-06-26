@@ -86,14 +86,21 @@ Because v2 builds the `Cursor` itself this is **native** — `Cursor` already ex
 can't default, so we keep the explicit split — `iter_raw` for raw, `iter::<T>` for typed —
 rather than one `iter` with a defaulted `T`.)
 
-**Writes & commands expose one terminal, `.execute(&txn)`**, returning the operation's
-result — a `WriteResult` (a **new** type added with this work; v2's write terminal composes
-the mutation plan and returns it directly, where v1's mutations return a `Cursor` you
-`.drain()` for the count):
+**Writes expose `.execute(&txn)` for the affected count plus the same two
+iteration terminals reads have** — `.iter_raw(&txn)` / `.iter::<T>(&txn)` — for the
+affected *documents* (the mutated rows the plan yields: an insert's generated
+`_id`s, an update's post-image, a delete's removed rows). `.execute` returns a
+`WriteResult` (a **new** type added with this work; v2's write terminal composes
+the mutation plan and returns it directly, where v1's mutations return a `Cursor`
+you `.drain()` for the count). The iteration terminals are the structured successor
+to that v1 cursor — same `write_cursor` core, just surfaced as a std `Iterator`.
+Commands (`indexes()`/`collections()`/scripts) expose only `.execute(&txn)`:
 
 ```rust
-orders.find(filter).update(spec).execute(&txn)?            // WriteResult
-orders.insert_many(docs).execute(&txn)?                    // WriteResult
+orders.find(filter).update(spec).execute(&txn)?            // WriteResult (count)
+orders.insert_many(docs).execute(&txn)?                    // WriteResult (count)
+orders.insert_many(docs).iter::<Order>(&txn)?              // the inserted docs, typed
+orders.find(filter).delete().iter_raw(&txn)?               // the removed docs, raw
 orders.indexes().create(&["status"], opts).execute(&txn)?  // ()
 ```
 

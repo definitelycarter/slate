@@ -1,10 +1,12 @@
 //! v2 write surface: the mutation builders and their `.execute` terminal.
 //!
-//! Phase 0, slice B. A write is a builder finished with one of three terminals:
-//! `.execute(&txn)` runs it and returns a [`WriteResult`], `.explain(&txn)`
-//! renders the mutation plan without running it, and `.analyze(&txn)` runs it
-//! under `EXPLAIN ANALYZE`. Each builder carries a **real, self-contained body**
-//! — it lowers the request and plans it itself (via [`super::exec`]) rather than
+//! Phase 0, slice B. A write is a builder finished with a terminal: `.execute(&txn)`
+//! runs it and returns a [`WriteResult`] (the affected count), while
+//! `.iter_raw(&txn)` / `.iter::<T>(&txn)` run it and stream back the affected
+//! *documents* (mirroring the read terminals). `.explain(&txn)` renders the
+//! mutation plan without running it, and `.analyze(&txn)` runs it under
+//! `EXPLAIN ANALYZE`. Each builder carries a **real, self-contained body** — it
+//! lowers the request and plans it itself (via [`super::exec`]) rather than
 //! calling `Transaction::update_*`/`delete_*`/`insert_many`/etc.
 //!
 //! Two families:
@@ -17,9 +19,11 @@
 //!   take documents, not a filter.
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use slate_store::Store;
 
 use crate::RawBson;
+use crate::cursor::{CursorIter, RawCursorIter};
 use crate::database::Transaction;
 use crate::error::DbError;
 use slate_planner::UpsertMode;
@@ -198,6 +202,32 @@ impl<F: Serialize, U: Serialize> UpdateBuilder<'_, F, U> {
         })
     }
 
+    /// Run the update and stream the affected documents as raw BSON
+    /// (`RawDocumentBuf`) — the documents this mutation wrote, the raw counterpart
+    /// of [`iter`](Self::iter). Like the read terminals it's just an [`Iterator`],
+    /// so `collect`/`count`/`next` come from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<RawCursorIter<'t>, DbError>
+    where
+        S: Store + 'db,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+    }
+
+    /// Run the update and stream the affected documents deserialized into `T` (the
+    /// typed counterpart of [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        &self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
+    where
+        T: DeserializeOwned,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+    }
+
     /// Render the mutation plan without running it.
     pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
         Ok(self.build_plan(txn)?.explain())
@@ -250,6 +280,32 @@ impl<F: Serialize> DeleteBuilder<'_, F> {
         Ok(WriteResult {
             affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
         })
+    }
+
+    /// Run the delete and stream the removed documents as raw BSON
+    /// (`RawDocumentBuf`) — the raw counterpart of [`iter`](Self::iter). Like the
+    /// read terminals it's just an [`Iterator`], so `collect`/`count`/`next` come
+    /// from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<RawCursorIter<'t>, DbError>
+    where
+        S: Store + 'db,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+    }
+
+    /// Run the delete and stream the removed documents deserialized into `T` (the
+    /// typed counterpart of [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        &self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
+    where
+        T: DeserializeOwned,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -308,6 +364,32 @@ impl<F: Serialize, R: Serialize> ReplaceBuilder<'_, F, R> {
         })
     }
 
+    /// Run the replace and stream the replaced document as raw BSON
+    /// (`RawDocumentBuf`) — the raw counterpart of [`iter`](Self::iter). Like the
+    /// read terminals it's just an [`Iterator`], so `collect`/`count`/`next` come
+    /// from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<RawCursorIter<'t>, DbError>
+    where
+        S: Store + 'db,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+    }
+
+    /// Run the replace and stream the replaced document deserialized into `T` (the
+    /// typed counterpart of [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        &self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
+    where
+        T: DeserializeOwned,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+    }
+
     /// Render the mutation plan without running it.
     pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
         Ok(self.build_plan(txn)?.explain())
@@ -354,6 +436,32 @@ impl<D: Serialize> InsertBuilder<'_, D> {
         Ok(WriteResult {
             affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
         })
+    }
+
+    /// Run the insert and stream the inserted documents as raw BSON
+    /// (`RawDocumentBuf`), each carrying its `_id` (generated when absent) — the
+    /// raw counterpart of [`iter`](Self::iter). Like the read terminals it's just
+    /// an [`Iterator`], so `collect`/`count`/`next` come from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<RawCursorIter<'t>, DbError>
+    where
+        S: Store + 'db,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+    }
+
+    /// Run the insert and stream the inserted documents deserialized into `T` (the
+    /// typed counterpart of [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        &self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
+    where
+        T: DeserializeOwned,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -405,6 +513,32 @@ impl<D: Serialize> UpsertBuilder<'_, D> {
         Ok(WriteResult {
             affected: super::exec::execute_write(self.build_plan(txn)?, txn)?,
         })
+    }
+
+    /// Run the upsert/merge and stream the written documents as raw BSON
+    /// (`RawDocumentBuf`) — the raw counterpart of [`iter`](Self::iter). Like the
+    /// read terminals it's just an [`Iterator`], so `collect`/`count`/`next` come
+    /// from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<RawCursorIter<'t>, DbError>
+    where
+        S: Store + 'db,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+    }
+
+    /// Run the upsert/merge and stream the written documents deserialized into `T`
+    /// (the typed counterpart of [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        &self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
+    where
+        T: DeserializeOwned,
+    {
+        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -658,6 +792,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.get_i32("x").unwrap(), 1, "analyze executes the write");
+
+        txn.commit().unwrap();
+    }
+
+    #[test]
+    fn write_terminals_return_affected_docs() {
+        let db = db_with_users();
+        let txn = db.begin(false).unwrap();
+        let users = db.collection("users");
+
+        // insert: iter_raw streams back the inserted documents
+        let inserted: Vec<bson::RawDocumentBuf> = users
+            .insert_many(vec![
+                doc! { "_id": 1, "name": "ana", "age": 30 },
+                doc! { "_id": 2, "name": "bo", "age": 20 },
+            ])
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inserted.len(), 2);
+
+        // insert_one without an `_id`: the returned doc carries the generated one
+        let one = users
+            .insert_one(doc! { "name": "cy", "age": 40 })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
+            .unwrap()
+            .expect("the inserted doc");
+        assert!(
+            one.get("_id").unwrap().is_some(),
+            "insert generates an _id and hands it back"
+        );
+
+        // update: iter::<T> streams the updated documents, deserialized
+        #[derive(serde::Deserialize)]
+        struct User {
+            active: bool,
+        }
+        let updated: Vec<User> = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .update(doc! { "$set": { "active": true } })
+            .iter::<User>(&txn)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(updated.len(), 2); // ana(30), cy(40)
+        assert!(updated.iter().all(|u| u.active));
+
+        // delete: iter_raw streams the removed documents
+        let removed = users
+            .find(doc! { "_id": 2 })
+            .delete()
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].get_str("name").unwrap(), "bo");
+
+        // the delete actually landed — bo is gone, ana + cy remain
+        assert_eq!(users.find(doc! {}).iter_raw(&txn).unwrap().count(), 2);
 
         txn.commit().unwrap();
     }
