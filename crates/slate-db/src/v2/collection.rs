@@ -10,6 +10,7 @@
 use serde::Serialize;
 use slate_store::Store;
 
+use super::collections::Collections;
 use super::index::Indexes;
 use super::query::QueryBuilder;
 use super::read::FindBuilder;
@@ -23,8 +24,11 @@ use slate_planner::UpsertMode;
 /// [`Database::collection`] (default column family) or
 /// [`Database::cf`]`(cf).collection(name)`.
 pub struct Collection {
-    cf: String,
-    collection: String,
+    // `pub(super)` so the sibling v2 modules (`collections` constructs a fresh
+    // handle from `create`; `meta` reads them for stats/schema/purge) can reach
+    // the names without an accessor dance.
+    pub(super) cf: String,
+    pub(super) collection: String,
 }
 
 impl Collection {
@@ -123,6 +127,12 @@ impl CfScope {
             collection: name.to_string(),
         }
     }
+
+    /// The collection-management namespace for this column family:
+    /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`.
+    pub fn collections(self) -> Collections {
+        Collections::new(self.cf)
+    }
 }
 
 impl<S: Store> Database<S> {
@@ -137,5 +147,12 @@ impl<S: Store> Database<S> {
     /// Scope a subsequent `collection(...)` to the column family `cf`.
     pub fn cf(&self, cf: &str) -> CfScope {
         CfScope { cf: cf.to_string() }
+    }
+
+    /// The collection-management namespace for the default column family:
+    /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`. Sugar for
+    /// `db.cf(DEFAULT_CF).collections()`.
+    pub fn collections(&self) -> Collections {
+        Collections::new(DEFAULT_CF.to_string())
     }
 }

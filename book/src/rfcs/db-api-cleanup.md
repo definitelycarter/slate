@@ -231,7 +231,8 @@ own type. (This supersedes the original `scripts()` design and resolves Decision
 ## Collections — the `collections()` namespace
 
 ```rust
-let new = db.collections().create(config).execute(&txn)?;   // → the new Collection handle
+let orders = db.collections().create("orders").execute(&txn)?;   // → the new Collection handle
+db.collections().create("events").ttl_path("expires_at").execute(&txn)?;
 db.collections().remove("orders").execute(&txn)?;
 let names = db.collections().list(&txn)?;
 ```
@@ -239,8 +240,12 @@ let names = db.collections().list(&txn)?;
 `create` / `list` / `remove` on the *set* of collections, parallel to the singular
 `collection(name)`. The cf sub-scope applies here too — `db.collections()` for the default
 cf, `db.cf("tenant_42").collections()` for an explicit one (Decision 6). `db.collections()`
-is sugar for `db.cf(DEFAULT_CF).collections()`; `create(config)` takes its cf from the
-scope, so `CollectionConfig` no longer needs a `cf` field.
+is sugar for `db.cf(DEFAULT_CF).collections()`. `create(name)` is a **builder** (not
+`create(config)`) — consistent with every other v2 create, with `.pk_path(..)` / `.ttl_path(..)`
+stages defaulting to `_id` / `ttl`, finishing at `.execute(&txn)` which returns the new
+`Collection` handle. The cf comes from the scope, so there is no cf argument and no
+`CollectionConfig` (the builder *is* the config, and it can't carry a stale cf). `list` /
+`remove` are scoped to the cf — `list` returns the names in that column family.
 
 ## The pattern split
 
@@ -369,9 +374,9 @@ Every current public method and where it lands.
 
 **→ `collections()` namespace (off `db`)**
 
-- `create_collection` → `collections().create(config)` (→ the new handle),
-  `list_collections` → `collections().list`, `drop_collection` →
-  `collections().remove(name)`.
+- `create_collection` → `collections().create(name)[.pk_path(..)/.ttl_path(..)]` (builder →
+  the new handle), `list_collections` → `collections().list` (scoped to the cf),
+  `drop_collection` → `collections().remove(name)`.
 
 **→ Stays on `Transaction` — txn lifecycle**
 

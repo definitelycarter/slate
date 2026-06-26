@@ -19,18 +19,24 @@
 //! constructor for all index kinds) / `.remove(field)` / `.list(&txn)`.
 //!
 //! Slice D: the per-kind script sub-handles — [`Triggers`] / [`Validators`] /
-//! [`Functions`] — each `create(name, src)` / `.remove(name)` / `.list(&txn)`.
+//! [`Functions`] — each `create(name, src)` / `.remove(name)` / `.list(&txn)`;
+//! the [`Collections`] namespace (`db.collections()` / `db.cf(cf).collections()`)
+//! with `create(name)` / `.list` / `.remove`; and the handle metadata terminals
+//! `stats` / `schema` / `purge`.
 
 mod collection;
+mod collections;
 mod distinct;
 mod exec;
 mod index;
+mod meta;
 mod query;
 mod read;
 mod scripts;
 mod write;
 
 pub use collection::{CfScope, Collection};
+pub use collections::{Collections, CreateCollection, RemoveCollection};
 pub use distinct::DistinctBuilder;
 pub use index::{
     CreateIndex, IndexBuild, IndexOptions, IndexPaths, Indexes, RemoveIndex, VectorIndexOptions,
