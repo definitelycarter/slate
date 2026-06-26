@@ -9,7 +9,8 @@
 //! string predicates never match, and the retained recheck must drop).
 
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 /// Seed `things` with a scalar `name` field, optionally indexed on `name`.
@@ -18,29 +19,25 @@ use slate_store::MemoryStore;
 fn seed(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "things".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("things").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "things", "name").unwrap();
+        db.collection("things")
+            .indexes()
+            .create("name", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "things",
-        vec![
+    db.collection("things")
+        .insert_many(vec![
             doc! { "_id": "alpha", "name": "alpha" },
             doc! { "_id": "alphabet", "name": "alphabet" },
             doc! { "_id": "alpine", "name": "alpine" },
             doc! { "_id": "beta", "name": "beta" },
             doc! { "_id": "cap", "name": "Alpha" },
             doc! { "_id": "numname", "name": Bson::Int32(42) },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -48,10 +45,10 @@ fn seed(indexed: bool) -> Database<MemoryStore> {
 /// The sorted `_id`s that `sql` (a `SELECT VALUE c._id`) selects from `things`.
 fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut got: Vec<String> = txn
-        .query(DEFAULT_CF, "things", sql)
-        .unwrap()
-        .iter_values::<String>()
+    let mut got: Vec<String> = db
+        .collection("things")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -61,7 +58,7 @@ fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
 
 fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    let plan = txn.explain(DEFAULT_CF, "things", sql).unwrap();
+    let plan = db.collection("things").query(sql).explain(&txn).unwrap();
     txn.rollback().unwrap();
     plan
 }

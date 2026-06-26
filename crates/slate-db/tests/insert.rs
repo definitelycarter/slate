@@ -2,8 +2,6 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::DEFAULT_CF;
-use slate_query::FindOptions;
 
 // ── Insert tests ────────────────────────────────────────────────
 
@@ -13,19 +11,20 @@ fn insert_one_and_find_one() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "acct-1", "name": "Acme", "revenue": 50000.0 },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "acct-1", "name": "Acme", "revenue": 50000.0 })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let record = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-1" })
+    let record = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "acct-1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(record.get_str("_id").unwrap(), "acct-1");
@@ -39,22 +38,14 @@ fn insert_one_duplicate_id_fails() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "acct-1", "name": "Acme" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    let err = txn
-        .insert_one(
-            DEFAULT_CF,
-            COLLECTION,
-            doc! { "_id": "acct-1", "name": "Duplicate" },
-        )
-        .unwrap()
-        .drain()
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "acct-1", "name": "Acme" })
+        .execute(&txn)
+        .unwrap();
+    let err = db
+        .collection(COLLECTION)
+        .insert_one(doc! { "_id": "acct-1", "name": "Duplicate" })
+        .execute(&txn)
         .unwrap_err();
     assert!(err.to_string().contains("duplicate key"));
 }
@@ -65,18 +56,18 @@ fn insert_one_auto_generated_id() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, COLLECTION, doc! { "name": "No ID" })
-        .unwrap()
-        .drain()
+    db.collection(COLLECTION)
+        .insert_one(doc! { "name": "No ID" })
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Verify the auto-generated _id is an ObjectId
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -91,26 +82,23 @@ fn insert_many_batch() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    let count = txn
-        .insert_many(
-            DEFAULT_CF,
-            COLLECTION,
-            vec![
-                doc! { "_id": "acct-1", "name": "Acme" },
-                doc! { "_id": "acct-2", "name": "Globex" },
-            ],
-        )
+    let count = db
+        .collection(COLLECTION)
+        .insert_many(vec![
+            doc! { "_id": "acct-1", "name": "Acme" },
+            doc! { "_id": "acct-2", "name": "Globex" },
+        ])
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(count, 2);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let all = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let all = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

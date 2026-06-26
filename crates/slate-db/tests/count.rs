@@ -2,7 +2,6 @@ mod common;
 use common::*;
 
 use bson::{Bson, rawdoc};
-use slate_db::DEFAULT_CF;
 
 // ── Count tests ─────────────────────────────────────────────────
 
@@ -12,7 +11,12 @@ fn count_all() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let count = txn.count(DEFAULT_CF, COLLECTION, rawdoc! {}).unwrap();
+    let count = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
+        .unwrap()
+        .count();
     assert_eq!(count, 5);
 }
 
@@ -23,6 +27,11 @@ fn count_with_filter() {
 
     let txn = db.begin(true).unwrap();
     let filter = eq_filter("status", Bson::String("active".into()));
-    let count = txn.count(DEFAULT_CF, COLLECTION, filter).unwrap();
+    let count = db
+        .collection(COLLECTION)
+        .find(filter)
+        .iter_raw(&txn)
+        .unwrap()
+        .count();
     assert_eq!(count, 3);
 }

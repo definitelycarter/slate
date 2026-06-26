@@ -9,8 +9,8 @@
 //! the Mongo `{tags.[]: v}` forms (the latter closing a latent `MultikeyEq` bug).
 
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 /// Seed `posts` with array-valued `tags`, optionally indexed on `tags.[]`.
@@ -18,28 +18,24 @@ use slate_store::MemoryStore;
 fn seed(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "posts".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("posts").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "posts", "tags.[]").unwrap();
+        db.collection("posts")
+            .indexes()
+            .create("tags.[]", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "posts",
-        vec![
+    db.collection("posts")
+        .insert_many(vec![
             doc! { "_id": "r1", "tags": ["rust", "db"] },
             doc! { "_id": "r2", "tags": ["go", "api"] },
             doc! { "_id": "r3", "tags": ["rust", "api"] },
             doc! { "_id": "r4", "tags": [] },
             doc! { "_id": "r5", "tags": ["db", "db"] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -47,10 +43,10 @@ fn seed(indexed: bool) -> Database<MemoryStore> {
 /// The sorted `_id`s that `sql` (a `SELECT VALUE c._id`) selects from `posts`.
 fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut got: Vec<String> = txn
-        .query(DEFAULT_CF, "posts", sql)
-        .unwrap()
-        .iter_values::<String>()
+    let mut got: Vec<String> = db
+        .collection("posts")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -122,15 +118,10 @@ fn multikey_eq_dedups_duplicate_elements_mongo() {
     // latent `MultikeyEq` duplicate-row bug (r5 was returned twice).
     let db = seed(true);
     let txn = db.begin(true).unwrap();
-    let mut got: Vec<String> = txn
-        .find(
-            DEFAULT_CF,
-            "posts",
-            doc! { "tags.[]": "db" },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let mut got: Vec<String> = db
+        .collection("posts")
+        .find(doc! { "tags.[]": "db" })
+        .iter_raw(&txn)
         .unwrap()
         .map(|r| r.unwrap().get_str("_id").unwrap().to_string())
         .collect();
@@ -142,27 +133,23 @@ fn multikey_eq_dedups_duplicate_elements_mongo() {
 fn seed_numeric(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "posts".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("posts").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "posts", "nums.[]").unwrap();
+        db.collection("posts")
+            .indexes()
+            .create("nums.[]", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "posts",
-        vec![
+    db.collection("posts")
+        .insert_many(vec![
             doc! { "_id": "i32", "nums": [Bson::Int32(7)] },
             doc! { "_id": "i64", "nums": [Bson::Int64(7)] },
             doc! { "_id": "f64", "nums": [Bson::Double(7.0)] },
             doc! { "_id": "other", "nums": [Bson::Int32(8)] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -175,10 +162,10 @@ fn array_contains_numeric_matches_across_types() {
     let sql = "SELECT VALUE c._id FROM c WHERE ARRAY_CONTAINS(c.nums, 7)";
     let nums = |db: &Database<MemoryStore>| {
         let txn = db.begin(true).unwrap();
-        let mut got: Vec<String> = txn
-            .query(DEFAULT_CF, "posts", sql)
-            .unwrap()
-            .iter_values::<String>()
+        let mut got: Vec<String> = db
+            .collection("posts")
+            .query(sql)
+            .iter::<String>(&txn)
             .unwrap()
             .map(|r| r.unwrap())
             .collect();

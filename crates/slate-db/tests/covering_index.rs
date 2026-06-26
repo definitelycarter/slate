@@ -14,8 +14,8 @@
 
 use bson::doc;
 use bson::raw::RawDocumentBuf;
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 /// Seed `people` with a scalar `status`, indexed only when `indexed`. The other
@@ -25,27 +25,23 @@ use slate_store::MemoryStore;
 fn seed(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("people").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "people", "status").unwrap();
+        db.collection("people")
+            .indexes()
+            .create("status", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collection("people")
+        .insert_many(vec![
             doc! { "_id": "1", "status": "active", "name": "ada", "meta": { "note": "x" } },
             doc! { "_id": "2", "status": "inactive", "name": "bob", "meta": { "note": "y" } },
             doc! { "_id": "3", "status": "active", "name": "cy", "meta": { "note": "z" } },
             doc! { "_id": "4", "status": "Active", "name": "dee" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -58,14 +54,13 @@ fn find_sorted(
     columns: Option<Vec<String>>,
 ) -> Vec<RawDocumentBuf> {
     let txn = db.begin(true).unwrap();
-    let options = FindOptions {
-        columns,
-        ..FindOptions::default()
-    };
-    let mut docs = txn
-        .find(DEFAULT_CF, "people", filter, options)
-        .unwrap()
-        .iter_raw()
+    let coll = db.collection("people");
+    let mut builder = coll.find(filter);
+    if let Some(columns) = columns {
+        builder = builder.project(columns);
+    }
+    let mut docs = builder
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<RawDocumentBuf>, _>>()
         .unwrap();
@@ -82,10 +77,10 @@ fn id_of(doc: &RawDocumentBuf) -> String {
 /// values across queries — documents, strings — so a canonical string sort).
 fn query_sorted(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut out = txn
-        .query(DEFAULT_CF, "people", sql)
-        .unwrap()
-        .iter_values::<bson::Bson>()
+    let mut out = db
+        .collection("people")
+        .query(sql)
+        .iter::<bson::Bson>(&txn)
         .unwrap()
         .map(|r| format!("{:?}", r.unwrap()))
         .collect::<Vec<_>>();
@@ -95,7 +90,7 @@ fn query_sorted(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
 
 fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    txn.explain(DEFAULT_CF, "people", sql).unwrap()
+    db.collection("people").query(sql).explain(&txn).unwrap()
 }
 
 // ── The value invariant: covered == materialized ────────────────────────────
@@ -230,27 +225,23 @@ fn unindexed_field_query_keeps_key_lookup() {
 fn seed_dotted(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("people").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "people", "meta.note").unwrap();
+        db.collection("people")
+            .indexes()
+            .create("meta.note", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collection("people")
+        .insert_many(vec![
             doc! { "_id": "1", "meta": { "note": "x", "tag": "t1" }, "name": "ada" },
             doc! { "_id": "2", "meta": { "note": "y", "tag": "t2" }, "name": "bob" },
             doc! { "_id": "3", "meta": { "note": "x", "tag": "t3" }, "name": "cy" },
             doc! { "_id": "4", "name": "dee" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }

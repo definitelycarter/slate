@@ -2,8 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF};
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
 
 #[allow(dead_code)]
 fn create_collection_with_indexes(
@@ -12,13 +11,13 @@ fn create_collection_with_indexes(
     indexes: &[&str],
 ) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: name.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create(name).execute(&txn).unwrap();
     for field in indexes {
-        txn.create_index(DEFAULT_CF, name, field).unwrap();
+        db.collection(name)
+            .indexes()
+            .create(*field, IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
     txn.commit().unwrap();
 }
@@ -31,32 +30,27 @@ fn create_and_use_index() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        COLLECTION,
-        vec![
+    db.collection(COLLECTION)
+        .insert_many(vec![
             doc! { "_id": "r1", "name": "Alice", "status": "active" },
             doc! { "_id": "r2", "name": "Bob", "status": "rejected" },
             doc! { "_id": "r3", "name": "Charlie", "status": "active" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     // Create index after data exists (tests backfill)
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -91,21 +85,25 @@ fn numeric_index_scans_decode_without_crashing() {
     let docs: Vec<_> = (0u32..300)
         .map(|i| doc! { "_id": det_oid(i), "priority": (i % 3 + 1) as i32 })
         .collect();
-    txn.insert_many(DEFAULT_CF, COLLECTION, docs)
-        .unwrap()
-        .drain()
+    db.collection(COLLECTION)
+        .insert_many(docs)
+        .execute(&txn)
         .unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "priority")
+    db.collection(COLLECTION)
+        .indexes()
+        .create("priority", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     let count = |filter: bson::RawDocumentBuf| {
         let txn = db.begin(true).unwrap();
-        let n = txn
-            .find(DEFAULT_CF, COLLECTION, filter, FindOptions::default())
+        let n = db
+            .collection(COLLECTION)
+            .find(filter)
+            .iter_raw(&txn)
             .unwrap()
-            .drain()
-            .unwrap();
+            .count();
         txn.rollback().unwrap();
         n
     };
@@ -122,20 +120,28 @@ fn drop_index() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let mut indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
+    let mut indexes = db.collection(COLLECTION).indexes().list(&txn).unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "ttl"]);
 
     let txn = db.begin(false).unwrap();
-    txn.drop_index(DEFAULT_CF, COLLECTION, "status").unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .remove("status")
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
+    let indexes = db.collection(COLLECTION).indexes().list(&txn).unwrap();
     assert_eq!(indexes, vec!["ttl"]);
 }
 
@@ -148,36 +154,27 @@ fn index_maintained_on_insert() {
 
     // Create index first, then insert
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "r1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "r2", "name": "Bob", "status": "rejected" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "r1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "r2", "name": "Bob", "status": "rejected" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Index scan should work
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -191,57 +188,44 @@ fn index_maintained_on_update() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "r1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "r1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Update the indexed field
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        DEFAULT_CF,
-        COLLECTION,
-        &filter,
-        doc! { "status": "rejected" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .find(&filter)
+        .update(doc! { "status": "rejected" })
+        .one()
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Old index value should not match
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(results.len(), 0);
 
     // New index value should match
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("rejected".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("rejected".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -254,36 +238,33 @@ fn index_maintained_on_delete() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "r1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "r1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one(DEFAULT_CF, COLLECTION, &filter)
-        .unwrap()
-        .drain()
+    db.collection(COLLECTION)
+        .find(&filter)
+        .delete()
+        .one()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Index should be empty
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -296,38 +277,28 @@ fn index_maintained_on_delete() {
 fn index_on_nested_path() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "nested_idx".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "nested_idx", "address.city")
+    db.collections().create("nested_idx").execute(&txn).unwrap();
+    db.collection("nested_idx")
+        .indexes()
+        .create("address.city", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "nested_idx",
-        vec![
+    db.collection("nested_idx")
+        .insert_many(vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
             doc! { "_id": "r2", "name": "Bob", "address": { "city": "Denver", "state": "CO" } },
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Index scan on address.city
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested_idx",
-            eq_filter("address.city", Bson::String("Austin".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested_idx")
+        .find(eq_filter("address.city", Bson::String("Austin".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -344,37 +315,28 @@ fn index_on_nested_path() {
 fn index_on_array_of_scalars() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "tags_idx".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "tags_idx", "tags.[]").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "tags_idx",
-        vec![
+    db.collections().create("tags_idx").execute(&txn).unwrap();
+    db.collection("tags_idx")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("tags_idx")
+        .insert_many(vec![
             doc! { "_id": "r1", "name": "Post A", "tags": ["rust", "db"] },
             doc! { "_id": "r2", "name": "Post B", "tags": ["go", "api"] },
             doc! { "_id": "r3", "name": "Post C", "tags": ["rust", "api"] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Query for tag "rust" via index
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_idx",
-            eq_filter("tags.[]", Bson::String("rust".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_idx")
+        .find(eq_filter("tags.[]", Bson::String("rust".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -387,15 +349,10 @@ fn index_on_array_of_scalars() {
     assert_eq!(names, vec!["Post A", "Post C"]);
 
     // Query for tag "api" via index
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_idx",
-            eq_filter("tags.[]", Bson::String("api".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_idx")
+        .find(eq_filter("tags.[]", Bson::String("api".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -412,36 +369,28 @@ fn index_on_array_of_scalars() {
 fn index_on_array_of_objects() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "items_idx".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "items_idx", "items.[].sku")
+    db.collections().create("items_idx").execute(&txn).unwrap();
+    db.collection("items_idx")
+        .indexes()
+        .create("items.[].sku", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "items_idx",
-        vec![
+    db.collection("items_idx")
+        .insert_many(vec![
             doc! { "_id": "order-1", "items": [{ "sku": "A1", "qty": 2 }, { "sku": "B2", "qty": 1 }] },
             doc! { "_id": "order-2", "items": [{ "sku": "C3", "qty": 5 }] },
             doc! { "_id": "order-3", "items": [{ "sku": "A1", "qty": 1 }, { "sku": "C3", "qty": 3 }] },
-        ],
-    )
-    .unwrap().drain().unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Query for sku "A1"
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "items_idx",
-            eq_filter("items.[].sku", Bson::String("A1".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("items_idx")
+        .find(eq_filter("items.[].sku", Bson::String("A1".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -454,15 +403,10 @@ fn index_on_array_of_objects() {
     assert_eq!(ids, vec!["order-1", "order-3"]);
 
     // Query for sku "C3"
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "items_idx",
-            eq_filter("items.[].sku", Bson::String("C3".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("items_idx")
+        .find(eq_filter("items.[].sku", Bson::String("C3".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -479,62 +423,45 @@ fn index_on_array_of_objects() {
 fn multikey_index_maintained_on_update() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "tags_upd".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "tags_upd", "tags.[]").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "tags_upd",
-        doc! { "_id": "r1", "tags": ["rust", "db"] },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collections().create("tags_upd").execute(&txn).unwrap();
+    db.collection("tags_upd")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("tags_upd")
+        .insert_one(doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Update tags
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.update_one(
-        DEFAULT_CF,
-        "tags_upd",
-        &filter,
-        doc! { "tags": ["go", "api"] },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("tags_upd")
+        .find(&filter)
+        .update(doc! { "tags": ["go", "api"] })
+        .one()
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Old tags should not match
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_upd",
-            eq_filter("tags.[]", Bson::String("rust".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_upd")
+        .find(eq_filter("tags.[]", Bson::String("rust".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(results.len(), 0);
 
     // New tags should match
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_upd",
-            eq_filter("tags.[]", Bson::String("go".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_upd")
+        .find(eq_filter("tags.[]", Bson::String("go".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -546,42 +473,35 @@ fn multikey_index_maintained_on_update() {
 fn multikey_index_maintained_on_delete() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "tags_del".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "tags_del", "tags.[]").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "tags_del",
-        doc! { "_id": "r1", "tags": ["rust", "db"] },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collections().create("tags_del").execute(&txn).unwrap();
+    db.collection("tags_del")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("tags_del")
+        .insert_one(doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Delete
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.delete_one(DEFAULT_CF, "tags_del", &filter)
-        .unwrap()
-        .drain()
+    db.collection("tags_del")
+        .find(&filter)
+        .delete()
+        .one()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Index entries should be cleaned up
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_del",
-            eq_filter("tags.[]", Bson::String("rust".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_del")
+        .find(eq_filter("tags.[]", Bson::String("rust".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -595,36 +515,31 @@ fn multikey_index_backfill() {
 
     // Insert data first, then create the index
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "backfill",
-        vec![
+    db.collection("backfill")
+        .insert_many(vec![
             doc! { "_id": "r1", "tags": ["rust", "db"] },
             doc! { "_id": "r2", "tags": ["go", "api"] },
             doc! { "_id": "r3", "tags": ["rust", "api"] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Now create the index — should backfill
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, "backfill", "tags.[]").unwrap();
+    db.collection("backfill")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Verify backfill worked
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "backfill",
-            eq_filter("tags.[]", Bson::String("rust".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("backfill")
+        .find(eq_filter("tags.[]", Bson::String("rust".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -641,64 +556,46 @@ fn multikey_index_backfill() {
 fn multikey_index_replace_one() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "tags_rep".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "tags_rep", "tags.[]").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "tags_rep",
-        doc! { "_id": "r1", "tags": ["rust", "db"] },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collections().create("tags_rep").execute(&txn).unwrap();
+    db.collection("tags_rep")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("tags_rep")
+        .insert_one(doc! { "_id": "r1", "tags": ["rust", "db"] })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Replace entirely
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("r1".into()));
-    txn.replace_one(
-        DEFAULT_CF,
-        "tags_rep",
-        &filter,
-        doc! { "tags": ["python", "ml"] },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("tags_rep")
+        .find(&filter)
+        .replace(doc! { "tags": ["python", "ml"] })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Old tags gone
     let txn = db.begin(true).unwrap();
     assert_eq!(
-        txn.find(
-            DEFAULT_CF,
-            "tags_rep",
-            eq_filter("tags.[]", Bson::String("rust".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .len(),
+        db.collection("tags_rep")
+            .find(eq_filter("tags.[]", Bson::String("rust".into())))
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .len(),
         0
     );
 
     // New tags present
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "tags_rep",
-            eq_filter("tags.[]", Bson::String("python".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("tags_rep")
+        .find(eq_filter("tags.[]", Bson::String("python".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -710,20 +607,22 @@ fn multikey_index_replace_one() {
 fn create_index_shows_in_list() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "configured".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "configured", "status")
+    db.collections().create("configured").execute(&txn).unwrap();
+    db.collection("configured")
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
-    txn.create_index(DEFAULT_CF, "configured", "tags.[]")
+    db.collection("configured")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Verify indexes were created
     let txn = db.begin(true).unwrap();
-    let mut indexes = txn.list_indexes(DEFAULT_CF, "configured").unwrap();
+    let mut indexes = db.collection("configured").indexes().list(&txn).unwrap();
     indexes.sort();
     assert_eq!(indexes, vec!["status", "tags.[]", "ttl"]);
 }
@@ -734,36 +633,32 @@ fn create_collection_idempotent() {
 
     // Create once
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "idem".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "idem", "status").unwrap();
+    db.collections().create("idem").execute(&txn).unwrap();
+    db.collection("idem")
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Insert data
     let txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, "idem", doc! { "_id": "r1", "status": "active" })
-        .unwrap()
-        .drain()
+    db.collection("idem")
+        .insert_one(doc! { "_id": "r1", "status": "active" })
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Create again — should be a no-op, data preserved
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "idem".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("idem").execute(&txn).unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, "idem", rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("idem")
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -778,25 +673,20 @@ fn unique_index_rejects_duplicate_through_db_api() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.create_unique_index(DEFAULT_CF, COLLECTION, "email")
+    db.collection(COLLECTION)
+        .indexes()
+        .create("email", IndexOptions::unique())
+        .execute(&txn)
         .unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "a", "email": "x@test.com" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "a", "email": "x@test.com" })
+        .execute(&txn)
+        .unwrap();
 
-    let err = txn
-        .insert_one(
-            DEFAULT_CF,
-            COLLECTION,
-            doc! { "_id": "b", "email": "x@test.com" },
-        )
-        .unwrap()
-        .drain()
+    let err = db
+        .collection(COLLECTION)
+        .insert_one(doc! { "_id": "b", "email": "x@test.com" })
+        .execute(&txn)
         .unwrap_err();
     assert!(
         matches!(err, slate_db::DbError::UniqueViolation { .. }),
@@ -819,17 +709,14 @@ fn seed_k(
     indexed: bool,
 ) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: name.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(DEFAULT_CF, name, docs)
-        .unwrap()
-        .drain()
-        .unwrap();
+    db.collections().create(name).execute(&txn).unwrap();
+    db.collection(name).insert_many(docs).execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, name, "k").unwrap();
+        db.collection(name)
+            .indexes()
+            .create("k", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
     txn.commit().unwrap();
 }
@@ -840,10 +727,10 @@ fn find_ids(
     filter: bson::Document,
 ) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut ids: Vec<String> = txn
-        .find(DEFAULT_CF, name, &filter, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let mut ids: Vec<String> = db
+        .collection(name)
+        .find(&filter)
+        .iter_raw(&txn)
         .unwrap()
         .map(|r| r.unwrap().get_str("_id").unwrap().to_string())
         .collect();
@@ -943,22 +830,21 @@ fn unique_index_shows_in_list_and_allows_distinct() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.create_unique_index(DEFAULT_CF, COLLECTION, "email")
+    db.collection(COLLECTION)
+        .indexes()
+        .create("email", IndexOptions::unique())
+        .execute(&txn)
         .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        COLLECTION,
-        vec![
+    db.collection(COLLECTION)
+        .insert_many(vec![
             doc! { "_id": "a", "email": "a@test.com" },
             doc! { "_id": "b", "email": "b@test.com" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let indexes = txn.list_indexes(DEFAULT_CF, COLLECTION).unwrap();
+    let indexes = db.collection(COLLECTION).indexes().list(&txn).unwrap();
     assert!(indexes.contains(&"email".to_string()));
 }

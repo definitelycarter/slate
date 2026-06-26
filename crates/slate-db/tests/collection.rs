@@ -2,8 +2,7 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF};
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
 
 // ── Collection tests ────────────────────────────────────────────
 
@@ -14,25 +13,18 @@ fn list_collections() {
     create_collection(&db, "accounts");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "contacts",
-        doc! { "_id": "c-1", "name": "Alice" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "accounts",
-        doc! { "_id": "a-1", "name": "Acme" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("contacts")
+        .insert_one(doc! { "_id": "c-1", "name": "Alice" })
+        .execute(&txn)
+        .unwrap();
+    db.collection("accounts")
+        .insert_one(doc! { "_id": "a-1", "name": "Acme" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
+    // v2: no global list (collections().list() is cf-scoped)
     let mut collections = txn.list_collections().unwrap();
     collections.sort_by(|a, b| a.1.cmp(&b.1));
     let names: Vec<&str> = collections.iter().map(|(_, n)| n.as_str()).collect();
@@ -45,28 +37,27 @@ fn drop_collection() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "a-1", "name": "Acme" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "a-1", "name": "Acme" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
-    txn.drop_collection(DEFAULT_CF, COLLECTION).unwrap();
+    db.collections().remove(COLLECTION).execute(&txn).unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let result = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .and_then(|c| c.iter_raw()?.collect::<Result<Vec<_>, _>>());
+    let result = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
+        .and_then(|it| it.collect::<Result<Vec<_>, _>>());
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
     ));
+    // v2: no global list (collections().list() is cf-scoped)
     let collections = txn.list_collections().unwrap();
     assert!(!collections.iter().any(|(_, n)| n == COLLECTION));
 }
@@ -80,39 +71,31 @@ fn collection_isolation() {
     create_collection(&db, "accounts");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "contacts",
-        doc! { "_id": "c-1", "name": "Alice" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "accounts",
-        doc! { "_id": "a-1", "name": "Acme" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("contacts")
+        .insert_one(doc! { "_id": "c-1", "name": "Alice" })
+        .execute(&txn)
+        .unwrap();
+    db.collection("accounts")
+        .insert_one(doc! { "_id": "a-1", "name": "Acme" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let contacts = txn
-        .find(DEFAULT_CF, "contacts", rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let contacts = db
+        .collection("contacts")
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0].get_str("name").unwrap(), "Alice");
 
-    let accounts = txn
-        .find(DEFAULT_CF, "accounts", rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let accounts = db
+        .collection("accounts")
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -126,22 +109,24 @@ fn collection_isolation() {
 fn register_triggers() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "users".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.register_trigger(DEFAULT_CF, "users", "audit", "print('audit')")
+    db.collections().create("users").execute(&txn).unwrap();
+    db.collection("users")
+        .triggers()
+        .create("audit", "print('audit')")
+        .execute(&txn)
         .unwrap();
-    txn.register_trigger(DEFAULT_CF, "users", "notify", "print('notify')")
+    db.collection("users")
+        .triggers()
+        .create("notify", "print('notify')")
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Verify the collection is usable.
     let txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, "users", doc! { "_id": "u1", "name": "Alice" })
-        .unwrap()
-        .drain()
+    db.collection("users")
+        .insert_one(doc! { "_id": "u1", "name": "Alice" })
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 }
@@ -150,16 +135,16 @@ fn register_triggers() {
 fn register_validators() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "users".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.register_validator(DEFAULT_CF, "users", "require_name", "assert(doc.name)")
+    db.collections().create("users").execute(&txn).unwrap();
+    db.collection("users")
+        .validators()
+        .create("require_name", "assert(doc.name)")
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
+    // v2: no global list (collections().list() is cf-scoped)
     let collections = txn.list_collections().unwrap();
     assert!(collections.iter().any(|(_, n)| n == "users"));
 }
@@ -168,21 +153,16 @@ fn register_validators() {
 fn register_udfs() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "users".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.register_udf(
-        DEFAULT_CF,
-        "users",
-        "full_name",
-        "return first .. ' ' .. last",
-    )
-    .unwrap();
+    db.collections().create("users").execute(&txn).unwrap();
+    db.collection("users")
+        .functions()
+        .create("full_name", "return first .. ' ' .. last")
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
+    // v2: no global list (collections().list() is cf-scoped)
     let collections = txn.list_collections().unwrap();
     assert!(collections.iter().any(|(_, n)| n == "users"));
 }
@@ -191,37 +171,42 @@ fn register_udfs() {
 fn register_all_function_types_with_indexes() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "users".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "users", "email").unwrap();
-    txn.register_trigger(DEFAULT_CF, "users", "audit", "print('audit')")
+    db.collections().create("users").execute(&txn).unwrap();
+    db.collection("users")
+        .indexes()
+        .create("email", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
-    txn.register_validator(DEFAULT_CF, "users", "check", "assert(doc.name)")
+    db.collection("users")
+        .triggers()
+        .create("audit", "print('audit')")
+        .execute(&txn)
         .unwrap();
-    txn.register_udf(DEFAULT_CF, "users", "full_name", "return first .. last")
+    db.collection("users")
+        .validators()
+        .create("check", "assert(doc.name)")
+        .execute(&txn)
+        .unwrap();
+    db.collection("users")
+        .functions()
+        .create("full_name", "return first .. last")
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     // Verify collection works with all config together.
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "users",
-        doc! { "_id": "u1", "name": "Alice", "email": "alice@test.com" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("users")
+        .insert_one(doc! { "_id": "u1", "name": "Alice", "email": "alice@test.com" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, "users", rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("users")
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

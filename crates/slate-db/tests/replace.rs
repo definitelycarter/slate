@@ -2,8 +2,6 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::DEFAULT_CF;
-use slate_query::FindOptions;
 
 // ── Replace tests ───────────────────────────────────────────────
 
@@ -13,31 +11,31 @@ fn replace_one_full_replacement() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "acct-1", "name": "Acme", "status": "active", "revenue": 50000.0 },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(
+            doc! { "_id": "acct-1", "name": "Acme", "status": "active", "revenue": 50000.0 },
+        )
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("acct-1".into()));
-    let result = txn
-        .replace_one(DEFAULT_CF, COLLECTION, &filter, doc! { "name": "New Corp" })
+    let result = db
+        .collection(COLLECTION)
+        .find(&filter)
+        .replace(doc! { "name": "New Corp" })
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(result, 1);
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

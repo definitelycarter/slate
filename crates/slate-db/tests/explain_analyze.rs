@@ -3,38 +3,35 @@
 //! that the counts reflect what actually flowed through each operator, and that
 //! the annotated tree still has the same shape `explain` prints.
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn seeded() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("people").execute(&txn).unwrap();
     // `name` indexed, `age` not — so the two predicate shapes differ.
-    txn.create_index(DEFAULT_CF, "people", "name").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collection("people")
+        .indexes()
+        .create("name", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("people")
+        .insert_many(vec![
             bson::doc! { "_id": "1", "name": "ada", "age": 36 },
             bson::doc! { "_id": "2", "name": "alan", "age": 41 },
             bson::doc! { "_id": "3", "name": "grace", "age": 44 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
 
 fn analyze(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    let out = txn.explain_analyze(DEFAULT_CF, "people", sql).unwrap();
+    let out = db.collection("people").query(sql).analyze(&txn).unwrap();
     txn.rollback().unwrap();
     out
 }
@@ -102,8 +99,8 @@ fn annotated_tree_keeps_the_same_shape_as_explain() {
     let sql = "SELECT VALUE c.name FROM c WHERE c.age = 41";
 
     let txn = db.begin(true).unwrap();
-    let plain = txn.explain(DEFAULT_CF, "people", sql).unwrap();
-    let annotated = txn.explain_analyze(DEFAULT_CF, "people", sql).unwrap();
+    let plain = db.collection("people").query(sql).explain(&txn).unwrap();
+    let annotated = db.collection("people").query(sql).analyze(&txn).unwrap();
     txn.rollback().unwrap();
 
     // Same number of node lines, same operator at each depth (the annotation is a
@@ -127,12 +124,10 @@ fn annotated_tree_keeps_the_same_shape_as_explain() {
 fn parameterized_query_is_rejected_like_query() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let err = txn
-        .explain_analyze(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE c.name FROM c WHERE c.age = @min",
-        )
+    let err = db
+        .collection("people")
+        .query("SELECT VALUE c.name FROM c WHERE c.age = @min")
+        .analyze(&txn)
         .unwrap_err();
     assert!(err.to_string().contains("@min"), "error: {err}");
 }

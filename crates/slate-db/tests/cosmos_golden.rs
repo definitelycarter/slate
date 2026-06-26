@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use bson::Bson;
 use serde_json::{Number, Value};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn parity_dir() -> PathBuf {
@@ -136,8 +136,11 @@ fn run_slate(docs: &[Value], sql: &str) -> Result<Vec<Value>, String> {
     seed(&db, docs)?;
 
     let txn = db.begin(true).map_err(|e| e.to_string())?;
-    let cursor = txn.query(DEFAULT_CF, "c", sql).map_err(|e| e.to_string())?;
-    let iter = cursor.iter_raw_values().map_err(|e| e.to_string())?;
+    let iter = db
+        .collection("c")
+        .query(sql)
+        .iter_raw(&txn)
+        .map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for it in iter {
         let raw = it.map_err(|e| e.to_string())?;
@@ -149,15 +152,14 @@ fn run_slate(docs: &[Value], sql: &str) -> Result<Vec<Value>, String> {
 
 fn seed(db: &Database<MemoryStore>, docs: &[Value]) -> Result<(), String> {
     let txn = db.begin(false).map_err(|e| e.to_string())?;
-    txn.create_collection(&CollectionConfig {
-        name: "c".into(),
-        pk_path: "id".into(), // match Cosmos's system primary key
-        ..Default::default()
-    })
-    .map_err(|e| e.to_string())?;
-    txn.insert_many(DEFAULT_CF, "c", docs.to_vec())
-        .map_err(|e| e.to_string())?
-        .drain()
+    db.collections()
+        .create("c")
+        .pk_path("id") // match Cosmos's system primary key
+        .execute(&txn)
+        .map_err(|e| e.to_string())?;
+    db.collection("c")
+        .insert_many(docs.to_vec())
+        .execute(&txn)
         .map_err(|e| e.to_string())?;
     txn.commit().map_err(|e| e.to_string())?;
     Ok(())

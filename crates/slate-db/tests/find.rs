@@ -3,8 +3,9 @@ use common::*;
 
 use bson::raw::RawDocument;
 use bson::{Bson, doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database};
-use slate_query::{FindOptions, Sort, SortDirection};
+use slate_db::Database;
+use slate_db::v2::IndexOptions;
+use slate_query::SortDirection;
 use slate_store::MemoryStore;
 
 // ── Query tests ─────────────────────────────────────────────────
@@ -15,10 +16,10 @@ fn find_no_filters() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -31,15 +32,10 @@ fn find_eq_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -52,15 +48,10 @@ fn find_gt_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! { "revenue": { "$gt": 80000.0 } },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "revenue": { "$gt": 80000.0 } })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -73,34 +64,21 @@ fn find_isnull_filter() {
     create_collection(&db, COLLECTION);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "acct-x", "name": "NoStatus" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "acct-1", "name": "Acme", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "acct-x", "name": "NoStatus" })
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "acct-1", "name": "Acme", "status": "active" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! { "status": null },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "status": null })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -114,15 +92,10 @@ fn find_or_filter() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "$or": [{ "status": "snoozed" }, { "status": "rejected" }] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -137,21 +110,11 @@ fn find_sort_asc() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "revenue".into(),
-                    direction: SortDirection::Asc,
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .sort("revenue", SortDirection::Asc)
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -166,21 +129,11 @@ fn find_sort_desc() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "revenue".into(),
-                    direction: SortDirection::Desc,
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .sort("revenue", SortDirection::Desc)
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -196,23 +149,13 @@ fn find_skip_and_take() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "revenue".into(),
-                    direction: SortDirection::Asc,
-                }],
-                skip: Some(1),
-                take: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .sort("revenue", SortDirection::Asc)
+        .offset(1)
+        .limit(2)
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -227,23 +170,13 @@ fn find_filter_sort_paginate() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions {
-                sort: vec![Sort {
-                    field: "revenue".into(),
-                    direction: SortDirection::Desc,
-                }],
-                skip: Some(1),
-                take: Some(1),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .sort("revenue", SortDirection::Desc)
+        .offset(1)
+        .limit(1)
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -259,18 +192,11 @@ fn find_with_projection() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                columns: Some(vec!["name".into(), "status".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .project(vec!["name".into(), "status".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -289,18 +215,11 @@ fn find_projection_includes_filter_columns() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions {
-                columns: Some(vec!["name".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .project(vec!["name".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -317,23 +236,13 @@ fn find_projection_includes_sort_columns() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "revenue".into(),
-                    direction: SortDirection::Desc,
-                }],
-                take: Some(2),
-                columns: Some(vec!["name".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .sort("revenue", SortDirection::Desc)
+        .limit(2)
+        .project(vec!["name".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -354,10 +263,8 @@ fn nested_doc_write_and_read() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "nested",
-        doc! {
+    db.collection("nested")
+        .insert_one(doc! {
             "_id": "r1",
             "name": "Alice",
             "address": {
@@ -365,18 +272,16 @@ fn nested_doc_write_and_read() {
                 "state": "TX",
                 "zip": "78701"
             }
-        },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(DEFAULT_CF, "nested", rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -395,30 +300,21 @@ fn dot_notation_filter_eq() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "nested",
-        vec![
+    db.collection("nested")
+        .insert_many(vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin", "state": "TX" } },
             doc! { "_id": "r2", "name": "Bob", "address": { "city": "Denver", "state": "CO" } },
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Austin", "state": "TX" } },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested",
-            eq_filter("address.city", Bson::String("Austin".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(eq_filter("address.city", Bson::String("Austin".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -437,36 +333,22 @@ fn dot_notation_sort() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "nested",
-        vec![
+    db.collection("nested")
+        .insert_many(vec![
             doc! { "_id": "r1", "name": "Alice", "address": { "city": "Zurich" } },
             doc! { "_id": "r2", "name": "Bob", "address": { "city": "Austin" } },
             doc! { "_id": "r3", "name": "Charlie", "address": { "city": "Denver" } },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested",
-            rawdoc! {},
-            FindOptions {
-                sort: vec![Sort {
-                    field: "address.city".into(),
-                    direction: SortDirection::Asc,
-                }],
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(rawdoc! {})
+        .sort("address.city", SortDirection::Asc)
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -482,10 +364,8 @@ fn dot_notation_projection() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "nested",
-        doc! {
+    db.collection("nested")
+        .insert_one(doc! {
             "_id": "r1",
             "name": "Alice",
             "address": {
@@ -493,26 +373,17 @@ fn dot_notation_projection() {
                 "state": "TX",
                 "zip": "78701"
             }
-        },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested",
-            rawdoc! {},
-            FindOptions {
-                columns: Some(vec!["name".into(), "address.city".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(rawdoc! {})
+        .project(vec!["name".into(), "address.city".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -531,10 +402,8 @@ fn dot_notation_projection_multiple_subfields() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "nested",
-        doc! {
+    db.collection("nested")
+        .insert_one(doc! {
             "_id": "r1",
             "name": "Alice",
             "address": {
@@ -542,30 +411,21 @@ fn dot_notation_projection_multiple_subfields() {
                 "state": "TX",
                 "zip": "78701"
             }
-        },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested",
-            rawdoc! {},
-            FindOptions {
-                columns: Some(vec![
-                    "name".into(),
-                    "address.city".into(),
-                    "address.zip".into(),
-                ]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(rawdoc! {})
+        .project(vec![
+            "name".into(),
+            "address.city".into(),
+            "address.zip".into(),
+        ])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -583,30 +443,21 @@ fn dot_notation_isnull_missing_parent() {
     create_collection(&db, "nested");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "nested",
-        doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin" } },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.insert_one(DEFAULT_CF, "nested", doc! { "_id": "r2", "name": "Bob" })
-        .unwrap()
-        .drain()
+    db.collection("nested")
+        .insert_one(doc! { "_id": "r1", "name": "Alice", "address": { "city": "Austin" } })
+        .execute(&txn)
+        .unwrap();
+    db.collection("nested")
+        .insert_one(doc! { "_id": "r2", "name": "Bob" })
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "nested",
-            rawdoc! { "address.city": null },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("nested")
+        .find(rawdoc! { "address.city": null })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -620,26 +471,20 @@ fn dot_notation_deep_nesting() {
     create_collection(&db, "deep");
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "deep",
-        doc! { "_id": "r1", "data": { "level1": { "level2": { "value": "found" } } } },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("deep")
+        .insert_one(doc! { "_id": "r1", "data": { "level1": { "level2": { "value": "found" } } } })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "deep",
-            eq_filter("data.level1.level2.value", Bson::String("found".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("deep")
+        .find(eq_filter(
+            "data.level1.level2.value",
+            Bson::String("found".into()),
+        ))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -653,18 +498,11 @@ fn projection_only_uses_selective_read() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! {},
-            FindOptions {
-                columns: Some(vec!["name".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .project(vec!["name".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -686,8 +524,13 @@ fn find_by_id_returns_document() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let doc = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "acct-1" })
+    let doc = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "acct-1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("_id").unwrap(), "acct-1");
@@ -701,8 +544,13 @@ fn find_by_id_not_found() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let result = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "nonexistent" })
+    let result = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "nonexistent" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap();
     assert!(result.is_none());
 }
@@ -712,7 +560,10 @@ fn find_by_id_missing_collection() {
     let (db, _dir) = temp_db();
 
     let txn = db.begin(true).unwrap();
-    let result = txn.find_one(DEFAULT_CF, "no_such_collection", rawdoc! { "_id": "id-1" });
+    let result = db
+        .collection("no_such_collection")
+        .find(rawdoc! { "_id": "id-1" })
+        .iter_raw(&txn);
     assert!(matches!(
         result,
         Err(slate_db::DbError::CollectionNotFound(_))
@@ -725,18 +576,11 @@ fn find_by_id_with_projection() {
     seed_records(&db);
 
     let txn = db.begin(true).unwrap();
-    let doc = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            rawdoc! { "_id": "acct-1" },
-            FindOptions {
-                columns: Some(vec!["name".into(), "status".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let doc = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "acct-1" })
+        .project(vec!["name".into(), "status".into()])
+        .iter_raw(&txn)
         .unwrap()
         .next()
         .transpose()
@@ -754,26 +598,28 @@ fn find_by_id_with_projection() {
 /// Create a collection with indexes and seed data for OR/AND tests.
 fn seed_or_test_data(db: &Database<MemoryStore>) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "orders".to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "orders", "user_id").unwrap();
-    txn.create_index(DEFAULT_CF, "orders", "status").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "orders",
-        vec![
+    db.collections().create("orders").execute(&txn).unwrap();
+    db.collection("orders")
+        .indexes()
+        .create("user_id", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("orders")
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("orders")
+        .insert_many(vec![
             doc! { "_id": "o1", "user_id": "abc", "status": "active", "score": 80, "name": "Order 1" },
             doc! { "_id": "o2", "user_id": "xyz", "status": "archived", "score": 30, "name": "Order 2" },
             doc! { "_id": "o3", "user_id": "abc", "status": "archived", "score": 90, "name": "Order 3" },
             doc! { "_id": "o4", "user_id": "xyz", "status": "active", "score": 20, "name": "Order 4" },
             doc! { "_id": "o5", "user_id": "abc", "status": "active", "score": 10, "name": "Order 5" },
             doc! { "_id": "o6", "user_id": "def", "status": "pending", "score": 60, "name": "Order 6" },
-        ],
-    )
-    .unwrap().drain().unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 }
 
@@ -793,15 +639,10 @@ fn find_with_or_indexed() {
 
     let txn = db.begin(true).unwrap();
     // user_id = "abc" OR status = "active"
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [{ "user_id": "abc" }, { "status": "active" }] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -816,15 +657,10 @@ fn find_with_or_same_field() {
 
     let txn = db.begin(true).unwrap();
     // status = "active" OR status = "archived"
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [{ "status": "active" }, { "status": "archived" }] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -839,15 +675,10 @@ fn find_with_or_fallback_scan() {
 
     let txn = db.begin(true).unwrap();
     // user_id = "abc" OR score > 50 (score not indexed -> full scan)
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [{ "user_id": "abc" }, { "score": { "$gt": 50_i64 } }] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -863,15 +694,10 @@ fn find_with_and_priority() {
     let txn = db.begin(true).unwrap();
     // user_id = "abc" AND status = "active"
     // user_id has higher priority -- planner should use it for IndexScan
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "status": "active", "user_id": "abc" },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "status": "active", "user_id": "abc" })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -886,18 +712,13 @@ fn find_with_nested_and_or() {
 
     let txn = db.begin(true).unwrap();
     // (user_id = "abc" AND status = "active") OR (user_id = "xyz" AND status = "archived")
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [
-                { "user_id": "abc", "status": "active" },
-                { "user_id": "xyz", "status": "archived" },
-            ] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [
+            { "user_id": "abc", "status": "active" },
+            { "user_id": "xyz", "status": "archived" },
+        ] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -912,15 +733,10 @@ fn find_with_or_three_values() {
 
     let txn = db.begin(true).unwrap();
     // user_id = "abc" OR user_id = "xyz" OR user_id = "def"
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [{ "user_id": "abc" }, { "user_id": "xyz" }, { "user_id": "def" }] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -939,18 +755,13 @@ fn find_with_or_partial_index_per_branch() {
     let txn = db.begin(true).unwrap();
     // (user_id = "abc" AND score > 50) OR status = "pending"
     // Each OR branch has one indexed Eq -- IndexMerge(Or), full recheck
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            rawdoc! { "$or": [
-                { "user_id": "abc", "score": { "$gt": 50_i64 } },
-                { "status": "pending" },
-            ] },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("orders")
+        .find(rawdoc! { "$or": [
+            { "user_id": "abc", "score": { "$gt": 50_i64 } },
+            { "status": "pending" },
+        ] })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -964,37 +775,26 @@ fn find_with_or_partial_index_per_branch() {
 fn index_covered_preserves_int32_type() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: COLLECTION.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "score").unwrap();
+    db.collections().create(COLLECTION).execute(&txn).unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("score", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
     // Insert with Int32
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "rec-1", "score": 100_i32 },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "rec-1", "score": 100_i32 })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Query with Int64 -- same encoded bytes, different BSON type
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("score", Bson::Int64(100)),
-            FindOptions {
-                columns: Some(vec!["score".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("score", Bson::Int64(100)))
+        .project(vec!["score".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1012,35 +812,24 @@ fn index_covered_preserves_int32_type() {
 fn index_covered_preserves_string_type() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: COLLECTION.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "rec-1", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collections().create(COLLECTION).execute(&txn).unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "rec-1", "status": "active" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions {
-                columns: Some(vec!["status".into()]),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .project(vec!["status".into()])
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1059,36 +848,27 @@ fn index_covered_preserves_string_type() {
 fn find_gt_on_indexed_field() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "scores".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "scores", "score").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "scores",
-        vec![
+    db.collections().create("scores").execute(&txn).unwrap();
+    db.collection("scores")
+        .indexes()
+        .create("score", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("scores")
+        .insert_many(vec![
             doc! { "_id": "1", "name": "Alice", "score": 70 },
             doc! { "_id": "2", "name": "Bob", "score": 90 },
             doc! { "_id": "3", "name": "Charlie", "score": 80 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "scores",
-            rawdoc! { "score": { "$gt": 75 } },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("scores")
+        .find(rawdoc! { "score": { "$gt": 75 } })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -1108,38 +888,29 @@ fn find_gt_on_indexed_field() {
 fn find_gte_lte_on_indexed_field() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "scores".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "scores", "score").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "scores",
-        vec![
+    db.collections().create("scores").execute(&txn).unwrap();
+    db.collection("scores")
+        .indexes()
+        .create("score", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("scores")
+        .insert_many(vec![
             doc! { "_id": "1", "name": "Alice", "score": 70 },
             doc! { "_id": "2", "name": "Bob", "score": 90 },
             doc! { "_id": "3", "name": "Charlie", "score": 80 },
             doc! { "_id": "4", "name": "Diana", "score": 60 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     // score >= 70 AND score <= 80
-    let results = txn
-        .find(
-            DEFAULT_CF,
-            "scores",
-            rawdoc! { "score": { "$gte": 70, "$lte": 80 } },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let results = db
+        .collection("scores")
+        .find(rawdoc! { "score": { "$gte": 70, "$lte": 80 } })
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();

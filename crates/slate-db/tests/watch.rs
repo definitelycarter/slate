@@ -10,7 +10,7 @@ use common::*;
 use std::sync::{Arc, Mutex};
 
 use bson::{Bson, doc};
-use slate_db::{ChangeEvent, DEFAULT_CF, Database, WatchStream};
+use slate_db::{ChangeEvent, Database, WatchStream};
 use slate_store::MemoryStore;
 
 const SENSORS: &str = "sensors";
@@ -42,9 +42,9 @@ fn only_event(b: &Batches) -> ChangeEvent {
 
 fn insert(db: &Database<MemoryStore>, doc: bson::Document) {
     let txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, SENSORS, doc)
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .insert_one(doc)
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 }
@@ -52,9 +52,11 @@ fn insert(db: &Database<MemoryStore>, doc: bson::Document) {
 fn update_temp(db: &Database<MemoryStore>, id: &str, temp: i32) {
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String(id.into()));
-    txn.update_one(DEFAULT_CF, SENSORS, &filter, doc! { "temp": temp })
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .find(&filter)
+        .update(doc! { "temp": temp })
+        .one()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 }
@@ -67,7 +69,9 @@ fn insert_matching_fires_insert_event() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -84,7 +88,9 @@ fn insert_below_threshold_fires_nothing() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 50 });
@@ -104,14 +110,18 @@ fn delete_in_set_fires_delete_event() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
-    txn.delete_one(DEFAULT_CF, SENSORS, &filter)
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .find(&filter)
+        .delete()
+        .one()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
@@ -127,7 +137,9 @@ fn match_all_with_no_where_fires_on_every_write() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s")
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 1 });
@@ -146,7 +158,9 @@ fn update_staying_in_set_carries_old_and_new() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 95);
@@ -168,7 +182,9 @@ fn update_entering_set_recasts_to_insert() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 90); // crosses into the set
@@ -187,7 +203,9 @@ fn update_leaving_set_recasts_to_delete() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 50); // drops out of the set
@@ -206,7 +224,9 @@ fn update_outside_set_on_both_sides_fires_nothing() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 20); // still below threshold
@@ -224,19 +244,25 @@ fn two_updates_to_same_doc_in_one_commit_coalesce() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     // Two mutations to the same document inside ONE transaction.
     let txn = db.begin(false).unwrap();
     let filter = eq_filter("_id", Bson::String("a".into()));
-    txn.update_one(DEFAULT_CF, SENSORS, &filter, doc! { "temp": 90 })
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .find(&filter)
+        .update(doc! { "temp": 90 })
+        .one()
+        .execute(&txn)
         .unwrap();
-    txn.update_one(DEFAULT_CF, SENSORS, &filter, doc! { "temp": 95 })
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .find(&filter)
+        .update(doc! { "temp": 95 })
+        .one()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
@@ -258,13 +284,15 @@ fn rollback_delivers_no_events() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     let txn = db.begin(false).unwrap();
-    txn.insert_one(DEFAULT_CF, SENSORS, doc! { "_id": "a", "temp": 90 })
-        .unwrap()
-        .drain()
+    db.collection(SENSORS)
+        .insert_one(doc! { "_id": "a", "temp": 90 })
+        .execute(&txn)
         .unwrap();
     txn.rollback().unwrap();
 
@@ -283,7 +311,9 @@ fn dropping_the_handle_stops_delivery() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -302,7 +332,9 @@ fn watch_dropped_by_scope_unregisters() {
     let (batches, cb) = collector();
     {
         let _handle = db
-            .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+            .collection(SENSORS)
+            .query("SELECT * FROM s WHERE s.temp > 80")
+            .watch(cb)
             .unwrap();
         insert(&db, doc! { "_id": "a", "temp": 90 });
     } // _handle dropped here → unregistered
@@ -321,12 +353,14 @@ fn dropping_another_collection_does_not_disturb_a_watch() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     // Dropping an unrelated collection proceeds (a watch holds no lock).
     let txn = db.begin(false).unwrap();
-    txn.drop_collection(DEFAULT_CF, "other").unwrap();
+    db.collections().remove("other").execute(&txn).unwrap();
     txn.commit().unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -339,12 +373,14 @@ fn dropping_the_watched_collection_proceeds_and_goes_cold() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80", cb)
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .watch(cb)
         .unwrap();
 
     // The watch must not block dropping its own collection.
     let txn = db.begin(false).unwrap();
-    txn.drop_collection(DEFAULT_CF, SENSORS).unwrap();
+    db.collections().remove(SENSORS).execute(&txn).unwrap();
     txn.commit().unwrap();
 
     assert_eq!(batch_count(&batches), 0);
@@ -359,39 +395,41 @@ fn rejected_clauses_are_errors_at_registration() {
     let noop = |_: &[ChangeEvent]| {};
 
     assert!(
-        db.watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s ORDER BY s.temp", noop)
+        db.collection(SENSORS)
+            .query("SELECT * FROM s ORDER BY s.temp")
+            .watch(noop)
             .is_err()
     );
     assert!(
-        db.watch_query(DEFAULT_CF, SENSORS, "SELECT * FROM s GROUP BY s.temp", noop)
+        db.collection(SENSORS)
+            .query("SELECT * FROM s GROUP BY s.temp")
+            .watch(noop)
             .is_err()
     );
     assert!(
-        db.watch_query(DEFAULT_CF, SENSORS, "SELECT VALUE c FROM c LIMIT 5", noop)
+        db.collection(SENSORS)
+            .query("SELECT VALUE c FROM c LIMIT 5")
+            .watch(noop)
             .is_err()
     );
     assert!(
-        db.watch_query(DEFAULT_CF, SENSORS, "SELECT s.temp FROM s", noop)
+        db.collection(SENSORS)
+            .query("SELECT s.temp FROM s")
+            .watch(noop)
             .is_err()
     );
     assert!(
-        db.watch_query(
-            DEFAULT_CF,
-            SENSORS,
-            "SELECT * FROM s WHERE s.temp > @t",
-            noop
-        )
-        .is_err()
+        db.collection(SENSORS)
+            .query("SELECT * FROM s WHERE s.temp > @t")
+            .watch(noop)
+            .is_err()
     );
     // A bare WHERE filter is accepted.
     assert!(
-        db.watch_query(
-            DEFAULT_CF,
-            SENSORS,
-            "SELECT * FROM s WHERE s.temp > 80",
-            noop
-        )
-        .is_ok()
+        db.collection(SENSORS)
+            .query("SELECT * FROM s WHERE s.temp > 80")
+            .watch(noop)
+            .is_ok()
     );
 }
 
@@ -408,7 +446,9 @@ fn bson_watch_insert_matching_fires_insert() {
     let (batches, cb) = collector();
     // `{ temp: { $gt: 80 } }` — the same filter `find` would take.
     let _handle = db
-        .watch(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } }, cb)
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -425,7 +465,9 @@ fn bson_watch_below_threshold_fires_nothing() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     let _handle = db
-        .watch(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } }, cb)
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .watch(cb)
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 50 });
@@ -441,7 +483,9 @@ fn bson_watch_update_entering_set_recasts_to_insert() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } }, cb)
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 90); // crosses into the set
@@ -460,7 +504,9 @@ fn bson_watch_update_leaving_set_recasts_to_delete() {
 
     let (batches, cb) = collector();
     let _handle = db
-        .watch(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } }, cb)
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .watch(cb)
         .unwrap();
 
     update_temp(&db, "a", 50); // drops out of the set
@@ -477,7 +523,7 @@ fn bson_watch_empty_filter_is_match_all() {
     create_collection(&db, SENSORS);
     let (batches, cb) = collector();
     // `{}` — match every document, the BSON match-all.
-    let _handle = db.watch(DEFAULT_CF, SENSORS, doc! {}, cb).unwrap();
+    let _handle = db.collection(SENSORS).find(doc! {}).watch(cb).unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 1 });
     insert(&db, doc! { "_id": "b", "temp": 999 });
@@ -505,7 +551,9 @@ fn stream_bson_drains_batches_across_commits() {
     let (db, _dir) = temp_db();
     create_collection(&db, SENSORS);
     let stream = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
 
     // Two separate commits → two buffered batches, in order.
@@ -531,7 +579,9 @@ fn stream_query_drains_batches_across_commits() {
     let (db, _dir) = temp_db();
     create_collection(&db, SENSORS);
     let stream = db
-        .stream_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80")
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .stream()
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -549,11 +599,15 @@ fn stream_query_rejects_set_operations() {
     create_collection(&db, SENSORS);
     // Same SQL-clause restrictions as `watch_query`.
     assert!(
-        db.stream_query(DEFAULT_CF, SENSORS, "SELECT * FROM s ORDER BY s.temp")
+        db.collection(SENSORS)
+            .query("SELECT * FROM s ORDER BY s.temp")
+            .stream()
             .is_err()
     );
     assert!(
-        db.stream_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80")
+        db.collection(SENSORS)
+            .query("SELECT * FROM s WHERE s.temp > 80")
+            .stream()
             .is_ok()
     );
 }
@@ -566,7 +620,9 @@ fn stream_blocking_consumer_receives_next_batch() {
     let (db, _dir) = temp_db();
     create_collection(&db, SENSORS);
     let stream = Arc::new(
-        db.stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        db.collection(SENSORS)
+            .find(doc! { "temp": { "$gt": 80 } })
+            .stream()
             .unwrap(),
     );
 
@@ -596,7 +652,9 @@ fn stream_slow_consumer_lags_and_drops_without_blocking_writer() {
     // well past it. Use a custom-capacity stream via the public surface by
     // committing more than the default buffer holds.
     let stream = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
 
     // Write more matching commits than the default buffer (1024) can hold,
@@ -625,7 +683,9 @@ fn dropping_the_stream_stops_capture() {
     let (db, _dir) = temp_db();
     create_collection(&db, SENSORS);
     let stream = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });
@@ -636,7 +696,9 @@ fn dropping_the_stream_stops_capture() {
     // A fresh stream sees only writes after it subscribes — the dropped one is
     // gone, so this write is captured by the new stream alone.
     let stream2 = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
     insert(&db, doc! { "_id": "b", "temp": 90 });
     assert_eq!(drain(&stream2).len(), 1);
@@ -647,7 +709,9 @@ fn try_next_on_empty_stream_is_none() {
     let (db, _dir) = temp_db();
     create_collection(&db, SENSORS);
     let stream = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
 
     // Nothing written yet, and a non-matching write contributes no batch.
@@ -663,10 +727,14 @@ fn two_streams_on_one_collection_each_get_their_own_batches() {
     // One BSON stream, one SQL stream, both over the same set — both must see
     // the write (independent subscriptions, shared detection core).
     let s_bson = db
-        .stream(DEFAULT_CF, SENSORS, doc! { "temp": { "$gt": 80 } })
+        .collection(SENSORS)
+        .find(doc! { "temp": { "$gt": 80 } })
+        .stream()
         .unwrap();
     let s_sql = db
-        .stream_query(DEFAULT_CF, SENSORS, "SELECT * FROM s WHERE s.temp > 80")
+        .collection(SENSORS)
+        .query("SELECT * FROM s WHERE s.temp > 80")
+        .stream()
         .unwrap();
 
     insert(&db, doc! { "_id": "a", "temp": 90 });

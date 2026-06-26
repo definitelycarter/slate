@@ -2,30 +2,27 @@
 //! introspection surface. These pin the exact document and index-entry counts
 //! and the distinct-value cardinality, and the database-wide roll-up.
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
+use slate_db::{DEFAULT_CF, Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn seeded() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "people", "city").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collections().create("people").execute(&txn).unwrap();
+    db.collection("people")
+        .indexes()
+        .create("city", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("people")
+        .insert_many(vec![
             bson::doc! { "_id": "1", "name": "ada", "city": "london" },
             bson::doc! { "_id": "2", "name": "alan", "city": "london" },
             bson::doc! { "_id": "3", "name": "grace", "city": "baltimore" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -45,6 +42,7 @@ fn index_by_field<'a>(
 #[test]
 fn collection_stats_counts_documents_and_index_entries() {
     let db = seeded();
+    // v2: db-level convenience; no txn-free v2 equivalent
     let stats = db.collection_stats(DEFAULT_CF, "people").unwrap();
 
     assert_eq!(stats.cf, DEFAULT_CF);
@@ -63,6 +61,7 @@ fn collection_stats_counts_documents_and_index_entries() {
 #[test]
 fn database_stats_rolls_up_documents() {
     let db = seeded();
+    // v2: db-wide rollup; no direct v2 equivalent
     let stats = db.stats().unwrap();
     assert_eq!(stats.total_documents, 3);
     assert!(
@@ -78,16 +77,15 @@ fn stats_track_writes() {
     let db = seeded();
     // Add a fourth person in a new city.
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![bson::doc! { "_id": "4", "name": "kay", "city": "paris" }],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("people")
+        .insert_many(vec![
+            bson::doc! { "_id": "4", "name": "kay", "city": "paris" },
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
+    // v2: db-level convenience; no txn-free v2 equivalent
     let stats = db.collection_stats(DEFAULT_CF, "people").unwrap();
     assert_eq!(stats.document_count, 4);
     let city = index_by_field(&stats, "city");
@@ -99,13 +97,10 @@ fn stats_track_writes() {
 fn empty_collection_reports_zero() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "empty".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("empty").execute(&txn).unwrap();
     txn.commit().unwrap();
 
+    // v2: db-level convenience; no txn-free v2 equivalent
     let stats = db.collection_stats(DEFAULT_CF, "empty").unwrap();
     assert_eq!(stats.document_count, 0);
     // The auto-created TTL index exists but has no live entries.

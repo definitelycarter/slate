@@ -2,30 +2,25 @@ mod common;
 use common::*;
 
 use bson::doc;
-use slate_db::{
-    CollectionConfig, DEFAULT_CF, DbError, VectorDataType, VectorIndexSpec, VectorMetric,
-};
+use slate_db::v2::VectorIndexOptions;
+use slate_db::{DbError, VectorDataType, VectorIndexSpec, VectorMetric};
 
 const PHOTOS: &str = "photos";
 
 /// Create the `photos` collection.
 fn create_photos(db: &slate_db::Database<slate_store::MemoryStore>) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: PHOTOS.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create(PHOTOS).execute(&txn).unwrap();
     txn.commit().unwrap();
 }
 
 /// Run a kNN query through the db layer and collect the `_id`s in rank order.
 fn knn_ids(db: &slate_db::Database<slate_store::MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let ids = txn
-        .query(DEFAULT_CF, PHOTOS, sql)
-        .unwrap()
-        .iter_values::<String>()
+    let ids = db
+        .collection(PHOTOS)
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -42,26 +37,24 @@ fn create_vector_index_then_knn_query_through_db_layer() {
     create_photos(&db);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        PHOTOS,
-        vec![
+    db.collection(PHOTOS)
+        .insert_many(vec![
             // Three unit-ish vectors pointing in distinct directions.
             doc! { "_id": "x", "embedding": [1.0, 0.0, 0.0] },
             doc! { "_id": "y", "embedding": [0.0, 1.0, 0.0] },
             doc! { "_id": "z", "embedding": [0.0, 0.0, 1.0] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     // Build the index AFTER data exists — exercises the backfill path too.
-    txn.create_vector_index(
-        DEFAULT_CF,
-        PHOTOS,
-        &VectorIndexSpec::float32("embedding", 3, VectorMetric::Cosine),
-    )
-    .unwrap();
+    db.collection(PHOTOS)
+        .indexes()
+        .create(
+            "embedding",
+            VectorIndexOptions::float32(3, VectorMetric::Cosine),
+        )
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Query near the x-axis: cosine is "higher is closer", so DESC orders by
@@ -106,22 +99,22 @@ fn create_vector_index_dims_mismatch_on_existing_data_is_invalid_document() {
     create_photos(&db);
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        PHOTOS,
+    db.collection(PHOTOS)
         // 4 dims, but the index below declares 3.
-        vec![doc! { "_id": "bad", "embedding": [1.0, 2.0, 3.0, 4.0] }],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        .insert_many(vec![
+            doc! { "_id": "bad", "embedding": [1.0, 2.0, 3.0, 4.0] },
+        ])
+        .execute(&txn)
+        .unwrap();
 
-    let err = txn
-        .create_vector_index(
-            DEFAULT_CF,
-            PHOTOS,
-            &VectorIndexSpec::float32("embedding", 3, VectorMetric::Cosine),
+    let err = db
+        .collection(PHOTOS)
+        .indexes()
+        .create(
+            "embedding",
+            VectorIndexOptions::float32(3, VectorMetric::Cosine),
         )
+        .execute(&txn)
         .unwrap_err();
     assert!(
         matches!(err, DbError::InvalidDocument(_)),
@@ -145,18 +138,21 @@ fn create_vector_index_spec_carries_explicit_dtype() {
     };
 
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        PHOTOS,
-        vec![
+    db.collection(PHOTOS)
+        .insert_many(vec![
             doc! { "_id": "a", "embedding": [0.0, 0.0] },
             doc! { "_id": "b", "embedding": [10.0, 10.0] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.create_vector_index(DEFAULT_CF, PHOTOS, &spec).unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
+    db.collection(PHOTOS)
+        .indexes()
+        .create(
+            spec.path.as_str(),
+            VectorIndexOptions::float32(spec.dims, spec.metric),
+        )
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Euclidean is "lower is closer" → ASC. Query at the origin: `a` ranks first.

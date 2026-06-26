@@ -4,7 +4,7 @@
 
 use bson::raw::RawDocument;
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 pub trait HasKey {
@@ -40,11 +40,7 @@ pub fn eq_filter(field: &str, value: Bson) -> bson::RawDocumentBuf {
 
 pub fn create_collection(db: &Database<MemoryStore>, name: &str) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: name.to_string(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create(name).execute(&txn).unwrap();
     txn.commit().unwrap();
 }
 
@@ -52,17 +48,15 @@ pub fn create_collection(db: &Database<MemoryStore>, name: &str) {
 pub fn seed_records(db: &Database<MemoryStore>) {
     create_collection(db, COLLECTION);
     let txn = db.begin(false).unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        COLLECTION,
-        vec![
+    db.collection(COLLECTION)
+        .insert_many(vec![
             doc! { "_id": "acct-1", "name": "Acme Corp", "revenue": 50000.0, "status": "active", "active": true },
             doc! { "_id": "acct-2", "name": "Globex", "revenue": 80000.0, "status": "snoozed", "active": true },
             doc! { "_id": "acct-3", "name": "Initech", "revenue": 12000.0, "status": "rejected", "active": false },
             doc! { "_id": "acct-4", "name": "Umbrella", "revenue": 95000.0, "status": "active", "active": true },
             doc! { "_id": "acct-5", "name": "Stark Industries", "revenue": 200000.0, "status": "active", "active": false },
-        ],
-    )
-    .unwrap().drain().unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 }

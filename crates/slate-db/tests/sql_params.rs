@@ -10,7 +10,8 @@ mod common;
 use common::*;
 
 use bson::{Document, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database};
+use slate_db::Database;
+use slate_db::v2::IndexOptions;
 use slate_store::MemoryStore;
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -18,9 +19,10 @@ use slate_store::MemoryStore;
 /// Run a parameterized query and collect the bare values as strings.
 fn names(db: &Database<MemoryStore>, sql: &str, params: Document) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    txn.query_with_params(DEFAULT_CF, COLLECTION, sql, params)
-        .unwrap()
-        .iter_values::<String>()
+    db.collection(COLLECTION)
+        .query(sql)
+        .params(params)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
@@ -29,21 +31,24 @@ fn names(db: &Database<MemoryStore>, sql: &str, params: Document) -> Vec<String>
 /// Run a parameterized query and collect whole documents.
 fn docs(db: &Database<MemoryStore>, sql: &str, params: Document) -> Vec<Document> {
     let txn = db.begin(true).unwrap();
-    txn.query_with_params(DEFAULT_CF, COLLECTION, sql, params)
-        .unwrap()
-        .iter::<Document>()
+    db.collection(COLLECTION)
+        .query(sql)
+        .params(params)
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
 }
 
-/// Run a parameterized query and return the row count (drain).
+/// Run a parameterized query and return the row count.
 fn count(db: &Database<MemoryStore>, sql: &str, params: Document) -> u64 {
     let txn = db.begin(true).unwrap();
-    txn.query_with_params(DEFAULT_CF, COLLECTION, sql, params)
+    db.collection(COLLECTION)
+        .query(sql)
+        .params(params)
+        .iter_raw(&txn)
         .unwrap()
-        .drain()
-        .unwrap()
+        .count() as u64
 }
 
 /// The same five accounts `common::seed_records` inserts, for the indexed-seed
@@ -302,13 +307,11 @@ fn missing_param_is_an_error() {
     seed_records(&db);
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query_with_params(
-            DEFAULT_CF,
-            COLLECTION,
-            "SELECT VALUE c.name FROM c WHERE c.revenue > @missing",
-            doc! {},
-        )
-        .is_err()
+        db.collection(COLLECTION)
+            .query("SELECT VALUE c.name FROM c WHERE c.revenue > @missing")
+            .params(doc! {})
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -319,13 +322,11 @@ fn partially_supplied_params_error_on_the_missing_one() {
     seed_records(&db);
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query_with_params(
-            DEFAULT_CF,
-            COLLECTION,
-            "SELECT VALUE c.name FROM c WHERE c.revenue > @lo AND c.revenue < @hi",
-            doc! { "lo": 1000.0 },
-        )
-        .is_err()
+        db.collection(COLLECTION)
+            .query("SELECT VALUE c.name FROM c WHERE c.revenue > @lo AND c.revenue < @hi")
+            .params(doc! { "lo": 1000.0 })
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -336,12 +337,10 @@ fn no_params_api_rejects_a_referenced_parameter() {
     seed_records(&db);
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query(
-            DEFAULT_CF,
-            COLLECTION,
-            "SELECT VALUE c.name FROM c WHERE c.revenue > @min",
-        )
-        .is_err()
+        db.collection(COLLECTION)
+            .query("SELECT VALUE c.name FROM c WHERE c.revenue > @min")
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -368,15 +367,15 @@ fn param_alongside_sargable_index() {
     let (db, _dir) = temp_db();
     {
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: COLLECTION.into(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
-        txn.insert_many(DEFAULT_CF, COLLECTION, account_docs())
-            .unwrap()
-            .drain()
+        db.collections().create(COLLECTION).execute(&txn).unwrap();
+        db.collection(COLLECTION)
+            .indexes()
+            .create("status", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
+        db.collection(COLLECTION)
+            .insert_many(account_docs())
+            .execute(&txn)
             .unwrap();
         txn.commit().unwrap();
     }
@@ -424,14 +423,10 @@ fn param_matches_value_with_special_characters_literally() {
     create_collection(&db, COLLECTION);
     {
         let txn = db.begin(false).unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            COLLECTION,
-            vec![doc! { "_id": "x1", "name": "a%b_c'd" }],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+        db.collection(COLLECTION)
+            .insert_many(vec![doc! { "_id": "x1", "name": "a%b_c'd" }])
+            .execute(&txn)
+            .unwrap();
         txn.commit().unwrap();
     }
     assert_eq!(

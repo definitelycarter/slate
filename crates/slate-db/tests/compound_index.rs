@@ -9,8 +9,8 @@
 //! the spillover.
 
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 /// Seed `orders` with `status` + `created_at`, optionally with a compound index
@@ -19,34 +19,25 @@ use slate_store::MemoryStore;
 fn seed(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "orders".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "orders",
-        vec![
+    db.collections().create("orders").execute(&txn).unwrap();
+    db.collection("orders")
+        .insert_many(vec![
             doc! { "_id": "a", "status": "active", "created_at": 10 },
             doc! { "_id": "b", "status": "active", "created_at": 20 },
             doc! { "_id": "c", "status": "active", "created_at": 30 },
             doc! { "_id": "d", "status": "active2", "created_at": 15 },
             doc! { "_id": "e", "status": "archived", "created_at": 25 },
             doc! { "_id": "f", "status": "archived", "created_at": 5 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     // Create the index after data exists (also tests backfill).
     if indexed {
-        txn.create_compound_index(
-            DEFAULT_CF,
-            "orders",
-            &["status".to_string(), "created_at".to_string()],
-        )
-        .unwrap();
+        db.collection("orders")
+            .indexes()
+            .create(["status", "created_at"], IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
     txn.commit().unwrap();
     db
@@ -55,10 +46,10 @@ fn seed(indexed: bool) -> Database<MemoryStore> {
 /// The sorted `_id`s a `SELECT VALUE c._id … WHERE` selects from `orders`.
 fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut got: Vec<String> = txn
-        .query(DEFAULT_CF, "orders", sql)
-        .unwrap()
-        .iter_values::<String>()
+    let mut got: Vec<String> = db
+        .collection("orders")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -68,7 +59,7 @@ fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
 
 fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    let plan = txn.explain(DEFAULT_CF, "orders", sql).unwrap();
+    let plan = db.collection("orders").query(sql).explain(&txn).unwrap();
     txn.rollback().unwrap();
     plan
 }
@@ -176,10 +167,10 @@ fn eq_then_range_selects_the_right_rows() {
 /// comparing a covered plan against the materialized (unindexed) one.
 fn vals(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut out = txn
-        .query(DEFAULT_CF, "orders", sql)
-        .unwrap()
-        .iter_values::<bson::Bson>()
+    let mut out = db
+        .collection("orders")
+        .query(sql)
+        .iter::<bson::Bson>(&txn)
         .unwrap()
         .map(|r| format!("{:?}", r.unwrap()))
         .collect::<Vec<_>>();
@@ -247,9 +238,11 @@ fn update_maintains_compound_index() {
     {
         let txn = db.begin(false).unwrap();
         let filter = eq("_id", Bson::String("b".into()));
-        txn.update_one(DEFAULT_CF, "orders", &filter, doc! { "status": "archived" })
-            .unwrap()
-            .drain()
+        db.collection("orders")
+            .find(&filter)
+            .update(doc! { "status": "archived" })
+            .one()
+            .execute(&txn)
             .unwrap();
         txn.commit().unwrap();
     }
@@ -271,9 +264,11 @@ fn delete_maintains_compound_index() {
     {
         let txn = db.begin(false).unwrap();
         let filter = eq("_id", Bson::String("a".into()));
-        txn.delete_one(DEFAULT_CF, "orders", &filter)
-            .unwrap()
-            .drain()
+        db.collection("orders")
+            .find(&filter)
+            .delete()
+            .one()
+            .execute(&txn)
             .unwrap();
         txn.commit().unwrap();
     }
@@ -290,29 +285,20 @@ fn missing_component_is_not_indexed() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     {
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "orders".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "orders",
-            vec![
+        db.collections().create("orders").execute(&txn).unwrap();
+        db.collection("orders")
+            .insert_many(vec![
                 doc! { "_id": "a", "status": "active", "created_at": 10 },
                 // No `created_at` → not in the compound index.
                 doc! { "_id": "b", "status": "active" },
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
-        txn.create_compound_index(
-            DEFAULT_CF,
-            "orders",
-            &["status".to_string(), "created_at".to_string()],
-        )
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
+        db.collection("orders")
+            .indexes()
+            .create(["status", "created_at"], IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
         txn.commit().unwrap();
     }
     // The compound-index path returns only "a"; the residual recheck applied by
@@ -323,15 +309,10 @@ fn missing_component_is_not_indexed() {
     );
     // But a full-scan equality on just `status` still sees both (no index used).
     let txn = db.begin(true).unwrap();
-    let found = txn
-        .find(
-            DEFAULT_CF,
-            "orders",
-            eq("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let found = db
+        .collection("orders")
+        .find(eq("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .count();
     assert_eq!(found, 2);
@@ -343,7 +324,7 @@ fn missing_component_is_not_indexed() {
 fn list_indexes_reports_compound_identity() {
     let db = seed(true);
     let txn = db.begin(true).unwrap();
-    let indexes = txn.list_indexes(DEFAULT_CF, "orders").unwrap();
+    let indexes = db.collection("orders").indexes().list(&txn).unwrap();
     assert!(
         indexes
             .iter()
@@ -358,17 +339,12 @@ fn list_indexes_reports_compound_identity() {
 fn seed_members_unique() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "members".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_unique_compound_index(
-        DEFAULT_CF,
-        "members",
-        &["org_id".to_string(), "email".to_string()],
-    )
-    .unwrap();
+    db.collections().create("members").execute(&txn).unwrap();
+    db.collection("members")
+        .indexes()
+        .create(["org_id", "email"], IndexOptions::unique())
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -377,23 +353,15 @@ fn seed_members_unique() -> Database<MemoryStore> {
 fn unique_compound_allows_same_email_across_orgs() {
     let db = seed_members_unique();
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "members",
-        doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("members")
+        .insert_one(doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" })
+        .execute(&txn)
+        .unwrap();
     // Same email, different org → allowed (the combination is distinct).
-    txn.insert_one(
-        DEFAULT_CF,
-        "members",
-        doc! { "_id": "m2", "org_id": "globex", "email": "x@test.com" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("members")
+        .insert_one(doc! { "_id": "m2", "org_id": "globex", "email": "x@test.com" })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 }
 
@@ -401,23 +369,15 @@ fn unique_compound_allows_same_email_across_orgs() {
 fn unique_compound_rejects_same_combination() {
     let db = seed_members_unique();
     let txn = db.begin(false).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "members",
-        doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("members")
+        .insert_one(doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" })
+        .execute(&txn)
+        .unwrap();
     // Same org AND same email → the combination collides.
-    let err = txn
-        .insert_one(
-            DEFAULT_CF,
-            "members",
-            doc! { "_id": "m2", "org_id": "acme", "email": "x@test.com" },
-        )
-        .unwrap()
-        .drain()
+    let err = db
+        .collection("members")
+        .insert_one(doc! { "_id": "m2", "org_id": "acme", "email": "x@test.com" })
+        .execute(&txn)
         .unwrap_err();
     assert!(
         matches!(err, slate_db::DbError::UniqueViolation { .. }),
@@ -429,29 +389,20 @@ fn unique_compound_rejects_same_combination() {
 fn unique_compound_backfill_detects_existing_duplicate() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "members".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "members",
-        vec![
+    db.collections().create("members").execute(&txn).unwrap();
+    db.collection("members")
+        .insert_many(vec![
             doc! { "_id": "m1", "org_id": "acme", "email": "x@test.com" },
             doc! { "_id": "m2", "org_id": "acme", "email": "x@test.com" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     // Backfilling a unique compound index over duplicate combinations fails.
-    let err = txn
-        .create_unique_compound_index(
-            DEFAULT_CF,
-            "members",
-            &["org_id".to_string(), "email".to_string()],
-        )
+    let err = db
+        .collection("members")
+        .indexes()
+        .create(["org_id", "email"], IndexOptions::unique())
+        .execute(&txn)
         .unwrap_err();
     assert!(
         matches!(err, slate_db::DbError::UniqueViolation { .. }),

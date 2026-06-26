@@ -1,46 +1,41 @@
-//! `Transaction::query` — the CosmosDB-style SQL surface. SQL shares the v2
+//! `Collection::query` — the CosmosDB-style SQL surface. SQL shares the v2
 //! stack with `find` (same AST, planner, executor), so these also pin that the
 //! two surfaces agree.
 
 use bson::{Document, doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn seeded() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("people").execute(&txn).unwrap();
     // A string index exercises the sargable string path; numeric cross-type
     // index behaviour is covered by `indexed_numeric_queries_are_correct_across_types`.
-    txn.create_index(DEFAULT_CF, "people", "name").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collection("people")
+        .indexes()
+        .create("name", slate_db::v2::IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("people")
+        .insert_many(vec![
             doc! { "_id": "1", "name": "ada", "age": 36, "tags": ["x", "y"], "address": { "city": "austin", "zip": "78701" } },
             doc! { "_id": "2", "name": "alan", "age": 41, "tags": ["y", "z"], "address": { "city": "denver", "zip": "80202" } },
             doc! { "_id": "3", "name": "grace", "age": 44, "tags": [], "address": { "city": "miami", "zip": "33101" } },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
 
 fn strings(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    // `SELECT VALUE c.name` yields bare strings → value iteration, not `iter`
-    // (which expects documents).
-    txn.query(DEFAULT_CF, "people", sql)
-        .unwrap()
-        .iter_values::<String>()
+    // `SELECT VALUE c.name` yields bare strings → value iteration, not document
+    // iteration.
+    db.collection("people")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
@@ -48,9 +43,10 @@ fn strings(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
 
 fn param_strings(db: &Database<MemoryStore>, sql: &str, params: Document) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    txn.query_with_params(DEFAULT_CF, "people", sql, params)
-        .unwrap()
-        .iter_values::<String>()
+    db.collection("people")
+        .query(sql)
+        .params(params)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
@@ -232,13 +228,11 @@ fn missing_param_is_an_error() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query_with_params(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE c.name FROM c WHERE c.age > @missing",
-            doc! {},
-        )
-        .is_err()
+        db.collection("people")
+            .query("SELECT VALUE c.name FROM c WHERE c.age > @missing")
+            .params(doc! {})
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -258,14 +252,10 @@ fn offset_limit() {
 fn object_projection_deserializes() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let docs: Vec<Document> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            r#"SELECT VALUE { "n": c.name, "a": c.age } FROM c WHERE c.name = "ada""#,
-        )
-        .unwrap()
-        .iter::<Document>()
+    let docs: Vec<Document> = db
+        .collection("people")
+        .query(r#"SELECT VALUE { "n": c.name, "a": c.age } FROM c WHERE c.name = "ada""#)
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -292,26 +282,17 @@ fn sql_agrees_with_find() {
     // they share the v2 planner/executor.
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let via_sql: Vec<Document> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            r#"SELECT VALUE c FROM c WHERE c.name = "alan""#,
-        )
-        .unwrap()
-        .iter::<Document>()
+    let via_sql: Vec<Document> = db
+        .collection("people")
+        .query(r#"SELECT VALUE c FROM c WHERE c.name = "alan""#)
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    let via_find: Vec<Document> = txn
-        .find(
-            DEFAULT_CF,
-            "people",
-            rawdoc! { "name": "alan" },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter::<Document>()
+    let via_find: Vec<Document> = db
+        .collection("people")
+        .find(rawdoc! { "name": "alan" })
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -321,9 +302,9 @@ fn sql_agrees_with_find() {
 
 fn docs(db: &Database<MemoryStore>, sql: &str) -> Vec<Document> {
     let txn = db.begin(true).unwrap();
-    txn.query(DEFAULT_CF, "people", sql)
-        .unwrap()
-        .iter::<Document>()
+    db.collection("people")
+        .query(sql)
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
@@ -388,7 +369,9 @@ fn duplicate_projected_key_is_an_error() {
     let txn = db.begin(true).unwrap();
     // `c.name` and `c.age AS name` both want key "name".
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT c.name, c.age AS name FROM c")
+        db.collection("people")
+            .query("SELECT c.name, c.age AS name FROM c")
+            .iter_raw(&txn)
             .is_err()
     );
 }
@@ -401,32 +384,28 @@ fn indexed_numeric_queries_are_correct_across_types() {
     // `age > 40`).
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "n".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "n", "age").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "n",
-        vec![
+    db.collections().create("n").execute(&txn).unwrap();
+    db.collection("n")
+        .indexes()
+        .create("age", slate_db::v2::IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("n")
+        .insert_many(vec![
             doc! { "_id": "a", "age": 36_i32 },   // Int32
             doc! { "_id": "b", "age": 41_i64 },   // Int64
             doc! { "_id": "c", "age": 44.0_f64 }, // Double
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin(true).unwrap();
     let ids = |sql: &str| -> Vec<String> {
-        let mut out: Vec<String> = txn
-            .query(DEFAULT_CF, "n", sql)
-            .unwrap()
-            .iter_values::<String>()
+        let mut out: Vec<String> = db
+            .collection("n")
+            .query(sql)
+            .iter::<String>(&txn)
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -467,12 +446,12 @@ fn fuzz_indexed_numeric_matches_brute_force() {
         let mut rng = StdRng::seed_from_u64(seed);
         let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "f".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.create_index(DEFAULT_CF, "f", "age").unwrap();
+        db.collections().create("f").execute(&txn).unwrap();
+        db.collection("f")
+            .indexes()
+            .create("age", slate_db::v2::IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
 
         // Each doc's indexed `age` is a random numeric of a random BSON type.
         let mut expected: Vec<(String, f64)> = Vec::new();
@@ -488,10 +467,7 @@ fn fuzz_indexed_numeric_matches_brute_force() {
             docs.push(doc! { "_id": id.clone(), "age": age });
             expected.push((id, as_f64));
         }
-        txn.insert_many(DEFAULT_CF, "f", docs)
-            .unwrap()
-            .drain()
-            .unwrap();
+        db.collection("f").insert_many(docs).execute(&txn).unwrap();
         txn.commit().unwrap();
 
         // A random comparison against an integer bound (SQL int literal → i64).
@@ -507,10 +483,10 @@ fn fuzz_indexed_numeric_matches_brute_force() {
         let sql = format!("SELECT VALUE c._id FROM c WHERE c.age {op} {bound}");
 
         let txn = db.begin(true).unwrap();
-        let mut got: Vec<String> = txn
-            .query(DEFAULT_CF, "f", &sql)
-            .unwrap()
-            .iter_values::<String>()
+        let mut got: Vec<String> = db
+            .collection("f")
+            .query(&sql)
+            .iter::<String>(&txn)
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -530,7 +506,9 @@ fn invalid_sql_is_an_error() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT VALUE FROM WHERE")
+        db.collection("people")
+            .query("SELECT VALUE FROM WHERE")
+            .iter_raw(&txn)
             .is_err()
     );
 }
@@ -539,15 +517,12 @@ fn invalid_sql_is_an_error() {
 fn count_via_drain() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let n = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE c FROM c WHERE c.age > 40",
-        )
+    let n = db
+        .collection("people")
+        .query("SELECT VALUE c FROM c WHERE c.age > 40")
+        .iter_raw(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .count();
     assert_eq!(n, 2);
 }
 
@@ -556,9 +531,9 @@ fn count_via_drain() {
 /// Run a `SELECT VALUE <aggregate>` and deserialize each bare value into `T`.
 fn agg<T: serde::de::DeserializeOwned>(db: &Database<MemoryStore>, sql: &str) -> Vec<T> {
     let txn = db.begin(true).unwrap();
-    txn.query(DEFAULT_CF, "people", sql)
-        .unwrap()
-        .iter_values::<T>()
+    db.collection("people")
+        .query(sql)
+        .iter::<T>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect()
@@ -616,15 +591,11 @@ fn aggregate_over_empty_set() {
 fn aggregate_with_parameter_filter() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let n: Vec<i64> = txn
-        .query_with_params(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE COUNT(1) FROM c WHERE c.age > @min",
-            doc! { "min": 40 },
-        )
-        .unwrap()
-        .iter_values::<i64>()
+    let n: Vec<i64> = db
+        .collection("people")
+        .query("SELECT VALUE COUNT(1) FROM c WHERE c.age > @min")
+        .params(doc! { "min": 40 })
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -639,14 +610,10 @@ fn scalar_subquery_counts_in_document_array() {
     // ada ["x","y"]→2, alan ["y","z"]→2, grace []→0.
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let counts: Vec<i64> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c ORDER BY c.age ASC",
-        )
-        .unwrap()
-        .iter_values::<i64>()
+    let counts: Vec<i64> = db
+        .collection("people")
+        .query("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c ORDER BY c.age ASC")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -658,14 +625,12 @@ fn scalar_subquery_with_inner_filter_is_correlated() {
     // Count only the "y" tags per doc: ada→1, alan→1, grace→0.
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let counts: Vec<i64> = txn
+    let counts: Vec<i64> = db
+        .collection("people")
         .query(
-            DEFAULT_CF,
-            "people",
             r#"SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags WHERE t = "y") FROM c ORDER BY c.age ASC"#,
         )
-        .unwrap()
-        .iter_values::<i64>()
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -691,14 +656,10 @@ fn uncorrelated_subquery_is_constant_per_row() {
     // outer doc gets the same value (3).
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let counts: Vec<i64> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE (SELECT VALUE COUNT(1) FROM x IN [10, 20, 30]) FROM c",
-        )
-        .unwrap()
-        .iter_values::<i64>()
+    let counts: Vec<i64> = db
+        .collection("people")
+        .query("SELECT VALUE (SELECT VALUE COUNT(1) FROM x IN [10, 20, 30]) FROM c")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -711,36 +672,26 @@ fn nested_subqueries() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     {
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "nest".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "nest",
-            vec![
+        db.collections().create("nest").execute(&txn).unwrap();
+        db.collection("nest")
+            .insert_many(vec![
                 doc! { "_id": "1", "groups": [ { "items": ["x", "y"] }, { "items": ["z"] } ] },
                 doc! { "_id": "2", "groups": [ { "items": ["a"] } ] },
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
         txn.commit().unwrap();
     }
     let txn = db.begin(true).unwrap();
-    let out: Vec<i64> = txn
+    let out: Vec<i64> = db
+        .collection("nest")
         .query(
-            DEFAULT_CF,
-            "nest",
             r#"SELECT VALUE (
                  SELECT VALUE COUNT(1) FROM g IN c.groups
                  WHERE EXISTS (SELECT VALUE i FROM i IN g.items WHERE i = "x")
                ) FROM c ORDER BY c._id ASC"#,
         )
-        .unwrap()
-        .iter_values::<i64>()
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -751,14 +702,10 @@ fn nested_subqueries() {
 fn array_subquery_collects_into_array() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let out: Vec<Vec<String>> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            r#"SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c WHERE c.name = "ada""#,
-        )
-        .unwrap()
-        .iter_values::<Vec<String>>()
+    let out: Vec<Vec<String>> = db
+        .collection("people")
+        .query(r#"SELECT VALUE ARRAY(SELECT VALUE t FROM t IN c.tags) FROM c WHERE c.name = "ada""#)
+        .iter::<Vec<String>>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -774,37 +721,25 @@ fn group_by_counts_per_group() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     {
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: "g".into(),
-            ..Default::default()
-        })
-        .unwrap();
-        txn.insert_many(
-            DEFAULT_CF,
-            "g",
-            vec![
+        db.collections().create("g").execute(&txn).unwrap();
+        db.collection("g")
+            .insert_many(vec![
                 doc! { "_id": "1", "kind": "a", "tags": ["x"] },
                 doc! { "_id": "2", "kind": "a", "tags": ["y", "z"] },
                 doc! { "_id": "3", "kind": "b", "tags": ["p"] },
                 doc! { "_id": "4", "kind": "b" }, // no tags → not counted
                 doc! { "_id": "5", "kind": "c", "tags": [] }, // empty but defined → counted
-            ],
-        )
-        .unwrap()
-        .drain()
-        .unwrap();
+            ])
+            .execute(&txn)
+            .unwrap();
         txn.commit().unwrap();
     }
 
     let txn = db.begin(true).unwrap();
-    let mut out: Vec<Document> = txn
-        .query(
-            DEFAULT_CF,
-            "g",
-            "SELECT c.kind, COUNT(c.tags) AS n FROM c GROUP BY c.kind",
-        )
-        .unwrap()
-        .iter::<Document>()
+    let mut out: Vec<Document> = db
+        .collection("g")
+        .query("SELECT c.kind, COUNT(c.tags) AS n FROM c GROUP BY c.kind")
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -846,12 +781,10 @@ fn group_by_rejects_ungrouped_column() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query(
-            DEFAULT_CF,
-            "people",
-            "SELECT c.name, COUNT(1) FROM c GROUP BY c.age",
-        )
-        .is_err()
+        db.collection("people")
+            .query("SELECT c.name, COUNT(1) FROM c GROUP BY c.age")
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -861,10 +794,10 @@ fn group_by_rejects_ungrouped_column() {
 fn from_less_value_evaluates_once() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let out: Vec<i64> = txn
-        .query(DEFAULT_CF, "people", "SELECT VALUE 1 + 1")
-        .unwrap()
-        .iter_values::<i64>()
+    let out: Vec<i64> = db
+        .collection("people")
+        .query("SELECT VALUE 1 + 1")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -878,10 +811,10 @@ fn from_less_needs_no_collection() {
     // selected.
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(true).unwrap();
-    let out: Vec<i64> = txn
-        .query(DEFAULT_CF, "does_not_exist", "SELECT VALUE 7 * 6")
-        .unwrap()
-        .iter_values::<i64>()
+    let out: Vec<i64> = db
+        .collection("does_not_exist")
+        .query("SELECT VALUE 7 * 6")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -893,10 +826,10 @@ fn from_less_projection_wraps_in_object() {
     // No VALUE → the projection list wraps into a single object row.
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(true).unwrap();
-    let out: Vec<Document> = txn
-        .query(DEFAULT_CF, "x", "SELECT 1 AS a, 2 AS b")
-        .unwrap()
-        .iter_values::<Document>()
+    let out: Vec<Document> = db
+        .collection("x")
+        .query("SELECT 1 AS a, 2 AS b")
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -908,10 +841,10 @@ fn from_less_scalar_subquery() {
     // A FROM-less subquery is valid too, and reduces to its single value.
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(true).unwrap();
-    let out: Vec<i64> = txn
-        .query(DEFAULT_CF, "x", "SELECT VALUE (SELECT VALUE 1)")
-        .unwrap()
-        .iter_values::<i64>()
+    let out: Vec<i64> = db
+        .collection("x")
+        .query("SELECT VALUE (SELECT VALUE 1)")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -922,7 +855,7 @@ fn from_less_scalar_subquery() {
 fn select_star_without_from_is_rejected() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(true).unwrap();
-    assert!(txn.query(DEFAULT_CF, "x", "SELECT *").is_err());
+    assert!(db.collection("x").query("SELECT *").iter_raw(&txn).is_err());
 }
 
 #[test]
@@ -957,36 +890,24 @@ fn stringsplit_and_stringjoin_round_trip() {
 fn from_subroot_path_scopes_iteration() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "emps".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "emps",
-        vec![
+    db.collections().create("emps").execute(&txn).unwrap();
+    db.collection("emps")
+        .insert_many(vec![
             doc! { "_id": "1", "employment": { "team": "Retail", "hours": 40 } },
             doc! { "_id": "2", "employment": { "team": "Retail" } },
             doc! { "_id": "3", "employment": { "team": "Eng" } },
             doc! { "_id": "4", "name": "no employment" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // `e` binds to each document's `employment` sub-object; doc 4 (no path) drops.
     let txn = db.begin(true).unwrap();
-    let teams: Vec<String> = txn
-        .query(
-            DEFAULT_CF,
-            "emps",
-            "SELECT VALUE e.team FROM c.employment e ORDER BY e.team ASC",
-        )
-        .unwrap()
-        .iter_values::<String>()
+    let teams: Vec<String> = db
+        .collection("emps")
+        .query("SELECT VALUE e.team FROM c.employment e ORDER BY e.team ASC")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -994,14 +915,10 @@ fn from_subroot_path_scopes_iteration() {
 
     // WHERE over the rebound alias; SELECT * returns the whole sub-object.
     let txn = db.begin(true).unwrap();
-    let docs: Vec<Document> = txn
-        .query(
-            DEFAULT_CF,
-            "emps",
-            r#"SELECT * FROM c.employment e WHERE e.team = "Retail" AND IS_DEFINED(e.hours)"#,
-        )
-        .unwrap()
-        .iter_values::<Document>()
+    let docs: Vec<Document> = db
+        .collection("emps")
+        .query(r#"SELECT * FROM c.employment e WHERE e.team = "Retail" AND IS_DEFINED(e.hours)"#)
+        .iter::<Document>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1044,12 +961,10 @@ fn select_top_caps_results() {
     // TOP cannot be combined with OFFSET/LIMIT.
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query(
-            DEFAULT_CF,
-            "people",
-            "SELECT TOP 2 VALUE c.name FROM c LIMIT 1"
-        )
-        .is_err()
+        db.collection("people")
+            .query("SELECT TOP 2 VALUE c.name FROM c LIMIT 1")
+            .iter_raw(&txn)
+            .is_err()
     );
 }
 
@@ -1057,31 +972,23 @@ fn select_top_caps_results() {
 fn select_distinct_dedups_rows() {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "d".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "d",
-        vec![
+    db.collections().create("d").execute(&txn).unwrap();
+    db.collection("d")
+        .insert_many(vec![
             doc! { "_id": "1", "cat": "A", "tags": ["x", "y"] },
             doc! { "_id": "2", "cat": "B", "tags": ["x", "y"] },
             doc! { "_id": "3", "cat": "A", "tags": ["y", "z"] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // Scalar VALUE dedup, in first-occurrence order.
     let txn = db.begin(true).unwrap();
-    let cats: Vec<String> = txn
-        .query(DEFAULT_CF, "d", "SELECT DISTINCT VALUE c.cat FROM c")
-        .unwrap()
-        .iter_values::<String>()
+    let cats: Vec<String> = db
+        .collection("d")
+        .query("SELECT DISTINCT VALUE c.cat FROM c")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1090,10 +997,10 @@ fn select_distinct_dedups_rows() {
     // Arrays dedup as whole values — no Mongo-style flattening — so the
     // repeated ["x","y"] collapses to one, matching Cosmos.
     let txn = db.begin(true).unwrap();
-    let tags: Vec<Vec<String>> = txn
-        .query(DEFAULT_CF, "d", "SELECT DISTINCT VALUE c.tags FROM c")
-        .unwrap()
-        .iter_values::<Vec<String>>()
+    let tags: Vec<Vec<String>> = db
+        .collection("d")
+        .query("SELECT DISTINCT VALUE c.tags FROM c")
+        .iter::<Vec<String>>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1109,18 +1016,18 @@ fn getcurrent_uses_the_injected_clock() {
         .open(MemoryStore::new())
         .unwrap();
     let txn = db.begin(true).unwrap();
-    let ts: Vec<i64> = txn
-        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTTIMESTAMP()")
-        .unwrap()
-        .iter_values::<i64>()
+    let ts: Vec<i64> = db
+        .collection("x")
+        .query("SELECT VALUE GETCURRENTTIMESTAMP()")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
     assert_eq!(ts, vec![1000]);
-    let dt: Vec<String> = txn
-        .query(DEFAULT_CF, "x", "SELECT VALUE GETCURRENTDATETIME()")
-        .unwrap()
-        .iter_values::<String>()
+    let dt: Vec<String> = db
+        .collection("x")
+        .query("SELECT VALUE GETCURRENTDATETIME()")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1133,20 +1040,28 @@ fn unqualified_identifier_is_rejected() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT VALUE name FROM c")
+        db.collection("people")
+            .query("SELECT VALUE name FROM c")
+            .iter_raw(&txn)
             .is_err()
     );
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT VALUE d.name FROM c")
+        db.collection("people")
+            .query("SELECT VALUE d.name FROM c")
+            .iter_raw(&txn)
             .is_err()
     );
     // Qualified paths and the special value words are fine.
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT VALUE c.name FROM c")
+        db.collection("people")
+            .query("SELECT VALUE c.name FROM c")
+            .iter_raw(&txn)
             .is_ok()
     );
     assert!(
-        txn.query(DEFAULT_CF, "people", "SELECT VALUE undefined FROM c")
+        db.collection("people")
+            .query("SELECT VALUE undefined FROM c")
+            .iter_raw(&txn)
             .is_ok()
     );
 }
@@ -1157,14 +1072,10 @@ fn join_source_subquery() {
     // correlated subquery's result.
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let mut out: Vec<String> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE t FROM c JOIN t IN (SELECT VALUE s FROM s IN c.tags WHERE s != 'zzz')",
-        )
-        .unwrap()
-        .iter_values::<String>()
+    let mut out: Vec<String> = db
+        .collection("people")
+        .query("SELECT VALUE t FROM c JOIN t IN (SELECT VALUE s FROM s IN c.tags WHERE s != 'zzz')")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1179,14 +1090,10 @@ fn subquery_from_outer_alias_is_item_scoped() {
     // single bound element (1), not the whole collection (the bug was a re-scan).
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let out: Vec<i64> = txn
-        .query(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE (SELECT VALUE COUNT(1) FROM t) FROM c JOIN t IN c.tags",
-        )
-        .unwrap()
-        .iter_values::<i64>()
+    let out: Vec<i64> = db
+        .collection("people")
+        .query("SELECT VALUE (SELECT VALUE COUNT(1) FROM t) FROM c JOIN t IN c.tags")
+        .iter::<i64>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -1200,10 +1107,10 @@ fn is_null_recognizes_a_null_object_field() {
     // must recognize it (regression for the OwnedRaw(Null) case).
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(true).unwrap();
-    let out: Vec<bool> = txn
-        .query(DEFAULT_CF, "x", "SELECT VALUE IS_NULL({a: 1, b: null}.b)")
-        .unwrap()
-        .iter_values::<bool>()
+    let out: Vec<bool> = db
+        .collection("x")
+        .query("SELECT VALUE IS_NULL({a: 1, b: null}.b)")
+        .iter::<bool>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();

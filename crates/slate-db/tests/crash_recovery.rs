@@ -35,7 +35,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, Durability};
+use slate_db::v2::IndexOptions;
+use slate_db::{DEFAULT_CF, Database, DatabaseBuilder, Durability};
 use slate_store::{RedbStore, RocksStore, Store};
 
 const COLLECTION: &str = "accounts";
@@ -98,13 +99,20 @@ fn run_worker<S: Store + Send + Sync + 'static>(
     // the crash exercises `i`, `u`, and (via the auto TTL index) TTL structures.
     {
         let txn = db.begin(false).unwrap();
-        txn.create_collection(&CollectionConfig {
-            name: COLLECTION.into(),
-            ..Default::default()
-        })
-        .unwrap();
-        ignore_index_exists(txn.create_index(DEFAULT_CF, COLLECTION, "bucket"));
-        ignore_index_exists(txn.create_unique_index(DEFAULT_CF, COLLECTION, "email"));
+        db.collections().create(COLLECTION).execute(&txn).unwrap();
+        let collection = db.collection(COLLECTION);
+        ignore_index_exists(
+            collection
+                .indexes()
+                .create("bucket", IndexOptions::default())
+                .execute(&txn),
+        );
+        ignore_index_exists(
+            collection
+                .indexes()
+                .create("email", IndexOptions::unique())
+                .execute(&txn),
+        );
         txn.commit().unwrap();
     }
 
@@ -123,9 +131,9 @@ fn run_worker<S: Store + Send + Sync + 'static>(
             "email": format!("user-{seq}@example.com"),
             "payload": "x".repeat(64),
         };
-        txn.insert_one(DEFAULT_CF, COLLECTION, doc)
-            .unwrap()
-            .drain()
+        db.collection(COLLECTION)
+            .insert_one(doc)
+            .execute(&txn)
             .unwrap();
         txn.commit().unwrap();
 
@@ -153,8 +161,11 @@ fn ignore_index_exists(result: Result<(), slate_db::DbError>) {
 fn next_seq<S: Store + Send + Sync + 'static>(db: &Database<S>) -> u64 {
     let txn = db.begin(true).unwrap();
     // The collection may not exist yet on a first run.
-    let count = txn
-        .count(DEFAULT_CF, COLLECTION, bson::doc! {})
+    let count = db
+        .collection(COLLECTION)
+        .find(bson::doc! {})
+        .iter_raw(&txn)
+        .map(|it| it.count() as u64)
         .unwrap_or_default();
     txn.rollback().unwrap();
     count
@@ -261,8 +272,13 @@ fn assert_recovered<S: Store + Send + Sync + 'static>(db: &Database<S>, frontier
     // Atomicity: every acked commit must be wholly present on reopen.
     for seq in 0..=frontier {
         let id = format!("doc-{seq}");
-        let found = txn
-            .find_one(DEFAULT_CF, COLLECTION, bson::doc! { "_id": &id })
+        let found = db
+            .collection(COLLECTION)
+            .find(bson::doc! { "_id": &id })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
             .unwrap();
         assert!(
             found.is_some(),

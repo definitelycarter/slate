@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex};
 
 use bson::doc;
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 const COLLECTION: &str = "nums";
@@ -19,17 +19,13 @@ const COLLECTION: &str = "nums";
 /// `val = i / 10` (so `val` spans `[0.0, 0.1, …]`).
 fn seed(db: &Database<MemoryStore>, n: usize) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: COLLECTION.into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create(COLLECTION).execute(&txn).unwrap();
     let docs: Vec<_> = (0..n)
         .map(|i| doc! { "_id": format!("{i:03}"), "val": i as f64 / 10.0 })
         .collect();
-    txn.insert_many(DEFAULT_CF, COLLECTION, docs)
-        .unwrap()
-        .drain()
+    db.collection(COLLECTION)
+        .insert_many(docs)
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 }
@@ -37,9 +33,9 @@ fn seed(db: &Database<MemoryStore>, n: usize) {
 /// Run `sql` and collect the result values as `f64`.
 fn floats(db: &Database<MemoryStore>, sql: &str) -> Vec<f64> {
     let txn = db.begin(true).unwrap();
-    txn.query(DEFAULT_CF, COLLECTION, sql)
-        .unwrap()
-        .iter_values::<f64>()
+    db.collection(COLLECTION)
+        .query(sql)
+        .iter::<f64>(&txn)
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap()

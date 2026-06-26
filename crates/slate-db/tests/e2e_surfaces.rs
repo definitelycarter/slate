@@ -7,8 +7,7 @@
 //! for identical data they must return identical rows.
 
 use bson::{doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn db() -> Database<MemoryStore> {
@@ -21,29 +20,26 @@ fn insert_then_find_and_sql_agree() {
 
     // ── write: create a collection and insert documents ──
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "users".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "users",
-        vec![
+    db.collections().create("users").execute(&txn).unwrap();
+    db.collection("users")
+        .insert_many(vec![
             doc! { "_id": "u1", "name": "ada",   "age": 36 },
             doc! { "_id": "u2", "name": "alan",  "age": 41 },
             doc! { "_id": "u3", "name": "grace", "age": 29 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
     // ── read 1: MongoDB `find_one` by _id returns the whole document ──
     let txn = db.begin(true).unwrap();
-    let found = txn
-        .find_one(DEFAULT_CF, "users", rawdoc! { "_id": "u1" })
+    let found = db
+        .collection("users")
+        .find(rawdoc! { "_id": "u1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .expect("u1 should exist");
     assert_eq!(found.get_str("_id").unwrap(), "u1");
@@ -52,15 +48,10 @@ fn insert_then_find_and_sql_agree() {
 
     // ── read 2: MongoDB `find` with a filter (age > 30) ──
     let txn = db.begin(true).unwrap();
-    let mut find_names: Vec<String> = txn
-        .find(
-            DEFAULT_CF,
-            "users",
-            rawdoc! { "age": { "$gt": 30 } },
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let mut find_names: Vec<String> = db
+        .collection("users")
+        .find(rawdoc! { "age": { "$gt": 30 } })
+        .iter_raw(&txn)
         .unwrap()
         .map(|r| r.unwrap().get_str("name").unwrap().to_string())
         .collect();
@@ -69,14 +60,10 @@ fn insert_then_find_and_sql_agree() {
 
     // ── read 3: the SQL equivalent of the same filter ──
     let txn = db.begin(true).unwrap();
-    let mut sql_names: Vec<String> = txn
-        .query(
-            DEFAULT_CF,
-            "users",
-            "SELECT VALUE c.name FROM c WHERE c.age > 30",
-        )
-        .unwrap()
-        .iter_values::<String>()
+    let mut sql_names: Vec<String> = db
+        .collection("users")
+        .query("SELECT VALUE c.name FROM c WHERE c.age > 30")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();

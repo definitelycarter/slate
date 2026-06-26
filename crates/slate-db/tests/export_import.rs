@@ -7,9 +7,8 @@
 //! catalog survive — the migration path physical backup can't serve.
 
 use bson::{Decimal128, doc, oid::ObjectId};
-use slate_db::{
-    CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, ExportOptions, ImportOptions,
-};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder, ExportOptions, ImportOptions};
 use slate_store::{RedbStore, RocksStore, Store};
 use std::str::FromStr;
 
@@ -19,48 +18,43 @@ use std::str::FromStr;
 fn populate<S: Store + Send + Sync + 'static>(db: &Database<S>) {
     let txn = db.begin(false).unwrap();
 
-    txn.create_collection(&CollectionConfig {
-        name: "users".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "users", "city").unwrap();
-    txn.create_unique_index(DEFAULT_CF, "users", "email")
+    db.collections().create("users").execute(&txn).unwrap();
+    let users = db.collection("users");
+    users
+        .indexes()
+        .create("city", IndexOptions::default())
+        .execute(&txn)
         .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "users",
-        vec![
+    users
+        .indexes()
+        .create("email", IndexOptions::unique())
+        .execute(&txn)
+        .unwrap();
+    users
+        .insert_many(vec![
             doc! { "_id": "1", "name": "ada", "city": "London", "email": "ada@x.io",
             "joined": bson::DateTime::from_millis(1_700_000_000_000),
             "oid": ObjectId::from_str("64a9c0ffee0000000000beef").unwrap(),
             "balance": Decimal128::from_str("9999.99").unwrap() },
             doc! { "_id": "2", "name": "alan", "city": "London", "email": "alan@x.io" },
             doc! { "_id": "3", "name": "grace", "city": "York", "email": "grace@x.io" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
 
-    txn.create_collection(&CollectionConfig {
-        name: "events".into(),
-        pk_path: "key".into(),
-        ttl_path: "expires".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "events",
-        vec![
+    db.collections()
+        .create("events")
+        .pk_path("key")
+        .ttl_path("expires")
+        .execute(&txn)
+        .unwrap();
+    db.collection("events")
+        .insert_many(vec![
             doc! { "key": "e1", "kind": "click" },
             doc! { "key": "e2", "kind": "view" },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
 
     txn.commit().unwrap();
 }
@@ -68,10 +62,10 @@ fn populate<S: Store + Send + Sync + 'static>(db: &Database<S>) {
 /// Sorted-by-pk documents of one collection, for order-independent comparison.
 fn docs<S: Store>(db: &Database<S>, collection: &str, pk: &str) -> Vec<bson::Document> {
     let txn = db.begin(true).unwrap();
-    let mut out: Vec<bson::Document> = txn
-        .find(DEFAULT_CF, collection, doc! {}, Default::default())
-        .unwrap()
-        .iter::<bson::Document>()
+    let mut out: Vec<bson::Document> = db
+        .collection(collection)
+        .find(doc! {})
+        .iter::<bson::Document>(&txn)
         .unwrap()
         .map(|d| d.unwrap())
         .collect();
@@ -117,29 +111,19 @@ fn redb_to_rocksdb_round_trip() {
 
     // Catalog is identical — the manifest carried the full definition.
     for (collection, _pk) in [("users", "_id"), ("events", "key")] {
-        let s = src
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, collection)
-            .unwrap();
-        let d = dst
-            .begin(true)
-            .unwrap()
-            .collection_schema(DEFAULT_CF, collection)
-            .unwrap();
+        let src_txn = src.begin(true).unwrap();
+        let s = src.collection(collection).schema(&src_txn).unwrap();
+        let dst_txn = dst.begin(true).unwrap();
+        let d = dst.collection(collection).schema(&dst_txn).unwrap();
         assert_eq!(s, d, "schema mismatch for {collection}");
     }
 
     // The rebuilt `city` index drives a query on the RocksDB side.
     let txn = dst.begin(true).unwrap();
-    let names: Vec<String> = txn
-        .query(
-            DEFAULT_CF,
-            "users",
-            "SELECT VALUE c.name FROM c WHERE c.city = 'London' ORDER BY c.name",
-        )
-        .unwrap()
-        .iter_values::<String>()
+    let names: Vec<String> = dst
+        .collection("users")
+        .query("SELECT VALUE c.name FROM c WHERE c.city = 'London' ORDER BY c.name")
+        .iter::<String>(&txn)
         .unwrap()
         .map(|n| n.unwrap())
         .collect();

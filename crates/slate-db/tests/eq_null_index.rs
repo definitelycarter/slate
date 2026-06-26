@@ -7,35 +7,32 @@
 //! Filter; indexed results must equal unindexed (the index is invisible to results).
 
 use bson::{Bson, doc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 /// `t` with `x` null in three docs and a real number in two, optionally indexed.
 fn seed(indexed: bool) -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "t".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("t").execute(&txn).unwrap();
     if indexed {
-        txn.create_index(DEFAULT_CF, "t", "x").unwrap();
+        db.collection("t")
+            .indexes()
+            .create("x", IndexOptions::default())
+            .execute(&txn)
+            .unwrap();
     }
-    txn.insert_many(
-        DEFAULT_CF,
-        "t",
-        vec![
+    db.collection("t")
+        .insert_many(vec![
             doc! { "_id": "a", "x": Bson::Null },
             doc! { "_id": "b", "x": Bson::Null },
             doc! { "_id": "c", "x": Bson::Null },
             doc! { "_id": "d", "x": 5 },
             doc! { "_id": "e", "x": 7 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
@@ -43,10 +40,10 @@ fn seed(indexed: bool) -> Database<MemoryStore> {
 /// The sorted `_id`s a `SELECT VALUE c._id` selects from `t`.
 fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let mut got: Vec<String> = txn
-        .query(DEFAULT_CF, "t", sql)
-        .unwrap()
-        .iter_values::<String>()
+    let mut got: Vec<String> = db
+        .collection("t")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -80,12 +77,10 @@ fn eq_null_indexed_matches_unindexed() {
 fn eq_null_plans_as_filter_not_index_scan() {
     let db = seed(true);
     let txn = db.begin(true).unwrap();
-    let plan = txn
-        .explain(
-            DEFAULT_CF,
-            "t",
-            "SELECT VALUE c._id FROM c WHERE c.x = null",
-        )
+    let plan = db
+        .collection("t")
+        .query("SELECT VALUE c._id FROM c WHERE c.x = null")
+        .explain(&txn)
         .unwrap();
     assert!(
         plan.contains("Filter") && !plan.contains("IndexScan"),

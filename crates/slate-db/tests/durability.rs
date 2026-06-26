@@ -1,20 +1,23 @@
 //! Database-level durability + integrity surface (Threads A & C of the
 //! Durability & Crash Safety RFC), exercised through the public `slate-db` API.
 
-use slate_db::{
-    CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder, Durability, IntegrityIssue,
-};
+use slate_db::v2::IndexOptions;
+use slate_db::{DEFAULT_CF, Database, DatabaseBuilder, Durability, IntegrityIssue};
 use slate_store::{MemoryStore, RocksStore};
 
 fn seed_accounts<S: slate_store::Store + Send + Sync + 'static>(db: &Database<S>) {
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "accounts".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "accounts", "bucket").unwrap();
-    txn.create_unique_index(DEFAULT_CF, "accounts", "email")
+    db.collections().create("accounts").execute(&txn).unwrap();
+    let accounts = db.collection("accounts");
+    accounts
+        .indexes()
+        .create("bucket", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    accounts
+        .indexes()
+        .create("email", IndexOptions::unique())
+        .execute(&txn)
         .unwrap();
     for i in 0..20 {
         let doc = bson::doc! {
@@ -22,10 +25,7 @@ fn seed_accounts<S: slate_store::Store + Send + Sync + 'static>(db: &Database<S>
             "bucket": (i % 4) as i64,
             "email": format!("a{i}@x.com"),
         };
-        txn.insert_one(DEFAULT_CF, "accounts", doc)
-            .unwrap()
-            .drain()
-            .unwrap();
+        accounts.insert_one(doc).execute(&txn).unwrap();
     }
     txn.commit().unwrap();
 }
@@ -48,27 +48,22 @@ fn verify_clean_after_updates_and_deletes() {
     // Mutate: change some buckets, move an email (frees + reclaims a u-slot),
     // delete a few documents.
     let txn = db.begin(false).unwrap();
-    txn.update_many(
-        DEFAULT_CF,
-        "accounts",
-        bson::doc! { "bucket": 0i64 },
-        bson::doc! { "$set": { "bucket": 9i64 } },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.update_one(
-        DEFAULT_CF,
-        "accounts",
-        bson::doc! { "_id": "a1" },
-        bson::doc! { "$set": { "email": "moved@x.com" } },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
-    txn.delete_many(DEFAULT_CF, "accounts", bson::doc! { "_id": "a2" })
-        .unwrap()
-        .drain()
+    let accounts = db.collection("accounts");
+    accounts
+        .find(bson::doc! { "bucket": 0i64 })
+        .update(bson::doc! { "$set": { "bucket": 9i64 } })
+        .execute(&txn)
+        .unwrap();
+    accounts
+        .find(bson::doc! { "_id": "a1" })
+        .update(bson::doc! { "$set": { "email": "moved@x.com" } })
+        .one()
+        .execute(&txn)
+        .unwrap();
+    accounts
+        .find(bson::doc! { "_id": "a2" })
+        .delete()
+        .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
 
@@ -113,7 +108,11 @@ fn builder_durability_default_round_trips_on_rocks() {
     let db = DatabaseBuilder::new().open(store).unwrap();
     let txn = db.begin(true).unwrap();
     assert_eq!(
-        txn.count(DEFAULT_CF, "accounts", bson::doc! {}).unwrap(),
+        db.collection("accounts")
+            .find(bson::doc! {})
+            .iter_raw(&txn)
+            .unwrap()
+            .count(),
         20
     );
     txn.rollback().unwrap();
@@ -132,28 +131,24 @@ fn begin_with_overrides_builder_default_on_rocks() {
         .unwrap();
 
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "ledger".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("ledger").execute(&txn).unwrap();
     txn.commit().unwrap();
 
     let txn = db.begin_with(Durability::Strict).unwrap();
-    txn.insert_one(
-        DEFAULT_CF,
-        "ledger",
-        bson::doc! { "_id": "txn-1", "amount": 100i64 },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection("ledger")
+        .insert_one(bson::doc! { "_id": "txn-1", "amount": 100i64 })
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
 
+    let txn = db.begin(true).unwrap();
     let got = db
-        .begin(true)
+        .collection("ledger")
+        .find(bson::doc! { "_id": "txn-1" })
+        .iter_raw(&txn)
         .unwrap()
-        .find_one(DEFAULT_CF, "ledger", bson::doc! { "_id": "txn-1" })
+        .next()
+        .transpose()
         .unwrap();
     assert!(got.is_some());
 }

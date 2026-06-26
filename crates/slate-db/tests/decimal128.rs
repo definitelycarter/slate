@@ -8,8 +8,7 @@
 //! double). The stored value stays a real `Decimal128` — `find` round-trips it.
 
 use bson::{Bson, Decimal128, doc, rawdoc};
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
-use slate_query::FindOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn dec(s: &str) -> Decimal128 {
@@ -19,33 +18,25 @@ fn dec(s: &str) -> Decimal128 {
 fn seeded() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "items".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "items",
-        vec![
+    db.collections().create("items").execute(&txn).unwrap();
+    db.collection("items")
+        .insert_many(vec![
             doc! { "_id": "1", "price": dec("10.00") },
             doc! { "_id": "2", "price": dec("25.50") },
             doc! { "_id": "3", "price": dec("100.00") },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
 
 fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
     let txn = db.begin(true).unwrap();
-    let out = txn
-        .query(DEFAULT_CF, "items", sql)
-        .unwrap()
-        .iter_values::<String>()
+    let out = db
+        .collection("items")
+        .query(sql)
+        .iter::<String>(&txn)
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
@@ -55,10 +46,10 @@ fn ids(db: &Database<MemoryStore>, sql: &str) -> Vec<String> {
 
 fn one_f64(db: &Database<MemoryStore>, sql: &str) -> f64 {
     let txn = db.begin(true).unwrap();
-    let v = txn
-        .query(DEFAULT_CF, "items", sql)
-        .unwrap()
-        .iter_values::<f64>()
+    let v = db
+        .collection("items")
+        .query(sql)
+        .iter::<f64>(&txn)
         .unwrap()
         .next()
         .unwrap()
@@ -69,10 +60,10 @@ fn one_f64(db: &Database<MemoryStore>, sql: &str) -> f64 {
 
 fn one_bson(db: &Database<MemoryStore>, sql: &str) -> Bson {
     let txn = db.begin(true).unwrap();
-    let v = txn
-        .query(DEFAULT_CF, "items", sql)
-        .unwrap()
-        .iter_values::<Bson>()
+    let v = db
+        .collection("items")
+        .query(sql)
+        .iter::<Bson>(&txn)
         .unwrap()
         .next()
         .unwrap()
@@ -148,8 +139,13 @@ fn find_still_round_trips_the_raw_decimal() {
     let db = seeded();
     let txn = db.begin(true).unwrap();
     // find returns the stored document untouched — the decimal is intact.
-    let found = txn
-        .find_one(DEFAULT_CF, "items", rawdoc! { "_id": "3" })
+    let found = db
+        .collection("items")
+        .find(rawdoc! { "_id": "3" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .expect("doc 3");
     assert_eq!(
@@ -157,16 +153,12 @@ fn find_still_round_trips_the_raw_decimal() {
         Some(bson::raw::RawBsonRef::Decimal128(dec("100.00")))
     );
     // and the Mongo filter surface compares decimals just like SQL does.
-    let n = txn
-        .find(
-            DEFAULT_CF,
-            "items",
-            rawdoc! { "price": { "$gt": 20 } },
-            FindOptions::default(),
-        )
+    let n = db
+        .collection("items")
+        .find(rawdoc! { "price": { "$gt": 20 } })
+        .iter_raw(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .count();
     assert_eq!(n, 2);
     txn.rollback().unwrap();
 }

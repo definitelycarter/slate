@@ -3,38 +3,35 @@
 //! real index choice: an indexed equality becomes an `IndexScan`→`KeyLookup`,
 //! while an unindexed predicate stays a `Scan`→`Filter`.
 
-use slate_db::{CollectionConfig, DEFAULT_CF, Database, DatabaseBuilder};
+use slate_db::v2::IndexOptions;
+use slate_db::{Database, DatabaseBuilder};
 use slate_store::MemoryStore;
 
 fn seeded() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "people".into(),
-        ..Default::default()
-    })
-    .unwrap();
+    db.collections().create("people").execute(&txn).unwrap();
     // `name` is indexed; `age` deliberately is not, so the two predicates below
     // take different plan shapes.
-    txn.create_index(DEFAULT_CF, "people", "name").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "people",
-        vec![
+    db.collection("people")
+        .indexes()
+        .create("name", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("people")
+        .insert_many(vec![
             bson::doc! { "_id": "1", "name": "ada", "age": 36 },
             bson::doc! { "_id": "2", "name": "alan", "age": 41 },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
 
 fn explain(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    let plan = txn.explain(DEFAULT_CF, "people", sql).unwrap();
+    let plan = db.collection("people").query(sql).explain(&txn).unwrap();
     txn.rollback().unwrap();
     plan
 }
@@ -86,30 +83,26 @@ fn unindexed_predicate_stays_a_filtered_scan() {
 fn seeded_tags() -> Database<MemoryStore> {
     let db = DatabaseBuilder::new().open(MemoryStore::new()).unwrap();
     let txn = db.begin(false).unwrap();
-    txn.create_collection(&CollectionConfig {
-        name: "posts".into(),
-        ..Default::default()
-    })
-    .unwrap();
-    txn.create_index(DEFAULT_CF, "posts", "tags.[]").unwrap();
-    txn.insert_many(
-        DEFAULT_CF,
-        "posts",
-        vec![
+    db.collections().create("posts").execute(&txn).unwrap();
+    db.collection("posts")
+        .indexes()
+        .create("tags.[]", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    db.collection("posts")
+        .insert_many(vec![
             bson::doc! { "_id": "1", "tags": ["rust", "db"] },
             bson::doc! { "_id": "2", "tags": ["go", "api"] },
-        ],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+        ])
+        .execute(&txn)
+        .unwrap();
     txn.commit().unwrap();
     db
 }
 
 fn explain_tags(db: &Database<MemoryStore>, sql: &str) -> String {
     let txn = db.begin(true).unwrap();
-    let plan = txn.explain(DEFAULT_CF, "posts", sql).unwrap();
+    let plan = db.collection("posts").query(sql).explain(&txn).unwrap();
     txn.rollback().unwrap();
     plan
 }
@@ -158,12 +151,10 @@ fn references_to_parameters_are_rejected_like_query() {
     // `@parameter` is an error rather than a misleading plan.
     let db = seeded();
     let txn = db.begin(true).unwrap();
-    let err = txn
-        .explain(
-            DEFAULT_CF,
-            "people",
-            "SELECT VALUE c.name FROM c WHERE c.age = @min",
-        )
+    let err = db
+        .collection("people")
+        .query("SELECT VALUE c.name FROM c WHERE c.age = @min")
+        .explain(&txn)
         .unwrap_err();
     assert!(
         err.to_string().contains("@min"),

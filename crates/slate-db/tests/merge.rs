@@ -2,8 +2,7 @@ mod common;
 use common::*;
 
 use bson::{Bson, doc, rawdoc};
-use slate_db::DEFAULT_CF;
-use slate_query::FindOptions;
+use slate_db::v2::IndexOptions;
 
 // ── Merge Many ──────────────────────────────────────────────────
 
@@ -17,17 +16,18 @@ fn merge_many_inserts_new() {
         doc! { "_id": "m1", "name": "Alice", "status": "active" },
         doc! { "_id": "m2", "name": "Bob", "status": "inactive" },
     ];
-    let result = txn
-        .merge_many(DEFAULT_CF, COLLECTION, docs)
+    let result = db
+        .collection(COLLECTION)
+        .merge_many(docs)
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(result, 2);
 
-    let found = txn
-        .find(DEFAULT_CF, COLLECTION, rawdoc! {}, FindOptions::default())
-        .unwrap()
-        .iter_raw()
+    let found = db
+        .collection(COLLECTION)
+        .find(rawdoc! {})
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -40,26 +40,28 @@ fn merge_many_merges_existing() {
     create_collection(&db, COLLECTION);
     let txn = db.begin(false).unwrap();
 
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "m1", "name": "Alice", "status": "active", "score": 100 },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "m1", "name": "Alice", "status": "active", "score": 100 })
+        .execute(&txn)
+        .unwrap();
 
     // Merge only updates status — score should remain
     let docs = vec![doc! { "_id": "m1", "status": "inactive" }];
-    let result = txn
-        .merge_many(DEFAULT_CF, COLLECTION, docs)
+    let result = db
+        .collection(COLLECTION)
+        .merge_many(docs)
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(result, 1);
 
-    let doc = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "m1" })
+    let doc = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "m1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
@@ -72,52 +74,38 @@ fn merge_many_index_maintenance() {
     let (db, _dir) = temp_db();
     create_collection(&db, COLLECTION);
     let txn = db.begin(false).unwrap();
-    txn.create_index(DEFAULT_CF, COLLECTION, "status").unwrap();
+    db.collection(COLLECTION)
+        .indexes()
+        .create("status", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
 
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "m1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "m1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
 
     // Merge changes status
-    txn.merge_many(
-        DEFAULT_CF,
-        COLLECTION,
-        vec![doc! { "_id": "m1", "status": "inactive" }],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .merge_many(vec![doc! { "_id": "m1", "status": "inactive" }])
+        .execute(&txn)
+        .unwrap();
 
     // Old index entry gone
-    let active = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("active".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let active = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("active".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(active.len(), 0);
 
     // New index entry present
-    let inactive = txn
-        .find(
-            DEFAULT_CF,
-            COLLECTION,
-            eq_filter("status", Bson::String("inactive".into())),
-            FindOptions::default(),
-        )
-        .unwrap()
-        .iter_raw()
+    let inactive = db
+        .collection(COLLECTION)
+        .find(eq_filter("status", Bson::String("inactive".into())))
+        .iter_raw(&txn)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -130,24 +118,21 @@ fn merge_many_unchanged_noop() {
     create_collection(&db, COLLECTION);
     let txn = db.begin(false).unwrap();
 
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "m1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "m1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
 
     // Merge with same values — updated count should still be 1 (we count the attempt, not actual changes)
     // But internally raw_merge_update returns false for no-op, so updated stays at 1 because merge_many
     // always increments updated when the record exists
     let docs = vec![doc! { "_id": "m1", "status": "active" }];
-    let result = txn
-        .merge_many(DEFAULT_CF, COLLECTION, docs)
+    let result = db
+        .collection(COLLECTION)
+        .merge_many(docs)
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(result, 1);
 }
 
@@ -157,27 +142,24 @@ fn merge_many_adds_new_field() {
     create_collection(&db, COLLECTION);
     let txn = db.begin(false).unwrap();
 
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "m1", "name": "Alice" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "m1", "name": "Alice" })
+        .execute(&txn)
+        .unwrap();
 
     // Merge adds a new field
-    txn.merge_many(
-        DEFAULT_CF,
-        COLLECTION,
-        vec![doc! { "_id": "m1", "status": "active" }],
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .merge_many(vec![doc! { "_id": "m1", "status": "active" }])
+        .execute(&txn)
+        .unwrap();
 
-    let doc = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "m1" })
+    let doc = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "m1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(doc.get_str("name").unwrap(), "Alice");
@@ -190,35 +172,42 @@ fn merge_many_mixed_insert_and_merge() {
     create_collection(&db, COLLECTION);
     let txn = db.begin(false).unwrap();
 
-    txn.insert_one(
-        DEFAULT_CF,
-        COLLECTION,
-        doc! { "_id": "m1", "name": "Alice", "status": "active" },
-    )
-    .unwrap()
-    .drain()
-    .unwrap();
+    db.collection(COLLECTION)
+        .insert_one(doc! { "_id": "m1", "name": "Alice", "status": "active" })
+        .execute(&txn)
+        .unwrap();
 
     let docs = vec![
         doc! { "_id": "m1", "status": "inactive" }, // merge
         doc! { "_id": "m2", "name": "Bob", "status": "active" }, // insert
     ];
-    let result = txn
-        .merge_many(DEFAULT_CF, COLLECTION, docs)
+    let result = db
+        .collection(COLLECTION)
+        .merge_many(docs)
+        .execute(&txn)
         .unwrap()
-        .drain()
-        .unwrap();
+        .affected;
     assert_eq!(result, 2);
 
-    let m1 = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "m1" })
+    let m1 = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "m1" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(m1.get_str("name").unwrap(), "Alice"); // preserved
     assert_eq!(m1.get_str("status").unwrap(), "inactive"); // merged
 
-    let m2 = txn
-        .find_one(DEFAULT_CF, COLLECTION, rawdoc! { "_id": "m2" })
+    let m2 = db
+        .collection(COLLECTION)
+        .find(rawdoc! { "_id": "m2" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
         .unwrap()
         .unwrap();
     assert_eq!(m2.get_str("name").unwrap(), "Bob");
