@@ -11,10 +11,13 @@
 //! [`Collection`] handle. Bodies are self-contained — they call the engine
 //! transaction's catalog methods directly, not a v1 verb.
 
+use std::sync::Arc;
+
 use slate_engine::{Catalog, CreateCollectionOptions, EngineError};
 use slate_store::Store;
 
 use super::Collection;
+use crate::WatchRegistry;
 use crate::database::Transaction;
 use crate::error::DbError;
 
@@ -22,11 +25,14 @@ use crate::error::DbError;
 /// [`Database::collections`](super::Collection) or `db.cf(cf).collections()`.
 pub struct Collections {
     cf: String,
+    /// The database's watch registry, carried so a [`Collection`] built by
+    /// `create` is a fully-formed reactive root like any other handle.
+    watch: Arc<WatchRegistry>,
 }
 
 impl Collections {
-    pub(super) fn new(cf: String) -> Self {
-        Self { cf }
+    pub(super) fn new(cf: String, watch: Arc<WatchRegistry>) -> Self {
+        Self { cf, watch }
     }
 
     /// Create a collection named `name` in this scope's column family. Returns a
@@ -35,6 +41,7 @@ impl Collections {
     pub fn create(&self, name: &str) -> CreateCollection<'_> {
         CreateCollection {
             cf: &self.cf,
+            watch: &self.watch,
             name: name.to_string(),
             pk_path: "_id".to_string(),
             ttl_path: "ttl".to_string(),
@@ -66,6 +73,7 @@ impl Collections {
 #[must_use = "a create-collection builder does nothing until .execute(&txn) runs it"]
 pub struct CreateCollection<'a> {
     cf: &'a str,
+    watch: &'a Arc<WatchRegistry>,
     name: String,
     pk_path: String,
     ttl_path: String,
@@ -106,6 +114,8 @@ impl CreateCollection<'_> {
         Ok(Collection {
             cf: self.cf.to_string(),
             collection: self.name,
+            // `Arc` refcount bump: the new handle is a reactive root like any other.
+            watch: self.watch.clone(),
         })
     }
 }

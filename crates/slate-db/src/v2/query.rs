@@ -8,33 +8,45 @@
 //! documents. Per the RFC the SQL builder carries no `count`/`first`/`distinct`
 //! — those live inline in the SQL.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use slate_store::Store;
 
 use crate::cursor::{Cursor, RawValuesIter};
 use crate::database::Transaction;
 use crate::error::DbError;
-use crate::{RawBson, RawDocumentBuf};
+use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
+use crate::{ChangeEvent, RawBson, RawDocumentBuf, WatchHandle, WatchRegistry};
 
 /// A lazily-built SQL read: parameters bind via [`params`](Self::params); a
 /// terminal runs it.
 ///
 /// Built by [`Collection::query`](super::Collection::query). Inert until a
 /// terminal — `.iter` / `.collect` consume the values, `.explain` renders the
-/// plan without running it.
-#[must_use = "a query builder does nothing until a terminal (.iter/.collect/.explain) runs it"]
+/// plan without running it, `.watch` / `.stream` register a subscription.
+#[must_use = "a query builder does nothing until a terminal (.iter/.collect/.explain/.watch/.stream) runs it"]
 pub struct QueryBuilder<'a, P = ()> {
     cf: &'a str,
     collection: &'a str,
+    /// The database's watch registry (borrowed from the [`Collection`]), used only
+    /// by the reactive terminals.
+    watch: &'a Arc<WatchRegistry>,
     sql: &'a str,
     params: Option<P>,
 }
 
 impl<'a> QueryBuilder<'a, ()> {
-    pub(super) fn new(cf: &'a str, collection: &'a str, sql: &'a str) -> Self {
+    pub(super) fn new(
+        cf: &'a str,
+        collection: &'a str,
+        watch: &'a Arc<WatchRegistry>,
+        sql: &'a str,
+    ) -> Self {
         Self {
             cf,
             collection,
+            watch,
             sql,
             params: None,
         }
@@ -46,9 +58,45 @@ impl<'a> QueryBuilder<'a, ()> {
         QueryBuilder {
             cf: self.cf,
             collection: self.collection,
+            watch: self.watch,
             sql: self.sql,
             params: Some(params),
         }
+    }
+
+    /// Register a **push** subscription on this SQL `WHERE` filter: `callback`
+    /// fires once per committed transaction with the batch of changes matching
+    /// it, recast against the filter's set boundary. The SQL is a filter `SELECT`
+    /// (`SELECT * FROM c WHERE …`); set operations (`ORDER BY`/`GROUP BY`/`LIMIT`/
+    /// aggregates/joins) are rejected by the registry. Takes no transaction; the
+    /// returned [`WatchHandle`] unregisters on drop.
+    ///
+    /// Only on the no-parameter builder — reactive SQL binds no `@params` (as in
+    /// v1), so `query(sql).params(..).watch(..)` does not compile.
+    pub fn watch(
+        self,
+        callback: impl Fn(&[ChangeEvent]) + Send + Sync + 'static,
+    ) -> Result<WatchHandle, DbError> {
+        WatchRegistry::watch_sql(
+            self.watch,
+            self.cf,
+            self.collection,
+            self.sql,
+            Arc::new(callback),
+        )
+    }
+
+    /// Open a **pull** subscription: a long-lived [`WatchStream`] with the same
+    /// SQL filter semantics as [`watch`](Self::watch) and the non-blocking
+    /// lag-drop delivery. Takes no transaction; unregisters on drop.
+    pub fn stream(self) -> Result<WatchStream, DbError> {
+        WatchRegistry::stream_sql(
+            self.watch,
+            self.cf,
+            self.collection,
+            self.sql,
+            DEFAULT_STREAM_CAPACITY,
+        )
     }
 }
 
@@ -296,5 +344,59 @@ mod tests {
             .analyze(&txn)
             .unwrap();
         assert!(!analyzed.is_empty());
+    }
+
+    #[test]
+    fn query_watch_fires_on_matching_commit() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::ChangeEvent;
+
+        let db = seed();
+        let batches: Arc<Mutex<Vec<Vec<ChangeEvent>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+        // SQL WHERE filter as a subscription — no transaction, no params
+        let _handle = db
+            .collection("users")
+            .query("SELECT * FROM c WHERE c.age > 25")
+            .watch(move |events| sink.lock().unwrap().push(events.to_vec()))
+            .unwrap();
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_one(doc! { "_id": 9, "name": "zoe", "age": 50 })
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let b = batches.lock().unwrap();
+        assert_eq!(b.len(), 1);
+        match &b[0][0] {
+            ChangeEvent::Insert { doc } => assert_eq!(doc.get_str("name").unwrap(), "zoe"),
+            other => panic!("expected Insert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_stream_drains_matching() {
+        let db = seed();
+        let stream = db
+            .collection("users")
+            .query("SELECT * FROM c WHERE c.age > 25")
+            .stream()
+            .unwrap();
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_one(doc! { "_id": 9, "age": 50 })
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.try_next() {
+            batches.push(batch);
+        }
+        assert_eq!(batches.len(), 1);
     }
 }

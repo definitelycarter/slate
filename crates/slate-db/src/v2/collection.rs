@@ -3,9 +3,12 @@
 //!
 //! Phase 0, slice A: [`Database::collection`] / [`Database::cf`] build a
 //! lightweight [`Collection`]; [`Collection::find`] opens a read builder. The
-//! handle owns only its `(cf, collection)` names — the transaction supplied at
-//! the terminal carries the execution state. (Reactive roots — the `Arc`s into
-//! `db` that `.watch`/`.stream` need — arrive with slice E.)
+//! handle owns its `(cf, collection)` names plus an `Arc` clone of the database's
+//! watch registry — the DB-lifetime root the reactive `.watch`/`.stream`
+//! terminals (slice E) register on, with no transaction. Data terminals still
+//! take the transaction supplied at the call.
+
+use std::sync::Arc;
 
 use serde::Serialize;
 use slate_store::Store;
@@ -17,6 +20,7 @@ use super::read::FindBuilder;
 use super::scripts::{Functions, Triggers, Validators};
 use super::write::{InsertBuilder, UpsertBuilder};
 use crate::DEFAULT_CF;
+use crate::WatchRegistry;
 use crate::database::Database;
 use slate_planner::UpsertMode;
 
@@ -26,23 +30,28 @@ use slate_planner::UpsertMode;
 pub struct Collection {
     // `pub(super)` so the sibling v2 modules (`collections` constructs a fresh
     // handle from `create`; `meta` reads them for stats/schema/purge) can reach
-    // the names without an accessor dance.
+    // these without an accessor dance.
     pub(super) cf: String,
     pub(super) collection: String,
+    /// `Arc` clone of the database's watch registry — the reactive root that lets
+    /// `find(f).watch`/`.stream` register a DB-lifetime subscription off this
+    /// handle without a transaction.
+    pub(super) watch: Arc<WatchRegistry>,
 }
 
 impl Collection {
     /// Open a `find` read over a Mongo-style `filter`. Returns a builder; nothing
     /// runs until a terminal (`.iter`/`.collect`/`.count`/`.first`) is called with
-    /// a transaction.
+    /// a transaction, or a reactive terminal (`.watch`/`.stream`) registers it.
     pub fn find<F: Serialize>(&self, filter: F) -> FindBuilder<'_, F> {
-        FindBuilder::new(&self.cf, &self.collection, filter)
+        FindBuilder::new(&self.cf, &self.collection, &self.watch, filter)
     }
 
     /// Open a CosmosDB-style SQL `query` over this collection. Returns a builder;
-    /// nothing runs until a terminal (`.iter`/`.collect`/`.explain`) runs it.
+    /// nothing runs until a terminal (`.iter`/`.collect`/`.explain`/`.watch`/
+    /// `.stream`) runs it.
     pub fn query<'a>(&'a self, sql: &'a str) -> QueryBuilder<'a> {
-        QueryBuilder::new(&self.cf, &self.collection, sql)
+        QueryBuilder::new(&self.cf, &self.collection, &self.watch, sql)
     }
 
     /// Insert a single document (generating an `_id` when absent). Returns a
@@ -117,6 +126,7 @@ impl Collection {
 /// collection on it to get a [`Collection`].
 pub struct CfScope {
     cf: String,
+    watch: Arc<WatchRegistry>,
 }
 
 impl CfScope {
@@ -125,13 +135,14 @@ impl CfScope {
         Collection {
             cf: self.cf,
             collection: name.to_string(),
+            watch: self.watch,
         }
     }
 
     /// The collection-management namespace for this column family:
     /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`.
     pub fn collections(self) -> Collections {
-        Collections::new(self.cf)
+        Collections::new(self.cf, self.watch)
     }
 }
 
@@ -141,18 +152,23 @@ impl<S: Store> Database<S> {
         Collection {
             cf: DEFAULT_CF.to_string(),
             collection: name.to_string(),
+            // `Arc` refcount bump: the handle carries a DB-lifetime reactive root.
+            watch: self.watch_registry().clone(),
         }
     }
 
     /// Scope a subsequent `collection(...)` to the column family `cf`.
     pub fn cf(&self, cf: &str) -> CfScope {
-        CfScope { cf: cf.to_string() }
+        CfScope {
+            cf: cf.to_string(),
+            watch: self.watch_registry().clone(),
+        }
     }
 
     /// The collection-management namespace for the default column family:
     /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`. Sugar for
     /// `db.cf(DEFAULT_CF).collections()`.
     pub fn collections(&self) -> Collections {
-        Collections::new(DEFAULT_CF.to_string())
+        Collections::new(DEFAULT_CF.to_string(), self.watch_registry().clone())
     }
 }

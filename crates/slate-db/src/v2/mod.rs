@@ -23,6 +23,11 @@
 //! the [`Collections`] namespace (`db.collections()` / `db.cf(cf).collections()`)
 //! with `create(name)` / `.list` / `.remove`; and the handle metadata terminals
 //! `stats` / `schema` / `purge`.
+//!
+//! Slice E: the reactive terminals — `find(filter).watch(cb)` / `.stream()` and
+//! `query(sql).watch(cb)` / `.stream()` — which register a DB-lifetime
+//! subscription on the watch registry (carried as an `Arc` on the handle) and
+//! take no transaction. Filter-only in phase 1.
 
 mod collection;
 mod collections;

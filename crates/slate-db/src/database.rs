@@ -409,6 +409,14 @@ impl<S: Store> Database<S> {
         )
     }
 
+    /// The ephemeral watch registry, behind its `Arc` — for v2's reactive
+    /// terminals (`find(f).watch`/`.stream`, `query(sql).watch`/`.stream`), which
+    /// register a DB-lifetime subscription with no transaction, exactly as the
+    /// flat `watch`/`stream` methods above do.
+    pub(crate) fn watch_registry(&self) -> &Arc<WatchRegistry> {
+        &self.watch_registry
+    }
+
     /// Walk a collection's records and index structures and report any integrity
     /// drift (missing / orphan / mismatched `i` / `u` / TTL entries).
     ///

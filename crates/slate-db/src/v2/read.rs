@@ -5,32 +5,46 @@
 //! *not* call `Transaction::find`/`count`/`run_plan`. Reads are raw BSON for now
 //! (`RawDocumentBuf`); typed reads (generic `T`) are Decision 9 / phase 2.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use slate_store::Store;
 
 use crate::cursor::{Cursor, RawCursorIter};
 use crate::database::Transaction;
 use crate::error::DbError;
-use crate::{FindOptions, RawDocumentBuf, Sort, SortDirection};
+use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
+use crate::{ChangeEvent, FindOptions, RawDocumentBuf, Sort, SortDirection};
+use crate::{WatchHandle, WatchRegistry};
 
 /// A lazily-built `find` read: stages reshape it, a terminal runs it.
 ///
 /// Built by [`Collection::find`](super::Collection::find). Inert until a terminal
 /// is called — `.iter` / `.collect` / `.count` / `.first`, each taking the
-/// transaction the read runs in.
-#[must_use = "a find builder does nothing until a terminal (.iter/.collect/.count/.first) runs it"]
+/// transaction the read runs in, or the reactive `.watch` / `.stream`, which
+/// register a subscription with no transaction.
+#[must_use = "a find builder does nothing until a terminal (.iter/.collect/.count/.first/.watch/.stream) runs it"]
 pub struct FindBuilder<'a, F> {
     cf: &'a str,
     collection: &'a str,
+    /// The database's watch registry (borrowed from the [`Collection`]), used only
+    /// by the reactive terminals.
+    watch: &'a Arc<WatchRegistry>,
     filter: F,
     options: FindOptions,
 }
 
 impl<'a, F> FindBuilder<'a, F> {
-    pub(super) fn new(cf: &'a str, collection: &'a str, filter: F) -> Self {
+    pub(super) fn new(
+        cf: &'a str,
+        collection: &'a str,
+        watch: &'a Arc<WatchRegistry>,
+        filter: F,
+    ) -> Self {
         Self {
             cf,
             collection,
+            watch,
             filter,
             options: FindOptions::default(),
         }
@@ -186,6 +200,60 @@ impl<F: Serialize> FindBuilder<'_, F> {
     /// it for a `find`.
     pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
         super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
+    }
+
+    /// Reactive terminals are **filter-only**: a `find` reshaped with
+    /// `sort`/`offset`/`limit`/`project` has no meaning as a change subscription,
+    /// so reject it at runtime (phase 1). An untouched `find(filter)` passes.
+    fn ensure_filter_only(&self) -> Result<(), DbError> {
+        if self.options.sort.is_empty()
+            && self.options.skip.is_none()
+            && self.options.take.is_none()
+            && self.options.columns.is_none()
+        {
+            Ok(())
+        } else {
+            Err(DbError::InvalidQuery(
+                "watch/stream are filter-only: drop sort/offset/limit/project".to_string(),
+            ))
+        }
+    }
+
+    /// Register a **push** subscription: `callback` fires once per committed
+    /// transaction with the batch of changes matching this filter, recast against
+    /// the filter's set boundary (enter → `Insert`, leave → `Delete`, modified
+    /// in-set → `Update`). Takes no transaction — the returned [`WatchHandle`]
+    /// unregisters on drop. Filter-only (see [`ensure_filter_only`](Self::ensure_filter_only)).
+    pub fn watch(
+        self,
+        callback: impl Fn(&[ChangeEvent]) + Send + Sync + 'static,
+    ) -> Result<WatchHandle, DbError> {
+        self.ensure_filter_only()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
+        WatchRegistry::watch_bson(
+            self.watch,
+            self.cf,
+            self.collection,
+            &filter_raw,
+            Arc::new(callback),
+        )
+    }
+
+    /// Open a **pull** subscription: a long-lived [`WatchStream`] the consumer
+    /// drains on its own thread (non-blocking lag-drop, so a slow consumer never
+    /// blocks the writer). Same filter/set-transition semantics as
+    /// [`watch`](Self::watch); takes no transaction, unregisters on drop.
+    /// Filter-only.
+    pub fn stream(self) -> Result<WatchStream, DbError> {
+        self.ensure_filter_only()?;
+        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
+        WatchRegistry::stream_bson(
+            self.watch,
+            self.cf,
+            self.collection,
+            &filter_raw,
+            DEFAULT_STREAM_CAPACITY,
+        )
     }
 }
 
@@ -361,5 +429,84 @@ mod tests {
         assert!(!analyzed.is_empty());
         // analyze annotates with actual counts that plain explain lacks
         assert_ne!(explained, analyzed);
+    }
+
+    #[test]
+    fn find_watch_fires_on_matching_commit() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::ChangeEvent;
+
+        let db = seed();
+        let batches: Arc<Mutex<Vec<Vec<ChangeEvent>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+        // register on the db-rooted handle — no transaction
+        let _handle = db
+            .collection("users")
+            .find(doc! { "age": { "$gt": 25 } })
+            .watch(move |events| sink.lock().unwrap().push(events.to_vec()))
+            .unwrap();
+
+        // a matching insert in a later commit fires the callback inline
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_one(doc! { "_id": 9, "name": "zoe", "age": 50 })
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let b = batches.lock().unwrap();
+        assert_eq!(b.len(), 1, "one matching commit → one batch");
+        match &b[0][0] {
+            ChangeEvent::Insert { doc } => assert_eq!(doc.get_str("name").unwrap(), "zoe"),
+            other => panic!("expected Insert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_stream_drains_matching_batches() {
+        let db = seed();
+        let stream = db
+            .collection("users")
+            .find(doc! { "age": { "$gt": 25 } })
+            .stream()
+            .unwrap();
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_one(doc! { "_id": 9, "age": 50 })
+            .execute(&txn)
+            .unwrap();
+        // a non-matching write contributes no batch
+        db.collection("users")
+            .insert_one(doc! { "_id": 10, "age": 5 })
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let mut batches = Vec::new();
+        while let Some(batch) = stream.try_next() {
+            batches.push(batch);
+        }
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+        assert!(!stream.lagged());
+    }
+
+    #[test]
+    fn watch_and_stream_reject_non_filter_stages() {
+        use crate::ChangeEvent;
+
+        let db = seed();
+        // sort/offset/limit/project make no sense for a subscription → runtime error
+        let w = db
+            .collection("users")
+            .find(doc! {})
+            .sort("age", SortDirection::Asc)
+            .watch(|_: &[ChangeEvent]| {});
+        assert!(w.is_err());
+
+        let s = db.collection("users").find(doc! {}).limit(5).stream();
+        assert!(s.is_err());
     }
 }
