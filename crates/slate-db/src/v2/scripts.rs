@@ -101,7 +101,7 @@ pub struct Triggers<'a> {
 }
 
 impl<'a> Triggers<'a> {
-    pub(super) fn new(cf: &'a str, collection: &'a str) -> Self {
+    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
         Self { cf, collection }
     }
 
@@ -162,7 +162,7 @@ pub struct Validators<'a> {
 }
 
 impl<'a> Validators<'a> {
-    pub(super) fn new(cf: &'a str, collection: &'a str) -> Self {
+    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
         Self { cf, collection }
     }
 
@@ -222,7 +222,7 @@ pub struct Functions<'a> {
 }
 
 impl<'a> Functions<'a> {
-    pub(super) fn new(cf: &'a str, collection: &'a str) -> Self {
+    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
         Self { cf, collection }
     }
 

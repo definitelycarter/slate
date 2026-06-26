@@ -39,6 +39,111 @@ pub struct WriteResult {
     pub affected: u64,
 }
 
+// ── Shared write cores ───────────────────────────────────────────────
+//
+// Each lowers one mutation to a plan. Called by both the v2 write builders
+// above and the (inverted) flat `Transaction` mutation methods, so the two
+// surfaces run one body. The flat method then wraps the plan in a cursor via
+// [`super::exec::write_cursor`]; the builders drain it for a count.
+
+/// Lower an `update`: select the matched rows (`take`-limited when `one`) and
+/// apply the Mongo update document's assignments.
+pub(crate) fn update_plan<F: Serialize, U: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    filter: &F,
+    update: &U,
+    one: bool,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let filter_raw = bson::serialize_to_raw_document_buf(filter)?;
+    let update_raw = bson::serialize_to_raw_document_buf(update)?;
+    let assignments = slate_query::update_to_assignments(&update_raw)?;
+    let query = super::exec::write_query(&filter_raw, one.then_some(1))?;
+    let ctx = super::exec::write_context(txn, cf, collection, txn.collection_meta(cf, collection)?);
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Update { query, assignments },
+        &ctx,
+    )?)
+}
+
+/// Lower a `delete`: select the matched rows (`take`-limited when `one`).
+pub(crate) fn delete_plan<F: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    filter: &F,
+    one: bool,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let filter_raw = bson::serialize_to_raw_document_buf(filter)?;
+    let query = super::exec::write_query(&filter_raw, one.then_some(1))?;
+    let ctx = super::exec::write_context(txn, cf, collection, txn.collection_meta(cf, collection)?);
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Delete { query },
+        &ctx,
+    )?)
+}
+
+/// Lower a `replace`: select the first matched row and swap it for `replacement`.
+pub(crate) fn replace_plan<F: Serialize, R: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    filter: &F,
+    replacement: &R,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let filter_raw = bson::serialize_to_raw_document_buf(filter)?;
+    let replacement = bson::serialize_to_raw_document_buf(replacement)?;
+    // Replace targets a single document, mirroring v1's `replace_one`.
+    let query = super::exec::write_query(&filter_raw, Some(1))?;
+    let ctx = super::exec::write_context(txn, cf, collection, txn.collection_meta(cf, collection)?);
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Replace { query, replacement },
+        &ctx,
+    )?)
+}
+
+/// Lower an `insert`: a scan-free write, so an empty meta suffices.
+pub(crate) fn insert_plan<D: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    docs: &[D],
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let docs = serialize_docs(docs)?;
+    let ctx = super::exec::write_context(
+        txn,
+        cf,
+        collection,
+        slate_planner::CollectionMeta::default(),
+    );
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Insert { docs },
+        &ctx,
+    )?)
+}
+
+/// Lower an `upsert`/`merge`: keyed by `_id`, so an empty meta suffices.
+pub(crate) fn upsert_plan<D: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    docs: &[D],
+    mode: UpsertMode,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let docs = serialize_docs(docs)?;
+    let ctx = super::exec::write_context(
+        txn,
+        cf,
+        collection,
+        slate_planner::CollectionMeta::default(),
+    );
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Upsert { docs, mode },
+        &ctx,
+    )?)
+}
+
 // ── Filter writes: update / delete / replace ─────────────────────────
 
 /// An `update` write, built by [`FindBuilder::update`](super::FindBuilder::update).
@@ -76,20 +181,14 @@ impl<F: Serialize, U: Serialize> UpdateBuilder<'_, F, U> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
-        let update_raw = bson::serialize_to_raw_document_buf(&self.update)?;
-        let assignments = slate_query::update_to_assignments(&update_raw)?;
-        let query = super::exec::write_query(&filter_raw, self.one.then_some(1))?;
-        let ctx = super::exec::write_context(
-            txn,
+        update_plan(
             self.cf,
             self.collection,
-            txn.collection_meta(self.cf, self.collection)?,
-        );
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Update { query, assignments },
-            &ctx,
-        )?)
+            &self.filter,
+            &self.update,
+            self.one,
+            txn,
+        )
     }
 
     /// Run the update, returning how many documents it changed.
@@ -143,18 +242,7 @@ impl<F: Serialize> DeleteBuilder<'_, F> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
-        let query = super::exec::write_query(&filter_raw, self.one.then_some(1))?;
-        let ctx = super::exec::write_context(
-            txn,
-            self.cf,
-            self.collection,
-            txn.collection_meta(self.cf, self.collection)?,
-        );
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Delete { query },
-            &ctx,
-        )?)
+        delete_plan(self.cf, self.collection, &self.filter, self.one, txn)
     }
 
     /// Run the delete, returning how many documents it removed.
@@ -204,20 +292,13 @@ impl<F: Serialize, R: Serialize> ReplaceBuilder<'_, F, R> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
-        let replacement = bson::serialize_to_raw_document_buf(&self.replacement)?;
-        // Replace targets a single document, mirroring v1's `replace_one`.
-        let query = super::exec::write_query(&filter_raw, Some(1))?;
-        let ctx = super::exec::write_context(
-            txn,
+        replace_plan(
             self.cf,
             self.collection,
-            txn.collection_meta(self.cf, self.collection)?,
-        );
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Replace { query, replacement },
-            &ctx,
-        )?)
+            &self.filter,
+            &self.replacement,
+            txn,
+        )
     }
 
     /// Run the replace, returning how many documents it replaced (0 or 1).
@@ -265,18 +346,7 @@ impl<D: Serialize> InsertBuilder<'_, D> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let docs = serialize_docs(&self.docs)?;
-        // Insert scans nothing, so an empty meta suffices.
-        let ctx = super::exec::write_context(
-            txn,
-            self.cf,
-            self.collection,
-            slate_planner::CollectionMeta::default(),
-        );
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Insert { docs },
-            &ctx,
-        )?)
+        insert_plan(self.cf, self.collection, &self.docs, txn)
     }
 
     /// Run the insert, returning how many documents it inserted.
@@ -327,21 +397,7 @@ impl<D: Serialize> UpsertBuilder<'_, D> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let docs = serialize_docs(&self.docs)?;
-        // Upsert keys by `_id` rather than scanning, so an empty meta suffices.
-        let ctx = super::exec::write_context(
-            txn,
-            self.cf,
-            self.collection,
-            slate_planner::CollectionMeta::default(),
-        );
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Upsert {
-                docs,
-                mode: self.mode,
-            },
-            &ctx,
-        )?)
+        upsert_plan(self.cf, self.collection, &self.docs, self.mode, txn)
     }
 
     /// Run the upsert/merge, returning how many documents it wrote.

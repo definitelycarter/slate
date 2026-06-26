@@ -100,63 +100,118 @@ impl<'a> QueryBuilder<'a, ()> {
     }
 }
 
+/// The shared SQL read core: parse, validate parameters, and plan. Called by
+/// both the v2 [`QueryBuilder`] terminals and the (inverted) flat
+/// `Transaction::query`/`query_with_params`/`explain`, so the two surfaces run
+/// one body. `params` is the bound parameter document (`None` for the
+/// no-parameter forms); a referenced `@param` with no value is rejected.
+pub(crate) fn query_plan<S: Store>(
+    cf: &str,
+    collection: &str,
+    sql: &str,
+    params: Option<&bson::RawDocument>,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let query = slate_sql::parse(sql)?;
+
+    // Every referenced `@param` must have a supplied value; the plan shape never
+    // depends on a parameter's value, only its presence.
+    let mut supplied: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Some(doc) = params {
+        for entry in doc.iter() {
+            let (name, _) = entry.map_err(|err| DbError::InvalidQuery(err.to_string()))?;
+            supplied.insert(name.to_string());
+        }
+    }
+    for name in query.parameter_names() {
+        if !supplied.contains(name) {
+            return Err(DbError::InvalidQuery(format!(
+                "query references parameter @{name}, which was not supplied"
+            )));
+        }
+    }
+
+    // A FROM-less query (`SELECT VALUE 1`) reads no container, so it needs no
+    // catalog metadata.
+    let meta = if query.from.is_some() {
+        txn.collection_meta(cf, collection)?
+    } else {
+        slate_planner::CollectionMeta {
+            indexes: Vec::new(),
+            compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
+            pk_path: "_id".to_string(),
+        }
+    };
+    let ctx = slate_planner::PlanContext {
+        container: slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        },
+        meta,
+        validators: Vec::new(),
+        triggers: Vec::new(),
+    };
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Query(query),
+        &ctx,
+    )?)
+}
+
+/// The shared SQL read core: lower and wrap in a [`Cursor`], binding `params`.
+pub(crate) fn query_cursor<'t, 'db, S>(
+    cf: &str,
+    collection: &str,
+    sql: &str,
+    params: Option<RawDocumentBuf>,
+    txn: &'t Transaction<'db, S>,
+) -> Result<Cursor<'db, 't, S>, DbError>
+where
+    S: Store + 'db,
+{
+    let plan = query_plan(cf, collection, sql, params.as_deref(), txn)?;
+    // `.cloned()` rand/watch handles are `Arc`/`Rc` refcount bumps, the same
+    // handoff the v1 read path made.
+    Ok(match params {
+        Some(params) => Cursor::new_with_params(
+            txn.engine_txn(),
+            plan,
+            txn.pool(),
+            params,
+            txn.rand().cloned(),
+            txn.watch_sink().cloned(),
+        ),
+        None => Cursor::new(
+            txn.engine_txn(),
+            plan,
+            txn.pool(),
+            txn.rand().cloned(),
+            txn.watch_sink().cloned(),
+        ),
+    })
+}
+
 impl<P: Serialize> QueryBuilder<'_, P> {
-    /// Parse, validate parameters, and plan the query — v2's own SQL body, not a
-    /// call into `Transaction::query`/`lower_sql`. Returns the plan plus the
-    /// serialized parameter document (if any) for the cursor.
-    fn lower<S>(
+    /// Serialize the bound parameters (if any) once, for the terminals below.
+    fn params_raw(&self) -> Result<Option<RawDocumentBuf>, DbError> {
+        match &self.params {
+            Some(p) => Ok(Some(bson::serialize_to_raw_document_buf(p)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn lower<S: Store>(
         &self,
         txn: &Transaction<'_, S>,
-    ) -> Result<(slate_planner::Plan, Option<RawDocumentBuf>), DbError>
-    where
-        S: Store,
-    {
-        let params_raw = match &self.params {
-            Some(p) => Some(bson::serialize_to_raw_document_buf(p)?),
-            None => None,
-        };
-
-        let query = slate_sql::parse(self.sql)?;
-
-        // Every referenced `@param` must have a supplied value; the plan shape
-        // never depends on a parameter's value, only its presence.
-        let mut supplied: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        if let Some(doc) = &params_raw {
-            for entry in doc.iter() {
-                let (name, _) = entry.map_err(|err| DbError::InvalidQuery(err.to_string()))?;
-                supplied.insert(name.to_string());
-            }
-        }
-        for name in query.parameter_names() {
-            if !supplied.contains(name) {
-                return Err(DbError::InvalidQuery(format!(
-                    "query references parameter @{name}, which was not supplied"
-                )));
-            }
-        }
-
-        // A FROM-less query (`SELECT VALUE 1`) reads no container, so it needs no
-        // catalog metadata.
-        let meta = if query.from.is_some() {
-            txn.collection_meta(self.cf, self.collection)?
-        } else {
-            slate_planner::CollectionMeta {
-                indexes: Vec::new(),
-                compound_indexes: Vec::new(),
-                vector_indexes: Vec::new(),
-                pk_path: "_id".to_string(),
-            }
-        };
-        let ctx = slate_planner::PlanContext {
-            container: slate_planner::CollectionRef {
-                cf: self.cf.to_string(),
-                collection: self.collection.to_string(),
-            },
-            meta,
-            validators: Vec::new(),
-            triggers: Vec::new(),
-        };
-        let plan = slate_planner::plan(slate_planner::Statement::Query(query), &ctx)?;
+    ) -> Result<(slate_planner::Plan, Option<RawDocumentBuf>), DbError> {
+        let params_raw = self.params_raw()?;
+        let plan = query_plan(
+            self.cf,
+            self.collection,
+            self.sql,
+            params_raw.as_deref(),
+            txn,
+        )?;
         Ok((plan, params_raw))
     }
 
@@ -167,26 +222,7 @@ impl<P: Serialize> QueryBuilder<'_, P> {
     where
         S: Store + 'db,
     {
-        let (plan, params_raw) = self.lower(txn)?;
-        // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand
-        // and watch handles — the same handoff `Transaction::run_plan` makes.
-        Ok(match params_raw {
-            Some(params) => Cursor::new_with_params(
-                txn.engine_txn(),
-                plan,
-                txn.pool(),
-                params,
-                txn.rand().cloned(),
-                txn.watch_sink().cloned(),
-            ),
-            None => Cursor::new(
-                txn.engine_txn(),
-                plan,
-                txn.pool(),
-                txn.rand().cloned(),
-                txn.watch_sink().cloned(),
-            ),
-        })
+        query_cursor(self.cf, self.collection, self.sql, self.params_raw()?, txn)
     }
 
     /// Stream the result values lazily.

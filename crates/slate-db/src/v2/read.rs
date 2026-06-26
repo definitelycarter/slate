@@ -105,28 +105,64 @@ impl<'a, F> FindBuilder<'a, F> {
     }
 }
 
+/// The shared `find` read core: lower the filter to a query plan. Called by both
+/// the v2 [`FindBuilder`] terminals and the (inverted) flat `Transaction::find`,
+/// so the two surfaces run one body. Shares only `collection_meta` (a catalog
+/// read) with the rest of the transaction.
+pub(crate) fn find_plan<F: Serialize, S: Store>(
+    cf: &str,
+    collection: &str,
+    filter: &F,
+    options: &FindOptions,
+    txn: &Transaction<'_, S>,
+) -> Result<slate_planner::Plan, DbError> {
+    let filter_raw = bson::serialize_to_raw_document_buf(filter)?;
+    let query = slate_query::find_to_query(&filter_raw, options)?;
+    let ctx = slate_planner::PlanContext {
+        container: slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        },
+        meta: txn.collection_meta(cf, collection)?,
+        validators: Vec::new(),
+        triggers: Vec::new(),
+    };
+    Ok(slate_planner::plan(
+        slate_planner::Statement::Query(query),
+        &ctx,
+    )?)
+}
+
+/// The shared `find` read core: lower and wrap in a [`Cursor`]. The cursor's
+/// `.cloned()` rand/watch handles are `Arc`/`Rc` refcount bumps, the same handoff
+/// the v1 read path made.
+pub(crate) fn find_cursor<'t, 'db, F, S>(
+    cf: &str,
+    collection: &str,
+    filter: &F,
+    options: &FindOptions,
+    txn: &'t Transaction<'db, S>,
+) -> Result<Cursor<'db, 't, S>, DbError>
+where
+    F: Serialize,
+    S: Store + 'db,
+{
+    let plan = find_plan(cf, collection, filter, options, txn)?;
+    Ok(Cursor::new(
+        txn.engine_txn(),
+        plan,
+        txn.pool(),
+        txn.rand().cloned(),
+        txn.watch_sink().cloned(),
+    ))
+}
+
 impl<F: Serialize> FindBuilder<'_, F> {
-    /// Lower the filter and plan it — v2's own read body, not a call into
-    /// `Transaction::find`. Shares only `collection_meta` (a catalog read).
     fn build_plan<S: Store>(
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<slate_planner::Plan, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
-        let query = slate_query::find_to_query(&filter_raw, &self.options)?;
-        let ctx = slate_planner::PlanContext {
-            container: slate_planner::CollectionRef {
-                cf: self.cf.to_string(),
-                collection: self.collection.to_string(),
-            },
-            meta: txn.collection_meta(self.cf, self.collection)?,
-            validators: Vec::new(),
-            triggers: Vec::new(),
-        };
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Query(query),
-            &ctx,
-        )?)
+        find_plan(self.cf, self.collection, &self.filter, &self.options, txn)
     }
 
     fn build_cursor<'t, 'db, S>(
@@ -136,16 +172,7 @@ impl<F: Serialize> FindBuilder<'_, F> {
     where
         S: Store + 'db,
     {
-        let plan = self.build_plan(txn)?;
-        // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand
-        // and watch handles — the same handoff `Transaction::run_plan` makes.
-        Ok(Cursor::new(
-            txn.engine_txn(),
-            plan,
-            txn.pool(),
-            txn.rand().cloned(),
-            txn.watch_sink().cloned(),
-        ))
+        find_cursor(self.cf, self.collection, &self.filter, &self.options, txn)
     }
 
     /// Stream the matching documents lazily.

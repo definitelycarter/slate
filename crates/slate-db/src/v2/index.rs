@@ -206,7 +206,7 @@ pub struct Indexes<'a> {
 }
 
 impl<'a> Indexes<'a> {
-    pub(super) fn new(cf: &'a str, collection: &'a str) -> Self {
+    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
         Self { cf, collection }
     }
 

@@ -63,10 +63,61 @@ impl<'a, F> DistinctBuilder<'a, F> {
     }
 }
 
+/// The shared `distinct` read core: build the `Distinct` plan and cursor. Called
+/// by both the v2 [`DistinctBuilder`] terminals and the (inverted) flat
+/// `Transaction::distinct`, so the two surfaces run one body. Distinct scans the
+/// container directly, so it needs no index metadata (`CollectionMeta::default()`).
+/// `sort` is the already-mapped AST direction.
+// The args are all distinct and meaningful (container + field + filter + paging
+// + txn); bundling them into a struct just to satisfy the lint would add
+// indirection without clarity.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn distinct_cursor<'t, 'db, F, S>(
+    cf: &str,
+    collection: &str,
+    field: &str,
+    filter: &F,
+    sort: Option<slate_ast::SortDirection>,
+    skip: Option<usize>,
+    take: Option<usize>,
+    txn: &'t Transaction<'db, S>,
+) -> Result<Cursor<'db, 't, S>, DbError>
+where
+    F: Serialize,
+    S: Store + 'db,
+{
+    let filter_raw = bson::serialize_to_raw_document_buf(filter)?;
+    let predicate = slate_query::translate_filter(&filter_raw)?;
+    let stmt = slate_planner::Statement::Distinct {
+        alias: slate_query::ALIAS.to_string(),
+        field: field.to_string(),
+        predicate,
+        sort,
+        skip: skip.map(|n| n as u64),
+        take: take.map(|n| n as u64),
+    };
+    let ctx = slate_planner::PlanContext {
+        container: slate_planner::CollectionRef {
+            cf: cf.to_string(),
+            collection: collection.to_string(),
+        },
+        meta: slate_planner::CollectionMeta::default(),
+        validators: Vec::new(),
+        triggers: Vec::new(),
+    };
+    let plan = slate_planner::plan(stmt, &ctx)?;
+    // `.cloned()` rand/watch handles are `Arc`/`Rc` refcount bumps, the same
+    // handoff the v1 read path made.
+    Ok(Cursor::new(
+        txn.engine_txn(),
+        plan,
+        txn.pool(),
+        txn.rand().cloned(),
+        txn.watch_sink().cloned(),
+    ))
+}
+
 impl<F: Serialize> DistinctBuilder<'_, F> {
-    /// Build the `Distinct` plan and cursor — v2's own body, not a call into
-    /// `Transaction::distinct`. Distinct scans the container directly, so it needs
-    /// no index metadata (`CollectionMeta::default()`).
     fn build_cursor<'t, 'db, S>(
         self,
         txn: &'t Transaction<'db, S>,
@@ -74,39 +125,20 @@ impl<F: Serialize> DistinctBuilder<'_, F> {
     where
         S: Store + 'db,
     {
-        let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
-        let predicate = slate_query::translate_filter(&filter_raw)?;
         let sort = self.sort.map(|dir| match dir {
             SortDirection::Asc => slate_ast::SortDirection::Asc,
             SortDirection::Desc => slate_ast::SortDirection::Desc,
         });
-        let stmt = slate_planner::Statement::Distinct {
-            alias: slate_query::ALIAS.to_string(),
-            field: self.field,
-            predicate,
+        distinct_cursor(
+            self.cf,
+            self.collection,
+            &self.field,
+            &self.filter,
             sort,
-            skip: self.skip.map(|n| n as u64),
-            take: self.take.map(|n| n as u64),
-        };
-        let ctx = slate_planner::PlanContext {
-            container: slate_planner::CollectionRef {
-                cf: self.cf.to_string(),
-                collection: self.collection.to_string(),
-            },
-            meta: slate_planner::CollectionMeta::default(),
-            validators: Vec::new(),
-            triggers: Vec::new(),
-        };
-        let plan = slate_planner::plan(stmt, &ctx)?;
-        // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand
-        // and watch handles — the same handoff `Transaction::run_plan` makes.
-        Ok(Cursor::new(
-            txn.engine_txn(),
-            plan,
-            txn.pool(),
-            txn.rand().cloned(),
-            txn.watch_sink().cloned(),
-        ))
+            self.skip,
+            self.take,
+            txn,
+        )
     }
 
     /// Stream the distinct values lazily.

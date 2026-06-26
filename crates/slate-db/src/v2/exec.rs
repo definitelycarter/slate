@@ -23,7 +23,7 @@ use crate::{FindOptions, RawDocumentBuf};
 /// `params` is the query's bound parameters (`None` for `find`); they are merged
 /// with the injected `$now` exactly as the cursor does. The result rows are run
 /// and dropped — only the per-node statistics are kept.
-pub(super) fn analyze_plan<S: Store>(
+pub(crate) fn analyze_plan<S: Store>(
     plan: slate_planner::Plan,
     params: Option<RawDocumentBuf>,
     txn: &Transaction<'_, S>,
@@ -82,10 +82,29 @@ pub(super) fn write_query(
     Ok(slate_query::find_to_query(filter_raw, &options)?)
 }
 
-/// Build a cursor over a mutation plan, drain it, and return the affected count
-/// — v2's own write body, the same handoff `Transaction::run_plan` + `drain`
-/// makes. The mutation plan yields the written documents; here only their count
-/// is kept.
+/// Wrap a mutation plan in a [`Cursor`] — the cursor the flat `Transaction`
+/// mutation methods return (the caller drains it for the count). `.cloned()`
+/// rand/watch handles are `Arc`/`Rc` refcount bumps, the same handoff the v1
+/// mutation path made.
+pub(crate) fn write_cursor<'t, 'db, S>(
+    plan: slate_planner::Plan,
+    txn: &'t Transaction<'db, S>,
+) -> Cursor<'db, 't, S>
+where
+    S: Store + 'db,
+{
+    Cursor::new(
+        txn.engine_txn(),
+        plan,
+        txn.pool(),
+        txn.rand().cloned(),
+        txn.watch_sink().cloned(),
+    )
+}
+
+/// Build a cursor over a mutation plan, drain it, and return the affected count —
+/// the v2 write builders' `.execute` path. The mutation plan yields the written
+/// documents; here only their count is kept.
 pub(super) fn execute_write<'db, S>(
     plan: slate_planner::Plan,
     txn: &Transaction<'db, S>,
@@ -93,14 +112,5 @@ pub(super) fn execute_write<'db, S>(
 where
     S: Store + 'db,
 {
-    // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand and
-    // watch handles — the same handoff the v1 mutation path makes.
-    let cursor = Cursor::new(
-        txn.engine_txn(),
-        plan,
-        txn.pool(),
-        txn.rand().cloned(),
-        txn.watch_sink().cloned(),
-    );
-    cursor.drain()
+    write_cursor(plan, txn).drain()
 }

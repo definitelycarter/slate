@@ -2,10 +2,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bson::{RawBson, RawDocumentBuf};
+use bson::RawDocumentBuf;
 use serde::Serialize;
 use slate_engine::{
-    Catalog, Engine, EngineTransaction, FunctionKind, IntegrityReport, KvEngine, VectorIndexSpec,
+    Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine, VectorIndexSpec,
 };
 use slate_executor::watch::WatchSink;
 use slate_query::{DistinctOptions, FindOptions};
@@ -310,14 +310,10 @@ impl<S: Store> Database<S> {
         filter: F,
         callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
     ) -> Result<WatchHandle, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        WatchRegistry::watch_bson(
-            &self.watch_registry,
-            cf,
-            collection,
-            &filter_raw,
-            Arc::new(callback),
-        )
+        self.cf(cf)
+            .collection(collection)
+            .find(filter)
+            .watch(callback)
     }
 
     /// Register a **watch query**: a SQL `WHERE` filter against `(cf,
@@ -348,13 +344,10 @@ impl<S: Store> Database<S> {
         sql_filter: &str,
         callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
     ) -> Result<WatchHandle, DbError> {
-        WatchRegistry::watch_sql(
-            &self.watch_registry,
-            cf,
-            collection,
-            sql_filter,
-            Arc::new(callback),
-        )
+        self.cf(cf)
+            .collection(collection)
+            .query(sql_filter)
+            .watch(callback)
     }
 
     /// Open a **watch stream** with a BSON (`find`-style) filter: the pull
@@ -376,14 +369,7 @@ impl<S: Store> Database<S> {
         collection: &str,
         filter: F,
     ) -> Result<crate::watch::WatchStream, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        WatchRegistry::stream_bson(
-            &self.watch_registry,
-            cf,
-            collection,
-            &filter_raw,
-            crate::watch::DEFAULT_STREAM_CAPACITY,
-        )
+        self.cf(cf).collection(collection).find(filter).stream()
     }
 
     /// Open a **watch stream** with a SQL `WHERE` filter: the pull (cursor)
@@ -400,13 +386,10 @@ impl<S: Store> Database<S> {
         collection: &str,
         sql_filter: &str,
     ) -> Result<crate::watch::WatchStream, DbError> {
-        WatchRegistry::stream_sql(
-            &self.watch_registry,
-            cf,
-            collection,
-            sql_filter,
-            crate::watch::DEFAULT_STREAM_CAPACITY,
-        )
+        self.cf(cf)
+            .collection(collection)
+            .query(sql_filter)
+            .stream()
     }
 
     /// The ephemeral watch registry, behind its `Arc` — for v2's reactive
@@ -532,14 +515,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         docs: impl IntoIterator<Item = D>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let raw_docs: Vec<RawDocumentBuf> = docs
-            .into_iter()
-            .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
-            .collect::<Result<Vec<_>, DbError>>()?;
-
-        let docs = raw_docs.into_iter().map(RawBson::Document).collect();
-        let ctx = self.write_context(cf, collection, slate_planner::CollectionMeta::default());
-        self.run_plan(slate_planner::Statement::Insert { docs }, ctx)
+        let docs: Vec<D> = docs.into_iter().collect();
+        let plan = crate::v2::insert_plan(cf, collection, &docs, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     // ── Query operations ────────────────────────────────────────
@@ -559,10 +537,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
         options: FindOptions,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let query = slate_query::find_to_query(&filter_raw, &options)?;
-        let ctx = self.read_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Query(query), ctx)
+        crate::v2::find_cursor(cf, collection, &filter, &options, self)
     }
 
     /// Execute a CosmosDB-style SQL query (`SELECT VALUE <expr> FROM <alias>
@@ -586,14 +561,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         sql: &str,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = self.lower_sql(cf, collection, sql, None)?;
-        Ok(Cursor::new(
-            &self.txn,
-            plan,
-            self.pool,
-            self.rand.clone(),
-            self.watch_sink.clone(),
-        ))
+        crate::v2::query_cursor(cf, collection, sql, None, self)
     }
 
     /// Execute a SQL query with values for its `@name` parameters.
@@ -615,15 +583,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         params: P,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         let params = bson::serialize_to_raw_document_buf(&params)?;
-        let plan = self.lower_sql(cf, collection, sql, Some(&params))?;
-        Ok(Cursor::new_with_params(
-            &self.txn,
-            plan,
-            self.pool,
-            params,
-            self.rand.clone(),
-            self.watch_sink.clone(),
-        ))
+        crate::v2::query_cursor(cf, collection, sql, Some(params), self)
     }
 
     /// Explain a query: lower it to a physical plan and render that plan as an
@@ -635,8 +595,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// references an `@parameter` is rejected (the plan shape never depends on a
     /// parameter's value, only on its presence in the query text).
     pub fn explain(&self, cf: &str, collection: &str, sql: &str) -> Result<String, DbError> {
-        let plan = self.lower_sql(cf, collection, sql, None)?;
-        Ok(plan.explain())
+        Ok(crate::v2::query_plan(cf, collection, sql, None, self)?.explain())
     }
 
     /// Run a query and render its plan as an `EXPLAIN ANALYZE` tree — the same
@@ -655,23 +614,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         sql: &str,
     ) -> Result<String, DbError> {
-        let plan = self.lower_sql(cf, collection, sql, None)?;
-        // Clone the plan to render after execution consumes it. Justified: the
-        // analyze path is a debugging/observability surface, not the query hot
-        // path — a one-off plan clone here is well outside any inner loop.
-        let render_plan = plan.clone();
-
-        // Inject `$now` so the SQL `GETCURRENT*` functions resolve, mirroring the
-        // cursor's normal execution setup.
-        let mut doc = bson::Document::new();
-        doc.insert("$now", self.txn.now_millis());
-        let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
-
-        let (_rows, stats) =
-            slate_executor::Executor::with_pool_and_params(&self.txn, self.pool, params)
-                .with_rand(rand_rc(&self.rand))
-                .execute_analyze(plan)?;
-        Ok(render_plan.explain_analyze(&stats))
+        let plan = crate::v2::query_plan(cf, collection, sql, None, self)?;
+        crate::v2::analyze_plan(plan, None, self)
     }
 
     /// Gather size/cardinality statistics for one collection as of this
@@ -687,58 +631,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         cf: &str,
         collection: &str,
     ) -> Result<crate::stats::CollectionStats, DbError> {
-        use std::collections::HashSet;
-
-        let handle = self.txn.collection(cf, collection)?;
-
-        // Live document count via a full scan.
-        let mut document_count: u64 = 0;
-        for doc in self.txn.scan(&handle)? {
-            doc?;
-            document_count += 1;
-        }
-
-        // Per-index: entries and distinct values. Each index value is deduped by
-        // its canonical BSON bytes to count cardinality without decoding to `Bson`.
-        // The single-field wrapper key is the same for every value, so build it
-        // once.
-        let value_key =
-            bson::raw::CString::try_from("v").map_err(|e| DbError::InvalidQuery(e.to_string()))?;
-        let mut indexes = Vec::with_capacity(handle.indexes().len());
-        for field in handle.indexes() {
-            let mut entry_count: u64 = 0;
-            let mut distinct: HashSet<Vec<u8>> = HashSet::new();
-            let iter =
-                self.txn
-                    .scan_index(&handle, field, slate_engine::IndexRange::Full, false)?;
-            for entry in iter {
-                let entry = entry?;
-                entry_count += 1;
-                // Wrap the value in a single-field raw document and key the dedup
-                // set on the document bytes. The index stores one sortable key per
-                // value, so identical values serialize identically — an exact
-                // distinct count.
-                let value = entry.value()?;
-                let mut doc = RawDocumentBuf::new();
-                doc.append(&value_key, value);
-                distinct.insert(doc.into_bytes());
-            }
-            indexes.push(crate::stats::IndexStats {
-                // `field` is borrowed from the catalog handle's `&[String]`, so it
-                // must be cloned to own it in the report — off the hot path.
-                field: field.clone(),
-                entry_count,
-                cardinality: distinct.len() as u64,
-            });
-        }
-
-        Ok(crate::stats::CollectionStats {
-            cf: cf.to_string(),
-            name: collection.to_string(),
-            document_count,
-            indexes,
-            approximate: false,
-        })
+        crate::v2::collection_stats_core(cf, collection, self)
     }
 
     /// Gather statistics for every collection visible to this transaction and
@@ -755,60 +648,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             collections,
             None,
         ))
-    }
-
-    /// Parse and lower a SQL string into a plan (shared by `query` and
-    /// `query_with_params`).
-    ///
-    /// Validates that every `@parameter` the query references has a value in
-    /// `params` — an unsupplied parameter is a hard error rather than silently
-    /// undefined (matching Cosmos), which catches a misspelled or forgotten
-    /// name. `params` is `None` for the no-parameter `query` API, so any `@name`
-    /// there is unsupplied.
-    fn lower_sql(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql: &str,
-        params: Option<&bson::RawDocument>,
-    ) -> Result<slate_planner::Plan, DbError> {
-        let query = slate_sql::parse(sql)?;
-
-        let mut supplied: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if let Some(doc) = params {
-            for entry in doc.iter() {
-                let (name, _) = entry.map_err(|e| DbError::InvalidQuery(e.to_string()))?;
-                supplied.insert(name.to_string());
-            }
-        }
-        for name in query.parameter_names() {
-            if !supplied.contains(name) {
-                return Err(DbError::InvalidQuery(format!(
-                    "query references parameter @{name}, which was not supplied"
-                )));
-            }
-        }
-
-        // A FROM-less query (`SELECT VALUE 1`) reads no container, so it neither
-        // needs nor requires the collection to exist — skip the metadata fetch.
-        // `plan` validates bindings and grouping (rejecting unqualified
-        // identifiers and ungrouped columns); the param check above is the one
-        // validation it can't do, since it needs the supplied parameter set.
-        let meta = if query.from.is_some() {
-            self.collection_meta(cf, collection)?
-        } else {
-            slate_planner::CollectionMeta {
-                indexes: Vec::new(),
-                compound_indexes: Vec::new(),
-                vector_indexes: Vec::new(),
-                pk_path: "_id".to_string(),
-            }
-        };
-        let ctx = self.read_context(cf, collection, meta);
-        Ok(slate_planner::plan(
-            slate_planner::Statement::Query(query),
-            &ctx,
-        )?)
     }
 
     /// Read the index/pk metadata `slate-planner` needs to choose a scan source.
@@ -856,20 +695,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         })
     }
 
-    // ── Planning helpers ─────────────────────────────────────────
+    // ── Hook snapshot accessors ──────────────────────────────────
     //
-    // The Mongo front-end (`slate-query`) translates a request into a
-    // `slate_ast` query / statement, these helpers gather the collection's
-    // catalog state into a `PlanContext`, and `slate_planner::plan` does all
-    // plan shaping — validator/trigger wrapping included.
-
-    fn container(&self, cf: &str, collection: &str) -> slate_planner::CollectionRef {
-        slate_planner::CollectionRef {
-            cf: cf.to_string(),
-            collection: collection.to_string(),
-        }
-    }
-
     // `pub(crate)` so v2's write builders can assemble their own write
     // `PlanContext` (container + validators + triggers) without calling a v1
     // verb — the hook snapshot is transaction state, reached like rand/watch.
@@ -885,70 +712,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .as_ref()
             .map(|s| s.triggers_for(cf, collection).to_vec())
             .unwrap_or_default()
-    }
-
-    /// The find query selecting the documents a write targets (`take`-limited).
-    /// The translation is the one `find` uses, so writes match identically; a
-    /// filter the front-end can't translate yet is a hard error.
-    fn write_query(
-        &self,
-        filter_raw: &RawDocumentBuf,
-        take: Option<usize>,
-    ) -> Result<slate_ast::Query, DbError> {
-        let options = FindOptions {
-            take,
-            ..Default::default()
-        };
-        Ok(slate_query::find_to_query(filter_raw, &options)?)
-    }
-
-    /// Catalog context for a read: container + index metadata, no hooks.
-    fn read_context(
-        &self,
-        cf: &str,
-        collection: &str,
-        meta: slate_planner::CollectionMeta,
-    ) -> slate_planner::PlanContext {
-        slate_planner::PlanContext {
-            container: self.container(cf, collection),
-            meta,
-            validators: Vec::new(),
-            triggers: Vec::new(),
-        }
-    }
-
-    /// Catalog context for a write: container + validators + triggers. `meta` is
-    /// the caller's choice — filter-bearing writes pass real index metadata (so
-    /// the matched-document source can use an index); insert/upsert, which scan
-    /// nothing, pass an empty one.
-    fn write_context(
-        &self,
-        cf: &str,
-        collection: &str,
-        meta: slate_planner::CollectionMeta,
-    ) -> slate_planner::PlanContext {
-        slate_planner::PlanContext {
-            container: self.container(cf, collection),
-            meta,
-            validators: self.validators(cf, collection),
-            triggers: self.triggers(cf, collection),
-        }
-    }
-
-    /// Plan `stmt` against `ctx` and wrap the result in a cursor.
-    fn run_plan(
-        &self,
-        stmt: slate_planner::Statement,
-        ctx: slate_planner::PlanContext,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = slate_planner::plan(stmt, &ctx)?;
-        Ok(Cursor::new(
-            &self.txn,
-            plan,
-            self.pool,
-            self.rand.clone(),
-            self.watch_sink.clone(),
-        ))
     }
 
     // ── v2 surface accessors ─────────────────────────────────────
@@ -1019,13 +782,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
         update: U,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let raw = bson::serialize_to_raw_document_buf(&update)?;
-        let assignments = slate_query::update_to_assignments(&raw)?;
-
-        let query = self.write_query(&filter_raw, Some(1))?;
-        let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Update { query, assignments }, ctx)
+        let plan = crate::v2::update_plan(cf, collection, &filter, &update, true, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     /// Update all documents matching the filter.
@@ -1036,13 +794,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
         update: U,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let raw = bson::serialize_to_raw_document_buf(&update)?;
-        let assignments = slate_query::update_to_assignments(&raw)?;
-
-        let query = self.write_query(&filter_raw, None)?;
-        let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Update { query, assignments }, ctx)
+        let plan = crate::v2::update_plan(cf, collection, &filter, &update, false, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     /// Replace the first document matching the filter entirely (no merge).
@@ -1053,18 +806,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
         replacement: R,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let raw = bson::serialize_to_raw_document_buf(&replacement)?;
-
-        let query = self.write_query(&filter_raw, Some(1))?;
-        let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(
-            slate_planner::Statement::Replace {
-                query,
-                replacement: raw,
-            },
-            ctx,
-        )
+        let plan = crate::v2::replace_plan(cf, collection, &filter, &replacement, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     // ── Delete operations ───────────────────────────────────────
@@ -1076,10 +819,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let query = self.write_query(&filter_raw, Some(1))?;
-        let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Delete { query }, ctx)
+        let plan = crate::v2::delete_plan(cf, collection, &filter, true, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     /// Delete all documents matching the filter.
@@ -1089,10 +830,8 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         filter: F,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let query = self.write_query(&filter_raw, None)?;
-        let ctx = self.write_context(cf, collection, self.collection_meta(cf, collection)?);
-        self.run_plan(slate_planner::Statement::Delete { query }, ctx)
+        let plan = crate::v2::delete_plan(cf, collection, &filter, false, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     // ── Bulk upsert / merge operations ────────────────────────────
@@ -1124,14 +863,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         docs: impl IntoIterator<Item = D>,
         mode: slate_planner::UpsertMode,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let raw_docs: Vec<RawDocumentBuf> = docs
-            .into_iter()
-            .map(|doc| bson::serialize_to_raw_document_buf(&doc).map_err(DbError::from))
-            .collect::<Result<Vec<_>, DbError>>()?;
-
-        let docs = raw_docs.into_iter().map(RawBson::Document).collect();
-        let ctx = self.write_context(cf, collection, slate_planner::CollectionMeta::default());
-        self.run_plan(slate_planner::Statement::Upsert { docs, mode }, ctx)
+        let docs: Vec<D> = docs.into_iter().collect();
+        let plan = crate::v2::upsert_plan(cf, collection, &docs, mode, self)?;
+        Ok(crate::v2::write_cursor(plan, self))
     }
 
     // ── Count ───────────────────────────────────────────────────
@@ -1160,36 +894,24 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         filter: F,
         options: DistinctOptions,
     ) -> Result<bson::RawBson, DbError> {
-        let filter_raw = bson::serialize_to_raw_document_buf(&filter)?;
-        let predicate = slate_query::translate_filter(&filter_raw)?;
         let sort = options.sort.map(|dir| match dir {
             slate_query::SortDirection::Asc => slate_ast::SortDirection::Asc,
             slate_query::SortDirection::Desc => slate_ast::SortDirection::Desc,
         });
-        let stmt = slate_planner::Statement::Distinct {
-            alias: slate_query::ALIAS.to_string(),
-            field: field.to_string(),
-            predicate,
+        let cursor = crate::v2::distinct_cursor(
+            cf,
+            collection,
+            field,
+            &filter,
             sort,
-            skip: options.skip.map(|n| n as u64),
-            take: options.take.map(|n| n as u64),
-        };
-        // Distinct scans the container directly (no index pushdown), so an empty
-        // meta suffices; it's a read, so no validators/triggers.
-        let ctx = self.read_context(cf, collection, slate_planner::CollectionMeta::default());
-        let plan = slate_planner::plan(stmt, &ctx)?;
-
-        // Distinct yields bare scalar values, not documents, so run the plan
-        // directly and gather them rather than going through `Cursor` (which
-        // expects documents).
-        let iter = slate_executor::Executor::with_pool(&self.txn, self.pool)
-            .with_rand(rand_rc(&self.rand))
-            .execute(plan)?;
+            options.skip,
+            options.take,
+            self,
+        )?;
+        // Distinct yields bare scalar values; gather them into one array.
         let mut arr = bson::RawArrayBuf::new();
-        for item in iter {
-            if let Some(value) = item.map_err(DbError::from)? {
-                arr.push(value);
-            }
+        for item in cursor.iter_raw_values()? {
+            arr.push(item?);
         }
         Ok(bson::RawBson::Array(arr))
     }
@@ -1198,16 +920,16 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Purge expired documents from a collection.
     pub fn purge_expired(&self, cf: &str, collection: &str) -> Result<u64, DbError> {
-        let handle = self.txn.collection(cf, collection)?;
-        Ok(self.txn.purge(&handle)?)
+        crate::v2::purge_core(cf, collection, self)
     }
 
     // ── Index operations ────────────────────────────────────────
 
     /// Create an index on a field and backfill existing records.
     pub fn create_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
-        self.txn.create_index(cf, collection, field)?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .create(field, crate::v2::IndexOptions::default())
+            .execute(self)
     }
 
     /// Create a unique index on a field and backfill existing records.
@@ -1221,13 +943,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         field: &str,
     ) -> Result<(), DbError> {
-        self.txn.create_index_with_options(
-            cf,
-            collection,
-            field,
-            &slate_engine::IndexOptions { unique: true },
-        )?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .create(field, crate::v2::IndexOptions::unique())
+            .execute(self)
     }
 
     /// Create a *compound* (multi-field) index and backfill existing records.
@@ -1242,8 +960,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         fields: &[String],
     ) -> Result<(), DbError> {
-        self.txn.create_compound_index(cf, collection, fields)?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .create(fields, crate::v2::IndexOptions::default())
+            .execute(self)
     }
 
     /// Create a *unique* compound index and backfill existing records.
@@ -1259,13 +978,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         fields: &[String],
     ) -> Result<(), DbError> {
-        self.txn.create_compound_index_with_options(
-            cf,
-            collection,
-            fields,
-            &slate_engine::IndexOptions { unique: true },
-        )?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .create(fields, crate::v2::IndexOptions::unique())
+            .execute(self)
     }
 
     /// Create a *flat vector index* from `spec` and backfill existing records.
@@ -1284,21 +999,25 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         collection: &str,
         spec: &VectorIndexSpec,
     ) -> Result<(), DbError> {
-        self.txn.create_vector_index(cf, collection, spec)?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .create(
+                spec.path.as_str(),
+                crate::v2::VectorIndexOptions::float32(spec.dims, spec.metric),
+            )
+            .execute(self)
     }
 
     /// Drop an index and remove all its entries. For a compound index, pass the
     /// joined identity returned by [`list_indexes`](Self::list_indexes).
     pub fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
-        self.txn.drop_index(cf, collection, field)?;
-        Ok(())
+        crate::v2::Indexes::new(cf, collection)
+            .remove(field)
+            .execute(self)
     }
 
     /// List indexed fields for a collection.
     pub fn list_indexes(&self, cf: &str, collection: &str) -> Result<Vec<String>, DbError> {
-        let handle = self.txn.collection(cf, collection)?;
-        Ok(handle.indexes().to_vec())
+        crate::v2::Indexes::new(cf, collection).list(self)
     }
 
     /// Read a collection's catalog metadata: its key paths and indexed fields
@@ -1309,15 +1028,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         cf: &str,
         collection: &str,
     ) -> Result<CollectionSchema, DbError> {
-        let handle = self.txn.collection(cf, collection)?;
-        Ok(CollectionSchema {
-            cf: handle.cf_name().to_string(),
-            name: handle.name().to_string(),
-            pk_path: handle.pk_path().to_string(),
-            ttl_path: handle.ttl_path().to_string(),
-            indexes: handle.indexes().to_vec(),
-            unique_indexes: handle.unique_indexes().to_vec(),
-        })
+        crate::v2::collection_schema_core(cf, collection, self)
     }
 
     // ── Collection operations ───────────────────────────────────
@@ -1333,9 +1044,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Drop a collection and all its data, indexes, and metadata.
     pub fn drop_collection(&self, cf: &str, collection: &str) -> Result<(), DbError> {
-        self.txn.drop_collection(cf, collection)?;
-        self.hooks_dirty.set(true);
-        Ok(())
+        crate::v2::drop_collection_core(cf, collection, self)
     }
 
     // ── Lifecycle ───────────────────────────────────────────────
@@ -1377,22 +1086,13 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
 
     /// Create a collection with the given config.
     pub fn create_collection(&self, config: &CollectionConfig) -> Result<(), DbError> {
-        let options = slate_engine::CreateCollectionOptions {
-            pk_path: Some(config.pk_path.clone()),
-            ttl_path: Some(config.ttl_path.clone()),
-        };
-        self.txn
-            .create_collection(&config.cf, &config.name, &options)?;
-
-        // Auto-create TTL index; ignore IndexExists for idempotent re-creation.
-        if let Err(e) = self
-            .txn
-            .create_index(&config.cf, &config.name, &config.ttl_path)
-            && !matches!(e, slate_engine::EngineError::IndexExists(_))
-        {
-            return Err(e.into());
-        }
-        Ok(())
+        crate::v2::create_collection_core(
+            &config.cf,
+            &config.name,
+            &config.pk_path,
+            &config.ttl_path,
+            self,
+        )
     }
 
     // ── Function operations ──────────────────────────────────────
@@ -1405,16 +1105,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn.create_function(
-            cf,
-            collection,
-            FunctionKind::Trigger,
-            name,
-            slate_engine::runtime_tag::LUA,
-            source.as_bytes(),
-        )?;
-        self.hooks_dirty.set(true);
-        Ok(())
+        crate::v2::Triggers::new(cf, collection)
+            .create(name, source)
+            .execute(self)
     }
 
     /// Register a validator function on a collection.
@@ -1425,16 +1118,9 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn.create_function(
-            cf,
-            collection,
-            FunctionKind::Validator,
-            name,
-            slate_engine::runtime_tag::LUA,
-            source.as_bytes(),
-        )?;
-        self.hooks_dirty.set(true);
-        Ok(())
+        crate::v2::Validators::new(cf, collection)
+            .create(name, source)
+            .execute(self)
     }
 
     /// Register a user-defined function on a collection.
@@ -1445,38 +1131,30 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         name: &str,
         source: &str,
     ) -> Result<(), DbError> {
-        self.txn.create_function(
-            cf,
-            collection,
-            FunctionKind::Udf,
-            name,
-            slate_engine::runtime_tag::LUA,
-            source.as_bytes(),
-        )?;
-        Ok(())
+        crate::v2::Functions::new(cf, collection)
+            .create(name, source)
+            .execute(self)
     }
 
     /// Drop a trigger function from a collection.
     pub fn drop_trigger(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        self.txn
-            .drop_function(cf, collection, FunctionKind::Trigger, name)?;
-        self.hooks_dirty.set(true);
-        Ok(())
+        crate::v2::Triggers::new(cf, collection)
+            .remove(name)
+            .execute(self)
     }
 
     /// Drop a validator function from a collection.
     pub fn drop_validator(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        self.txn
-            .drop_function(cf, collection, FunctionKind::Validator, name)?;
-        self.hooks_dirty.set(true);
-        Ok(())
+        crate::v2::Validators::new(cf, collection)
+            .remove(name)
+            .execute(self)
     }
 
     /// Drop a user-defined function from a collection.
     pub fn drop_udf(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        self.txn
-            .drop_function(cf, collection, FunctionKind::Udf, name)?;
-        Ok(())
+        crate::v2::Functions::new(cf, collection)
+            .remove(name)
+            .execute(self)
     }
 }
 

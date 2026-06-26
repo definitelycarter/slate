@@ -95,22 +95,7 @@ impl CreateCollection<'_> {
     /// Create the collection and return a handle to it. Also auto-creates the TTL
     /// index on the TTL path (an existing one is fine — idempotent).
     pub fn execute<S: Store>(self, txn: &Transaction<'_, S>) -> Result<Collection, DbError> {
-        let options = CreateCollectionOptions {
-            pk_path: Some(self.pk_path),
-            ttl_path: Some(self.ttl_path),
-        };
-        txn.engine_txn()
-            .create_collection(self.cf, &self.name, &options)?;
-
-        // Auto-create the TTL index, reading the path back from `options` (still
-        // owned — `create_collection` borrowed it). A pre-existing index is fine.
-        if let Some(ttl) = options.ttl_path.as_deref()
-            && let Err(e) = txn.engine_txn().create_index(self.cf, &self.name, ttl)
-            && !matches!(e, EngineError::IndexExists(_))
-        {
-            return Err(e.into());
-        }
-
+        create_collection_core(self.cf, &self.name, &self.pk_path, &self.ttl_path, txn)?;
         Ok(Collection {
             cf: self.cf.to_string(),
             collection: self.name,
@@ -118,6 +103,42 @@ impl CreateCollection<'_> {
             watch: self.watch.clone(),
         })
     }
+}
+
+/// The shared collection-create core: create the collection and auto-create its
+/// TTL index. Called by both [`CreateCollection::execute`] and the (inverted)
+/// flat `Transaction::create_collection`, so the two run one body.
+pub(crate) fn create_collection_core<S: Store>(
+    cf: &str,
+    name: &str,
+    pk_path: &str,
+    ttl_path: &str,
+    txn: &Transaction<'_, S>,
+) -> Result<(), DbError> {
+    let options = CreateCollectionOptions {
+        pk_path: Some(pk_path.to_string()),
+        ttl_path: Some(ttl_path.to_string()),
+    };
+    txn.engine_txn().create_collection(cf, name, &options)?;
+    // A pre-existing TTL index is fine — the create is idempotent.
+    if let Err(e) = txn.engine_txn().create_index(cf, name, ttl_path)
+        && !matches!(e, EngineError::IndexExists(_))
+    {
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+/// The shared collection-drop core: drop the collection and mark the hook
+/// snapshot stale (a dropped collection takes its triggers/validators with it).
+pub(crate) fn drop_collection_core<S: Store>(
+    cf: &str,
+    name: &str,
+    txn: &Transaction<'_, S>,
+) -> Result<(), DbError> {
+    txn.engine_txn().drop_collection(cf, name)?;
+    txn.mark_hooks_dirty();
+    Ok(())
 }
 
 /// A pending collection removal, from [`Collections::remove`]. Run it with
@@ -131,11 +152,7 @@ pub struct RemoveCollection<'a> {
 impl RemoveCollection<'_> {
     /// Drop the collection and everything in it.
     pub fn execute<S: Store>(self, txn: &Transaction<'_, S>) -> Result<(), DbError> {
-        txn.engine_txn().drop_collection(self.cf, &self.name)?;
-        // Dropping a collection removes its triggers/validators, so the hook
-        // snapshot is now stale.
-        txn.mark_hooks_dirty();
-        Ok(())
+        drop_collection_core(self.cf, &self.name, txn)
     }
 }
 
