@@ -58,10 +58,9 @@ pub use write::{
 // Shared read/write cores, used both by the builders above and by the inverted
 // flat `Transaction` methods (so the two surfaces run one body). `pub(crate)`,
 // not public — they are an internal seam, not part of the v2 API.
-pub(crate) use collections::{create_collection_core, drop_collection_core};
-pub(crate) use distinct::distinct_cursor;
-pub(crate) use exec::{analyze_plan, write_cursor};
+pub(crate) use collections::create_collection_core;
+pub(crate) use exec::write_cursor;
 pub(crate) use meta::{collection_schema_core, collection_stats_core, purge_core};
-pub(crate) use query::{query_cursor, query_plan};
+pub(crate) use query::query_cursor;
 pub(crate) use read::find_cursor;
-pub(crate) use write::{delete_plan, insert_plan, replace_plan, update_plan, upsert_plan};
+pub(crate) use write::{insert_plan, upsert_plan};

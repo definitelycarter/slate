@@ -2,13 +2,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bson::RawDocumentBuf;
 use serde::Serialize;
-use slate_engine::{
-    Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine, VectorIndexSpec,
-};
+use slate_engine::{Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine};
 use slate_executor::watch::WatchSink;
-use slate_query::{DistinctOptions, FindOptions};
+use slate_query::FindOptions;
 use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
 
@@ -16,7 +13,7 @@ use crate::collection::{CollectionConfig, CollectionSchema};
 use crate::cursor::Cursor;
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
-use crate::watch::{WatchHandle, WatchRegistry, WatchSnapshot};
+use crate::watch::{WatchRegistry, WatchSnapshot};
 
 /// The injected random source backing the SQL `RAND()` function: a callable
 /// returning a fresh value in `[0, 1)` per call. Shared (`Arc`) so it outlives
@@ -284,114 +281,6 @@ impl<S: Store> Database<S> {
         })
     }
 
-    /// Register a **watch** with a BSON (`find`-style) filter and a callback
-    /// fired once per committed transaction with the batch of matching changes,
-    /// in write order.
-    ///
-    /// This is the BSON counterpart of [`watch_query`](Self::watch_query): the
-    /// `filter` is the same Mongo filter document `find` takes (translated by
-    /// `slate_query`), so the two surfaces share semantics. The BSON surface is
-    /// **filter-only** — there is no projection (use `watch_query` for that).
-    /// An empty filter (`doc! {}`) is match-all.
-    ///
-    /// Each change is recast against the filter's set boundary: a document
-    /// *entering* the filtered set surfaces as [`ChangeEvent::Insert`], one
-    /// *leaving* as [`ChangeEvent::Delete`], and one modified while staying in
-    /// as [`ChangeEvent::Update`] (carrying both old and new).
-    ///
-    /// The returned [`WatchHandle`] unregisters the watch on `Drop` (or via
-    /// [`WatchHandle::unwatch`]). The callback runs **inline on the writer
-    /// thread** after commit; it should be fast and non-panicking (a panic is
-    /// caught and isolated) — offload heavy work via [`stream`](Self::stream).
-    pub fn watch<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-        callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
-    ) -> Result<WatchHandle, DbError> {
-        self.cf(cf)
-            .collection(collection)
-            .find(filter)
-            .watch(callback)
-    }
-
-    /// Register a **watch query**: a SQL `WHERE` filter against `(cf,
-    /// collection)` whose `callback` fires once per committed transaction with
-    /// the batch of matching changes, in write order.
-    ///
-    /// This is the SQL counterpart of [`watch`](Self::watch) (bare name =
-    /// BSON filter; `_query` = SQL, mirroring `find`/`query`). `sql_filter` is a
-    /// `SELECT` whose `WHERE` clause is the filter (`SELECT * FROM c WHERE c.temp
-    /// > 80`); only `WHERE` and an identity projection apply. Set operations
-    /// (`ORDER BY` / `GROUP BY` / `HAVING` / aggregates / `LIMIT` / `OFFSET` /
-    /// `DISTINCT`) and joins are rejected.
-    ///
-    /// Each change is recast against the filter's set boundary: a document
-    /// *entering* the filtered set surfaces as [`ChangeEvent::Insert`], one
-    /// *leaving* as [`ChangeEvent::Delete`], and one modified while staying in
-    /// as [`ChangeEvent::Update`] (carrying both old and new).
-    ///
-    /// The returned [`WatchHandle`] unregisters the watch on `Drop` (or via
-    /// [`WatchHandle::unwatch`]). The callback runs **inline on the writer
-    /// thread** after commit; it should be fast and non-panicking (a panic is
-    /// caught and isolated) — offload heavy work via
-    /// [`stream_query`](Self::stream_query).
-    pub fn watch_query(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql_filter: &str,
-        callback: impl Fn(&[crate::ChangeEvent]) + Send + Sync + 'static,
-    ) -> Result<WatchHandle, DbError> {
-        self.cf(cf)
-            .collection(collection)
-            .query(sql_filter)
-            .watch(callback)
-    }
-
-    /// Open a **watch stream** with a BSON (`find`-style) filter: the pull
-    /// (cursor) counterpart of [`watch`](Self::watch).
-    ///
-    /// Returns a long-lived [`WatchStream`] subscription the consumer drains on
-    /// its own thread — decoupled from the writer, the FFI-clean delivery shape.
-    /// The stream is backed by a bounded buffer with the **non-blocking lag-drop**
-    /// policy: a slow consumer that fills the buffer causes further batches to be
-    /// dropped and the stream marked [`lagged`](WatchStream::lagged), never
-    /// blocking the writer. On a lag signal the consumer re-snapshots current
-    /// state. Dropping the stream unregisters the watch.
-    ///
-    /// See [`watch`](Self::watch) for filter and set-transition semantics (they
-    /// are identical — only the delivery differs).
-    pub fn stream<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-    ) -> Result<crate::watch::WatchStream, DbError> {
-        self.cf(cf).collection(collection).find(filter).stream()
-    }
-
-    /// Open a **watch stream** with a SQL `WHERE` filter: the pull (cursor)
-    /// counterpart of [`watch_query`](Self::watch_query).
-    ///
-    /// Returns a long-lived [`WatchStream`] subscription with the same
-    /// bounded-buffer, non-blocking lag-drop semantics as [`stream`](Self::stream)
-    /// (see there). The SQL clause restrictions match
-    /// [`watch_query`](Self::watch_query). Dropping the stream unregisters the
-    /// watch.
-    pub fn stream_query(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql_filter: &str,
-    ) -> Result<crate::watch::WatchStream, DbError> {
-        self.cf(cf)
-            .collection(collection)
-            .query(sql_filter)
-            .stream()
-    }
-
     /// The ephemeral watch registry, behind its `Arc` — for v2's reactive
     /// terminals (`find(f).watch`/`.stream`, `query(sql).watch`/`.stream`), which
     /// register a DB-lifetime subscription with no transaction, exactly as the
@@ -564,60 +453,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         crate::v2::query_cursor(cf, collection, sql, None, self)
     }
 
-    /// Execute a SQL query with values for its `@name` parameters.
-    ///
-    /// `params` serializes to a document whose keys are the bare parameter names
-    /// (no leading `@`) — e.g. `doc! { "minAge": 21 }` binds `@minAge`. A
-    /// referenced parameter with no supplied value evaluates to undefined.
-    ///
-    /// ```ignore
-    /// let cursor = txn.query_with_params(DEFAULT_CF, "users",
-    ///     "SELECT VALUE c.name FROM c WHERE c.age > @minAge",
-    ///     doc! { "minAge": 21 })?;
-    /// ```
-    pub fn query_with_params<P: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql: &str,
-        params: P,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let params = bson::serialize_to_raw_document_buf(&params)?;
-        crate::v2::query_cursor(cf, collection, sql, Some(params), self)
-    }
-
-    /// Explain a query: lower it to a physical plan and render that plan as an
-    /// indented operator tree, without running it.
-    ///
-    /// Lowering is exactly what [`query`](Self::query) does — same parse, same
-    /// planner, same index choice — so the tree shows the plan the query would
-    /// actually run. Like `query`, this binds no parameters, so a `sql` that
-    /// references an `@parameter` is rejected (the plan shape never depends on a
-    /// parameter's value, only on its presence in the query text).
-    pub fn explain(&self, cf: &str, collection: &str, sql: &str) -> Result<String, DbError> {
-        Ok(crate::v2::query_plan(cf, collection, sql, None, self)?.explain())
-    }
-
-    /// Run a query and render its plan as an `EXPLAIN ANALYZE` tree — the same
-    /// shape [`explain`](Self::explain) prints, annotated with per-node *actuals*
-    /// (`rows=` emitted and, for non-source nodes, `examined=` rows that flowed
-    /// in). Unlike `explain`, this *executes* the query (read-only), so it sees
-    /// real cardinalities; the rows are collected and dropped — only the counts
-    /// are returned.
-    ///
-    /// Lowering matches [`query`](Self::query) exactly (same parse, planner, index
-    /// choice). Like `query` it binds no `@parameters`, so a parameterized query
-    /// is rejected (the plan shape never depends on a parameter's value).
-    pub fn explain_analyze(
-        &self,
-        cf: &str,
-        collection: &str,
-        sql: &str,
-    ) -> Result<String, DbError> {
-        let plan = crate::v2::query_plan(cf, collection, sql, None, self)?;
-        crate::v2::analyze_plan(plan, None, self)
-    }
-
     /// Gather size/cardinality statistics for one collection as of this
     /// transaction's read snapshot: live document count, plus per-index entry and
     /// distinct-value (cardinality) counts.
@@ -757,83 +592,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         self.hooks_dirty.set(true);
     }
 
-    /// Find the first document matching a filter.
-    pub fn find_one<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-    ) -> Result<Option<RawDocumentBuf>, DbError> {
-        let options = FindOptions {
-            take: Some(1),
-            ..Default::default()
-        };
-        let cursor = self.find(cf, collection, filter, options)?;
-        cursor.iter_raw()?.next().transpose()
-    }
-
-    // ── Update operations ───────────────────────────────────────
-
-    /// Update the first document matching the filter.
-    pub fn update_one<F: Serialize, U: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-        update: U,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = crate::v2::update_plan(cf, collection, &filter, &update, true, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    /// Update all documents matching the filter.
-    pub fn update_many<F: Serialize, U: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-        update: U,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = crate::v2::update_plan(cf, collection, &filter, &update, false, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    /// Replace the first document matching the filter entirely (no merge).
-    pub fn replace_one<F: Serialize, R: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-        replacement: R,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = crate::v2::replace_plan(cf, collection, &filter, &replacement, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    // ── Delete operations ───────────────────────────────────────
-
-    /// Delete the first document matching the filter.
-    pub fn delete_one<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = crate::v2::delete_plan(cf, collection, &filter, true, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
-    /// Delete all documents matching the filter.
-    pub fn delete_many<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        filter: F,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        let plan = crate::v2::delete_plan(cf, collection, &filter, false, self)?;
-        Ok(crate::v2::write_cursor(plan, self))
-    }
-
     // ── Bulk upsert / merge operations ────────────────────────────
 
     /// Upsert (insert-or-replace) a batch of documents by `_id`.
@@ -844,16 +602,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         docs: impl IntoIterator<Item = D>,
     ) -> Result<Cursor<'db, '_, S>, DbError> {
         self.upsert_with_mode(cf, collection, docs, slate_planner::UpsertMode::Replace)
-    }
-
-    /// Merge (insert-or-patch) a batch of partial documents by `_id`.
-    pub fn merge_many<D: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        docs: impl IntoIterator<Item = D>,
-    ) -> Result<Cursor<'db, '_, S>, DbError> {
-        self.upsert_with_mode(cf, collection, docs, slate_planner::UpsertMode::Merge)
     }
 
     fn upsert_with_mode<D: Serialize>(
@@ -879,41 +627,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     ) -> Result<u64, DbError> {
         self.find(cf, collection, filter, FindOptions::default())?
             .drain()
-    }
-
-    /// Return distinct values for a field, with optional filter and sort.
-    ///
-    /// Builds the Mongo `distinct` pipeline (`Scan → [Filter] → Project(path) →
-    /// Distinct → [Sort] → [Limit]`), runs it directly, and gathers the bare
-    /// values into a single array.
-    pub fn distinct<F: Serialize>(
-        &self,
-        cf: &str,
-        collection: &str,
-        field: &str,
-        filter: F,
-        options: DistinctOptions,
-    ) -> Result<bson::RawBson, DbError> {
-        let sort = options.sort.map(|dir| match dir {
-            slate_query::SortDirection::Asc => slate_ast::SortDirection::Asc,
-            slate_query::SortDirection::Desc => slate_ast::SortDirection::Desc,
-        });
-        let cursor = crate::v2::distinct_cursor(
-            cf,
-            collection,
-            field,
-            &filter,
-            sort,
-            options.skip,
-            options.take,
-            self,
-        )?;
-        // Distinct yields bare scalar values; gather them into one array.
-        let mut arr = bson::RawArrayBuf::new();
-        for item in cursor.iter_raw_values()? {
-            arr.push(item?);
-        }
-        Ok(bson::RawBson::Array(arr))
     }
 
     // ── TTL operations ──────────────────────────────────────────
@@ -948,78 +661,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .execute(self)
     }
 
-    /// Create a *compound* (multi-field) index and backfill existing records.
-    ///
-    /// The `fields` are matched left-to-right by the leftmost-prefix rule: an
-    /// index on `["status", "created_at"]` can serve queries on `{status}` or
-    /// `{status, created_at}`, but not `{created_at}` alone. A single-element
-    /// `fields` is equivalent to [`create_index`](Self::create_index).
-    pub fn create_compound_index(
-        &self,
-        cf: &str,
-        collection: &str,
-        fields: &[String],
-    ) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .create(fields, crate::v2::IndexOptions::default())
-            .execute(self)
-    }
-
-    /// Create a *unique* compound index and backfill existing records.
-    ///
-    /// Enforces that no two live documents share the same *combination* of
-    /// values across `fields` (e.g. unique on `["org_id", "email"]` allows the
-    /// same email across different orgs). Scalar components only (no multikey
-    /// `[]`). Fails with [`DbError::UniqueViolation`] if existing data already
-    /// holds a duplicate combination.
-    pub fn create_unique_compound_index(
-        &self,
-        cf: &str,
-        collection: &str,
-        fields: &[String],
-    ) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .create(fields, crate::v2::IndexOptions::unique())
-            .execute(self)
-    }
-
-    /// Create a *flat vector index* from `spec` and backfill existing records.
-    ///
-    /// The `spec` carries the embedding field path, dimensionality, distance
-    /// metric, and element dtype (see [`VectorIndexSpec`]). Every existing
-    /// document with a well-formed embedding at `spec.path` is packed and
-    /// indexed; the index then serves `ORDER BY VECTORDISTANCE(field, q) LIMIT k`
-    /// top-k seeks. Fails with [`DbError::IndexExists`] if a vector index on
-    /// that field already exists, and with [`DbError::InvalidDocument`] if any
-    /// existing document's vector has the wrong dimensionality (the whole
-    /// create rolls back).
-    pub fn create_vector_index(
-        &self,
-        cf: &str,
-        collection: &str,
-        spec: &VectorIndexSpec,
-    ) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .create(
-                spec.path.as_str(),
-                crate::v2::VectorIndexOptions::float32(spec.dims, spec.metric),
-            )
-            .execute(self)
-    }
-
-    /// Drop an index and remove all its entries. For a compound index, pass the
-    /// joined identity returned by [`list_indexes`](Self::list_indexes).
-    pub fn drop_index(&self, cf: &str, collection: &str, field: &str) -> Result<(), DbError> {
-        crate::v2::Indexes::new(cf, collection)
-            .remove(field)
-            .execute(self)
-    }
-
-    /// List indexed fields for a collection.
-    pub fn list_indexes(&self, cf: &str, collection: &str) -> Result<Vec<String>, DbError> {
-        crate::v2::Indexes::new(cf, collection).list(self)
-    }
-
     /// Read a collection's catalog metadata: its key paths and indexed fields
     /// (with the unique subset called out). Read-only; intended for schema
     /// introspection rather than planning.
@@ -1040,11 +681,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .into_iter()
             .map(|c| (c.cf_name().to_string(), c.name().to_string()))
             .collect())
-    }
-
-    /// Drop a collection and all its data, indexes, and metadata.
-    pub fn drop_collection(&self, cf: &str, collection: &str) -> Result<(), DbError> {
-        crate::v2::drop_collection_core(cf, collection, self)
     }
 
     // ── Lifecycle ───────────────────────────────────────────────
@@ -1093,68 +729,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             &config.ttl_path,
             self,
         )
-    }
-
-    // ── Function operations ──────────────────────────────────────
-
-    /// Register a trigger function on a collection.
-    pub fn register_trigger(
-        &self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-        source: &str,
-    ) -> Result<(), DbError> {
-        crate::v2::Triggers::new(cf, collection)
-            .create(name, source)
-            .execute(self)
-    }
-
-    /// Register a validator function on a collection.
-    pub fn register_validator(
-        &self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-        source: &str,
-    ) -> Result<(), DbError> {
-        crate::v2::Validators::new(cf, collection)
-            .create(name, source)
-            .execute(self)
-    }
-
-    /// Register a user-defined function on a collection.
-    pub fn register_udf(
-        &self,
-        cf: &str,
-        collection: &str,
-        name: &str,
-        source: &str,
-    ) -> Result<(), DbError> {
-        crate::v2::Functions::new(cf, collection)
-            .create(name, source)
-            .execute(self)
-    }
-
-    /// Drop a trigger function from a collection.
-    pub fn drop_trigger(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        crate::v2::Triggers::new(cf, collection)
-            .remove(name)
-            .execute(self)
-    }
-
-    /// Drop a validator function from a collection.
-    pub fn drop_validator(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        crate::v2::Validators::new(cf, collection)
-            .remove(name)
-            .execute(self)
-    }
-
-    /// Drop a user-defined function from a collection.
-    pub fn drop_udf(&self, cf: &str, collection: &str, name: &str) -> Result<(), DbError> {
-        crate::v2::Functions::new(cf, collection)
-            .remove(name)
-            .execute(self)
     }
 }
 
