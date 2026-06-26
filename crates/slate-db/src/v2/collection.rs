@@ -10,6 +10,7 @@
 use serde::Serialize;
 use slate_store::Store;
 
+use super::query::QueryBuilder;
 use super::read::FindBuilder;
 use crate::DEFAULT_CF;
 use crate::database::Database;
@@ -28,6 +29,12 @@ impl Collection {
     /// a transaction.
     pub fn find<F: Serialize>(&self, filter: F) -> FindBuilder<'_, F> {
         FindBuilder::new(&self.cf, &self.collection, filter)
+    }
+
+    /// Open a CosmosDB-style SQL `query` over this collection. Returns a builder;
+    /// nothing runs until a terminal (`.iter`/`.collect`/`.explain`) runs it.
+    pub fn query<'a>(&'a self, sql: &'a str) -> QueryBuilder<'a> {
+        QueryBuilder::new(&self.cf, &self.collection, sql)
     }
 }
 
