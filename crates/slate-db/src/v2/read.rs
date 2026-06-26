@@ -1,29 +1,31 @@
 //! v2 read surface: the `find` builder and its cursor terminals.
 //!
 //! Phase 0, slice A. Each terminal carries a **real, self-contained body** — it
-//! lowers the filter, plans it, and constructs a [`Cursor`] directly; it does
-//! *not* call `Transaction::find`/`count`/`run_plan`. Reads are raw BSON for now
-//! (`RawDocumentBuf`); typed reads (generic `T`) are Decision 9 / phase 2.
+//! lowers the filter, plans it, and constructs a [`Cursor`] directly. Iteration
+//! comes in two forms, both returning a std [`Iterator`] so `collect`/`count`/
+//! `next` come free: `iter_raw` (raw `RawDocumentBuf`) and `iter::<T>` (the
+//! deserialized counterpart).
 
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use slate_store::Store;
 
-use crate::cursor::{Cursor, RawCursorIter};
+use crate::cursor::{Cursor, CursorIter, RawCursorIter};
 use crate::database::Transaction;
 use crate::error::DbError;
 use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
-use crate::{ChangeEvent, FindOptions, RawDocumentBuf, Sort, SortDirection};
+use crate::{ChangeEvent, FindOptions, Sort, SortDirection};
 use crate::{WatchHandle, WatchRegistry};
 
 /// A lazily-built `find` read: stages reshape it, a terminal runs it.
 ///
 /// Built by [`Collection::find`](super::Collection::find). Inert until a terminal
-/// is called — `.iter` / `.collect` / `.count` / `.first`, each taking the
-/// transaction the read runs in, or the reactive `.watch` / `.stream`, which
-/// register a subscription with no transaction.
-#[must_use = "a find builder does nothing until a terminal (.iter/.collect/.count/.first/.watch/.stream) runs it"]
+/// is called — `.iter_raw` / `.iter::<T>` (each yielding a std [`Iterator`]), each
+/// taking the transaction the read runs in, or the reactive `.watch` / `.stream`,
+/// which register a subscription with no transaction.
+#[must_use = "a find builder does nothing until a terminal (.iter_raw/.iter/.watch/.stream) runs it"]
 pub struct FindBuilder<'a, F> {
     cf: &'a str,
     collection: &'a str,
@@ -175,8 +177,10 @@ impl<F: Serialize> FindBuilder<'_, F> {
         find_cursor(self.cf, self.collection, &self.filter, &self.options, txn)
     }
 
-    /// Stream the matching documents lazily.
-    pub fn iter<'t, 'db, S>(
+    /// Stream the matching documents as raw BSON (`RawDocumentBuf`). The terminal
+    /// is just an [`Iterator`] — `collect`, `count`, `next` (first), `map`, … come
+    /// from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
         self,
         txn: &'t Transaction<'db, S>,
     ) -> Result<RawCursorIter<'t>, DbError>
@@ -186,33 +190,22 @@ impl<F: Serialize> FindBuilder<'_, F> {
         self.build_cursor(txn)?.iter_raw()
     }
 
-    /// Collect all matching documents.
-    pub fn collect<'db, S>(self, txn: &Transaction<'db, S>) -> Result<Vec<RawDocumentBuf>, DbError>
+    /// Stream the matching documents deserialized into `T` (the typed counterpart
+    /// of [`iter_raw`](Self::iter_raw)). Also just an [`Iterator`], so the standard
+    /// library handles `collect`/`count`/`next`/etc.
+    ///
+    /// ```ignore
+    /// let names: Vec<User> = orders.find(f).iter::<User>(&txn)?.collect::<Result<_, _>>()?;
+    /// let first = orders.find(f).iter::<User>(&txn)?.next().transpose()?;
+    /// ```
+    pub fn iter<'t, 'db, T>(
+        self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<CursorIter<'t, T>, DbError>
     where
-        S: Store + 'db,
+        T: DeserializeOwned,
     {
-        self.build_cursor(txn)?.iter_raw()?.collect()
-    }
-
-    /// Count the matching documents (honors `limit`/`offset` if set).
-    pub fn count<'db, S>(self, txn: &Transaction<'db, S>) -> Result<u64, DbError>
-    where
-        S: Store + 'db,
-    {
-        self.build_cursor(txn)?.drain()
-    }
-
-    /// Return the first matching document, if any (`find_one`). Honors any
-    /// `sort` set on the builder.
-    pub fn first<'db, S>(
-        mut self,
-        txn: &Transaction<'db, S>,
-    ) -> Result<Option<RawDocumentBuf>, DbError>
-    where
-        S: Store + 'db,
-    {
-        self.options.take = Some(1);
-        self.build_cursor(txn)?.iter_raw()?.next().transpose()
+        self.build_cursor(txn)?.iter::<T>()
     }
 
     /// Render the physical plan without running it. There is no `EXPLAIN`
@@ -322,20 +315,33 @@ mod tests {
         let users = db.collection("users");
 
         // collect all
-        assert_eq!(users.find(doc! {}).collect(&txn).unwrap().len(), 3);
+        assert_eq!(
+            users
+                .find(doc! {})
+                .iter_raw(&txn)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            3
+        );
 
         // count with a filter
         let n = users
             .find(doc! { "age": { "$gt": 25 } })
-            .count(&txn)
-            .unwrap();
+            .iter_raw(&txn)
+            .unwrap()
+            .count();
         assert_eq!(n, 2);
 
         // first, honoring sort
         let oldest = users
             .find(doc! {})
             .sort("age", SortDirection::Desc)
-            .first(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
             .unwrap()
             .expect("a row");
         assert_eq!(oldest.get_str("name").unwrap(), "cy");
@@ -345,7 +351,9 @@ mod tests {
             .find(doc! {})
             .sort("age", SortDirection::Asc)
             .limit(2)
-            .collect(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(two.len(), 2);
         assert_eq!(two[0].get_str("name").unwrap(), "bo");
@@ -355,10 +363,55 @@ mod tests {
             .find(doc! {})
             .sort("age", SortDirection::Asc)
             .offset(1)
-            .collect(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(skipped.len(), 2);
         assert_eq!(skipped[0].get_str("name").unwrap(), "ana");
+    }
+
+    #[test]
+    fn find_iter_typed_deserializes() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct User {
+            _id: i32,
+            name: String,
+            age: i32,
+        }
+
+        let db = seed();
+        let txn = db.begin(true).unwrap();
+        let users: Vec<User> = db
+            .collection("users")
+            .find(doc! {})
+            .sort("age", SortDirection::Asc)
+            .iter::<User>(&txn)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        // names in age order: bo(20), ana(30), cy(40)
+        assert_eq!(
+            users,
+            vec![
+                User {
+                    _id: 2,
+                    name: "bo".to_string(),
+                    age: 20
+                },
+                User {
+                    _id: 1,
+                    name: "ana".to_string(),
+                    age: 30
+                },
+                User {
+                    _id: 3,
+                    name: "cy".to_string(),
+                    age: 40
+                },
+            ]
+        );
     }
 
     #[test]

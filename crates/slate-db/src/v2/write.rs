@@ -484,7 +484,7 @@ mod tests {
             .unwrap();
         assert_eq!(res1.affected, 1);
 
-        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 3);
+        assert_eq!(users.find(doc! {}).iter_raw(&txn).unwrap().count(), 3);
         txn.commit().unwrap();
     }
 
@@ -530,12 +530,12 @@ mod tests {
             .execute(&txn)
             .unwrap();
         assert_eq!(one.affected, 1);
-        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 2);
+        assert_eq!(users.find(doc! {}).iter_raw(&txn).unwrap().count(), 2);
 
         // delete_many: remove the rest
         let many = users.find(doc! {}).delete().execute(&txn).unwrap();
         assert_eq!(many.affected, 2);
-        assert_eq!(users.find(doc! {}).count(&txn).unwrap(), 0);
+        assert_eq!(users.find(doc! {}).iter_raw(&txn).unwrap().count(), 0);
 
         txn.commit().unwrap();
     }
@@ -556,7 +556,10 @@ mod tests {
 
         let bo = users
             .find(doc! { "_id": 2 })
-            .first(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
             .unwrap()
             .expect("a row");
         assert_eq!(bo.get_str("name").unwrap(), "bohdan");
@@ -583,7 +586,14 @@ mod tests {
             .unwrap();
         assert_eq!(up.affected, 2);
         // replace semantics: id=1 lost its `age`
-        let ana = users.find(doc! { "_id": 1 }).first(&txn).unwrap().unwrap();
+        let ana = users
+            .find(doc! { "_id": 1 })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
+            .unwrap()
+            .unwrap();
         assert!(ana.get("age").unwrap().is_none());
 
         // merge: patch id=4's name, keep its age
@@ -592,7 +602,14 @@ mod tests {
             .execute(&txn)
             .unwrap();
         assert_eq!(mg.affected, 1);
-        let di = users.find(doc! { "_id": 4 }).first(&txn).unwrap().unwrap();
+        let di = users
+            .find(doc! { "_id": 4 })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
+            .unwrap()
+            .unwrap();
         assert_eq!(di.get_str("name").unwrap(), "dina");
         assert_eq!(di.get_i32("age").unwrap(), 50); // merge kept it
 
@@ -613,7 +630,14 @@ mod tests {
             .explain(&txn)
             .unwrap();
         assert!(!explained.is_empty());
-        let row = users.find(doc! { "age": 30 }).first(&txn).unwrap().unwrap();
+        let row = users
+            .find(doc! { "age": 30 })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
+            .unwrap()
+            .unwrap();
         assert!(row.get("x").unwrap().is_none(), "explain must not mutate");
 
         // analyze runs the plan to capture actuals, so on a write it *executes*
@@ -625,7 +649,14 @@ mod tests {
             .unwrap();
         assert!(!analyzed.is_empty());
         assert_ne!(explained, analyzed);
-        let row = users.find(doc! { "age": 30 }).first(&txn).unwrap().unwrap();
+        let row = users
+            .find(doc! { "age": 30 })
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
+            .unwrap()
+            .unwrap();
         assert_eq!(row.get_i32("x").unwrap(), 1, "analyze executes the write");
 
         txn.commit().unwrap();

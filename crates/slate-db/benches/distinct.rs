@@ -17,7 +17,9 @@ fn bench_distinct_indexed_low(c: &mut Criterion) {
                     .collection("bench")
                     .find(rawdoc! {})
                     .distinct("status")
-                    .collect(&txn)
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
                     .unwrap()
             })
         });
@@ -36,7 +38,9 @@ fn bench_distinct_indexed_high(c: &mut Criterion) {
                     .collection("bench")
                     .find(rawdoc! {})
                     .distinct("contacts_count")
-                    .collect(&txn)
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
                     .unwrap()
             })
         });
@@ -55,7 +59,9 @@ fn bench_distinct_non_indexed(c: &mut Criterion) {
                     .collection("bench")
                     .find(rawdoc! {})
                     .distinct("product_recommendation1")
-                    .collect(&txn)
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
                     .unwrap()
             })
         });
@@ -75,7 +81,9 @@ fn bench_distinct_with_filter(c: &mut Criterion) {
                     .collection("bench")
                     .find(filter.clone())
                     .distinct("product_recommendation1")
-                    .collect(&txn)
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
                     .unwrap()
             })
         });

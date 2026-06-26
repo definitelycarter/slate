@@ -20,9 +20,8 @@ fn bench_query_indexed_eq_dotted_projection(c: &mut Criterion) {
                 engine
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter::<bson::Bson>(&txn)
                     .unwrap()
-                    .map(|v| bson::Bson::try_from(v.unwrap().as_raw_bson_ref()).unwrap())
                     .count()
             })
         });
@@ -45,7 +44,7 @@ fn bench_query_array_contains(c: &mut Criterion) {
                 indexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -56,7 +55,7 @@ fn bench_query_array_contains(c: &mut Criterion) {
                 unindexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -82,7 +81,7 @@ fn bench_query_string_equals(c: &mut Criterion) {
                 indexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -93,7 +92,7 @@ fn bench_query_string_equals(c: &mut Criterion) {
                 unindexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -117,7 +116,7 @@ fn bench_query_string_startswith(c: &mut Criterion) {
                 indexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -128,7 +127,7 @@ fn bench_query_string_startswith(c: &mut Criterion) {
                 unindexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -151,7 +150,7 @@ fn bench_query_string_like(c: &mut Criterion) {
                 indexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -162,7 +161,7 @@ fn bench_query_string_like(c: &mut Criterion) {
                 unindexed
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -186,7 +185,7 @@ fn bench_query_sql(c: &mut Criterion) {
                 engine
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -213,7 +212,7 @@ fn bench_query_compound_eq(c: &mut Criterion) {
                 engine
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })
@@ -241,7 +240,7 @@ fn bench_query_compound_covering(c: &mut Criterion) {
                 engine
                     .collection("bench")
                     .query(sql)
-                    .iter(&txn)
+                    .iter_raw(&txn)
                     .unwrap()
                     .count()
             })

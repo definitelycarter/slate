@@ -41,14 +41,14 @@ pub struct Collection {
 
 impl Collection {
     /// Open a `find` read over a Mongo-style `filter`. Returns a builder; nothing
-    /// runs until a terminal (`.iter`/`.collect`/`.count`/`.first`) is called with
-    /// a transaction, or a reactive terminal (`.watch`/`.stream`) registers it.
+    /// runs until a terminal (`.iter_raw`/`.iter::<T>`) is called with a
+    /// transaction, or a reactive terminal (`.watch`/`.stream`) registers it.
     pub fn find<F: Serialize>(&self, filter: F) -> FindBuilder<'_, F> {
         FindBuilder::new(&self.cf, &self.collection, &self.watch, filter)
     }
 
     /// Open a CosmosDB-style SQL `query` over this collection. Returns a builder;
-    /// nothing runs until a terminal (`.iter`/`.collect`/`.explain`/`.watch`/
+    /// nothing runs until a terminal (`.iter_raw`/`.iter::<T>`/`.explain`/`.watch`/
     /// `.stream`) runs it.
     pub fn query<'a>(&'a self, sql: &'a str) -> QueryBuilder<'a> {
         QueryBuilder::new(&self.cf, &self.collection, &self.watch, sql)

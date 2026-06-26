@@ -178,7 +178,7 @@ mod tests {
             .insert_one(doc! { "_id": 1, "total": 9 })
             .execute(&txn)
             .unwrap();
-        assert_eq!(orders.find(doc! {}).count(&txn).unwrap(), 1);
+        assert_eq!(orders.find(doc! {}).iter_raw(&txn).unwrap().count(), 1);
         txn.commit().unwrap();
     }
 

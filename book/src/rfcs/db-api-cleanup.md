@@ -47,44 +47,44 @@ existing Mongo-style `find`.
 
 For data-heavy flows, `txn.collection(name)` (and `txn.cf(cf).collection(name)`) returns a
 txn-bound handle whose data terminals omit the `&txn` argument —
-`orders.find(f).first()?` instead of `orders.find(f).first(&txn)?` (Decision 1). Same
-builders; only the terminal's `&txn` differs.
+`orders.find(f).iter::<Order>()?` instead of `orders.find(f).iter::<Order>(&txn)?`
+(Decision 1). Same builders; only the terminal's `&txn` differs.
 
 ## Execution model: build lazily, run at a terminal
 
 A handle method **builds an operation; it does not run it.** A **terminal** runs it, and
 that's where the transaction enters. There are three terminal families:
 
-**Reads expose a cursor** — several terminals, because rows can be consumed many ways —
-each taking `&txn`:
+**Reads expose exactly two iteration terminals**, each taking `&txn` and returning a std
+[`Iterator`] — so `collect`/`count`/`next`(first)/`map`/… come free from the standard
+library rather than as bespoke terminals:
 
 ```rust
-orders.find(filter).iter(&txn)?      // lazy Cursor<T>
-orders.find(filter).collect(&txn)?   // Vec<T>
-orders.find(filter).count(&txn)?     // usize
-orders.find(filter).first(&txn)?     // Option<T>   (find_one)
-orders.query(sql).explain(&txn)?     // the plan, without running
+orders.find(filter).iter_raw(&txn)?                       // Iterator<Item = Result<RawDocumentBuf>>
+orders.find(filter).iter::<Order>(&txn)?                   // Iterator<Item = Result<Order>>   (typed)
+orders.find(filter).iter::<Order>(&txn)?.next().transpose()?  // find_one
+orders.find(filter).iter_raw(&txn)?.count()               // count
+orders.query(sql).explain(&txn)?                          // the plan, without running
 ```
 
-These chainable cursor methods are the **`find` (Mongo-flavored) surface** — stages that
-reshape the read (`.distinct(field)`, `.sort`, `.offset`, `.limit`, `.project`) and terminals that
-consume it (`.iter`/`.collect`/`.count`/`.first`), e.g.
-`find(f).distinct("status").count(&txn)`. `distinct(field)` in particular is a *stage*,
-not a terminal: it narrows the read to that field's distinct values and the normal `find`
-terminals still apply. It takes only the field; page and order it by chaining the usual
-stages (`.offset` / `.limit` / `.sort`), so the old `DistinctOptions` (skip / take / sort)
-folds away. `query` carries **none** of these — `.count`/`.first`/`.distinct`/
-`.limit`/`.sort` don't exist on the SQL builder, because SQL already expresses them inline
-(`COUNT(…)`, `TOP`/`OFFSET`/`LIMIT`, `SELECT DISTINCT`, `ORDER BY`). A SQL read just runs
-and is consumed with `.iter`/`.collect` (plus `.explain`/`.analyze`, and the
-reactive `.watch`/`.stream`).
+These are the **`find` (Mongo-flavored) surface** — stages reshape the read
+(`.distinct(field)`, `.sort`, `.offset`, `.limit`, `.project`) and the two terminals consume
+it. `distinct(field)` is a *stage*, not a terminal: it narrows the read to that field's
+distinct values and the same `iter_raw`/`iter` terminals apply. It takes only the field; page
+and order it by chaining the usual stages (`.offset` / `.limit` / `.sort`), so the old
+`DistinctOptions` folds away. `query` carries none of the reshaping stages — `count`/`first`/
+`distinct`/`limit`/`sort` aren't builder methods, because SQL expresses them inline
+(`COUNT(…)`, `TOP`/`OFFSET`/`LIMIT`, `SELECT DISTINCT`, `ORDER BY`) and the std `Iterator`
+covers `count`/`next`. A SQL read just runs and is consumed with the same `iter_raw`/`iter::<T>`
+(plus `.explain`/`.analyze`, and the reactive `.watch`/`.stream`).
 
-*Typed reads:* `Cursor<T>` / `Vec<T>` / `Option<T>` deserialize each row into a caller `T`
-via serde. Because v2 builds the `Cursor` itself, this is **native** — `Cursor` already
-exposes `iter::<T>()` — not a layer bolted over a raw-only flat method (pass `RawDocumentBuf`
-as `T` for raw). Decision 9 still phases it (raw first, typed second) to keep phase-1 scope
-tight, with the terminals generic over `T` (default `RawDocumentBuf`) from the start so the
-typed path slots in without a break.
+*Raw vs typed:* `iter_raw` yields the raw form (`RawDocumentBuf` for `find`, `RawBson` values
+for `query`/`distinct`); `iter::<T>` deserializes each row into a caller `T` via serde.
+Because v2 builds the `Cursor` itself this is **native** — `Cursor` already exposes
+`iter::<T>()`/`iter_values::<T>()` — not a layer bolted over a raw-only flat method.
+(Decision 9 originally phased typed reads to a later pass; they're now in. Method type-params
+can't default, so we keep the explicit split — `iter_raw` for raw, `iter::<T>` for typed —
+rather than one `iter` with a defaulted `T`.)
 
 **Writes & commands expose one terminal, `.execute(&txn)`**, returning the operation's
 result — a `WriteResult` (a **new** type added with this work; v2's write terminal composes
@@ -162,10 +162,10 @@ vector options is a build-time error.
 `collection.find(bson)` / `collection.query(sql)` are the two builder entries (BSON vs
 SQL, lowering to one planner); the **terminal** decides how the result is consumed:
 
-| builder entry | cursor terminals `(&txn)` | `.watch(cb)` | `.stream()` |
+| builder entry | iteration terminals `(&txn)` | `.watch(cb)` | `.stream()` |
 |---|---|---|---|
-| `find(bson_filter)` | `.iter`/`.collect`/`.count`/`.first` + stages `.distinct`/`.sort`/`.offset`/`.limit`/`.project` | reactive push | reactive pull |
-| `query(sql)`        | `.iter`/`.collect` only — `count`/`first`/`distinct`/`limit` live in the SQL | reactive push | reactive pull |
+| `find(bson_filter)` | `.iter_raw`/`.iter::<T>` (std `Iterator`) + stages `.distinct`/`.sort`/`.offset`/`.limit`/`.project` | reactive push | reactive pull |
+| `query(sql)`        | `.iter_raw`/`.iter::<T>` — `count`/`first`/`distinct`/`limit` live in the SQL (or the std `Iterator`) | reactive push | reactive pull |
 
 This **folds the shipped-flat watch quartet** (`watch`/`watch_query`/`stream`/
 `stream_query`) into `find`/`query` × `.watch`/`.stream`, behavior unchanged. The terminal
@@ -194,9 +194,10 @@ This **dissolves the `_one`/`_many` × update/delete/replace family** into the b
 (`.one()` selects the single-row variant; `replace` has only a single-row form, so it
 needs no `.one()`). Inserts have no filter, so they stay direct builders
 (`insert_one(doc)` / `insert_many(docs)`), as do the bulk `upsert_many(docs)` /
-`merge_many(docs)` — each finished with `.execute(&txn)`. Note read-one is a *terminal*
-(`.first()` → `Option<T>`) while write-one is a *modifier* (`.one()`) — kept distinct
-because reads return rows and writes return a count (Decision 10).
+`merge_many(docs)` — each finished with `.execute(&txn)`. Note read-one is the std
+`Iterator`'s `next()` on the read (`…iter::<T>(&txn)?.next()`) while write-one is a
+*modifier* (`.one()`) — kept distinct because reads return rows and writes return a count
+(Decision 10).
 
 ## Scripts — per-kind sub-handles (`triggers()` / `validators()` / `functions()`)
 
@@ -352,13 +353,13 @@ Every current public method and where it lands.
   `update_one`/`update_many` → `find(f).update(spec)[.one()]`; `delete_one`/`delete_many`
   → `find(f).delete()[.one()]`; `replace_one` → `find(f).replace(doc)`; `upsert_many` /
   `merge_many` → direct builders `upsert_many(docs)` / `merge_many(docs)` (no filter).
-- *Reads (builder + cursor terminals `(&txn)`):* `find` → `find(f).iter`/`.collect`;
-  `find_one` → `.first`; `count` → `.count`; `distinct` → `.distinct(field)` (builder
-  stage taking just the field; page with `.offset`/`.limit`, order with `.sort` — the old
-  `DistinctOptions` folds into these); `query` /
-  `query_with_params` → `query(sql)[.params(…)]`; `explain` / `explain_analyze` →
-  `.explain` / `.analyze`. (`.count`/`.first`/`.distinct` are `find`-side only —
-  the SQL builder expresses them inline.)
+- *Reads (builder + iteration terminals `(&txn)`):* `find` → `find(f).iter_raw`/`.iter::<T>`;
+  `find_one` → `.iter…(&txn)?.next().transpose()`; `count` → `.iter_raw(&txn)?.count()`;
+  `distinct` → `.distinct(field)` (builder stage taking just the field; page with
+  `.offset`/`.limit`, order with `.sort` — the old `DistinctOptions` folds into these);
+  `query` / `query_with_params` → `query(sql)[.params(…)]`; `explain` / `explain_analyze` →
+  `.explain` / `.analyze`. (`count`/`first`/`distinct` are `find`-side stages or std-`Iterator`
+  methods — the SQL builder expresses them inline.)
 - *Reactive (no txn):* `watch`/`watch_query`/`stream`/`stream_query` → `find`/`query` ×
   `.watch(cb)`/`.stream()`.
 - *Indexes (`indexes()` sub-handle):* all five `create_*_index` collapse into one
@@ -444,15 +445,20 @@ Resolved here for review; genuinely-open sub-parts are flagged.
    sweep — deferred until a real need; it's a trivial loop over `list_collections`.)*
 8. **The write/command terminal is `.execute`.** Not `.run`. *Why:* conventional verb for
    running a prepared operation (JDBC/ORM idiom); `.run` reads as closure/process.
-9. **Raw-BSON reads in phase 1; typed reads in phase 2.** Terminals are generic over `T`
-   (default `RawDocumentBuf`) from the start, so typed deserialization slots in without a
-   break. *Why:* keeps phase-1 scope tight and de-risks; typed deser is independent and,
-   because v2 builds the `Cursor` itself (`iter::<T>()` already exists), nearly free to add
-   later — it could even fold into phase 1.
-10. **`.first()` for read-one, `.one()` for write-one — kept distinct.** *Why:* principled,
-    not accidental: reads return rows (a single one is a terminal yielding `Option<T>`),
+9. **Raw and typed reads via `iter_raw` / `iter::<T>` (both shipped).** Originally phased
+   (raw first, typed later); typed reads are now in. The two are explicit terminals rather
+   than one `iter` with a defaulted `T`, because Rust method type-params can't have defaults.
+   *Why native:* v2 builds the `Cursor` itself, which already exposes `iter::<T>()` /
+   `iter_values::<T>()`, so the typed path is the cursor's own, not a layer bolted over a
+   raw-only flat method. Each terminal returns a std `Iterator`, so `collect`/`count`/`next`
+   come from the standard library.
+10. **Read-one is `.iter…(&txn)?.next()`, write-one is the `.one()` modifier — kept
+    distinct.** *Why:* principled, not accidental: reads return rows (a single one is the
+    std `Iterator`'s `next()` on the lazy cursor — no bespoke `.first` terminal needed),
     writes return a count (a single one is a modifier on the op). Forcing `.limit(1)` onto
-    writes reads worse.
+    writes reads worse. *(Updated: an earlier draft had a dedicated `.first()` read terminal;
+    folding reads to `iter_raw`/`iter::<T>` makes `next()` the read-one, but the
+    read-terminal-vs-write-modifier asymmetry stands.)*
 
 ## Non-goals / constraints
 

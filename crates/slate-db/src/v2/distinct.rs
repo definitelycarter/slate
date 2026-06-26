@@ -5,22 +5,24 @@
 //! to the distinct values of one field (the find filter becomes the predicate).
 //! It is value-oriented, so its `.sort` takes a [`SortDirection`] (the values are
 //! scalars), and `.offset`/`.limit` page the value list; the terminals
-//! (`.iter`/`.collect`/`.count`/`.first`) yield [`RawBson`](crate::RawBson).
+//! `iter_raw` ([`RawBson`](crate::RawBson)) and `iter::<T>` (deserialized) each
+//! yield a std [`Iterator`].
 //!
 //! Real, self-contained body: builds the `Distinct` statement and cursor itself.
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use slate_store::Store;
 
-use crate::cursor::{Cursor, RawValuesIter};
+use crate::SortDirection;
+use crate::cursor::{Cursor, RawValuesIter, ValuesIter};
 use crate::database::Transaction;
 use crate::error::DbError;
-use crate::{RawBson, SortDirection};
 
 /// A lazily-built distinct-values read. Built by
 /// [`FindBuilder::distinct`](super::FindBuilder::distinct); inert until a
 /// terminal runs it.
-#[must_use = "a distinct builder does nothing until a terminal (.iter/.collect/.count/.first) runs it"]
+#[must_use = "a distinct builder does nothing until a terminal (.iter_raw/.iter) runs it"]
 pub struct DistinctBuilder<'a, F> {
     cf: &'a str,
     collection: &'a str,
@@ -141,8 +143,9 @@ impl<F: Serialize> DistinctBuilder<'_, F> {
         )
     }
 
-    /// Stream the distinct values lazily.
-    pub fn iter<'t, 'db, S>(
+    /// Stream the distinct values as raw BSON ([`RawBson`]). Just an [`Iterator`];
+    /// `collect`/`count`/`next`/… come from the standard library.
+    pub fn iter_raw<'t, 'db, S>(
         self,
         txn: &'t Transaction<'db, S>,
     ) -> Result<RawValuesIter<'t>, DbError>
@@ -152,32 +155,16 @@ impl<F: Serialize> DistinctBuilder<'_, F> {
         self.build_cursor(txn)?.iter_raw_values()
     }
 
-    /// Collect all distinct values.
-    pub fn collect<'db, S>(self, txn: &Transaction<'db, S>) -> Result<Vec<RawBson>, DbError>
+    /// Stream the distinct values deserialized into `T` (the typed counterpart of
+    /// [`iter_raw`](Self::iter_raw)).
+    pub fn iter<'t, 'db, T>(
+        self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<ValuesIter<'t, T>, DbError>
     where
-        S: Store + 'db,
+        T: DeserializeOwned,
     {
-        self.build_cursor(txn)?.iter_raw_values()?.collect()
-    }
-
-    /// Count the distinct values.
-    pub fn count<'db, S>(self, txn: &Transaction<'db, S>) -> Result<u64, DbError>
-    where
-        S: Store + 'db,
-    {
-        self.build_cursor(txn)?.drain()
-    }
-
-    /// Return the first distinct value, if any (honors `sort`).
-    pub fn first<'db, S>(mut self, txn: &Transaction<'db, S>) -> Result<Option<RawBson>, DbError>
-    where
-        S: Store + 'db,
-    {
-        self.take = Some(1);
-        self.build_cursor(txn)?
-            .iter_raw_values()?
-            .next()
-            .transpose()
+        self.build_cursor(txn)?.iter_values::<T>()
     }
 }
 
@@ -224,7 +211,9 @@ mod tests {
             .find(doc! {})
             .distinct("age")
             .sort(SortDirection::Asc)
-            .collect(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(
             ages,
@@ -232,7 +221,12 @@ mod tests {
         );
 
         // count of distinct values
-        let n = users.find(doc! {}).distinct("age").count(&txn).unwrap();
+        let n = users
+            .find(doc! {})
+            .distinct("age")
+            .iter_raw(&txn)
+            .unwrap()
+            .count();
         assert_eq!(n, 3);
 
         // first, descending
@@ -240,7 +234,10 @@ mod tests {
             .find(doc! {})
             .distinct("age")
             .sort(SortDirection::Desc)
-            .first(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .next()
+            .transpose()
             .unwrap();
         assert_eq!(top, Some(RawBson::Int32(40)));
 
@@ -249,7 +246,9 @@ mod tests {
             .find(doc! { "age": { "$gte": 30 } })
             .distinct("age")
             .sort(SortDirection::Asc)
-            .collect(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(filtered, vec![RawBson::Int32(30), RawBson::Int32(40)]);
     }

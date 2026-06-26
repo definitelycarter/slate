@@ -432,7 +432,9 @@ mod tests {
                 "SELECT VALUE c._id FROM c \
                  ORDER BY VECTORDISTANCE(c.embedding, [1.0, 0.0]) DESC LIMIT 1",
             )
-            .collect(&txn)
+            .iter_raw(&txn)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(hits, vec![bson::RawBson::Int32(1)]);
         txn.commit().unwrap();

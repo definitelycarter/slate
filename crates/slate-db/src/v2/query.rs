@@ -3,29 +3,31 @@
 //! Phase 0, slice A. Like [`FindBuilder`](super::FindBuilder), each terminal
 //! carries a **real, self-contained body** — it parses, validates parameters,
 //! plans, and builds the [`Cursor`] itself rather than calling
-//! `Transaction::query`/`lower_sql`. SQL can `SELECT VALUE <scalar>`, so the raw
-//! terminals iterate result *values* ([`RawBson`](crate::RawBson)), not just
-//! documents. Per the RFC the SQL builder carries no `count`/`first`/`distinct`
-//! — those live inline in the SQL.
+//! `Transaction::query`/`lower_sql`. SQL can `SELECT VALUE <scalar>`, so the
+//! terminals iterate result *values* — `iter_raw` ([`RawBson`](crate::RawBson))
+//! and `iter::<T>` (deserialized) — not documents. `count`/`first`/`distinct`
+//! aren't builder methods: SQL expresses them inline, and the std [`Iterator`]
+//! gives `count`/`next`.
 
 use std::sync::Arc;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use slate_store::Store;
 
-use crate::cursor::{Cursor, RawValuesIter};
+use crate::cursor::{Cursor, RawValuesIter, ValuesIter};
 use crate::database::Transaction;
 use crate::error::DbError;
 use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
-use crate::{ChangeEvent, RawBson, RawDocumentBuf, WatchHandle, WatchRegistry};
+use crate::{ChangeEvent, RawDocumentBuf, WatchHandle, WatchRegistry};
 
 /// A lazily-built SQL read: parameters bind via [`params`](Self::params); a
 /// terminal runs it.
 ///
 /// Built by [`Collection::query`](super::Collection::query). Inert until a
-/// terminal — `.iter` / `.collect` consume the values, `.explain` renders the
+/// terminal — `.iter_raw` / `.iter::<T>` stream the values, `.explain` renders the
 /// plan without running it, `.watch` / `.stream` register a subscription.
-#[must_use = "a query builder does nothing until a terminal (.iter/.collect/.explain/.watch/.stream) runs it"]
+#[must_use = "a query builder does nothing until a terminal (.iter_raw/.iter/.explain/.watch/.stream) runs it"]
 pub struct QueryBuilder<'a, P = ()> {
     cf: &'a str,
     collection: &'a str,
@@ -225,8 +227,10 @@ impl<P: Serialize> QueryBuilder<'_, P> {
         query_cursor(self.cf, self.collection, self.sql, self.params_raw()?, txn)
     }
 
-    /// Stream the result values lazily.
-    pub fn iter<'t, 'db, S>(
+    /// Stream the result values as raw BSON ([`RawBson`] — SQL `SELECT VALUE` is
+    /// value-oriented). Just an [`Iterator`]; `collect`/`count`/`next`/… come from
+    /// the standard library.
+    pub fn iter_raw<'t, 'db, S>(
         self,
         txn: &'t Transaction<'db, S>,
     ) -> Result<RawValuesIter<'t>, DbError>
@@ -236,12 +240,20 @@ impl<P: Serialize> QueryBuilder<'_, P> {
         self.build_cursor(txn)?.iter_raw_values()
     }
 
-    /// Collect all result values.
-    pub fn collect<'db, S>(self, txn: &Transaction<'db, S>) -> Result<Vec<RawBson>, DbError>
+    /// Stream the result values deserialized into `T` (the typed counterpart of
+    /// [`iter_raw`](Self::iter_raw)).
+    ///
+    /// ```ignore
+    /// let names: Vec<String> = c.query(sql).iter::<String>(&txn)?.collect::<Result<_, _>>()?;
+    /// ```
+    pub fn iter<'t, 'db, T>(
+        self,
+        txn: &'t Transaction<'db, impl Store + 'db>,
+    ) -> Result<ValuesIter<'t, T>, DbError>
     where
-        S: Store + 'db,
+        T: DeserializeOwned,
     {
-        self.build_cursor(txn)?.iter_raw_values()?.collect()
+        self.build_cursor(txn)?.iter_values::<T>()
     }
 
     /// Render the physical plan without running the query.
@@ -303,8 +315,23 @@ mod tests {
         let err = db
             .collection("users")
             .query("SELECT VALUE c.name FROM c WHERE c.age > @min")
-            .collect(&txn);
+            .iter_raw(&txn);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn query_iter_typed() {
+        let db = seed();
+        let txn = db.begin(true).unwrap();
+        let names: Vec<String> = db
+            .collection("users")
+            .query("SELECT VALUE c.name FROM c ORDER BY c.age")
+            .iter::<String>(&txn)
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap();
+        // names in age order: bo(20), ana(30), cy(40)
+        assert_eq!(names, vec!["bo", "ana", "cy"]);
     }
 
     #[test]
