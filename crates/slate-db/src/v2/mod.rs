@@ -12,9 +12,11 @@
 //! ([`FindBuilder`]) and its cursor terminals.
 
 mod collection;
+mod distinct;
 mod query;
 mod read;
 
 pub use collection::{CfScope, Collection};
+pub use distinct::DistinctBuilder;
 pub use query::QueryBuilder;
 pub use read::FindBuilder;

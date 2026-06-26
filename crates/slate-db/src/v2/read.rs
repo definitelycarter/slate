@@ -62,6 +62,13 @@ impl<'a, F> FindBuilder<'a, F> {
         self.options.columns = Some(fields.into_iter().collect());
         self
     }
+
+    /// Narrow the read to the distinct values of `field`. The filter becomes the
+    /// predicate; reshape the values with the returned builder's own
+    /// `.sort`/`.offset`/`.limit` (find-level stages don't carry over).
+    pub fn distinct(self, field: &str) -> super::DistinctBuilder<'a, F> {
+        super::DistinctBuilder::new(self.cf, self.collection, field, self.filter)
+    }
 }
 
 impl<F: Serialize> FindBuilder<'_, F> {
