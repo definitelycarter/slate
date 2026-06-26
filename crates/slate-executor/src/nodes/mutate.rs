@@ -5,10 +5,13 @@
 //! via `slate-eval`, then the rebuilt document is written back. Yields the
 //! mutated documents; documents left unchanged are dropped.
 
+use std::rc::Rc;
+
 use bson::{Document, RawBson};
 use slate_ast::Assignment;
 use slate_engine::{CollectionHandle, EngineTransaction};
 
+use crate::watch::WatchSink;
 use crate::{ExecError, ValueIter};
 
 /// The alias the find front-end binds the matched document to (matches
@@ -22,6 +25,7 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
     handle: CollectionHandle<T::Cf>,
     assignments: Vec<Assignment>,
     source: ValueIter<'a>,
+    watch: Option<Rc<WatchSink>>,
 ) -> Result<ValueIter<'a>, ExecError> {
     // Update assignments never reference `@parameters`, so an empty set suffices.
     let params = Document::new();
@@ -34,6 +38,17 @@ pub(crate) fn execute<'a, T: EngineTransaction>(
         match slate_eval::apply_assignments(&old, UPDATE_ALIAS, &assignments, &params)? {
             Some(mutated) => {
                 txn.put(&handle, &mutated)?;
+                // Update has both states — the watch recasts (enter/leave/stay)
+                // from the filter evaluated on each.
+                if let Some(sink) = &watch {
+                    sink.capture(
+                        handle.cf_name(),
+                        handle.name(),
+                        handle.pk_path(),
+                        Some(&old),
+                        Some(&mutated),
+                    )?;
+                }
                 Ok(Some(RawBson::Document(mutated)))
             }
             None => Ok(None), // unchanged

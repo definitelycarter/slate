@@ -8,6 +8,7 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Atomic mutations** — `$set`, `$inc`, `$unset`, `$rename`, `$push`, `$pop`, `$lpush` with dot-path support — no read-modify-write required
 - **Query engine** — filters, sorts, projections, pagination, distinct queries, dot-notation paths, and array element matching
 - **Two query surfaces** — a MongoDB-style `find` and a CosmosDB-style SQL (`SELECT * | VALUE <expr> | <cols>  FROM c [JOIN ...] [WHERE ...] [ORDER BY ...]` via `txn.query()`) that lower to one shared planner/executor
+- **Change detection (watch queries)** — register a filter on a collection and get matching inserts/updates/deletes delivered as they commit, by callback (`watch`/`watch_query`) or a pull cursor (`stream`/`stream_query`); BSON or SQL filter, coalesced per-commit and recast to set enter/leave events — in-process reactivity for live UIs, IoT rules, and sync, with no server or polling
 - **Indexed queries** — single-field, compound (multi-field, leftmost-prefix), and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
 - **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution

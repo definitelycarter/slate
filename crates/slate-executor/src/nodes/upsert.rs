@@ -6,6 +6,8 @@
 //! trigger *action* depends on the per-document runtime branch, so the hooks
 //! stay inside this node rather than a static `Trigger` wrapper.
 
+use std::rc::Rc;
+
 use bson::raw::{CString, RawDocumentBuf};
 use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
@@ -15,8 +17,10 @@ use slate_rawbson::raw_merge;
 use slate_vm::{ResolvedHook, pool::VmPool};
 
 use super::trigger::fire_hooks;
+use crate::watch::WatchSink;
 use crate::{ExecError, ValueIter};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     pool: Option<&'a VmPool>,
@@ -24,6 +28,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: ValueIter<'a>,
+    watch: Option<Rc<WatchSink>>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let cf = handle.cf_name().to_string();
     let pk_key = CString::try_from(handle.pk_path()).map_err(|e| EvalError {
@@ -58,17 +63,38 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 fire_hooks(txn, pool, &cf, &hooks, "updating", &old)?;
                 let written = match build_doc(pk, &pk_key, mode, &new_doc, &old)? {
                     Some(doc) => doc,
-                    // Merge no-op: unchanged, still counts as matched.
+                    // Merge no-op: nothing written, so nothing for a watch to
+                    // observe — return the existing doc unchanged.
                     None => return Ok(Some(RawBson::Document(old.clone()))),
                 };
                 txn.put(&handle, &written)?;
                 fire_hooks(txn, pool, &cf, &hooks, "updated", &written)?;
+                // Existing doc overwritten: both old and new states in hand.
+                if let Some(sink) = &watch {
+                    sink.capture(
+                        handle.cf_name(),
+                        handle.name(),
+                        handle.pk_path(),
+                        Some(&old),
+                        Some(&written),
+                    )?;
+                }
                 Ok(Some(RawBson::Document(written)))
             }
             None => {
                 fire_hooks(txn, pool, &cf, &hooks, "inserting", &new_doc)?;
                 txn.put_nx(&handle, &new_doc)?;
                 fire_hooks(txn, pool, &cf, &hooks, "inserted", &new_doc)?;
+                // Absent before: a fresh insert (only the new state).
+                if let Some(sink) = &watch {
+                    sink.capture(
+                        handle.cf_name(),
+                        handle.name(),
+                        handle.pk_path(),
+                        None,
+                        Some(&new_doc),
+                    )?;
+                }
                 Ok(Some(RawBson::Document(new_doc)))
             }
         }

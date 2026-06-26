@@ -188,8 +188,14 @@ uninstrumented:
 
 ## Change Feeds
 
-- **[Change Detection (Watch Queries)](./rfcs/watch-queries.md)** — *proposed.*
-  Register a filter; matching inserts/updates/deletes fire a callback at commit.
+- **[Change Detection (Watch Queries)](./rfcs/watch-queries.md)** — *partially implemented.*
+  A 2×2 API over one detection core: a **BSON filter** (`db.watch` / `db.stream`) or a
+  **SQL `WHERE` filter** (`db.watch_query` / `db.stream_query`), delivered by **callback**
+  (push) or a long-lived **subscription cursor** (pull, `WatchStream` with non-blocking
+  lag-drop). Matching inserts/updates/deletes are coalesced per pk and delivered once per
+  commit, recast against the filter's set boundary (enter → `Insert`, leave → `Delete`,
+  stay → `Update`). The reactive result-set fold (and lossless/durable delivery) are
+  still to come.
 
 ## Bindings & Tooling
 
