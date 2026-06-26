@@ -964,6 +964,17 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         self.watch_sink.as_ref()
     }
 
+    pub(crate) fn now_millis(&self) -> i64 {
+        self.txn.now_millis()
+    }
+
+    /// The transaction's random source in the executor's `Rc` form — for v2's
+    /// `analyze`, which builds an `Executor` directly (the cursor path uses the
+    /// `Arc`-based [`rand`](Self::rand) instead).
+    pub(crate) fn exec_rand(&self) -> Option<std::rc::Rc<dyn Fn() -> f64>> {
+        rand_rc(&self.rand)
+    }
+
     /// Find the first document matching a filter.
     pub fn find_one<F: Serialize>(
         &self,

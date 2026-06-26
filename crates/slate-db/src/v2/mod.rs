@@ -13,6 +13,7 @@
 
 mod collection;
 mod distinct;
+mod exec;
 mod query;
 mod read;
 

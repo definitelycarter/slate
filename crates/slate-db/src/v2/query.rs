@@ -168,6 +168,17 @@ impl<P: Serialize> QueryBuilder<'_, P> {
         let (plan, _params) = self.lower(txn)?;
         Ok(plan.explain())
     }
+
+    /// Run the query and render its plan annotated with per-node actuals
+    /// (`EXPLAIN ANALYZE`). Bound parameters are honored, so a parameterized
+    /// query can be analyzed (v1's `explain_analyze` binds none).
+    pub fn analyze<S>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError>
+    where
+        S: Store,
+    {
+        let (plan, params) = self.lower(txn)?;
+        super::exec::analyze_plan(plan, params, txn)
+    }
 }
 
 #[cfg(test)]
@@ -259,5 +270,31 @@ mod tests {
             .query("SELECT VALUE c.name FROM c WHERE c.age > @min")
             .collect(&txn);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn query_analyze_matches_v1() {
+        let db = seed();
+        let txn = db.begin(true).unwrap();
+        let sql = "SELECT VALUE c.name FROM c WHERE c.age > 25";
+
+        let v2 = db.collection("users").query(sql).analyze(&txn).unwrap();
+        let v1 = txn.explain_analyze(DEFAULT_CF, "users", sql).unwrap();
+        assert_eq!(v2, v1);
+        assert!(!v2.is_empty());
+    }
+
+    #[test]
+    fn parameterized_query_analyzes() {
+        let db = seed();
+        let txn = db.begin(true).unwrap();
+        // v1's explain_analyze binds no parameters; v2's threads them through.
+        let analyzed = db
+            .collection("users")
+            .query("SELECT VALUE c.name FROM c WHERE c.age > @min")
+            .params(doc! { "min": 25 })
+            .analyze(&txn)
+            .unwrap();
+        assert!(!analyzed.is_empty());
     }
 }

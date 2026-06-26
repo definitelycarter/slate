@@ -72,16 +72,12 @@ impl<'a, F> FindBuilder<'a, F> {
 }
 
 impl<F: Serialize> FindBuilder<'_, F> {
-    /// Lower the filter, plan it, and build the cursor — v2's own read body, not
-    /// a call into `Transaction::find`. Shares only the engine transaction and
-    /// `collection_meta` (a catalog read).
-    fn build_cursor<'t, 'db, S>(
+    /// Lower the filter and plan it — v2's own read body, not a call into
+    /// `Transaction::find`. Shares only `collection_meta` (a catalog read).
+    fn build_plan<S: Store>(
         &self,
-        txn: &'t Transaction<'db, S>,
-    ) -> Result<Cursor<'db, 't, S>, DbError>
-    where
-        S: Store + 'db,
-    {
+        txn: &Transaction<'_, S>,
+    ) -> Result<slate_planner::Plan, DbError> {
         let filter_raw = bson::serialize_to_raw_document_buf(&self.filter)?;
         let query = slate_query::find_to_query(&filter_raw, &self.options)?;
         let ctx = slate_planner::PlanContext {
@@ -93,7 +89,20 @@ impl<F: Serialize> FindBuilder<'_, F> {
             validators: Vec::new(),
             triggers: Vec::new(),
         };
-        let plan = slate_planner::plan(slate_planner::Statement::Query(query), &ctx)?;
+        Ok(slate_planner::plan(
+            slate_planner::Statement::Query(query),
+            &ctx,
+        )?)
+    }
+
+    fn build_cursor<'t, 'db, S>(
+        &self,
+        txn: &'t Transaction<'db, S>,
+    ) -> Result<Cursor<'db, 't, S>, DbError>
+    where
+        S: Store + 'db,
+    {
+        let plan = self.build_plan(txn)?;
         // `.cloned()` is an `Arc`/`Rc` refcount bump so the cursor owns its rand
         // and watch handles — the same handoff `Transaction::run_plan` makes.
         Ok(Cursor::new(
@@ -143,6 +152,20 @@ impl<F: Serialize> FindBuilder<'_, F> {
     {
         self.options.take = Some(1);
         self.build_cursor(txn)?.iter_raw()?.next().transpose()
+    }
+
+    /// Render the physical plan without running it. There is no `EXPLAIN`
+    /// keyword for a Mongo-style `find`, so this is the only way to see its plan
+    /// (v1 can only explain SQL strings).
+    pub fn explain<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        Ok(self.build_plan(txn)?.explain())
+    }
+
+    /// Run the read and render its plan annotated with per-node actuals
+    /// (`EXPLAIN ANALYZE`). Like [`explain`](Self::explain), the only way to get
+    /// it for a `find`.
+    pub fn analyze<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<String, DbError> {
+        super::exec::analyze_plan(self.build_plan(txn)?, None, txn)
     }
 }
 
@@ -297,5 +320,26 @@ mod tests {
         assert_eq!(v2.len(), 3);
         assert!(v2[0].get_str("name").is_ok());
         assert!(v2[0].get("age").unwrap().is_none());
+    }
+
+    #[test]
+    fn find_explain_and_analyze_render_a_plan() {
+        let db = seed();
+        let txn = db.begin(true).unwrap();
+        let users = db.collection("users");
+
+        let explained = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .explain(&txn)
+            .unwrap();
+        assert!(!explained.is_empty());
+
+        let analyzed = users
+            .find(doc! { "age": { "$gt": 25 } })
+            .analyze(&txn)
+            .unwrap();
+        assert!(!analyzed.is_empty());
+        // analyze annotates with actual counts that plain explain lacks
+        assert_ne!(explained, analyzed);
     }
 }
