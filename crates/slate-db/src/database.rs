@@ -6,6 +6,7 @@ use slate_engine::{Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine
 use slate_executor::ExecEnv;
 use slate_executor::watch::WatchSink;
 use slate_store::{BackupStore, Durability, Store};
+use slate_udf::UdfBag;
 use slate_vm::pool::VmPool;
 
 use crate::error::DbError;
@@ -52,6 +53,8 @@ fn default_rand() -> f64 {
 
 pub struct DatabaseBuilder {
     pool: Option<VmPool>,
+    /// UDF bag accumulated before open via `with_udf`; moved into the database.
+    udf_bag: Arc<UdfBag>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     rand: Option<RandFn>,
     durability: Option<Durability>,
@@ -69,6 +72,7 @@ impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
             pool: None,
+            udf_bag: Arc::new(UdfBag::new()),
             clock: None,
             rand: None,
             durability: None,
@@ -83,6 +87,15 @@ impl DatabaseBuilder {
     /// but no scripts will be executed.
     pub fn with_scripting(mut self, pool: VmPool) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Register a native UDF in the database-scoped bag before open. Equivalent
+    /// to `functions().register` but at build time, for compiled applications
+    /// that carry their functions in the binary. A bare closure is accepted via
+    /// the blanket [`Udf`](slate_udf::Udf) impl.
+    pub fn with_udf<U: slate_udf::Udf + 'static>(self, name: &str, udf: U) -> Self {
+        self.udf_bag.register(name, udf);
         self
     }
 
@@ -178,6 +191,7 @@ impl DatabaseBuilder {
             pool: self.pool,
             registry,
             watch_registry: Arc::new(WatchRegistry::new()),
+            udf_bag: self.udf_bag,
             rand,
             durability: self.durability,
             #[cfg(feature = "runtime")]
@@ -196,6 +210,11 @@ pub struct Database<S: Store> {
     /// behind an `Arc` so a [`WatchHandle`] outlives any database borrow and can
     /// unregister itself on `Drop`.
     watch_registry: Arc<WatchRegistry>,
+    /// The database-scoped UDF bag — the live `name -> Arc<dyn Udf>` registry the
+    /// query path resolves `udf.*` calls against. Always present (cheap when
+    /// empty); behind an `Arc` so collection handles can share it for no-txn
+    /// `functions().register`, exactly like the watch registry.
+    udf_bag: Arc<UdfBag>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
     /// The builder-level durability default applied to every write transaction,
@@ -269,6 +288,7 @@ impl<S: Store> Database<S> {
         Ok(Transaction {
             txn,
             pool: self.pool.as_ref(),
+            udf_bag: self.udf_bag.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
             rand: self.rand.clone(),
@@ -284,6 +304,12 @@ impl<S: Store> Database<S> {
     /// flat `watch`/`stream` methods above do.
     pub(crate) fn watch_registry(&self) -> &Arc<WatchRegistry> {
         &self.watch_registry
+    }
+
+    /// The database-scoped UDF bag, behind its `Arc` — for collection handles to
+    /// share (no-txn `functions().register`), like the watch registry.
+    pub(crate) fn udf_bag(&self) -> &Arc<UdfBag> {
+        &self.udf_bag
     }
 
     /// Walk a collection's records and index structures and report any integrity
@@ -364,6 +390,9 @@ impl<S: Store> Database<S> {
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
     pool: Option<&'db VmPool>,
+    /// The database's UDF bag, borrowed for the life of the transaction (like
+    /// `pool`). Consulted at `compile` to resolve `udf.*` references.
+    udf_bag: &'db UdfBag,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
     /// Random source for `RAND()`, handed to each cursor this transaction opens.
@@ -509,6 +538,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     pub(crate) fn exec_env(&self, params: Option<bson::RawDocumentBuf>) -> ExecEnv<'db> {
         ExecEnv::new()
             .with_pool(self.pool)
+            .with_udf(Some(self.udf_bag))
             .with_params(params.map(Rc::new))
             .with_rand(self.exec_rand())
             .with_watch(self.watch_sink.clone())

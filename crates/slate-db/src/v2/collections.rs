@@ -20,6 +20,7 @@ use super::Collection;
 use crate::WatchRegistry;
 use crate::database::Transaction;
 use crate::error::DbError;
+use slate_udf::UdfBag;
 
 /// The collection-management namespace for one column family. Built by
 /// [`Database::collections`](super::Collection) or `db.cf(cf).collections()`.
@@ -28,11 +29,14 @@ pub struct Collections {
     /// The database's watch registry, carried so a [`Collection`] built by
     /// `create` is a fully-formed reactive root like any other handle.
     watch: Arc<WatchRegistry>,
+    /// The database's UDF bag, carried for the same reason — a `create`d handle
+    /// shares the live bag like any other.
+    udf_bag: Arc<UdfBag>,
 }
 
 impl Collections {
-    pub(super) fn new(cf: String, watch: Arc<WatchRegistry>) -> Self {
-        Self { cf, watch }
+    pub(super) fn new(cf: String, watch: Arc<WatchRegistry>, udf_bag: Arc<UdfBag>) -> Self {
+        Self { cf, watch, udf_bag }
     }
 
     /// Create a collection named `name` in this scope's column family. Returns a
@@ -42,6 +46,7 @@ impl Collections {
         CreateCollection {
             cf: &self.cf,
             watch: &self.watch,
+            udf_bag: &self.udf_bag,
             name: name.to_string(),
             pk_path: "_id".to_string(),
             ttl_path: "ttl".to_string(),
@@ -74,6 +79,7 @@ impl Collections {
 pub struct CreateCollection<'a> {
     cf: &'a str,
     watch: &'a Arc<WatchRegistry>,
+    udf_bag: &'a Arc<UdfBag>,
     name: String,
     pk_path: String,
     ttl_path: String,
@@ -101,6 +107,7 @@ impl CreateCollection<'_> {
             collection: self.name,
             // `Arc` refcount bump: the new handle is a reactive root like any other.
             watch: self.watch.clone(),
+            udf_bag: self.udf_bag.clone(),
         })
     }
 }

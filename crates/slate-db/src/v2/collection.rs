@@ -23,6 +23,7 @@ use crate::DEFAULT_CF;
 use crate::WatchRegistry;
 use crate::database::Database;
 use slate_planner::UpsertMode;
+use slate_udf::UdfBag;
 
 /// A lightweight handle to one collection. Build it with
 /// [`Database::collection`] (default column family) or
@@ -37,6 +38,10 @@ pub struct Collection {
     /// `find(f).watch`/`.stream` register a DB-lifetime subscription off this
     /// handle without a transaction.
     pub(super) watch: Arc<WatchRegistry>,
+    /// `Arc` clone of the database's UDF bag — shared so `functions().register`
+    /// can mutate the live bag off this handle without a transaction, like
+    /// `watch`.
+    pub(super) udf_bag: Arc<UdfBag>,
 }
 
 impl Collection {
@@ -118,7 +123,7 @@ impl Collection {
     /// The collection's user-defined-function sub-handle:
     /// `functions().create(name, src)` / `.remove(name)` / `.list(&txn)`.
     pub fn functions(&self) -> Functions<'_> {
-        Functions::new(&self.cf, &self.collection)
+        Functions::new(&self.cf, &self.collection, &self.udf_bag)
     }
 }
 
@@ -127,6 +132,7 @@ impl Collection {
 pub struct CfScope {
     cf: String,
     watch: Arc<WatchRegistry>,
+    udf_bag: Arc<UdfBag>,
 }
 
 impl CfScope {
@@ -136,13 +142,14 @@ impl CfScope {
             cf: self.cf,
             collection: name.to_string(),
             watch: self.watch,
+            udf_bag: self.udf_bag,
         }
     }
 
     /// The collection-management namespace for this column family:
     /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`.
     pub fn collections(self) -> Collections {
-        Collections::new(self.cf, self.watch)
+        Collections::new(self.cf, self.watch, self.udf_bag)
     }
 }
 
@@ -154,6 +161,7 @@ impl<S: Store> Database<S> {
             collection: name.to_string(),
             // `Arc` refcount bump: the handle carries a DB-lifetime reactive root.
             watch: self.watch_registry().clone(),
+            udf_bag: self.udf_bag().clone(),
         }
     }
 
@@ -162,6 +170,7 @@ impl<S: Store> Database<S> {
         CfScope {
             cf: cf.to_string(),
             watch: self.watch_registry().clone(),
+            udf_bag: self.udf_bag().clone(),
         }
     }
 
@@ -169,6 +178,10 @@ impl<S: Store> Database<S> {
     /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`. Sugar for
     /// `db.cf(DEFAULT_CF).collections()`.
     pub fn collections(&self) -> Collections {
-        Collections::new(DEFAULT_CF.to_string(), self.watch_registry().clone())
+        Collections::new(
+            DEFAULT_CF.to_string(),
+            self.watch_registry().clone(),
+            self.udf_bag().clone(),
+        )
     }
 }

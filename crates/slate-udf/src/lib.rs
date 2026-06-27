@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use slate_value::Value;
+pub use slate_value::Value;
 
 /// A native scalar user-defined function.
 ///

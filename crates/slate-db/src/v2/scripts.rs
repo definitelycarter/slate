@@ -24,8 +24,11 @@
 //! call the engine transaction's catalog `create_function`/`drop_function`/
 //! `load_functions` directly, not a v1 verb.
 
+use std::sync::Arc;
+
 use slate_engine::{Catalog, FunctionKind, runtime_tag};
 use slate_store::Store;
+use slate_udf::{Udf, UdfBag};
 
 use crate::database::Transaction;
 use crate::error::DbError;
@@ -219,11 +222,34 @@ impl CreateValidator<'_> {
 pub struct Functions<'a> {
     cf: &'a str,
     collection: &'a str,
+    /// The database-scoped UDF bag, for the no-txn native `register`/`unregister`
+    /// verbs (the scripted `create`/`remove`/`list` go through the catalog).
+    udf_bag: &'a Arc<UdfBag>,
 }
 
 impl<'a> Functions<'a> {
-    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
-        Self { cf, collection }
+    pub(crate) fn new(cf: &'a str, collection: &'a str, udf_bag: &'a Arc<UdfBag>) -> Self {
+        Self {
+            cf,
+            collection,
+            udf_bag,
+        }
+    }
+
+    /// Register a native UDF named `name` in the database-scoped bag. No
+    /// transaction — this mutates live runtime state immediately, like
+    /// `watch`/`stream`. A bare closure is accepted via the blanket [`Udf`] impl.
+    /// (Database-scoped even though it hangs off a collection handle: the
+    /// *binding* that scopes a name to one collection is a later, durable
+    /// concern.)
+    pub fn register<U: Udf + 'static>(&self, name: &str, udf: U) {
+        self.udf_bag.register(name, udf);
+    }
+
+    /// Unregister the native UDF named `name` from the bag. Returns whether one
+    /// was present. No transaction.
+    pub fn unregister(&self, name: &str) -> bool {
+        self.udf_bag.unregister(name)
     }
 
     /// Register a UDF named `name` with Lua `source`. Returns a builder; nothing
@@ -304,11 +330,40 @@ impl<'a> RemoveScript<'a> {
 mod tests {
     use std::sync::Arc;
 
-    use bson::doc;
+    use bson::{Bson, doc};
     use slate_store::MemoryStore;
     use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
-    use crate::{Database, DatabaseBuilder, RuntimeRegistry, VmPool};
+    use crate::{Database, DatabaseBuilder, RuntimeRegistry, UdfError, Value, VmPool};
+
+    /// A native UDF: read arg 0 as a number and double it.
+    fn double(args: &[Value]) -> Result<Value, UdfError> {
+        let n = match args.first().and_then(Value::as_bson) {
+            Some(Bson::Int32(i)) => f64::from(*i),
+            Some(Bson::Int64(i)) => *i as f64,
+            Some(Bson::Double(d)) => *d,
+            _ => {
+                return Err(UdfError::InvalidArgument {
+                    name: "double".to_string(),
+                    message: "expected a number".to_string(),
+                });
+            }
+        };
+        Ok(Value::defined(n * 2.0))
+    }
+
+    /// Run `sql` over `collection` and collect the produced scalars as `f64`s.
+    fn query_f64s(
+        db: &Database<MemoryStore>,
+        collection: &str,
+        sql: &str,
+    ) -> Result<Vec<f64>, crate::DbError> {
+        let txn = db.begin(true).unwrap();
+        db.collection(collection)
+            .query(sql)
+            .iter::<f64>(&txn)?
+            .collect::<Result<Vec<f64>, _>>()
+    }
 
     fn db_with_users() -> Database<MemoryStore> {
         with_users(DatabaseBuilder::new())
@@ -427,5 +482,52 @@ mod tests {
             .execute(&txn);
         assert!(rejected.is_err(), "validator should reject the minor");
         txn.commit().unwrap();
+    }
+
+    #[test]
+    fn native_udf_registered_at_build_runs_in_a_query() {
+        // A native UDF registered before open resolves and runs end-to-end:
+        // `SELECT VALUE udf.double(c.x)` over two rows.
+        let db = with_users(DatabaseBuilder::new().with_udf("double", double));
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_many(vec![doc! { "_id": 1, "x": 21 }, doc! { "_id": 2, "x": 50 }])
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let mut out = query_f64s(&db, "users", "SELECT VALUE udf.double(c.x) FROM c").unwrap();
+        out.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        assert_eq!(out, vec![42.0, 100.0]);
+    }
+
+    #[test]
+    fn native_udf_registered_at_runtime_runs_then_unregisters() {
+        let db = db_with_users();
+
+        // Register at runtime (no transaction) and query through it.
+        db.collection("users")
+            .functions()
+            .register("double", double);
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_many(vec![doc! { "_id": 1, "x": 21 }, doc! { "_id": 2, "x": 50 }])
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let mut out = query_f64s(&db, "users", "SELECT VALUE udf.double(c.x) FROM c").unwrap();
+        out.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        assert_eq!(out, vec![42.0, 100.0]);
+
+        // Unregister, and the same query no longer resolves.
+        assert!(db.collection("users").functions().unregister("double"));
+        let err = query_f64s(&db, "users", "SELECT VALUE udf.double(c.x) FROM c").unwrap_err();
+        assert!(
+            err.to_string().contains("udf.double"),
+            "expected an unregistered-udf error after unregister, got: {err}"
+        );
     }
 }
