@@ -32,9 +32,11 @@ Concretely, this RFC proposes to:
 1. **Drop `slate-vm`, `with_scripting`, `RuntimeRegistry`, `VmPool`** from the
    core. The database no longer bakes in a VM.
 2. **Model each role as its own native trait** in its own low crate
-   (`slate-udf`, `slate-trigger`, `slate-validator`), sharing a small
-   `slate-hook` foundation. The planner/executor embed role-typed handles where
-   they embed `slate-vm::ResolvedHook` today.
+   (`slate-udf`, `slate-trigger`, `slate-validator`), each **self-contained —
+   no shared `slate-hook` crate**: every role crate owns its own context type,
+   and common vocabulary is factored out only if a second role proves it earns
+   the indirection. The planner/executor embed role-typed handles where they
+   embed `slate-vm::ResolvedHook` today.
 3. **Store only *bindings*** in the catalog — a per-collection mapping from a
    trigger/validator/UDF to a **native function name** — never code or blobs.
 4. **Register native functions at open *and* at runtime**, in role-typed bags on
@@ -106,15 +108,22 @@ and validators. Role-typed traits are stronger, for four reasons:
 
 ### Crate layout
 
-Each role trait + its registry lives in its own low crate, mirroring the existing
-`slate-udf`:
+Each role trait + its registry + **its own context type** lives in its own low
+crate, mirroring the existing `slate-udf` — **no shared `slate-hook` crate**:
 
 | Crate | Holds |
 |---|---|
-| `slate-hook` *(new, foundation)* | shared `ValidatorCtx`/`TriggerCtx` context (the read-only `ctx.doc()` view), `Verdict`, and the binding/registry plumbing the three roles share |
 | `slate-udf` *(exists)* | `Udf` trait + bag/registry |
-| `slate-trigger` *(new)* | `Trigger` trait + bag/registry |
-| `slate-validator` *(new)* | `Validator` trait + bag/registry |
+| `slate-validator` *(new)* | `Validator` trait, `ValidatorCtx` (the read-only `ctx.doc()` view), `Verdict` + bag/registry |
+| `slate-trigger` *(new)* | `Trigger` trait, `TriggerCtx` (read-only candidate + the `ReadWrite` capability surface) + bag/registry |
+
+A shared foundation was considered (`slate-hook`, holding the common `ctx.doc()`
+view / `Verdict` / registry plumbing) and **rejected**: with the roles built one
+at a time, it would have a single consumer and abstract prematurely. Each crate
+carries its own context newtype; if validator and trigger turn out to share
+enough vocabulary, that slice is extracted *then*, when a second consumer
+justifies it. The bag/registry pattern is small enough that mirroring it per
+crate (as `slate-udf` already does) costs less than the indirection.
 
 The planner/executor depend on these (for the role-typed handles embedded in
 plans) **instead of `slate-vm`** — which is what finally lets `slate-vm` leave the
@@ -145,7 +154,7 @@ consistency questions. (Promoting validators to read other documents is a future
 read-only candidate, **plus** the ability to mutate (set fields) and read other
 documents, via the existing borrowed scoped-callback mechanism
 (`ScriptCapabilities` / `ScopedMethod`, `slate-vm/src/lib.rs:61-77` — relocated
-into `slate-hook`). The exact `TriggerCtx` shape (event payload, pre/post timing)
+into `slate-trigger`). The exact `TriggerCtx` shape (event payload, pre/post timing)
 is trigger-specific detailed design; the requirement here is that it **inherits
 today's `ReadWrite` capability**, not that it resets to read-only-candidate-only.
 
@@ -423,8 +432,8 @@ builder.with_udf(Wasmtime::from_path("tax.wasm"));   // module shared, Mutex<Sto
 > **executor** fires (`nodes/{trigger,upsert,validate}.rs`). Exactly **three**
 > crates pull `slate-vm` today (planner, executor, db), all because of
 > `ResolvedHook`. So the first real task is to **relocate the hook vocabulary** —
-> the role traits + `ValidatorCtx`/`TriggerCtx` + `Verdict` — into `slate-hook`
-> and the role crates, with no VM. Only then can `slate-vm` leave the
+> the role traits + `ValidatorCtx`/`TriggerCtx` + `Verdict` — into the role
+> crates (each self-contained), with no VM. Only then can `slate-vm` leave the
 > planner/executor/`slate-db` dependency trees.
 
 The removal covers `with_scripting`, `RuntimeRegistry`, `VmPool`, the Lua runtime,
@@ -449,8 +458,8 @@ durable-binding model — but the spike itself is not shipped to `main`.
 1. **Execution-context refactor.** The per-query env bundle (`ExecEnv`/`EvalEnv`)
    + `plan.container()` + the expression-resolution pass, on `main`'s existing
    `params`/`rand`/`clock`/`watch` threading — see that RFC.
-2. **Native core.** Relocate the hook vocabulary into `slate-hook` + the role
-   crates. Drop `slate-vm`, `with_scripting`, `RuntimeRegistry`, `VmPool`, the
+2. **Native core.** Relocate the hook vocabulary into the role crates (each
+   self-contained). Drop `slate-vm`, `with_scripting`, `RuntimeRegistry`, `VmPool`, the
    stored-source path (quote `2a33620`). Add the builder bags + binding catalog +
    lazy validation. UDFs → validators → triggers, resolving at plan-build (the
    machinery landed in step 1).
@@ -484,9 +493,10 @@ durable-binding model — but the spike itself is not shipped to `main`.
 - **Trigger context shape** — event payload, pre/post timing (`when`), the exact
   `TriggerCtx` mutation/query surface. Deferred to a trigger-specific detailed
   design; the constraint is that it inherits today's `ReadWrite` power.
-- **`slate-hook` boundary** — confirm the shared `ValidatorCtx`/`TriggerCtx` +
-  `Verdict` + registry plumbing belong in a dedicated `slate-hook` crate vs folded
-  into `slate-value`.
+- ~~**`slate-hook` boundary**~~ — **resolved: no shared crate.** Each role crate
+  (`slate-validator`, `slate-trigger`) carries its own context type, `Verdict`,
+  and registry; a shared foundation is extracted only if a second role proves it
+  earns its keep.
 - **`Send + Sync` under future wasm-threads** — the `slate-wasm` `unsafe` newtype
   is sound only while `wasm32` is single-threaded; revisit if wasm-threads become
   a target.

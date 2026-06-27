@@ -1623,6 +1623,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-validator"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "thiserror",
+]
+
+[[package]]
 name = "slate-value"
 version = "0.1.0"
 dependencies = [
