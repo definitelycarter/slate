@@ -1531,6 +1531,7 @@ dependencies = [
  "slate-ast",
  "slate-rawbson",
  "slate-sql",
+ "slate-udf",
  "slate-value",
 ]
 
@@ -1547,6 +1548,7 @@ dependencies = [
  "slate-rawbson",
  "slate-sql",
  "slate-store",
+ "slate-udf",
  "slate-vm",
  "tracing",
 ]

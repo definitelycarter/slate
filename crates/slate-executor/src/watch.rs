@@ -48,7 +48,9 @@ pub use slate_eval::raweval::Compiled;
 /// member reads to direct row-field reads — the same fast form the `Filter`
 /// node uses.
 pub fn compile_filter(expr: &Expression, alias: &str) -> Arc<Compiled> {
-    Arc::new(raweval::compile(expr, Some(alias)))
+    // Watch filters compile without a UDF bag — `udf.*` in a watch predicate is
+    // out of scope for now (no bag is threaded through the registry path).
+    Arc::new(raweval::compile(expr, Some(alias), None))
 }
 
 /// A change to a document, recast against a single watch's filtered set

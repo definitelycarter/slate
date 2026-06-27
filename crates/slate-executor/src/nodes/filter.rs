@@ -22,7 +22,7 @@ pub(crate) fn execute<'a>(
 ) -> ValueIter<'a> {
     // Compile the predicate once; the per-row closure evaluates the resolved
     // form (see `raweval::compile`).
-    let program = raweval::compile(&predicate, sole_alias(&binding));
+    let program = raweval::compile(&predicate, sole_alias(&binding), env.udf);
     Box::new(source.filter_map(move |item| {
         match keep_row(item, &binding, &program, &env) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept

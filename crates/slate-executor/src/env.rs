@@ -29,6 +29,7 @@
 use std::rc::Rc;
 
 use bson::RawDocumentBuf;
+use slate_udf::UdfBag;
 use slate_vm::pool::VmPool;
 
 use crate::nodes::env::Rand;
@@ -68,6 +69,12 @@ pub struct ExecEnv<'a> {
     /// it is a plain value, not a callable. `None` makes the clock functions
     /// undefined.
     pub(crate) clock: Option<i64>,
+    /// The live, database-scoped UDF bag, borrowed from the transaction for the
+    /// life of the query (treated like `pool`). Consulted once per query, at
+    /// `compile`, to bake each `udf.*` reference into a resolved handle; per-row
+    /// eval then just calls it. `None` (the default) makes any `udf.*` reference
+    /// an unregistered error.
+    pub(crate) udf: Option<&'a UdfBag>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -111,6 +118,13 @@ impl<'a> ExecEnv<'a> {
     /// functions. `None` (the default) makes them undefined.
     pub fn with_clock(mut self, clock: Option<i64>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Attach the live UDF bag, consulted at `compile` to resolve `udf.*` calls.
+    /// `None` (the default) leaves every `udf.*` reference unresolved.
+    pub fn with_udf(mut self, udf: Option<&'a UdfBag>) -> Self {
+        self.udf = udf;
         self
     }
 }

@@ -12,6 +12,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 slate-ast = { path = "../slate-ast" }
 slate-rawbson = { path = "../slate-rawbson" }
 slate-value = { path = "../slate-value" }
+slate-udf = { path = "../slate-udf" }
 
 [dev-dependencies]
 # Cycle through a dev-dependency only: the evaluator's behavioural tests parse

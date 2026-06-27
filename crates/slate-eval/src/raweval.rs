@@ -15,6 +15,7 @@
 //! test (`raw_matches_owned`) pins this down.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use bson::raw::{BindRawBsonRef, CString, RawArrayBuf, RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::{Bson, RawBson};
@@ -27,6 +28,7 @@ use crate::eval::{
 use crate::value::Value;
 use slate_ast::{BinOp, Expression, Literal, UnaryOp};
 use slate_rawbson::RawField;
+use slate_udf::{Udf, UdfBag};
 
 /// The result of evaluating a [`Expression`] over raw bytes.
 ///
@@ -184,10 +186,12 @@ pub fn eval<'a>(expr: &'a Expression, env: &RowEnv<'a>) -> Result<RawValue<'a>> 
         Expression::Subquery { .. } => Err(EvalError {
             message: "subquery must be lowered by the planner, not evaluated directly".into(),
         }),
-        // Resolved at plan build into a baked handle (a later slice); like a
-        // subquery, never seen here in a well-formed plan.
-        Expression::Udf { .. } => Err(EvalError {
-            message: "udf must be resolved by the planner, not evaluated directly".into(),
+        // UDFs are resolved and baked at compile time (see `compile`), so the
+        // interpreted walk never executes one in the compiled SELECT/WHERE path.
+        // It is reached only from positions that interpret instead of compiling
+        // (ORDER BY / UNWIND / GROUP BY), where UDFs are not yet supported.
+        Expression::Udf { name, .. } => Err(EvalError {
+            message: format!("user-defined function udf.{name} is not supported in this position"),
         }),
 
         Expression::Member { base, field } => member_access(eval(base, env)?, field),
@@ -727,6 +731,15 @@ pub enum Compiled {
         name: String,
         args: Vec<Compiled>,
     },
+    /// A resolved user-defined-function call. The `Arc<dyn Udf>` is looked up
+    /// from the bag once, at compile time, and baked in — so per-row eval just
+    /// invokes it, with no resolver on the hot path. `name` is the query-facing
+    /// name (`udf.tax`), kept only for error messages.
+    Udf {
+        name: String,
+        udf: Arc<dyn Udf>,
+        args: Vec<Compiled>,
+    },
 }
 
 /// A precompiled object-projection key. `build_object` (in `eval`) revalidates
@@ -744,7 +757,7 @@ pub enum ObjKey {
 /// Compile `expr` for repeated evaluation. `sole` is the single `FROM` alias
 /// when the node reads bare rows ([`RowBinding::Alias`] mode); pass `None` for
 /// the multi-binding environment shape so identifiers fall back to name lookup.
-pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
+pub fn compile(expr: &Expression, sole: Option<&str>, udf: Option<&UdfBag>) -> Compiled {
     match expr {
         Expression::Literal(l) => Compiled::Literal(l.clone()),
         // Pre-convert the constant to raw bytes once. The common scalar/array
@@ -764,7 +777,7 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
         Expression::Member { base, field } => {
             // Collapse `<sole-alias>.<field>` to a direct field read on the row,
             // dropping the identifier lookup and its intermediate value.
-            match compile(base, sole) {
+            match compile(base, sole, udf) {
                 Compiled::Row => Compiled::RowField(field.clone()),
                 base => Compiled::Member {
                     base: Box::new(base),
@@ -773,12 +786,12 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
             }
         }
         Expression::Index { base, index } => Compiled::Index {
-            base: Box::new(compile(base, sole)),
-            index: Box::new(compile(index, sole)),
+            base: Box::new(compile(base, sole, udf)),
+            index: Box::new(compile(index, sole, udf)),
         },
         Expression::Unary { op, expr } => Compiled::Unary {
             op: *op,
-            expr: Box::new(compile(expr, sole)),
+            expr: Box::new(compile(expr, sole, udf)),
         },
         Expression::Binary { op, lhs, rhs } => {
             // Fuse the Mongo implicit-equality idiom so the field is read once.
@@ -786,17 +799,17 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
                 && let Some((base, value)) = as_eq_or_contains(lhs, rhs)
             {
                 return Compiled::MongoEq {
-                    base: Box::new(compile(base, sole)),
-                    value: Box::new(compile(value, sole)),
+                    base: Box::new(compile(base, sole, udf)),
+                    value: Box::new(compile(value, sole, udf)),
                 };
             }
             Compiled::Binary {
                 op: *op,
-                lhs: Box::new(compile(lhs, sole)),
-                rhs: Box::new(compile(rhs, sole)),
+                lhs: Box::new(compile(lhs, sole, udf)),
+                rhs: Box::new(compile(rhs, sole, udf)),
             }
         }
-        Expression::Function { name, args } => compile_function(name, args, sole),
+        Expression::Function { name, args } => compile_function(name, args, sole, udf),
         Expression::Object(fields) => Compiled::Object(
             fields
                 .iter()
@@ -806,15 +819,15 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
                         Ok(c) => ObjKey::Ready(c),
                         Err(_) => ObjKey::Lazy(k.clone()),
                     };
-                    (key, compile(v, sole))
+                    (key, compile(v, sole, udf))
                 })
                 .collect(),
         ),
         Expression::Array(items) => {
-            Compiled::Array(items.iter().map(|e| compile(e, sole)).collect())
+            Compiled::Array(items.iter().map(|e| compile(e, sole, udf)).collect())
         }
         Expression::PathGet { base, path } => Compiled::PathGet {
-            base: Box::new(compile(base, sole)),
+            base: Box::new(compile(base, sole, udf)),
             path: path.clone(),
         },
         Expression::MultikeyEq {
@@ -822,7 +835,7 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
             index_path,
             value,
         } => Compiled::MultikeyEq {
-            base: Box::new(compile(base, sole)),
+            base: Box::new(compile(base, sole, udf)),
             // `.[]` markers only mean "an array is here"; drop them once. The
             // verbatim path was for the planner.
             path: index_path
@@ -830,14 +843,26 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
                 .filter(|s| *s != "[]")
                 .map(str::to_string)
                 .collect(),
-            value: Box::new(compile(value, sole)),
+            value: Box::new(compile(value, sole, udf)),
         },
         Expression::Subquery { .. } => {
             Compiled::Unsupported("subquery must be lowered by the planner".into())
         }
-        Expression::Udf { .. } => Compiled::Unsupported(
-            "udf must be resolved by the planner, not compiled directly".into(),
-        ),
+        // Resolve the UDF against the bag now, once, and bake the handle in, so
+        // per-row eval just calls it. Resolution is by the query-facing name
+        // (`udf.tax`); the planner's binding pass (a later slice) rewrites that
+        // to the native function name before this point. An unregistered name
+        // defers to an eval-time error, like the other `Unsupported` cases.
+        Expression::Udf { name, args } => match udf.and_then(|bag| bag.get(name)) {
+            Some(func) => Compiled::Udf {
+                name: name.clone(),
+                udf: func,
+                args: args.iter().map(|a| compile(a, sole, udf)).collect(),
+            },
+            None => Compiled::Unsupported(format!(
+                "user-defined function udf.{name} is not registered"
+            )),
+        },
     }
 }
 
@@ -874,8 +899,13 @@ fn as_eq_or_contains<'a>(
 
 /// Resolve a function call to its compiled form, mirroring the dispatch in
 /// [`eval_function`] but doing the name match once.
-fn compile_function(name: &str, args: &[Expression], sole: Option<&str>) -> Compiled {
-    let c = |e| Box::new(compile(e, sole));
+fn compile_function(
+    name: &str,
+    args: &[Expression],
+    sole: Option<&str>,
+    udf: Option<&UdfBag>,
+) -> Compiled {
+    let c = |e| Box::new(compile(e, sole, udf));
     if args.len() == 1 {
         if name.eq_ignore_ascii_case("IS_DEFINED") {
             return Compiled::IsDefined(c(&args[0]));
@@ -892,7 +922,7 @@ fn compile_function(name: &str, args: &[Expression], sole: Option<&str>) -> Comp
     }
     Compiled::Call {
         name: name.to_string(),
-        args: args.iter().map(|a| compile(a, sole)).collect(),
+        args: args.iter().map(|a| compile(a, sole, udf)).collect(),
     }
 }
 
@@ -999,6 +1029,28 @@ pub fn eval_compiled<'a>(c: &'a Compiled, env: &RowEnv<'a>) -> Result<RawValue<'
             }
             crate::functions::call(name, vals).map(RawValue::from_value)
         }
+        Compiled::Udf { name, udf, args } => {
+            // UDFs receive owned `Value` arguments, exactly like built-in scalar
+            // functions (which already materialize their args), so this adds no
+            // cost over a built-in call.
+            let mut vals = Vec::with_capacity(args.len());
+            for a in args {
+                vals.push(eval_compiled(a, env)?.into_value()?);
+            }
+            // The body is user code: a panic must fail the query, not unwind
+            // across the call boundary. `AssertUnwindSafe` is sound here — on a
+            // panic the captured args/handle are simply dropped and we return an
+            // error.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| udf.call(&vals))) {
+                Ok(Ok(value)) => Ok(RawValue::from_value(value)),
+                Ok(Err(e)) => Err(EvalError {
+                    message: e.to_string(),
+                }),
+                Err(_) => Err(EvalError {
+                    message: format!("user-defined function udf.{name} panicked"),
+                }),
+            }
+        }
     }
 }
 
@@ -1088,7 +1140,7 @@ mod tests {
         // single-binding fast path (`sole = Some("c")`, exercising `Row`/
         // `RowField`) and the generic name-lookup path (`sole = None`).
         for sole in [Some("c"), None] {
-            let prog = compile(&expr, sole);
+            let prog = compile(&expr, sole, None);
             let compiled = eval_compiled(&prog, &RowEnv::new(&rbinds, None))
                 .unwrap()
                 .into_value()
@@ -1208,7 +1260,7 @@ mod tests {
 
         // …and via the compiled path (rewind the source first).
         idx.set(0);
-        let prog = compile(&expr, Some("c"));
+        let prog = compile(&expr, Some("c"), None);
         let got = eval_compiled(&prog, &env).unwrap().into_value().unwrap();
         assert_eq!(got, Value::Defined(bson::Bson::Double(seq[0])));
     }

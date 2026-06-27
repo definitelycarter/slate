@@ -21,6 +21,7 @@ trace = ["dep:tracing"]
 bson = { workspace = true }
 slate-ast = { path = "../slate-ast" }
 slate-eval = { path = "../slate-eval" }
+slate-udf = { path = "../slate-udf" }
 slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
 slate-rawbson = { path = "../slate-rawbson" }

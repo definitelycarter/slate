@@ -32,7 +32,7 @@ pub(crate) fn execute<'a>(
 
     // Otherwise compile the projection once; the per-row closure evaluates the
     // resolved form (see `raweval::compile`).
-    let program = raweval::compile(&expr, sole_alias(&binding));
+    let program = raweval::compile(&expr, sole_alias(&binding), env.udf);
     Box::new(source.map(move |item| project_row(item, &binding, &program, &env)))
 }
 
@@ -142,6 +142,83 @@ mod tests {
                 RawBson::String("ada".into()),
                 RawBson::String("alan".into())
             ]
+        );
+    }
+
+    #[test]
+    fn udf_resolves_against_the_bag_and_runs_per_row() {
+        use slate_eval::Value;
+        use slate_udf::{UdfBag, UdfError};
+
+        let bag = UdfBag::new();
+        bag.register("double", |args: &[Value]| {
+            let n = args
+                .first()
+                .and_then(Value::as_bson)
+                .and_then(|b| match b {
+                    bson::Bson::Int32(i) => Some(f64::from(*i)),
+                    bson::Bson::Int64(i) => Some(*i as f64),
+                    bson::Bson::Double(d) => Some(*d),
+                    _ => None,
+                })
+                .ok_or_else(|| UdfError::InvalidArgument {
+                    name: "double".to_string(),
+                    message: "expected a number".to_string(),
+                })?;
+            Ok(Value::defined(n * 2.0))
+        });
+
+        // `SELECT VALUE udf.double(c.age)` — resolved once against the bag at
+        // compile, then called per row.
+        let out = collect(execute(
+            sv("udf.double(c.age)"),
+            RowBinding::Env,
+            bind_c(people()),
+            crate::ExecEnv::new().with_udf(Some(&bag)),
+        ))
+        .unwrap();
+        assert_eq!(out, vec![RawBson::Double(72.0), RawBson::Double(82.0)]);
+    }
+
+    #[test]
+    fn unregistered_udf_is_an_error() {
+        use slate_udf::UdfBag;
+
+        let bag = UdfBag::new(); // empty
+        let err = collect(execute(
+            sv("udf.missing(c.age)"),
+            RowBinding::Env,
+            bind_c(people()),
+            crate::ExecEnv::new().with_udf(Some(&bag)),
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("udf.missing"),
+            "expected an unregistered-udf error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn panicking_udf_fails_the_query() {
+        use slate_eval::Value;
+        use slate_udf::{UdfBag, UdfError};
+
+        let bag = UdfBag::new();
+        bag.register("boom", |_: &[Value]| -> Result<Value, UdfError> {
+            panic!("kaboom")
+        });
+        // The panic is caught at the call boundary and turned into an error
+        // (the "thread panicked" line on stderr is expected).
+        let err = collect(execute(
+            sv("udf.boom(c.age)"),
+            RowBinding::Env,
+            bind_c(people()),
+            crate::ExecEnv::new().with_udf(Some(&bag)),
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("panicked"),
+            "expected a panic-to-error, got: {err}"
         );
     }
 }
