@@ -108,7 +108,10 @@ where
         triggers: Vec::new(),
     };
     let plan = slate_planner::plan(stmt, &ctx)?;
-    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)))
+    let env = txn
+        .exec_env(None)
+        .with_udf_bindings(txn.udf_bindings(cf, collection));
+    Ok(Cursor::new(txn.engine_txn(), plan, env))
 }
 
 impl<F: Serialize> DistinctBuilder<'_, F> {

@@ -26,9 +26,11 @@
 //! (cheaply cloned) `ExecEnv` and derive a `RowEnv` per row — see
 //! [`row_env`](crate::nodes::env::row_env).
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use bson::RawDocumentBuf;
+use slate_eval::raweval::UdfCtx;
 use slate_udf::UdfBag;
 use slate_vm::pool::VmPool;
 
@@ -75,6 +77,11 @@ pub struct ExecEnv<'a> {
     /// eval then just calls it. `None` (the default) makes any `udf.*` reference
     /// an unregistered error.
     pub(crate) udf: Option<&'a UdfBag>,
+    /// The query collection's UDF bindings (`query_name -> native_name`),
+    /// resolved from the cached catalog snapshot and shared (`Rc`) into each
+    /// evaluating node. `compile` consults it *before* the bag. `None` when the
+    /// collection has no bindings, so any `udf.*` reference there is unbound.
+    pub(crate) udf_bindings: Option<Rc<HashMap<String, String>>>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -126,5 +133,20 @@ impl<'a> ExecEnv<'a> {
     pub fn with_udf(mut self, udf: Option<&'a UdfBag>) -> Self {
         self.udf = udf;
         self
+    }
+
+    /// Attach the collection's UDF bindings (`query_name -> native_name`), shared
+    /// by `Rc`. `None` (the default) leaves every `udf.*` reference unbound.
+    pub fn with_udf_bindings(mut self, bindings: Option<Rc<HashMap<String, String>>>) -> Self {
+        self.udf_bindings = bindings;
+        self
+    }
+
+    /// Bundle the binding map and the bag into the [`UdfCtx`] `compile` consumes.
+    pub(crate) fn udf_ctx(&self) -> UdfCtx<'_> {
+        UdfCtx {
+            bindings: self.udf_bindings.as_deref(),
+            bag: self.udf,
+        }
     }
 }

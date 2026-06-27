@@ -32,7 +32,7 @@ pub(crate) fn execute<'a>(
 
     // Otherwise compile the projection once; the per-row closure evaluates the
     // resolved form (see `raweval::compile`).
-    let program = raweval::compile(&expr, sole_alias(&binding), env.udf);
+    let program = raweval::compile(&expr, sole_alias(&binding), env.udf_ctx());
     Box::new(source.map(move |item| project_row(item, &binding, &program, &env)))
 }
 
@@ -62,6 +62,16 @@ mod tests {
     use crate::nodes::values;
     use bson::{RawBson, rawdoc};
     use slate_planner::RowBinding;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    /// One binding (`query -> native`) for the executor-level UDF tests.
+    fn bound(query: &str, native: &str) -> Option<Rc<HashMap<String, String>>> {
+        Some(Rc::new(HashMap::from([(
+            query.to_string(),
+            native.to_string(),
+        )])))
+    }
 
     /// Project `expr_src` over a bound (`{c: doc}`) source of `docs`.
     fn project(expr_src: &str, docs: Vec<RawBson>) -> Vec<RawBson> {
@@ -174,17 +184,20 @@ mod tests {
             sv("udf.double(c.age)"),
             RowBinding::Env,
             bind_c(people()),
-            crate::ExecEnv::new().with_udf(Some(&bag)),
+            crate::ExecEnv::new()
+                .with_udf(Some(&bag))
+                .with_udf_bindings(bound("double", "double")),
         ))
         .unwrap();
         assert_eq!(out, vec![RawBson::Double(72.0), RawBson::Double(82.0)]);
     }
 
     #[test]
-    fn unregistered_udf_is_an_error() {
+    fn unbound_udf_is_an_error() {
         use slate_udf::UdfBag;
 
-        let bag = UdfBag::new(); // empty
+        let bag = UdfBag::new();
+        // No binding for `missing` → unbound, regardless of the bag.
         let err = collect(execute(
             sv("udf.missing(c.age)"),
             RowBinding::Env,
@@ -193,8 +206,29 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.to_string().contains("udf.missing"),
-            "expected an unregistered-udf error, got: {err}"
+            err.to_string().contains("not bound"),
+            "expected an unbound-udf error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bound_but_unregistered_native_fn_is_an_error() {
+        use slate_udf::UdfBag;
+
+        let bag = UdfBag::new(); // empty — the bound native fn is missing
+        let err = collect(execute(
+            sv("udf.tax(c.age)"),
+            RowBinding::Env,
+            bind_c(people()),
+            crate::ExecEnv::new()
+                .with_udf(Some(&bag))
+                .with_udf_bindings(bound("tax", "compute_tax")),
+        ))
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not registered") && msg.contains("compute_tax"),
+            "expected an unregistered-native-fn error, got: {msg}"
         );
     }
 
@@ -213,7 +247,9 @@ mod tests {
             sv("udf.boom(c.age)"),
             RowBinding::Env,
             bind_c(people()),
-            crate::ExecEnv::new().with_udf(Some(&bag)),
+            crate::ExecEnv::new()
+                .with_udf(Some(&bag))
+                .with_udf_bindings(bound("boom", "boom")),
         ))
         .unwrap_err();
         assert!(

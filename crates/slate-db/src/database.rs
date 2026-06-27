@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -170,14 +171,15 @@ impl DatabaseBuilder {
             None => None,
         };
 
-        // Load initial hook snapshot if scripting is enabled.
-        let registry = if self.pool.is_some() {
+        // Load the initial catalog snapshot. It carries trigger/validator hooks
+        // (fired only when scripting is enabled) *and* native UDF bindings
+        // (resolved at query time with no VM), so it is needed even without a
+        // pool — a UDF database has bindings but no scripting.
+        let registry = {
             let txn = engine.begin(true)?;
             let snapshot = HookSnapshot::load_all(&txn)?;
             txn.rollback()?;
             Some(HookRegistry::new(snapshot))
-        } else {
-            None
         };
 
         #[cfg(feature = "runtime")]
@@ -543,6 +545,22 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .with_rand(self.exec_rand())
             .with_watch(self.watch_sink.clone())
             .with_clock(Some(self.now_millis()))
+    }
+
+    /// The collection's UDF bindings (`query_name -> native_name`) from this
+    /// transaction's cached snapshot, cloned into an `Rc` for the query's
+    /// `ExecEnv`. `None` when the collection has no bindings — the common case
+    /// pays nothing. The small per-collection map is cloned once per query
+    /// (it lives inside the shared snapshot; the executor needs an owned handle).
+    pub(crate) fn udf_bindings(
+        &self,
+        cf: &str,
+        collection: &str,
+    ) -> Option<Rc<HashMap<String, String>>> {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.udf_bindings_for(cf, collection))
+            .map(|m| Rc::new(m.clone()))
     }
 
     /// Mark the trigger/validator hook snapshot stale — for v2's `triggers()` /

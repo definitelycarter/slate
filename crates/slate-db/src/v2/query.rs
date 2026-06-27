@@ -172,7 +172,10 @@ where
     S: Store + 'db,
 {
     let plan = query_plan(cf, collection, sql, params.as_deref(), txn)?;
-    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(params)))
+    let env = txn
+        .exec_env(params)
+        .with_udf_bindings(txn.udf_bindings(cf, collection));
+    Ok(Cursor::new(txn.engine_txn(), plan, env))
 }
 
 impl<P: Serialize> QueryBuilder<'_, P> {

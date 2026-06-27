@@ -214,7 +214,7 @@ fn vector_to_f32(query: &[f64]) -> Vec<f32> {
 /// non-vector result (the kNN then matches nothing).
 fn eval_query_vector(expr: &Expression, env: &ExecEnv) -> Result<Option<Vec<f64>>, ExecError> {
     // No row bindings — the query vector references only literals / `@params`.
-    let program = raweval::compile(expr, None, env.udf);
+    let program = raweval::compile(expr, None, env.udf_ctx());
     let binds: [(&str, bson::raw::RawBsonRef<'_>); 0] = [];
     let renv = row_env(&binds, env);
     let value = raweval::eval_compiled(&program, &renv)?.into_value()?;

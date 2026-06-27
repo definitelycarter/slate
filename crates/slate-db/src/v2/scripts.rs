@@ -529,6 +529,12 @@ mod tests {
         let db = with_users(DatabaseBuilder::new().with_udf("double", double));
 
         let txn = db.begin(false).unwrap();
+        // Bind `udf.double` on this collection to the registered `double` fn.
+        db.collection("users")
+            .functions()
+            .create("double", super::UdfFunction::from_name("double"))
+            .execute(&txn)
+            .unwrap();
         db.collection("users")
             .insert_many(vec![doc! { "_id": 1, "x": 21 }, doc! { "_id": 2, "x": 50 }])
             .execute(&txn)
@@ -541,15 +547,42 @@ mod tests {
     }
 
     #[test]
+    fn registered_but_unbound_udf_does_not_resolve() {
+        // The bag has `double`, but it is not *bound* on the collection — so the
+        // isolation model leaves `udf.double` unbound. Registration alone is not
+        // enough; a binding is required.
+        let db = with_users(DatabaseBuilder::new().with_udf("double", double));
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .insert_one(doc! { "_id": 1, "x": 21 })
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let err = query_f64s(&db, "users", "SELECT VALUE udf.double(c.x) FROM c").unwrap_err();
+        assert!(
+            err.to_string().contains("not bound"),
+            "expected an unbound-udf error, got: {err}"
+        );
+    }
+
+    #[test]
     fn native_udf_registered_at_runtime_runs_then_unregisters() {
         let db = db_with_users();
 
-        // Register at runtime (no transaction) and query through it.
+        // Register at runtime (no transaction), bind it on the collection, then
+        // query through it.
         db.collection("users")
             .functions()
             .register("double", double);
 
         let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .functions()
+            .create("double", super::UdfFunction::from_name("double"))
+            .execute(&txn)
+            .unwrap();
         db.collection("users")
             .insert_many(vec![doc! { "_id": 1, "x": 21 }, doc! { "_id": 2, "x": 50 }])
             .execute(&txn)

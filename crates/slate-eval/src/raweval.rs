@@ -15,6 +15,7 @@
 //! test (`raw_matches_owned`) pins this down.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bson::raw::{BindRawBsonRef, CString, RawArrayBuf, RawBsonRef, RawDocument, RawDocumentBuf};
@@ -754,10 +755,22 @@ pub enum ObjKey {
     Lazy(String),
 }
 
+/// The UDF resolution inputs `compile` threads while lowering: the
+/// per-collection binding (`query_name -> native_name`) and the live bag
+/// (`native_name -> Arc<dyn Udf>`). Resolving `udf.tax` is a two-step lookup —
+/// binding then bag — split so the *unbound* and *unregistered* cases surface
+/// distinctly. `Copy` so it rides the recursion with no ceremony; the default
+/// (both `None`) resolves no UDF.
+#[derive(Clone, Copy, Default)]
+pub struct UdfCtx<'a> {
+    pub bindings: Option<&'a HashMap<String, String>>,
+    pub bag: Option<&'a UdfBag>,
+}
+
 /// Compile `expr` for repeated evaluation. `sole` is the single `FROM` alias
 /// when the node reads bare rows ([`RowBinding::Alias`] mode); pass `None` for
 /// the multi-binding environment shape so identifiers fall back to name lookup.
-pub fn compile(expr: &Expression, sole: Option<&str>, udf: Option<&UdfBag>) -> Compiled {
+pub fn compile(expr: &Expression, sole: Option<&str>, udf: UdfCtx<'_>) -> Compiled {
     match expr {
         Expression::Literal(l) => Compiled::Literal(l.clone()),
         // Pre-convert the constant to raw bytes once. The common scalar/array
@@ -848,20 +861,26 @@ pub fn compile(expr: &Expression, sole: Option<&str>, udf: Option<&UdfBag>) -> C
         Expression::Subquery { .. } => {
             Compiled::Unsupported("subquery must be lowered by the planner".into())
         }
-        // Resolve the UDF against the bag now, once, and bake the handle in, so
-        // per-row eval just calls it. Resolution is by the query-facing name
-        // (`udf.tax`); the planner's binding pass (a later slice) rewrites that
-        // to the native function name before this point. An unregistered name
-        // defers to an eval-time error, like the other `Unsupported` cases.
-        Expression::Udf { name, args } => match udf.and_then(|bag| bag.get(name)) {
-            Some(func) => Compiled::Udf {
-                name: name.clone(),
-                udf: func,
-                args: args.iter().map(|a| compile(a, sole, udf)).collect(),
-            },
+        // Resolve `udf.NAME` in two steps, once, and bake the handle in so
+        // per-row eval just calls it. First the per-collection binding maps the
+        // query name to a native function name; then the bag maps that to the
+        // code. The two misses are distinct: no binding is *unbound*, no bag
+        // entry is *unregistered*. Both defer to an eval-time error, like the
+        // other `Unsupported` cases.
+        Expression::Udf { name, args } => match udf.bindings.and_then(|b| b.get(name)) {
             None => Compiled::Unsupported(format!(
-                "user-defined function udf.{name} is not registered"
+                "user-defined function udf.{name} is not bound on this collection"
             )),
+            Some(native) => match udf.bag.and_then(|bag| bag.get(native)) {
+                Some(func) => Compiled::Udf {
+                    name: name.clone(),
+                    udf: func,
+                    args: args.iter().map(|a| compile(a, sole, udf)).collect(),
+                },
+                None => Compiled::Unsupported(format!(
+                    "native function `{native}` bound to udf.{name} is not registered"
+                )),
+            },
         },
     }
 }
@@ -903,7 +922,7 @@ fn compile_function(
     name: &str,
     args: &[Expression],
     sole: Option<&str>,
-    udf: Option<&UdfBag>,
+    udf: UdfCtx<'_>,
 ) -> Compiled {
     let c = |e| Box::new(compile(e, sole, udf));
     if args.len() == 1 {
@@ -1140,7 +1159,7 @@ mod tests {
         // single-binding fast path (`sole = Some("c")`, exercising `Row`/
         // `RowField`) and the generic name-lookup path (`sole = None`).
         for sole in [Some("c"), None] {
-            let prog = compile(&expr, sole, None);
+            let prog = compile(&expr, sole, UdfCtx::default());
             let compiled = eval_compiled(&prog, &RowEnv::new(&rbinds, None))
                 .unwrap()
                 .into_value()
@@ -1260,7 +1279,7 @@ mod tests {
 
         // …and via the compiled path (rewind the source first).
         idx.set(0);
-        let prog = compile(&expr, Some("c"), None);
+        let prog = compile(&expr, Some("c"), UdfCtx::default());
         let got = eval_compiled(&prog, &env).unwrap().into_value().unwrap();
         assert_eq!(got, Value::Defined(bson::Bson::Double(seq[0])));
     }
