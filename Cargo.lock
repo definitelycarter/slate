@@ -1504,6 +1504,7 @@ dependencies = [
  "slate-sql",
  "slate-store",
  "slate-udf",
+ "slate-validator",
  "slate-vm",
  "tempfile",
  "tracing",

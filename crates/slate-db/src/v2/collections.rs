@@ -21,6 +21,7 @@ use crate::WatchRegistry;
 use crate::database::Transaction;
 use crate::error::DbError;
 use slate_udf::UdfBag;
+use slate_validator::ValidatorBag;
 
 /// The collection-management namespace for one column family. Built by
 /// [`Database::collections`](super::Collection) or `db.cf(cf).collections()`.
@@ -32,11 +33,23 @@ pub struct Collections {
     /// The database's UDF bag, carried for the same reason — a `create`d handle
     /// shares the live bag like any other.
     udf_bag: Arc<UdfBag>,
+    /// The database's validator bag, carried for the same reason as the UDF bag.
+    validator_bag: Arc<ValidatorBag>,
 }
 
 impl Collections {
-    pub(super) fn new(cf: String, watch: Arc<WatchRegistry>, udf_bag: Arc<UdfBag>) -> Self {
-        Self { cf, watch, udf_bag }
+    pub(super) fn new(
+        cf: String,
+        watch: Arc<WatchRegistry>,
+        udf_bag: Arc<UdfBag>,
+        validator_bag: Arc<ValidatorBag>,
+    ) -> Self {
+        Self {
+            cf,
+            watch,
+            udf_bag,
+            validator_bag,
+        }
     }
 
     /// Create a collection named `name` in this scope's column family. Returns a
@@ -47,6 +60,7 @@ impl Collections {
             cf: &self.cf,
             watch: &self.watch,
             udf_bag: &self.udf_bag,
+            validator_bag: &self.validator_bag,
             name: name.to_string(),
             pk_path: "_id".to_string(),
             ttl_path: "ttl".to_string(),
@@ -80,6 +94,7 @@ pub struct CreateCollection<'a> {
     cf: &'a str,
     watch: &'a Arc<WatchRegistry>,
     udf_bag: &'a Arc<UdfBag>,
+    validator_bag: &'a Arc<ValidatorBag>,
     name: String,
     pk_path: String,
     ttl_path: String,
@@ -108,6 +123,7 @@ impl CreateCollection<'_> {
             // `Arc` refcount bump: the new handle is a reactive root like any other.
             watch: self.watch.clone(),
             udf_bag: self.udf_bag.clone(),
+            validator_bag: self.validator_bag.clone(),
         })
     }
 }

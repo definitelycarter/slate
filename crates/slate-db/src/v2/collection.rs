@@ -24,6 +24,7 @@ use crate::WatchRegistry;
 use crate::database::Database;
 use slate_planner::UpsertMode;
 use slate_udf::UdfBag;
+use slate_validator::ValidatorBag;
 
 /// A lightweight handle to one collection. Build it with
 /// [`Database::collection`] (default column family) or
@@ -42,6 +43,10 @@ pub struct Collection {
     /// can mutate the live bag off this handle without a transaction, like
     /// `watch`.
     pub(super) udf_bag: Arc<UdfBag>,
+    /// `Arc` clone of the database's validator bag — shared so
+    /// `validators().register` can mutate the live bag off this handle without a
+    /// transaction, like the UDF bag.
+    pub(super) validator_bag: Arc<ValidatorBag>,
 }
 
 impl Collection {
@@ -117,7 +122,7 @@ impl Collection {
     /// The collection's validator sub-handle:
     /// `validators().create(name, src)` / `.remove(name)` / `.list(&txn)`.
     pub fn validators(&self) -> Validators<'_> {
-        Validators::new(&self.cf, &self.collection)
+        Validators::new(&self.cf, &self.collection, &self.validator_bag)
     }
 
     /// The collection's user-defined-function sub-handle:
@@ -133,6 +138,7 @@ pub struct CfScope {
     cf: String,
     watch: Arc<WatchRegistry>,
     udf_bag: Arc<UdfBag>,
+    validator_bag: Arc<ValidatorBag>,
 }
 
 impl CfScope {
@@ -143,13 +149,14 @@ impl CfScope {
             collection: name.to_string(),
             watch: self.watch,
             udf_bag: self.udf_bag,
+            validator_bag: self.validator_bag,
         }
     }
 
     /// The collection-management namespace for this column family:
     /// `collections().create(name)` / `.list(&txn)` / `.remove(name)`.
     pub fn collections(self) -> Collections {
-        Collections::new(self.cf, self.watch, self.udf_bag)
+        Collections::new(self.cf, self.watch, self.udf_bag, self.validator_bag)
     }
 }
 
@@ -162,6 +169,7 @@ impl<S: Store> Database<S> {
             // `Arc` refcount bump: the handle carries a DB-lifetime reactive root.
             watch: self.watch_registry().clone(),
             udf_bag: self.udf_bag().clone(),
+            validator_bag: self.validator_bag().clone(),
         }
     }
 
@@ -171,6 +179,7 @@ impl<S: Store> Database<S> {
             cf: cf.to_string(),
             watch: self.watch_registry().clone(),
             udf_bag: self.udf_bag().clone(),
+            validator_bag: self.validator_bag().clone(),
         }
     }
 
@@ -182,6 +191,7 @@ impl<S: Store> Database<S> {
             DEFAULT_CF.to_string(),
             self.watch_registry().clone(),
             self.udf_bag().clone(),
+            self.validator_bag().clone(),
         )
     }
 }

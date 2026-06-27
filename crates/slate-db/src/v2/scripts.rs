@@ -29,6 +29,7 @@ use std::sync::Arc;
 use slate_engine::{Catalog, EngineError, FunctionKind, runtime_tag};
 use slate_store::Store;
 use slate_udf::{Udf, UdfBag};
+use slate_validator::{Validator, ValidatorBag};
 
 use crate::database::Transaction;
 use crate::error::DbError;
@@ -167,11 +168,39 @@ impl CreateTrigger<'_> {
 pub struct Validators<'a> {
     cf: &'a str,
     collection: &'a str,
+    /// The database-scoped validator bag, for the no-txn native
+    /// `register`/`unregister` verbs (the `create`/`remove`/`list` binding verbs
+    /// go through the catalog).
+    validator_bag: &'a Arc<ValidatorBag>,
 }
 
 impl<'a> Validators<'a> {
-    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
-        Self { cf, collection }
+    pub(crate) fn new(
+        cf: &'a str,
+        collection: &'a str,
+        validator_bag: &'a Arc<ValidatorBag>,
+    ) -> Self {
+        Self {
+            cf,
+            collection,
+            validator_bag,
+        }
+    }
+
+    /// Register a native validator named `name` in the database-scoped bag. No
+    /// transaction — this mutates live runtime state immediately, like
+    /// `watch`/`stream`. A bare closure is accepted via the blanket
+    /// [`Validator`] impl. (Database-scoped even though it hangs off a collection
+    /// handle: the *binding* that guards one collection is a later, durable
+    /// concern.)
+    pub fn register<V: Validator + 'static>(&self, name: &str, validator: V) {
+        self.validator_bag.register(name, validator);
+    }
+
+    /// Unregister the native validator named `name` from the bag. Returns whether
+    /// one was present. No transaction.
+    pub fn unregister(&self, name: &str) -> bool {
+        self.validator_bag.unregister(name)
     }
 
     /// Register a validator named `name` with Lua `source`. Returns a builder;
@@ -393,7 +422,9 @@ mod tests {
     use slate_store::MemoryStore;
     use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
-    use crate::{Database, DatabaseBuilder, RuntimeRegistry, UdfError, Value, VmPool};
+    use crate::{
+        Database, DatabaseBuilder, RuntimeRegistry, UdfError, ValidatorCtx, Value, Verdict, VmPool,
+    };
 
     /// A native UDF: read arg 0 as a number and double it.
     fn double(args: &[Value]) -> Result<Value, UdfError> {
@@ -667,5 +698,36 @@ mod tests {
             .functions()
             .register("compute_tax", |_: &[Value]| Ok(Value::defined(0_i32)));
         assert!(db.dangling_bindings().is_empty());
+    }
+
+    #[test]
+    fn native_validator_registers_and_unregisters_at_runtime() {
+        // The no-txn `register`/`unregister` verbs reach the database-scoped bag
+        // off a collection handle (like `functions().register`). The bag is not
+        // yet consulted on writes — that is the next slice — so this proves only
+        // the wiring: a registered validator is present, then absent.
+        let db = db_with_users();
+        let users = db.collection("users");
+        users
+            .validators()
+            .register("require_name", |ctx: &ValidatorCtx<'_>| {
+                match ctx.doc().get_str("name") {
+                    Ok(s) if !s.is_empty() => Ok(Verdict::Accept),
+                    _ => Ok(Verdict::reject("name is required")),
+                }
+            });
+
+        assert!(users.validators().unregister("require_name"));
+        assert!(!users.validators().unregister("require_name"));
+    }
+
+    #[test]
+    fn native_validator_registered_at_build_is_in_the_bag() {
+        // `DatabaseBuilder::with_validator` populates the same database-scoped bag
+        // before open; the runtime handle sees it (unregister finds it).
+        let db = with_users(
+            DatabaseBuilder::new().with_validator("v", |_: &ValidatorCtx<'_>| Ok(Verdict::Accept)),
+        );
+        assert!(db.collection("users").validators().unregister("v"));
     }
 }

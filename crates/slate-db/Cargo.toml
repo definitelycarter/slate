@@ -27,6 +27,7 @@ slate-ast = { path = "../slate-ast" }
 slate-planner = { path = "../slate-planner" }
 slate-executor = { path = "../slate-executor" }
 slate-udf = { path = "../slate-udf" }
+slate-validator = { path = "../slate-validator" }
 slate-sql = { path = "../slate-sql" }
 slate-vm = { path = "../slate-vm" }
 serde = { version = "1", features = ["derive"] }

@@ -8,6 +8,7 @@ use slate_executor::ExecEnv;
 use slate_executor::watch::WatchSink;
 use slate_store::{BackupStore, Durability, Store};
 use slate_udf::UdfBag;
+use slate_validator::ValidatorBag;
 use slate_vm::pool::VmPool;
 
 use crate::error::DbError;
@@ -56,6 +57,9 @@ pub struct DatabaseBuilder {
     pool: Option<VmPool>,
     /// UDF bag accumulated before open via `with_udf`; moved into the database.
     udf_bag: Arc<UdfBag>,
+    /// Validator bag accumulated before open via `with_validator`; moved into the
+    /// database, mirroring `udf_bag`.
+    validator_bag: Arc<ValidatorBag>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     rand: Option<RandFn>,
     durability: Option<Durability>,
@@ -74,6 +78,7 @@ impl DatabaseBuilder {
         Self {
             pool: None,
             udf_bag: Arc::new(UdfBag::new()),
+            validator_bag: Arc::new(ValidatorBag::new()),
             clock: None,
             rand: None,
             durability: None,
@@ -97,6 +102,19 @@ impl DatabaseBuilder {
     /// the blanket [`Udf`](slate_udf::Udf) impl.
     pub fn with_udf<U: slate_udf::Udf + 'static>(self, name: &str, udf: U) -> Self {
         self.udf_bag.register(name, udf);
+        self
+    }
+
+    /// Register a native validator in the database-scoped bag before open.
+    /// Equivalent to `validators().register` but at build time, for compiled
+    /// applications that carry their validators in the binary. A bare closure is
+    /// accepted via the blanket [`Validator`](slate_validator::Validator) impl.
+    pub fn with_validator<V: slate_validator::Validator + 'static>(
+        self,
+        name: &str,
+        validator: V,
+    ) -> Self {
+        self.validator_bag.register(name, validator);
         self
     }
 
@@ -194,6 +212,7 @@ impl DatabaseBuilder {
             registry,
             watch_registry: Arc::new(WatchRegistry::new()),
             udf_bag: self.udf_bag,
+            validator_bag: self.validator_bag,
             rand,
             durability: self.durability,
             #[cfg(feature = "runtime")]
@@ -232,6 +251,11 @@ pub struct Database<S: Store> {
     /// empty); behind an `Arc` so collection handles can share it for no-txn
     /// `functions().register`, exactly like the watch registry.
     udf_bag: Arc<UdfBag>,
+    /// The database-scoped validator bag — the live `name -> Arc<dyn Validator>`
+    /// registry the write path resolves bound validators against. Always present
+    /// (cheap when empty); behind an `Arc` so collection handles can share it for
+    /// no-txn `validators().register`, exactly like the UDF bag.
+    validator_bag: Arc<ValidatorBag>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
     /// The builder-level durability default applied to every write transaction,
@@ -327,6 +351,12 @@ impl<S: Store> Database<S> {
     /// share (no-txn `functions().register`), like the watch registry.
     pub(crate) fn udf_bag(&self) -> &Arc<UdfBag> {
         &self.udf_bag
+    }
+
+    /// The database-scoped validator bag, behind its `Arc` — for collection
+    /// handles to share (no-txn `validators().register`), like the UDF bag.
+    pub(crate) fn validator_bag(&self) -> &Arc<ValidatorBag> {
+        &self.validator_bag
     }
 
     /// Every UDF binding whose target native function is not registered in the
