@@ -19,13 +19,15 @@
 //! The **transaction is not part of this bundle.** It is the data handle the
 //! source/mutation nodes run *against*, not an *evaluator* input — so the
 //! `Executor` holds it as a peer of the env (together they are the query's
-//! execution context), exactly as the per-row [`RawEnv`](slate_eval::raweval)
+//! execution context), exactly as the per-row [`RowEnv`](slate_eval::raweval)
 //! also carries no transaction. Keeping the txn out is also why this type needs
 //! no engine type parameter — only the `'a` of the borrowed pool.
 //!
 //! This is the per-*query* env, distinct from the per-*row* helpers in
-//! [`nodes::env`](crate::nodes::env): those build the leaf `RawEnv` (the RFC's
-//! `EvalEnv`) for a single row out of the capabilities this bundle carries.
+//! [`nodes::env`](crate::nodes::env): those build the leaf `RowEnv` for a single
+//! row out of the capabilities this bundle carries. The eval nodes hold a
+//! (cheaply cloned) `ExecEnv` and derive a `RowEnv` per row — see
+//! [`row_env`](crate::nodes::env::row_env).
 
 use std::rc::Rc;
 
@@ -43,7 +45,12 @@ use crate::watch::WatchSink;
 ///
 /// `'a` ties the borrowed pool to the transaction it lives alongside; the
 /// remaining capabilities are `Rc`/owned and outlive nothing narrower.
-#[derive(Default)]
+///
+/// `Clone` is a handful of `Rc` refcount bumps plus a `Copy` of the borrowed
+/// pool — no allocation, no deep copy. The eval nodes each take an owned clone
+/// (so a node's result stream can outlive the executor, borrowing only the txn),
+/// exactly as they previously cloned the `params`/`rand` handles individually.
+#[derive(Default, Clone)]
 pub struct ExecEnv<'a> {
     /// Scripting pool backing validators/triggers. `None` skips them.
     pub(crate) pool: Option<&'a VmPool>,

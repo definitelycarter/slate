@@ -1,6 +1,7 @@
 # RFC: Execution Context (env bundle & plan-derived scope)
 
-> **Status: proposed.** Extracted from the design discussion around the
+> **Status: in progress — steps 1–2 shipped, 3–4 pending** (see Migration /
+> sequencing). Extracted from the design discussion around the
 > [Native Functions RFC](./native-functions.md). On `main`, each per-query
 > capability — SQL `@`-params, the `RAND()` source, the injected `$now` clock, the
 > watch-capture sink — is threaded **individually** through the execution stack.
@@ -22,7 +23,7 @@
 Every per-query execution capability — SQL `@`-params, the `RAND()` source, the
 injected `$now` clock, the watch-capture sink, and now the UDF resolver — is
 threaded **individually** from `Database` → `Transaction` → `Cursor` → `Executor`
-→ each binding-aware node → `RawEnv`. Adding one capability means: a field on
+→ each binding-aware node → `RowEnv`. Adding one capability means: a field on
 `Transaction`, an argument on `Cursor::new`/`new_with_params`, an argument on
 every binding-aware node (`filter`/`project`/`sort`/`aggregate`/`unwind`/
 `vector_topk`), a bridge in `nodes::env`, and a `None` added to every node's test
@@ -59,14 +60,14 @@ Executor.udf  →  execute_node passes self.udf.clone()    slate-executor/lib.rs
    │
 node execute(..., udf)  →  per row: env::raw_env(bindings, params, rand, udf)   nodes/env.rs
    │
-RawEnv.udf_resolver: Option<&dyn UdfResolver>            slate-eval/raweval.rs
+RowEnv.udf_resolver: Option<&dyn UdfResolver>            slate-eval/raweval.rs
    │  Expression::Udf → dispatch_udf → resolver.resolve(name, &args)
 ScopedUdfResolver::resolve → registry.get(cf, collection, name)
 ```
 
 Two facts shape the design:
 
-- **`RawEnv` is already a bundle.** It carries `bindings`, `params`, `rand`, and
+- **`RowEnv` is already a bundle.** It carries `bindings`, `params`, `rand`, and
   `udf_resolver`. The leaf already works the way this RFC wants the whole stack
   to. The job is to extend that pattern up the stack rather than pass the same
   capabilities as a loose tuple.
@@ -100,16 +101,18 @@ Two facts shape the design:
 
 ### Three bundles, by lifetime
 
-The capabilities do not share a lifetime, so they do not share one struct. They
-split cleanly into three, one per layer:
+The capabilities split by lifetime. **Two env *types*** carry them — one
+per-query, one per-row — plus a future per-transaction bundle. The per-*node*
+level needs no type of its own: a node simply holds a cheap **clone** of the
+per-query `ExecEnv` (a few `Rc` bumps), and derives a `RowEnv` per row from it.
 
 | Bundle | Crate | Lifetime | Holds | Built |
 |---|---|---|---|---|
-| `Services` (a.k.a. `TxnEnv`) | slate-db | per-transaction | **unscoped** capabilities: `pool`, `rand: Arc`, `clock`, `udf_registry: Arc`, `watch_registry`/sink, future `trigger`/`validator` registries | cloned once at `begin` (Arc bumps) |
-| `ExecEnv<'txn>` | slate-executor | per-query | the evaluator's inputs: `engine_txn`, `pool`, `params: Rc`, `rand: Rc`, `watch: Rc`, `udf: Rc<dyn UdfResolver>`, `container: CollectionRef` | by the `Cursor`, translating `Services` + per-query info |
-| `EvalEnv<'a>` | slate-eval | per-row | borrowed forms: `bindings`, `params`, `rand: &dyn Fn`, `udf: &dyn UdfResolver` (today's `RawEnv`) | by each node, per row, from `ExecEnv` |
+| `Services` (a.k.a. `TxnEnv`) | slate-db | per-transaction | **unscoped** capabilities: `pool`, `rand: Arc`, `clock`, `udf_registry: Arc`, `watch_registry`/sink, future `trigger`/`validator` registries | cloned once at `begin` (Arc bumps) — *future, step 4* |
+| `ExecEnv<'a>` | slate-executor | per-query (held by the `Executor`; each eval node takes a clone) | the per-query capabilities: `pool`, `params: Rc`, `rand: Rc`, `watch: Rc` (+ future `udf`, `container`). The **transaction is a peer field on the `Executor`, not in this bundle**, so `ExecEnv` carries no engine type parameter. | by the `Cursor`, translating `Services` + per-query info |
+| `RowEnv<'a>` | slate-eval | per-row | the borrowed leaf the evaluator reads: `bindings` + borrowed `params`, `rand: &dyn Fn` (+ future `udf`). Renamed from `RawEnv`. | by each node, per row, from its `ExecEnv` clone |
 
-### Why three and not one
+### Why separate envs, not one shared
 
 A single shared env is **unsound**, not merely inelegant:
 
@@ -174,7 +177,7 @@ trait UdfResolver {
 }
 ```
 
-and the executor carries the `container` in `ExecEnv`/`EvalEnv`, supplying it at
+and the executor carries the `container` in `ExecEnv`/`RowEnv`, supplying it at
 resolve time. The `db → executor` handoff now passes only an *unscoped*
 registry-backed resolver; `cf/collection` never crosses the boundary. (Variant:
 keep the pre-scoped seam but build `ScopedUdfResolver` in the `Cursor` from
@@ -220,21 +223,24 @@ alongside the env work.
 
 ### Node signatures collapse
 
-With `EvalEnv`, the binding-aware nodes go from
+The binding-aware nodes go from threading each capability
 
 ```rust
-fn execute(expr, binding, source, params, rand, udf) -> ValueIter
+fn execute(expr, binding, source, params, rand /*, udf … */) -> ValueIter
 ```
 
-to
+to taking a single owned `ExecEnv` (a cheap clone):
 
 ```rust
-fn execute(expr, binding, source, env) -> ValueIter
+fn execute(expr, binding, source, env: ExecEnv) -> ValueIter
 ```
 
-and per-row construction is `env.eval_env(bindings)` → `RawEnv`. Crucially, **no
-node ever takes `cf/collection` or a scope** — the scope rides inside the env,
-sourced once from `plan.container()`. Test call sites become `EvalEnv::empty()`
+and per-row construction is `row_env(bindings, &env)` / `with_row_env(row,
+binding, &env, f)` → `RowEnv`. There is **no separate node-env type** — the node
+holds the `ExecEnv` clone directly and derives a `RowEnv` per row. Once `udf`
+joins the bundle, **no node ever takes `cf/collection` or a scope** — it rides
+inside the env, sourced once from `plan.container()`. Test call sites become
+`ExecEnv::new()`
 instead of `None, None, None`, and adding the next capability touches **zero**
 node signatures or node tests.
 
@@ -284,12 +290,17 @@ Each step is independently shippable and green; land them **first**, before the
 native-function work, so those capabilities land on the bundle instead of
 re-threading — step 3 is also what lets UDF resolution resolve at plan-build:
 
-1. **`ExecEnv` in slate-executor.** Introduce the struct; make `.with_*` delegate
-   to it (`Executor::with_env(txn, env)` + builders as sugar). Mechanical, no behavior
-   change.
-2. **`EvalEnv` in slate-eval / executor nodes.** Collapse per-node
-   `params/rand/udf` into one env argument; `RawEnv` is built from it. Node tests
-   switch to `EvalEnv::empty()`.
+1. **`ExecEnv` in slate-executor. ✅ shipped.** Introduce the struct; make
+   `.with_*` delegate to it (`Executor::with_env(txn, env)` + builders as sugar).
+   Mechanical, no behavior change. The transaction stays a **peer** field on the
+   `Executor`, not inside `ExecEnv` (so the bundle needs no engine type
+   parameter); `container` is deferred to step 3.
+2. **Nodes take `ExecEnv`; rename `RawEnv → RowEnv`. ✅ shipped.** Collapse each
+   binding-aware node's per-`params`/`rand` arguments into one owned `ExecEnv`
+   (the node holds a cheap clone). Per row the helpers `row_env`/`with_row_env`
+   build a `RowEnv` from it — **no separate node-env type**. Node/bench call
+   sites switch from `None, None` to `ExecEnv::new()`. Net simplification (−61
+   lines); `udf` later is one bundle field, not a node-signature change.
 3. **`plan.container()` + executor-derived scope.** Stamp the container at
    lowering; change the resolver seam to unscoped; move UDF scoping into the
    executor using `plan.container()`. Removes `cf/collection` from the db→executor

@@ -12,10 +12,10 @@ use std::rc::Rc;
 use bson::RawBson;
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use slate_eval::EvalError;
-use slate_eval::raweval::RawEnv;
+use slate_eval::raweval::RowEnv;
 use slate_planner::RowBinding;
 
-use crate::ExecError;
+use crate::{ExecEnv, ExecError};
 
 /// The query's `@`-parameter values, shared (by `Rc`) across the evaluating
 /// nodes of one pipeline. `None` means the query had no parameters.
@@ -29,12 +29,12 @@ pub(crate) type Params = Option<Rc<RawDocumentBuf>>;
 pub(crate) type Rand = Option<Rc<dyn Fn() -> f64>>;
 
 /// Borrow the parameter document for passing to the evaluator.
-pub(crate) fn params_doc(params: &Params) -> Option<&RawDocument> {
+fn params_doc(params: &Params) -> Option<&RawDocument> {
     params.as_deref().map(|b| &**b)
 }
 
 /// Borrow the random source as a plain `&dyn Fn` for passing to the evaluator.
-pub(crate) fn rand_fn(rand: &Rand) -> Option<&dyn Fn() -> f64> {
+fn rand_fn(rand: &Rand) -> Option<&dyn Fn() -> f64> {
     rand.as_deref()
 }
 
@@ -66,19 +66,20 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
     Ok(binds)
 }
 
-/// Build a raw evaluation environment over already-extracted bindings, with the
-/// query's `@`-parameters and random source (if any) visible to the expression.
-pub(crate) fn raw_env<'a>(
+/// Build a row environment over already-extracted bindings, sourcing the
+/// query's `@`-parameters and random source from the execution context
+/// ([`ExecEnv`]). The node holds an owned `ExecEnv`; this borrows the capability
+/// handles out of it for one row's evaluation.
+pub(crate) fn row_env<'a>(
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
-    params: Option<&'a RawDocument>,
-    rand: Option<&'a dyn Fn() -> f64>,
-) -> RawEnv<'a> {
-    RawEnv::new(bindings, params).with_rng(rand)
+    env: &'a ExecEnv<'_>,
+) -> RowEnv<'a> {
+    RowEnv::new(bindings, params_doc(&env.params)).with_rng(rand_fn(&env.rand))
 }
 
 /// The sole `FROM` alias when the node reads bare rows ([`RowBinding::Alias`]),
 /// for compiling the single-binding fast path; `None` for the multi-binding
-/// environment shape. Mirrors the binding used by [`with_env`].
+/// environment shape. Mirrors the binding used by [`with_row_env`].
 pub(crate) fn sole_alias(binding: &RowBinding) -> Option<&str> {
     match binding {
         RowBinding::Alias(alias) => Some(alias.as_str()),
@@ -86,27 +87,29 @@ pub(crate) fn sole_alias(binding: &RowBinding) -> Option<&str> {
     }
 }
 
-/// Run `f` with a raw evaluation environment for `row` under `binding`.
+/// Run `f` with a row environment for `row` under `binding`, sourcing the
+/// capabilities from the execution context ([`ExecEnv`]).
 ///
 /// In [`RowBinding::Alias`] mode the whole row is bound to one alias with **no
 /// allocation** (a one-element stack array); in [`RowBinding::Env`] mode the
 /// row's top-level fields are the bindings. The closure returns an owned value
 /// (it must not borrow the environment, which is dropped on return).
-pub(crate) fn with_env<R>(
+pub(crate) fn with_row_env<R>(
     row: &RawBson,
     binding: &RowBinding,
-    params: Option<&RawDocument>,
-    rand: Option<&dyn Fn() -> f64>,
-    f: impl FnOnce(&RawEnv) -> Result<R, ExecError>,
+    env: &ExecEnv<'_>,
+    f: impl FnOnce(&RowEnv) -> Result<R, ExecError>,
 ) -> Result<R, ExecError> {
+    let params = params_doc(&env.params);
+    let rand = rand_fn(&env.rand);
     match binding {
         RowBinding::Alias(alias) => {
             let binds = [(alias.as_str(), row.as_raw_bson_ref())];
-            f(&RawEnv::new(&binds, params).with_rng(rand))
+            f(&RowEnv::new(&binds, params).with_rng(rand))
         }
         RowBinding::Env => {
             let binds = bindings_of(row)?;
-            f(&RawEnv::new(&binds, params).with_rng(rand))
+            f(&RowEnv::new(&binds, params).with_rng(rand))
         }
     }
 }

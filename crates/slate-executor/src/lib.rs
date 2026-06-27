@@ -75,7 +75,7 @@ pub struct Executor<'a, T> {
     /// data handle the source/mutation nodes run against. Held *beside* `env`,
     /// not inside it: together they are the query's execution context, but the
     /// transaction is not an *evaluator* input, so it stays a peer rather than
-    /// living in the capability bundle (mirroring how the per-row `RawEnv` holds
+    /// living in the capability bundle (mirroring how the per-row `RowEnv` holds
     /// no transaction). Keeping it here is also why [`ExecEnv`] needs no engine
     /// type parameter.
     txn: &'a T,
@@ -350,8 +350,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     map_vector_metric(metric),
                     k,
                     source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
+                    self.env.clone(),
                 )?
             }
 
@@ -377,13 +376,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::unwind::execute(
-                    alias,
-                    array,
-                    source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
-                )
+                nodes::unwind::execute(alias, array, source, self.env.clone())
             }
 
             Node::Project {
@@ -392,13 +385,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::project::execute(
-                    expr,
-                    binding,
-                    source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
-                )
+                nodes::project::execute(expr, binding, source, self.env.clone())
             }
 
             Node::Filter {
@@ -407,13 +394,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::filter::execute(
-                    predicate,
-                    binding,
-                    source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
-                )
+                nodes::filter::execute(predicate, binding, source, self.env.clone())
             }
 
             Node::Sort {
@@ -422,13 +403,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::sort::execute(
-                    keys,
-                    binding,
-                    source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
-                )?
+                nodes::sort::execute(keys, binding, source, self.env.clone())?
             }
 
             Node::Limit { skip, take, source } => {
@@ -453,8 +428,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     aggregates,
                     binding,
                     source,
-                    self.env.params.clone(),
-                    self.env.rand.clone(),
+                    self.env.clone(),
                 )?
             }
 

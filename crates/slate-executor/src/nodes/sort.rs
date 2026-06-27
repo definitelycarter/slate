@@ -16,29 +16,22 @@ use slate_eval::eval::order_values;
 use slate_eval::raweval;
 use slate_planner::RowBinding;
 
-use super::env;
-use crate::{ExecError, ValueIter};
+use super::env::with_row_env;
+use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Buffer, sort by `keys` (evaluated against each row environment), emit.
 pub(crate) fn execute<'a>(
     keys: Vec<OrderByItem>,
     binding: RowBinding,
     source: ValueIter<'a>,
-    params: env::Params,
-    rand: env::Rand,
+    env: ExecEnv<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let mut rows: Vec<(Vec<Value>, RawBson)> = Vec::new();
     for item in source {
         // Undefined upstream rows are dropped (they'd be dropped at the
         // output boundary anyway).
         let Some(row) = item? else { continue };
-        let key_values = eval_keys(
-            &row,
-            &binding,
-            &keys,
-            env::params_doc(&params),
-            env::rand_fn(&rand),
-        )?;
+        let key_values = eval_keys(&row, &binding, &keys, &env)?;
         rows.push((key_values, row));
     }
 
@@ -52,10 +45,9 @@ fn eval_keys(
     row: &RawBson,
     binding: &RowBinding,
     keys: &[OrderByItem],
-    params: Option<&bson::RawDocument>,
-    rand: Option<&dyn Fn() -> f64>,
+    env: &ExecEnv,
 ) -> Result<Vec<Value>, ExecError> {
-    env::with_env(row, binding, params, rand, |renv| {
+    with_row_env(row, binding, env, |renv| {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // Sort keys are buffered, so they materialize to owned `Value`; the
@@ -105,16 +97,14 @@ mod tests {
             order_by(order_src),
             RowBinding::Env,
             bind_c(docs),
-            None,
-            None,
+            crate::ExecEnv::new(),
         )
         .unwrap();
         collect(project::execute(
             sv("c"),
             RowBinding::Env,
             sorted,
-            None,
-            None,
+            crate::ExecEnv::new(),
         ))
         .unwrap()
     }

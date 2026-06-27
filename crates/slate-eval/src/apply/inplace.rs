@@ -31,7 +31,7 @@ use slate_ast::{Assignment, Expression};
 use slate_rawbson::{RawField, RawFieldLoc, skip_bson_value};
 
 use crate::error::{EvalError, Result};
-use crate::raweval::{self, RawEnv, RawValue};
+use crate::raweval::{self, RawValue, RowEnv};
 
 /// The outcome of attempting the in-place fast path.
 pub(crate) enum Outcome {
@@ -76,7 +76,7 @@ pub(crate) fn try_apply(
 
     let mut bytes = old.as_bytes().to_vec();
     let binds = [(alias, RawBsonRef::Document(old))];
-    let env = RawEnv::new(&binds, None);
+    let env = RowEnv::new(&binds, None);
 
     for a in assignments {
         let field = &a.path[0];
@@ -292,7 +292,7 @@ fn append_element(bytes: &mut Vec<u8>, elem: Vec<u8>) {
 /// no-op (`rpush` leaves the array unchanged).
 fn apply_push(
     bytes: &mut Vec<u8>,
-    env: &RawEnv,
+    env: &RowEnv,
     field: &str,
     value_expr: &Expression,
 ) -> Result<bool> {

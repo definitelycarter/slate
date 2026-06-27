@@ -10,28 +10,21 @@ use slate_ast::Expression;
 use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
-use super::env;
-use crate::{ExecError, ValueIter};
+use super::env::{sole_alias, with_row_env};
+use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Wrap `source`, keeping only rows where `predicate` evaluates to `true`.
 pub(crate) fn execute<'a>(
     predicate: Expression,
     binding: RowBinding,
     source: ValueIter<'a>,
-    params: env::Params,
-    rand: env::Rand,
+    env: ExecEnv<'a>,
 ) -> ValueIter<'a> {
     // Compile the predicate once; the per-row closure evaluates the resolved
     // form (see `raweval::compile`).
-    let program = raweval::compile(&predicate, env::sole_alias(&binding));
+    let program = raweval::compile(&predicate, sole_alias(&binding));
     Box::new(source.filter_map(move |item| {
-        match keep_row(
-            item,
-            &binding,
-            &program,
-            env::params_doc(&params),
-            env::rand_fn(&rand),
-        ) {
+        match keep_row(item, &binding, &program, &env) {
             Ok(Some(value)) => Some(Ok(Some(value))), // kept
             Ok(None) => None,                         // dropped
             Err(e) => Some(Err(e)),                   // surface the error
@@ -45,8 +38,7 @@ fn keep_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
     program: &Compiled,
-    params: Option<&bson::RawDocument>,
-    rand: Option<&dyn Fn() -> f64>,
+    env: &ExecEnv,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -55,7 +47,7 @@ fn keep_row(
     // Evaluate the predicate against bindings that borrow from `row`; the
     // borrow ends before we move `row` through. Only `Some(true)` keeps the
     // row (3-valued rule: false *or* undefined drops it).
-    let keep = env::with_env(&row, binding, params, rand, |renv| {
+    let keep = with_row_env(&row, binding, env, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.as_bool() == Some(true))
     })?;
 
@@ -85,9 +77,13 @@ mod tests {
         collect(project::execute(
             sv("c"),
             RowBinding::Env,
-            execute(pred(pred_src), RowBinding::Env, bind_c(docs), None, None),
-            None,
-            None,
+            execute(
+                pred(pred_src),
+                RowBinding::Env,
+                bind_c(docs),
+                crate::ExecEnv::new(),
+            ),
+            crate::ExecEnv::new(),
         ))
         .unwrap()
     }
@@ -131,11 +127,9 @@ mod tests {
                 pred("c.age > 40"),
                 RowBinding::Env,
                 bind_c(people()),
-                None,
-                None,
+                crate::ExecEnv::new(),
             ),
-            None,
-            None,
+            crate::ExecEnv::new(),
         );
         assert_eq!(
             collect(projected).unwrap(),

@@ -31,7 +31,7 @@ use bson::RawDocumentBuf;
 use bson::raw::{CString, RawBsonRef, RawDocument};
 use slate_ast::Expression;
 use slate_eval::EvalError;
-use slate_eval::raweval::{self, RawEnv};
+use slate_eval::raweval::{self, RowEnv};
 
 use crate::ExecError;
 
@@ -213,7 +213,7 @@ impl WatchSink {
 fn matches(filter: &Compiled, alias: &str, doc: &RawDocumentBuf) -> bool {
     let doc: &RawDocument = doc;
     let binds = [(alias, RawBsonRef::Document(doc))];
-    let env = RawEnv::new(&binds, None);
+    let env = RowEnv::new(&binds, None);
     match raweval::eval_compiled(filter, &env) {
         Ok(value) => value.as_bool() == Some(true),
         Err(_) => false,

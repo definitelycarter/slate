@@ -101,7 +101,7 @@ impl<'a> RawValue<'a> {
 /// The bindings visible to a raw expression: alias → bound raw value, plus
 /// optional query parameters (`@name`) as a raw document and an optional random
 /// source for `RAND()`.
-pub struct RawEnv<'a> {
+pub struct RowEnv<'a> {
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
     params: Option<&'a RawDocument>,
     /// Injected random source backing `RAND()`. Unlike the clock — a *static*
@@ -115,7 +115,7 @@ pub struct RawEnv<'a> {
     rng: Option<&'a dyn Fn() -> f64>,
 }
 
-impl<'a> RawEnv<'a> {
+impl<'a> RowEnv<'a> {
     pub fn new(bindings: &'a [(&'a str, RawBsonRef<'a>)], params: Option<&'a RawDocument>) -> Self {
         Self {
             bindings,
@@ -124,7 +124,7 @@ impl<'a> RawEnv<'a> {
         }
     }
 
-    /// Attach the injected random source backing `RAND()` (see [`RawEnv::rng`]).
+    /// Attach the injected random source backing `RAND()` (see [`RowEnv::rng`]).
     pub fn with_rng(mut self, rng: Option<&'a dyn Fn() -> f64>) -> Self {
         self.rng = rng;
         self
@@ -161,7 +161,7 @@ impl<'a> RawEnv<'a> {
 
 /// Evaluate a scalar expression in `env`, borrowing from the input where
 /// possible.
-pub fn eval<'a>(expr: &'a Expression, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+pub fn eval<'a>(expr: &'a Expression, env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     match expr {
         Expression::Literal(lit) => Ok(literal_value(lit)),
         // A materialized value: cheap to clone (literals are scalars). The
@@ -213,7 +213,7 @@ pub fn eval<'a>(expr: &'a Expression, env: &RawEnv<'a>) -> Result<RawValue<'a>> 
 /// `Bson` — and must agree with [`crate::functions`], which the differential
 /// `raw_matches_owned` test pins down. Everything else materializes its
 /// arguments and dispatches through the shared [`crate::functions::call`].
-fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     if args.len() == 1 {
         if name.eq_ignore_ascii_case("IS_DEFINED") {
             return Ok(bool_value(!eval(&args[0], env)?.is_undefined()));
@@ -243,7 +243,7 @@ fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RawEnv<'a>) -> Re
 
 /// Resolve a `GETCURRENT*` function from the injected `$now` (epoch ms) the
 /// executor threads through the params channel. Undefined if `$now` is absent.
-fn current_time<'a>(name: &str, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn current_time<'a>(name: &str, env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     let now_ms = match env.param("$now")? {
         RawValue::Ref(RawBsonRef::Int64(n)) => n,
         RawValue::Owned(Bson::Int64(n)) => n,
@@ -258,7 +258,7 @@ fn current_time<'a>(name: &str, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
 /// draws a *fresh* value in `[0, 1)` (the source owns the PRNG state), so two
 /// `RAND()` calls in one query need not agree — unlike the clock. Undefined if
 /// no source is injected, mirroring `current_time` when `$now` is absent.
-fn rand_value<'a>(env: &RawEnv<'a>) -> RawValue<'a> {
+fn rand_value<'a>(env: &RowEnv<'a>) -> RawValue<'a> {
     match env.rng {
         Some(rng) => RawValue::Owned(Bson::Double(rng())),
         None => RawValue::Undefined,
@@ -473,7 +473,7 @@ fn eval_binary<'a>(
     op: BinOp,
     lhs: &'a Expression,
     rhs: &'a Expression,
-    env: &RawEnv<'a>,
+    env: &RowEnv<'a>,
 ) -> Result<RawValue<'a>> {
     match op {
         BinOp::And => {
@@ -520,7 +520,7 @@ fn eval_binop<'a>(op: BinOp, l: RawValue<'a>, r: RawValue<'a>) -> RawValue<'a> {
 
 // ── Object / array construction ─────────────────────────────────
 
-fn build_object<'a>(fields: &'a [(String, Expression)], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn build_object<'a>(fields: &'a [(String, Expression)], env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     // Build the result directly in raw form: each field value is appended as
     // raw bytes, so the projected document needs no Bson round-trip on output.
     //
@@ -543,7 +543,7 @@ fn build_object<'a>(fields: &'a [(String, Expression)], env: &RawEnv<'a>) -> Res
     Ok(RawValue::OwnedRaw(RawBson::Document(doc)))
 }
 
-fn build_array<'a>(items: &'a [Expression], env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+fn build_array<'a>(items: &'a [Expression], env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     let mut arr = RawArrayBuf::new();
     for it in items {
         // Undefined elements are omitted (Cosmos behavior).
@@ -881,7 +881,7 @@ fn compile_function(name: &str, args: &[Expression], sole: Option<&str>) -> Comp
 
 /// Evaluate a [`Compiled`] expression in `env`. Semantically identical to
 /// [`eval`] over the source [`Expression`].
-pub fn eval_compiled<'a>(c: &'a Compiled, env: &RawEnv<'a>) -> Result<RawValue<'a>> {
+pub fn eval_compiled<'a>(c: &'a Compiled, env: &RowEnv<'a>) -> Result<RawValue<'a>> {
     match c {
         Compiled::Unsupported(msg) => Err(EvalError {
             message: msg.clone(),
@@ -1005,7 +1005,7 @@ fn eval_compiled_binary<'a>(
     op: BinOp,
     lhs: &'a Compiled,
     rhs: &'a Compiled,
-    env: &RawEnv<'a>,
+    env: &RowEnv<'a>,
 ) -> Result<RawValue<'a>> {
     match op {
         BinOp::And => {
@@ -1060,7 +1060,7 @@ mod tests {
         let raw_doc = RawDocumentBuf::try_from(doc.as_document().unwrap()).unwrap();
         let cref = RawBsonRef::Document(&raw_doc);
         let rbinds = [("c", cref)];
-        let raw = eval(&expr, &RawEnv::new(&rbinds, None))
+        let raw = eval(&expr, &RowEnv::new(&rbinds, None))
             .unwrap()
             .into_value()
             .unwrap();
@@ -1072,7 +1072,7 @@ mod tests {
         // `RowField`) and the generic name-lookup path (`sole = None`).
         for sole in [Some("c"), None] {
             let prog = compile(&expr, sole);
-            let compiled = eval_compiled(&prog, &RawEnv::new(&rbinds, None))
+            let compiled = eval_compiled(&prog, &RowEnv::new(&rbinds, None))
                 .unwrap()
                 .into_value()
                 .unwrap();
@@ -1177,13 +1177,13 @@ mod tests {
 
         // No source → undefined.
         assert!(
-            eval(&expr, &RawEnv::new(&rbinds, None))
+            eval(&expr, &RowEnv::new(&rbinds, None))
                 .unwrap()
                 .is_undefined()
         );
 
         // Injected source → consecutive draws, via the interpreter…
-        let env = RawEnv::new(&rbinds, None).with_rng(Some(&source));
+        let env = RowEnv::new(&rbinds, None).with_rng(Some(&source));
         for want in seq {
             let got = eval(&expr, &env).unwrap().into_value().unwrap();
             assert_eq!(got, Value::Defined(bson::Bson::Double(want)));

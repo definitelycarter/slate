@@ -14,8 +14,8 @@ use slate_eval::raweval;
 use slate_eval::{EvalError, Value};
 use slate_planner::{AggregateExpr, GroupKey, RowBinding};
 
-use super::env;
-use crate::{ExecError, ValueIter};
+use super::env::with_row_env;
+use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Buffer `source`, group by `group_keys`, accumulate `aggregates`, emit one
 /// environment row per group.
@@ -24,8 +24,7 @@ pub(crate) fn execute<'a>(
     aggregates: Vec<AggregateExpr>,
     binding: RowBinding,
     source: ValueIter<'a>,
-    params: env::Params,
-    rand: env::Rand,
+    env: ExecEnv<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     // Resolve each aggregate's function name once (the planner only routes real
     // aggregates here, so an unknown name is an internal error).
@@ -43,23 +42,17 @@ pub(crate) fn execute<'a>(
 
     for item in source {
         let Some(row) = item? else { continue };
-        let (keys, args) = env::with_env(
-            &row,
-            &binding,
-            env::params_doc(&params),
-            env::rand_fn(&rand),
-            |renv| {
-                let mut keys = Vec::with_capacity(group_keys.len());
-                for gk in &group_keys {
-                    keys.push(raweval::eval(&gk.expr, renv)?.into_value()?);
-                }
-                let mut args = Vec::with_capacity(aggregates.len());
-                for agg in &aggregates {
-                    args.push(raweval::eval(&agg.arg, renv)?.into_value()?);
-                }
-                Ok((keys, args))
-            },
-        )?;
+        let (keys, args) = with_row_env(&row, &binding, &env, |renv| {
+            let mut keys = Vec::with_capacity(group_keys.len());
+            for gk in &group_keys {
+                keys.push(raweval::eval(&gk.expr, renv)?.into_value()?);
+            }
+            let mut args = Vec::with_capacity(aggregates.len());
+            for agg in &aggregates {
+                args.push(raweval::eval(&agg.arg, renv)?.into_value()?);
+            }
+            Ok((keys, args))
+        })?;
 
         let idx = match groups.iter().position(|(k, _)| keys_eq(k, &keys)) {
             Some(i) => i,

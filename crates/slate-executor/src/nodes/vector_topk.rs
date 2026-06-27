@@ -36,11 +36,11 @@ use bson::{Bson, RawBson};
 use slate_ast::Expression;
 use slate_engine::{Catalog, EngineTransaction};
 use slate_eval::VectorMetric;
-use slate_eval::raweval::{self, RawEnv};
+use slate_eval::raweval;
 use slate_eval::value::Value;
 
-use super::env;
-use crate::{ExecError, ValueIter};
+use super::env::row_env;
+use crate::{ExecEnv, ExecError, ValueIter};
 
 /// One kept candidate: its score and doc-id. Ordered so a `BinaryHeap`'s max-root
 /// is the *worst* entry currently kept, i.e. the first to be evicted by a better
@@ -109,11 +109,11 @@ impl Ord for Candidate {
     }
 }
 
-// The arguments mirror the `VectorTopK` node's fields plus the shared execution
-// context (the transaction, the optional pre-filter stream, and the `params`/
-// `rand` every evaluating node threads) — the same shape the dispatcher passes
-// the other node executors. Bundling them into a struct would add ceremony, not
-// clarity.
+// The arguments mirror the `VectorTopK` node's fields plus the transaction, the
+// optional pre-filter stream, and the execution context ([`ExecEnv`], from which
+// the query-vector expression reads its `@`-params) — the same shape the
+// dispatcher passes the other node executors. Bundling the node fields into a
+// struct would add ceremony, not clarity.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
@@ -123,8 +123,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     metric: VectorMetric,
     k: usize,
     source: Option<ValueIter<'a>>,
-    params: env::Params,
-    rand: env::Rand,
+    env: ExecEnv<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
 
@@ -136,7 +135,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
     // Evaluate the query vector ONCE — it is row-independent (a literal array or
     // an `@parameter`), so it binds against no row, only the query parameters.
-    let query = eval_query_vector(&query_vector, &params, &rand)?;
+    let query = eval_query_vector(&query_vector, &env)?;
     let Some(query) = query else {
         // An undefined / non-vector query (e.g. a missing `@q`) can match nothing
         // — the scalar `VECTORDISTANCE` would be undefined for every row, so the
@@ -213,16 +212,12 @@ fn vector_to_f32(query: &[f64]) -> Vec<f32> {
 /// matching the scalar `VECTORDISTANCE`'s argument reading: a defined array whose
 /// every element is a number, widened to `f64`. `Ok(None)` for an undefined or
 /// non-vector result (the kNN then matches nothing).
-fn eval_query_vector(
-    expr: &Expression,
-    params: &env::Params,
-    rand: &env::Rand,
-) -> Result<Option<Vec<f64>>, ExecError> {
+fn eval_query_vector(expr: &Expression, env: &ExecEnv) -> Result<Option<Vec<f64>>, ExecError> {
     // No row bindings — the query vector references only literals / `@params`.
     let program = raweval::compile(expr, None);
     let binds: [(&str, bson::raw::RawBsonRef<'_>); 0] = [];
-    let env_ = RawEnv::new(&binds, env::params_doc(params)).with_rng(env::rand_fn(rand));
-    let value = raweval::eval_compiled(&program, &env_)?.into_value()?;
+    let renv = row_env(&binds, env);
+    let value = raweval::eval_compiled(&program, &renv)?.into_value()?;
     Ok(match value {
         Value::Defined(Bson::Array(arr)) => bson_array_to_f64(&arr),
         _ => None,

@@ -28,7 +28,7 @@ use slate_store::MemoryStore;
 
 use crate::nodes;
 
-pub use crate::{ExecError, ValueIter, collect};
+pub use crate::{ExecEnv, ExecError, ValueIter, collect};
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -113,12 +113,12 @@ pub fn filter<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> ValueIter<'a> {
-    nodes::filter::execute(predicate, binding, source, None, None)
+    nodes::filter::execute(predicate, binding, source, ExecEnv::new())
 }
 
 /// `Project` — evaluate `expr` against each row environment.
 pub fn project<'a>(expr: Expression, binding: RowBinding, source: ValueIter<'a>) -> ValueIter<'a> {
-    nodes::project::execute(expr, binding, source, None, None)
+    nodes::project::execute(expr, binding, source, ExecEnv::new())
 }
 
 /// `Sort` — blocking buffer-and-sort by `keys`.
@@ -127,7 +127,7 @@ pub fn sort<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::sort::execute(keys, binding, source, None, None)
+    nodes::sort::execute(keys, binding, source, ExecEnv::new())
 }
 
 /// `Limit` — skip `skip` rows, then take at most `take`.
@@ -142,7 +142,7 @@ pub fn distinct<'a>(source: ValueIter<'a>, flatten: bool) -> ValueIter<'a> {
 
 /// `Unwind` — emit one row per element of `array`, extending the environment.
 pub fn unwind<'a>(alias: String, array: Expression, source: ValueIter<'a>) -> ValueIter<'a> {
-    nodes::unwind::execute(alias, array, source, None, None)
+    nodes::unwind::execute(alias, array, source, ExecEnv::new())
 }
 
 /// `KeyLookup` — point-read the full document for each incoming ID (or doc pk).
@@ -173,5 +173,5 @@ pub fn aggregate<'a>(
     binding: RowBinding,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::aggregate::execute(group_keys, aggregates, binding, source, None, None)
+    nodes::aggregate::execute(group_keys, aggregates, binding, source, ExecEnv::new())
 }

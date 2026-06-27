@@ -10,16 +10,15 @@ use slate_ast::Expression;
 use slate_eval::raweval::{self, Compiled};
 use slate_planner::RowBinding;
 
-use super::env;
-use crate::{ExecError, ValueIter};
+use super::env::{sole_alias, with_row_env};
+use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Wrap `source`, evaluating `expr` against each row environment.
 pub(crate) fn execute<'a>(
     expr: Expression,
     binding: RowBinding,
     source: ValueIter<'a>,
-    params: env::Params,
-    rand: env::Rand,
+    env: ExecEnv<'a>,
 ) -> ValueIter<'a> {
     // Identity fast path: `SELECT VALUE c` in single-binding mode projects the
     // whole bound row, so pass it straight through — no eval, no copy. This is
@@ -33,24 +32,15 @@ pub(crate) fn execute<'a>(
 
     // Otherwise compile the projection once; the per-row closure evaluates the
     // resolved form (see `raweval::compile`).
-    let program = raweval::compile(&expr, env::sole_alias(&binding));
-    Box::new(source.map(move |item| {
-        project_row(
-            item,
-            &binding,
-            &program,
-            env::params_doc(&params),
-            env::rand_fn(&rand),
-        )
-    }))
+    let program = raweval::compile(&expr, sole_alias(&binding));
+    Box::new(source.map(move |item| project_row(item, &binding, &program, &env)))
 }
 
 fn project_row(
     item: Result<Option<RawBson>, ExecError>,
     binding: &RowBinding,
     program: &Compiled,
-    params: Option<&bson::RawDocument>,
-    rand: Option<&dyn Fn() -> f64>,
+    env: &ExecEnv,
 ) -> Result<Option<RawBson>, ExecError> {
     let Some(row) = item? else {
         return Ok(None);
@@ -59,7 +49,7 @@ fn project_row(
     // Evaluate against bindings borrowing from `row`. `into_raw` copies the
     // result out (a `Ref` is a single byte copy, not a decode + re-encode), so
     // the row's borrow can end here.
-    env::with_env(&row, binding, params, rand, |renv| {
+    with_row_env(&row, binding, env, |renv| {
         Ok(raweval::eval_compiled(program, renv)?.into_raw()?)
     })
 }
@@ -79,8 +69,7 @@ mod tests {
             sv(expr_src),
             RowBinding::Env,
             bind_c(docs),
-            None,
-            None,
+            crate::ExecEnv::new(),
         ))
         .unwrap()
     }
@@ -131,8 +120,7 @@ mod tests {
             sv("c"),
             RowBinding::Alias("c".into()),
             values::execute(people()),
-            None,
-            None,
+            crate::ExecEnv::new(),
         ))
         .unwrap();
         assert_eq!(out, people());
@@ -145,8 +133,7 @@ mod tests {
             sv("c.name"),
             RowBinding::Alias("c".into()),
             values::execute(people()),
-            None,
-            None,
+            crate::ExecEnv::new(),
         ))
         .unwrap();
         assert_eq!(
