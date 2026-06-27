@@ -249,8 +249,44 @@ fn bench_query_compound_covering(c: &mut Criterion) {
     group.finish();
 }
 
+/// Native UDF call cost vs the equivalent built-in arithmetic, same query shape
+/// (full scan, project one value per row). `udf` runs `udf.double(c.x)` —
+/// resolve the binding at plan build, bake the handle at compile, call under
+/// `catch_unwind` per row; `builtin` runs `c.x * 2`. The delta is the per-row
+/// UDF overhead. Branch-only (no UDFs on `main`), so it is a fresh baseline.
+fn bench_query_udf(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_udf");
+    for n in [1_000, 10_000] {
+        let engine = udf_engine(n);
+        group.bench_with_input(BenchmarkId::new("udf", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                engine
+                    .collection("test")
+                    .query("SELECT VALUE udf.double(c.x) FROM c")
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .count()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("builtin", n), &n, |b, _| {
+            b.iter(|| {
+                let txn = engine.begin(true).unwrap();
+                engine
+                    .collection("test")
+                    .query("SELECT VALUE c.x * 2 FROM c")
+                    .iter_raw(&txn)
+                    .unwrap()
+                    .count()
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_query_udf,
     bench_query_indexed_eq_dotted_projection,
     bench_query_sql,
     bench_query_compound_eq,

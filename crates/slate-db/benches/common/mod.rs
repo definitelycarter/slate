@@ -7,7 +7,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::DatabaseBuilder;
 use slate_db::bench::Database;
-use slate_db::v2::IndexOptions;
+use slate_db::v2::{IndexOptions, UdfFunction};
+use slate_db::{UdfError, Value};
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -72,6 +73,50 @@ pub fn seeded_engine(n: usize) -> Database<MemoryStore> {
                 "product_recommendation1": "ProductA",
             }
         })
+        .collect();
+    engine
+        .collection("test")
+        .insert_many(docs)
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+    engine
+}
+
+/// A native UDF `double(x) = x * 2` — the same argument shape as a built-in
+/// scalar function, so the bench's `udf` vs `builtin` cases differ only in the
+/// per-row call.
+fn double_udf(args: &[Value]) -> Result<Value, UdfError> {
+    let x = args
+        .first()
+        .and_then(Value::as_bson)
+        .and_then(|b| match b {
+            bson::Bson::Int32(i) => Some(i64::from(*i)),
+            bson::Bson::Int64(i) => Some(*i),
+            _ => None,
+        })
+        .unwrap_or(0);
+    Ok(Value::defined(x * 2))
+}
+
+/// An engine with `n` docs (numeric field `x`), the native UDF `double`
+/// registered in the bag, and a binding `udf.double -> double` on the
+/// collection — for the UDF query scenario (`SELECT VALUE udf.double(c.x)`).
+pub fn udf_engine(n: usize) -> Database<MemoryStore> {
+    let engine = db_builder()
+        .with_udf("double", double_udf)
+        .open(MemoryStore::new())
+        .unwrap();
+    let txn = engine.begin(false).unwrap();
+    engine.collections().create("test").execute(&txn).unwrap();
+    engine
+        .collection("test")
+        .functions()
+        .create("double", UdfFunction::from_name("double"))
+        .execute(&txn)
+        .unwrap();
+    let docs: Vec<bson::Document> = (0..n)
+        .map(|i| bson::doc! { "_id": format!("rec-{i}"), "x": (i % 100) as i32 })
         .collect();
     engine
         .collection("test")
