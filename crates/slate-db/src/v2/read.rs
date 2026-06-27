@@ -150,7 +150,7 @@ where
     S: Store + 'db,
 {
     let plan = find_plan(cf, collection, filter, options, txn)?;
-    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)?))
+    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)))
 }
 
 impl<F: Serialize> FindBuilder<'_, F> {

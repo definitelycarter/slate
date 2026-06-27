@@ -99,20 +99,23 @@ impl<'a> RawValue<'a> {
 }
 
 /// The bindings visible to a raw expression: alias → bound raw value, plus
-/// optional query parameters (`@name`) as a raw document and an optional random
-/// source for `RAND()`.
+/// optional query parameters (`@name`) as a raw document, an optional random
+/// source for `RAND()`, and the injected clock reading for `GETCURRENT*`.
 pub struct RowEnv<'a> {
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
     params: Option<&'a RawDocument>,
-    /// Injected random source backing `RAND()`. Unlike the clock — a *static*
-    /// value threaded once per transaction as the `$now` param — `RAND()` must
-    /// produce a fresh value per call, so it takes a *callable* rather than a
-    /// param value. The closure owns its mutable PRNG state behind interior
-    /// mutability, so the evaluator stays a pure caller (no new mutable state in
-    /// eval itself); each call returns a value in `[0, 1)`. `None` (the default)
-    /// makes `RAND()` undefined, mirroring how an absent `$now` makes the clock
-    /// functions undefined.
+    /// Injected random source backing `RAND()`. `RAND()` must produce a *fresh*
+    /// value per call, so it takes a *callable* — the closure owns its mutable
+    /// PRNG state behind interior mutability, so the evaluator stays a pure
+    /// caller (no new mutable state in eval itself); each call returns a value in
+    /// `[0, 1)`. `None` (the default) makes `RAND()` undefined.
     rng: Option<&'a dyn Fn() -> f64>,
+    /// Injected clock reading (epoch milliseconds), captured once per
+    /// transaction, backing the `GETCURRENT*` functions. Unlike `RAND()` this is
+    /// a *static* value — every `GETCURRENT*` in a query sees the same instant —
+    /// so it is a plain value, not a callable. `None` (the default) makes the
+    /// clock functions undefined (e.g. evaluating outside a transaction).
+    clock: Option<i64>,
 }
 
 impl<'a> RowEnv<'a> {
@@ -121,12 +124,20 @@ impl<'a> RowEnv<'a> {
             bindings,
             params,
             rng: None,
+            clock: None,
         }
     }
 
     /// Attach the injected random source backing `RAND()` (see [`RowEnv::rng`]).
     pub fn with_rng(mut self, rng: Option<&'a dyn Fn() -> f64>) -> Self {
         self.rng = rng;
+        self
+    }
+
+    /// Attach the injected clock reading (epoch ms) backing `GETCURRENT*` (see
+    /// [`RowEnv::clock`]).
+    pub fn with_clock(mut self, clock: Option<i64>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -241,13 +252,11 @@ fn eval_function<'a>(name: &str, args: &'a [Expression], env: &RowEnv<'a>) -> Re
     crate::functions::call(name, vals).map(RawValue::from_value)
 }
 
-/// Resolve a `GETCURRENT*` function from the injected `$now` (epoch ms) the
-/// executor threads through the params channel. Undefined if `$now` is absent.
+/// Resolve a `GETCURRENT*` function from the injected clock reading (epoch ms).
+/// Undefined when no clock is attached (the `None` default).
 fn current_time<'a>(name: &str, env: &RowEnv<'a>) -> Result<RawValue<'a>> {
-    let now_ms = match env.param("$now")? {
-        RawValue::Ref(RawBsonRef::Int64(n)) => n,
-        RawValue::Owned(Bson::Int64(n)) => n,
-        _ => return Ok(RawValue::Undefined),
+    let Some(now_ms) = env.clock else {
+        return Ok(RawValue::Undefined);
     };
     Ok(RawValue::from_value(crate::functions::current_time(
         name, now_ms,

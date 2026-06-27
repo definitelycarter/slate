@@ -33,7 +33,7 @@ pub(crate) fn analyze_plan<S: Store>(
     // (pool/rand/watch + `$now`-injected params) comes from the same
     // `exec_env` translation the cursor uses.
     let render_plan = plan.clone();
-    let env = txn.exec_env(params)?;
+    let env = txn.exec_env(params);
     let (_rows, stats) =
         slate_executor::Executor::with_env(txn.engine_txn(), env).execute_analyze(plan)?;
     Ok(render_plan.explain_analyze(&stats))
@@ -82,11 +82,11 @@ pub(super) fn write_query(
 pub(crate) fn write_cursor<'t, 'db, S>(
     plan: slate_planner::Plan,
     txn: &'t Transaction<'db, S>,
-) -> Result<Cursor<'db, 't, S>, DbError>
+) -> Cursor<'db, 't, S>
 where
     S: Store + 'db,
 {
-    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)?))
+    Cursor::new(txn.engine_txn(), plan, txn.exec_env(None))
 }
 
 /// Build a cursor over a mutation plan, drain it, and return the affected count —
@@ -99,5 +99,5 @@ pub(super) fn execute_write<'db, S>(
 where
     S: Store + 'db,
 {
-    write_cursor(plan, txn)?.drain()
+    write_cursor(plan, txn).drain()
 }

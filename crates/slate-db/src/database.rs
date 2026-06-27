@@ -500,30 +500,19 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Build the per-query execution context ([`ExecEnv`]) for a plan run against
-    /// this transaction: the scripting pool, the `RAND()` source, and the
-    /// watch-capture sink, plus the query's `@`-parameters with the injected
-    /// `$now` clock folded in. The single translation point from a transaction's
-    /// capabilities to an executor env — the cursor and `analyze` both go through
-    /// it, so a new capability is wired here once.
-    pub(crate) fn exec_env(
-        &self,
-        params: Option<bson::RawDocumentBuf>,
-    ) -> Result<ExecEnv<'db>, DbError> {
-        // Inject `$now` (epoch ms, captured when the txn began from the engine's
-        // injectable clock) so the SQL `GETCURRENT*` functions resolve against
-        // it — consistent across the txn and wasm-clean (no syscall in the
-        // evaluator).
-        let mut doc: bson::Document = match params {
-            Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
-            None => bson::Document::new(),
-        };
-        doc.insert("$now", self.now_millis());
-        let params = Rc::new(bson::serialize_to_raw_document_buf(&doc)?);
-        Ok(ExecEnv::new()
+    /// this transaction: the scripting pool, the `RAND()` source, the watch sink,
+    /// the clock reading (epoch ms, captured at `begin`, backing `GETCURRENT*` —
+    /// consistent across the txn and wasm-clean, no syscall in the evaluator),
+    /// and the query's `@`-parameters. The single translation point from a
+    /// transaction's capabilities to an executor env — the cursor and `analyze`
+    /// both go through it, so a new capability is wired here once.
+    pub(crate) fn exec_env(&self, params: Option<bson::RawDocumentBuf>) -> ExecEnv<'db> {
+        ExecEnv::new()
             .with_pool(self.pool)
-            .with_params(Some(params))
+            .with_params(params.map(Rc::new))
             .with_rand(self.exec_rand())
-            .with_watch(self.watch_sink.clone()))
+            .with_watch(self.watch_sink.clone())
+            .with_clock(Some(self.now_millis()))
     }
 
     /// Mark the trigger/validator hook snapshot stale — for v2's `triggers()` /

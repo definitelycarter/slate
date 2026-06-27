@@ -2,19 +2,16 @@
 //!
 //! Every per-query capability the [`Executor`](crate::Executor) feeds to
 //! expression evaluation — an optional scripting pool for validators/triggers,
-//! the SQL `@`-parameters (which also carry the injected `$now` clock value),
-//! the `RAND()` source, and the watch-capture sink — was threaded as a
-//! *separate* `Executor` field and constructor argument. Adding the next scoped
-//! capability (a UDF resolver, then triggers/validators) meant re-threading
-//! every layer again.
+//! the SQL `@`-parameters, the `RAND()` source, the injected clock reading, and
+//! the watch-capture sink — was threaded as a *separate* `Executor` field and
+//! constructor argument. Adding the next scoped capability (a UDF resolver, then
+//! triggers/validators) meant re-threading every layer again.
 //!
 //! [`ExecEnv`] groups those capabilities into one value, so a new capability is a
-//! single field rather than a re-thread. This is migration **step 1** of the
-//! [execution-context RFC](../../../book/src/rfcs/execution-context.md): a
-//! mechanical regrouping with no behaviour change. The handles are the same
-//! `&`/`Rc` the `Executor` held before, so it is allocation-neutral. The
-//! `Executor`'s `with_*` builders remain as thin sugar over this type so call
-//! sites migrate incrementally.
+//! single field rather than a re-thread. The handles are the same `&`/`Rc` the
+//! `Executor` held before, so it is allocation-neutral. The db layer builds the
+//! populated bundle in one place — `Transaction::exec_env` — and hands it to
+//! [`Executor::with_env`](crate::Executor::with_env).
 //!
 //! The **transaction is not part of this bundle.** It is the data handle the
 //! source/mutation nodes run *against*, not an *evaluator* input — so the
@@ -55,9 +52,7 @@ pub struct ExecEnv<'a> {
     /// Scripting pool backing validators/triggers. `None` skips them.
     pub(crate) pool: Option<&'a VmPool>,
     /// Query `@`-parameters, shared (by `Rc`) into each evaluating node so they
-    /// outlive this executor. Also the carrier for the injected `$now` clock
-    /// value (the db layer folds it into this document). `None` means the query
-    /// had no parameters.
+    /// outlive this executor. `None` means the query had no parameters.
     pub(crate) params: Option<Rc<RawDocumentBuf>>,
     /// Random source backing `RAND()`, shared (by `Rc`) into each evaluating
     /// node like `params`. `None` makes `RAND()` undefined. The closure owns its
@@ -67,6 +62,12 @@ pub struct ExecEnv<'a> {
     /// mutation nodes so they buffer matching before/after documents as the
     /// write stream drains. `None` when no watches are registered.
     pub(crate) watch: Option<Rc<WatchSink>>,
+    /// Injected clock reading (epoch milliseconds), captured once at txn begin,
+    /// backing the SQL `GETCURRENT*` functions. A *static* per-query value
+    /// (every `GETCURRENT*` in a query sees the same instant), so unlike `rand`
+    /// it is a plain value, not a callable. `None` makes the clock functions
+    /// undefined.
+    pub(crate) clock: Option<i64>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -83,8 +84,8 @@ impl<'a> ExecEnv<'a> {
         self
     }
 
-    /// Attach the query's `@`-parameter document (also the carrier for the
-    /// injected `$now` clock), shared by `Rc` into each evaluating node.
+    /// Attach the query's `@`-parameter document, shared by `Rc` into each
+    /// evaluating node.
     pub fn with_params(mut self, params: Option<Rc<RawDocumentBuf>>) -> Self {
         self.params = params;
         self
@@ -103,6 +104,13 @@ impl<'a> ExecEnv<'a> {
     /// capture at zero cost.
     pub fn with_watch(mut self, watch: Option<Rc<WatchSink>>) -> Self {
         self.watch = watch;
+        self
+    }
+
+    /// Attach the injected clock reading (epoch ms) backing the SQL `GETCURRENT*`
+    /// functions. `None` (the default) makes them undefined.
+    pub fn with_clock(mut self, clock: Option<i64>) -> Self {
+        self.clock = clock;
         self
     }
 }

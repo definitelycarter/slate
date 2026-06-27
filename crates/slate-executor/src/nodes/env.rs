@@ -67,14 +67,16 @@ pub(crate) fn bindings_of(row: &RawBson) -> Result<Vec<(&str, RawBsonRef<'_>)>, 
 }
 
 /// Build a row environment over already-extracted bindings, sourcing the
-/// query's `@`-parameters and random source from the execution context
-/// ([`ExecEnv`]). The node holds an owned `ExecEnv`; this borrows the capability
-/// handles out of it for one row's evaluation.
+/// query's `@`-parameters, random source, and clock reading from the execution
+/// context ([`ExecEnv`]). The node holds an owned `ExecEnv`; this borrows the
+/// capability handles out of it for one row's evaluation.
 pub(crate) fn row_env<'a>(
     bindings: &'a [(&'a str, RawBsonRef<'a>)],
     env: &'a ExecEnv<'_>,
 ) -> RowEnv<'a> {
-    RowEnv::new(bindings, params_doc(&env.params)).with_rng(rand_fn(&env.rand))
+    RowEnv::new(bindings, params_doc(&env.params))
+        .with_rng(rand_fn(&env.rand))
+        .with_clock(env.clock)
 }
 
 /// The sole `FROM` alias when the node reads bare rows ([`RowBinding::Alias`]),
@@ -102,14 +104,15 @@ pub(crate) fn with_row_env<R>(
 ) -> Result<R, ExecError> {
     let params = params_doc(&env.params);
     let rand = rand_fn(&env.rand);
+    let clock = env.clock;
     match binding {
         RowBinding::Alias(alias) => {
             let binds = [(alias.as_str(), row.as_raw_bson_ref())];
-            f(&RowEnv::new(&binds, params).with_rng(rand))
+            f(&RowEnv::new(&binds, params).with_rng(rand).with_clock(clock))
         }
         RowBinding::Env => {
             let binds = bindings_of(row)?;
-            f(&RowEnv::new(&binds, params).with_rng(rand))
+            f(&RowEnv::new(&binds, params).with_rng(rand).with_clock(clock))
         }
     }
 }

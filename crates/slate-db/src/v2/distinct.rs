@@ -108,7 +108,7 @@ where
         triggers: Vec::new(),
     };
     let plan = slate_planner::plan(stmt, &ctx)?;
-    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)?))
+    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)))
 }
 
 impl<F: Serialize> DistinctBuilder<'_, F> {
