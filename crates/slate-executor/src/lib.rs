@@ -26,6 +26,7 @@
 //! zero-copy rather than decoding each row to `Bson`.
 
 mod analyze;
+mod env;
 mod error;
 mod nodes;
 mod trace;
@@ -44,6 +45,7 @@ use slate_planner::{Node, Plan, PlanStats};
 use slate_vm::pool::VmPool;
 
 use analyze::Counting;
+pub use env::ExecEnv;
 pub use error::ExecError;
 pub use watch::{CapturedEvent, ChangeEvent, Compiled, CompiledWatch, WatchSink};
 
@@ -69,59 +71,56 @@ pub type ValueIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, ExecErr
 /// Executes plans against a transaction, with an optional scripting pool for
 /// validators/triggers and an optional `@`-parameter document for SQL queries.
 pub struct Executor<'a, T> {
+    /// The engine transaction the query reads and (for writes) mutates — the
+    /// data handle the source/mutation nodes run against. Held *beside* `env`,
+    /// not inside it: together they are the query's execution context, but the
+    /// transaction is not an *evaluator* input, so it stays a peer rather than
+    /// living in the capability bundle (mirroring how the per-row `RawEnv` holds
+    /// no transaction). Keeping it here is also why [`ExecEnv`] needs no engine
+    /// type parameter.
     txn: &'a T,
-    pool: Option<&'a VmPool>,
-    /// Query `@`-parameters, shared (by `Rc`) into each evaluating node so they
-    /// outlive this executor — the result stream borrows only the transaction.
-    params: Option<Rc<RawDocumentBuf>>,
-    /// Random source backing `RAND()`, shared (by `Rc`) into each evaluating
-    /// node like `params`. `None` makes `RAND()` undefined. Injected by the
-    /// database (a seeded PRNG natively; `Math.random` on wasm); see
-    /// [`Executor::with_rand`].
-    rand: nodes::env::Rand,
+    /// The per-query evaluator capabilities — pool, params, rand, and watch sink
+    /// — bundled so a new capability is one field rather than a re-thread through
+    /// every layer (see [`ExecEnv`]).
+    env: ExecEnv<'a>,
     /// `EXPLAIN ANALYZE` collector, set *only* by
     /// [`execute_analyze`](Self::execute_analyze). When `None` (the normal path),
     /// `execute_node` builds no counting wrappers and pays nothing — the whole
     /// instrumentation is off. When `Some`, each node's output is wrapped in
     /// [`Counting`] keyed by its pre-order index (tracked in `analyze_index`).
+    ///
+    /// Instrumentation is *not* a per-query evaluator input, so it stays on the
+    /// `Executor` rather than the [`ExecEnv`] bundle.
     analyze: Option<Rc<PlanStats>>,
     /// Running pre-order node index for the analyze walk. `Cell` because
     /// `execute_node` is `&self`; it advances once per node, in the same order
     /// the renderer and `PlanStats::for_plan` walk the tree.
     analyze_index: std::cell::Cell<usize>,
-    /// Change-detection sink for watch queries, threaded (by `Rc`) into the
-    /// mutation nodes so they can buffer matching before/after documents as the
-    /// write stream drains. `None` when no watches are registered. See
-    /// [`watch`].
-    watch: Option<Rc<WatchSink>>,
 }
 
 impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
+    /// Construct an executor from a transaction and a fully-built [`ExecEnv`]
+    /// capability bundle — the two halves of the execution context. This is the
+    /// seam call sites migrate to; the other constructors are thin sugar over
+    /// it, building the bundle a capability at a time.
+    pub fn with_env(txn: &'a T, env: ExecEnv<'a>) -> Self {
+        Self {
+            txn,
+            env,
+            analyze: None,
+            analyze_index: std::cell::Cell::new(0),
+        }
+    }
+
     /// Construct an executor with no scripting pool (validators/triggers are
     /// skipped if encountered).
     pub fn new(txn: &'a T) -> Self {
-        Self {
-            txn,
-            pool: None,
-            params: None,
-            rand: None,
-            analyze: None,
-            analyze_index: std::cell::Cell::new(0),
-            watch: None,
-        }
+        Self::with_env(txn, ExecEnv::new())
     }
 
     /// Construct an executor with a scripting pool for validators/triggers.
     pub fn with_pool(txn: &'a T, pool: Option<&'a VmPool>) -> Self {
-        Self {
-            txn,
-            pool,
-            params: None,
-            rand: None,
-            analyze: None,
-            analyze_index: std::cell::Cell::new(0),
-            watch: None,
-        }
+        Self::with_env(txn, ExecEnv::new().with_pool(pool))
     }
 
     /// Construct an executor with a scripting pool and a document of query
@@ -131,21 +130,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         pool: Option<&'a VmPool>,
         params: Option<Rc<RawDocumentBuf>>,
     ) -> Self {
-        Self {
-            txn,
-            pool,
-            params,
-            rand: None,
-            analyze: None,
-            analyze_index: std::cell::Cell::new(0),
-            watch: None,
-        }
+        Self::with_env(txn, ExecEnv::new().with_pool(pool).with_params(params))
     }
 
-    /// Attach the random source backing `RAND()` (see [`Executor::rand`]). The
-    /// closure owns its PRNG state, so the executor only ever *calls* it.
+    /// Attach the random source backing `RAND()` (see [`ExecEnv`]). The closure
+    /// owns its PRNG state, so the executor only ever *calls* it.
     pub fn with_rand(mut self, rand: Option<Rc<dyn Fn() -> f64>>) -> Self {
-        self.rand = rand;
+        self.env.rand = rand;
         self
     }
 
@@ -153,7 +144,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
     /// before/after documents for registered watch queries. `None` (the
     /// default) disables capture at zero cost. See [`watch::WatchSink`].
     pub fn with_watch(mut self, watch: Option<Rc<WatchSink>>) -> Self {
-        self.watch = watch;
+        self.env.watch = watch;
         self
     }
 
@@ -170,7 +161,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::insert::execute(self.txn, handle, source, self.watch.clone())
+                nodes::insert::execute(self.txn, handle, source, self.env.watch.clone())
             }
 
             Plan::Delete { collection, source } => {
@@ -178,7 +169,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::delete::execute(self.txn, handle, source, self.watch.clone())
+                nodes::delete::execute(self.txn, handle, source, self.env.watch.clone())
             }
 
             Plan::Replace {
@@ -190,7 +181,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::replace::execute(self.txn, handle, replacement, source, self.watch.clone())
+                nodes::replace::execute(
+                    self.txn,
+                    handle,
+                    replacement,
+                    source,
+                    self.env.watch.clone(),
+                )
             }
 
             Plan::Update {
@@ -202,7 +199,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     .txn
                     .collection(&collection.cf, &collection.collection)?;
                 let source = self.execute_node(source, None)?;
-                nodes::mutate::execute(self.txn, handle, assignments, source, self.watch.clone())
+                nodes::mutate::execute(
+                    self.txn,
+                    handle,
+                    assignments,
+                    source,
+                    self.env.watch.clone(),
+                )
             }
 
             Plan::Trigger {
@@ -212,7 +215,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 plan,
             } => {
                 let inner = self.execute(*plan)?;
-                nodes::trigger::execute(self.txn, self.pool, cf, action, hooks, inner)
+                nodes::trigger::execute(self.txn, self.env.pool, cf, action, hooks, inner)
             }
 
             Plan::Upsert {
@@ -227,12 +230,12 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let source = self.execute_node(source, None)?;
                 nodes::upsert::execute(
                     self.txn,
-                    self.pool,
+                    self.env.pool,
                     hooks,
                     handle,
                     mode,
                     source,
-                    self.watch.clone(),
+                    self.env.watch.clone(),
                 )
             }
         }
@@ -347,8 +350,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     map_vector_metric(metric),
                     k,
                     source,
-                    self.params.clone(),
-                    self.rand.clone(),
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
                 )?
             }
 
@@ -374,7 +377,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::unwind::execute(alias, array, source, self.params.clone(), self.rand.clone())
+                nodes::unwind::execute(
+                    alias,
+                    array,
+                    source,
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
+                )
             }
 
             Node::Project {
@@ -387,8 +396,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     expr,
                     binding,
                     source,
-                    self.params.clone(),
-                    self.rand.clone(),
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
                 )
             }
 
@@ -402,8 +411,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     predicate,
                     binding,
                     source,
-                    self.params.clone(),
-                    self.rand.clone(),
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
                 )
             }
 
@@ -417,8 +426,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     keys,
                     binding,
                     source,
-                    self.params.clone(),
-                    self.rand.clone(),
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
                 )?
             }
 
@@ -444,8 +453,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     aggregates,
                     binding,
                     source,
-                    self.params.clone(),
-                    self.rand.clone(),
+                    self.env.params.clone(),
+                    self.env.rand.clone(),
                 )?
             }
 
@@ -456,12 +465,12 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::trigger::execute(self.txn, self.pool, cf, action, hooks, source)?
+                nodes::trigger::execute(self.txn, self.env.pool, cf, action, hooks, source)?
             }
 
             Node::Validate { validators, source } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::validate::execute(self.pool, validators, source)?
+                nodes::validate::execute(self.env.pool, validators, source)?
             }
 
             // The single outer row fed in by an enclosing `Subquery`.
@@ -1243,5 +1252,140 @@ mod write_path {
         };
         assert_eq!(doc.get_str("_id").unwrap(), "2"); // pk preserved
         assert_eq!(doc.get_i32("age").unwrap(), 99);
+    }
+}
+
+#[cfg(test)]
+mod exec_env {
+    //! The [`ExecEnv`] bundle — migration step 1. Each capability attached to
+    //! the bundle reaches expression evaluation through `Executor::with_env`,
+    //! the `None` default stays zero-cost, and the `Executor::with_*` sugar
+    //! delegates to the bundle faithfully.
+
+    use crate::nodes::test_support::{people_ref, pred, seeded_people};
+    use crate::watch::{CompiledWatch, compile_filter};
+    use crate::{ChangeEvent, ExecEnv, Executor, WatchSink};
+    use bson::{RawBson, RawDocumentBuf, rawdoc};
+    use slate_engine::{Catalog, DEFAULT_CF, Engine};
+    use slate_planner::{CollectionMeta, Node, Plan};
+    use std::rc::Rc;
+
+    /// The `people` fixture's collection metadata (only `age` is indexed), which
+    /// the lowerer needs to plan the query.
+    fn people_meta<T: Catalog>(txn: &T) -> CollectionMeta {
+        let handle = txn.collection(DEFAULT_CF, "people").unwrap();
+        CollectionMeta {
+            indexes: handle.indexes().to_vec(),
+            compound_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
+            pk_path: handle.pk_path().to_string(),
+        }
+    }
+
+    /// Lower a SQL string against the `people` fixture.
+    fn people_plan<T: Catalog>(txn: &T, sql: &str) -> Plan {
+        slate_planner::lower(
+            slate_sql::parse(sql).unwrap(),
+            people_ref(),
+            &people_meta(txn),
+        )
+    }
+
+    #[test]
+    fn params_attached_to_env_reach_at_param_eval() {
+        // `@who` resolves from the params document carried on the bundle.
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let plan = people_plan(&txn, "SELECT VALUE c.name FROM c WHERE c.name = @who");
+        let params: Option<Rc<RawDocumentBuf>> = Some(Rc::new(rawdoc! { "who": "alan" }));
+        let out = Executor::with_env(&txn, ExecEnv::new().with_params(params))
+            .execute_collect(plan)
+            .unwrap();
+        assert_eq!(out, vec![RawBson::String("alan".into())]);
+    }
+
+    #[test]
+    fn rand_attached_to_env_feeds_the_rand_function() {
+        // A fixed source on the bundle reaches `RAND()`: one draw per person.
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let plan = people_plan(&txn, "SELECT VALUE RAND() FROM c");
+        let source: Rc<dyn Fn() -> f64> = Rc::new(|| 0.42);
+        let out = Executor::with_env(&txn, ExecEnv::new().with_rand(Some(source)))
+            .execute_collect(plan)
+            .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                RawBson::Double(0.42),
+                RawBson::Double(0.42),
+                RawBson::Double(0.42),
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_rand_leaves_rand_undefined() {
+        // The `None` default stays zero-cost: `RAND()` is undefined, so every
+        // projected value is dropped at the output boundary.
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let plan = people_plan(&txn, "SELECT VALUE RAND() FROM c");
+        let out = Executor::with_env(&txn, ExecEnv::new())
+            .execute_collect(plan)
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn with_pool_and_params_sugar_matches_with_env() {
+        // The `with_*` builders must produce the same execution as building the
+        // bundle directly — they are sugar over `ExecEnv`.
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let sql = "SELECT VALUE c.name FROM c WHERE c.name = @who";
+        let params = Rc::new(rawdoc! { "who": "grace" });
+
+        let via_sugar = Executor::with_pool_and_params(&txn, None, Some(Rc::clone(&params)))
+            .execute_collect(people_plan(&txn, sql))
+            .unwrap();
+        let via_env = Executor::with_env(&txn, ExecEnv::new().with_params(Some(params)))
+            .execute_collect(people_plan(&txn, sql))
+            .unwrap();
+
+        assert_eq!(via_sugar, via_env);
+        assert_eq!(via_sugar, vec![RawBson::String("grace".into())]);
+    }
+
+    #[test]
+    fn watch_attached_to_env_captures_a_matching_write() {
+        // The watch sink threads through the bundle into the insert node, which
+        // captures the matching new document as an `Insert`.
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let filter = compile_filter(&pred("c.age > 40"), "c");
+        let sink = Rc::new(WatchSink::new(vec![(
+            DEFAULT_CF.into(),
+            "people".into(),
+            vec![CompiledWatch {
+                handle_id: 1,
+                alias: "c".into(),
+                filter,
+            }],
+        )]));
+        let insert = Plan::Insert {
+            collection: people_ref(),
+            source: Node::Values(vec![RawBson::Document(
+                rawdoc! { "_id": "9", "name": "kay", "age": 50 },
+            )]),
+        };
+        Executor::with_env(&txn, ExecEnv::new().with_watch(Some(Rc::clone(&sink))))
+            .execute_collect(insert)
+            .unwrap();
+
+        let captured = sink.take();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].handle_id, 1);
+        assert!(matches!(captured[0].event, ChangeEvent::Insert { .. }));
     }
 }

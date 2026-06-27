@@ -144,7 +144,7 @@ Executor::with_pool_and_params(txn.engine_txn(), txn.pool(), params)
 
 // proposed:
 let env = txn.exec_env(&plan, params);   // one translation point; scope from plan
-Executor::new(txn.engine_txn(), plan, env)
+Executor::with_env(txn.engine_txn(), env).execute(plan)  // plan stays an execute() arg
 ```
 
 The `.with_*` builders can remain as thin sugar over `ExecEnv` so call sites
@@ -285,7 +285,7 @@ native-function work, so those capabilities land on the bundle instead of
 re-threading — step 3 is also what lets UDF resolution resolve at plan-build:
 
 1. **`ExecEnv` in slate-executor.** Introduce the struct; make `.with_*` delegate
-   to it (`Executor::new(.., env)` + builders as sugar). Mechanical, no behavior
+   to it (`Executor::with_env(txn, env)` + builders as sugar). Mechanical, no behavior
    change.
 2. **`EvalEnv` in slate-eval / executor nodes.** Collapse per-node
    `params/rand/udf` into one env argument; `RawEnv` is built from it. Node tests
