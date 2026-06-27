@@ -96,7 +96,7 @@ fn check_expr(expr: &Expression, scope: &[&str]) -> Result<(), PlanError> {
             check_expr(lhs, scope)?;
             check_expr(rhs, scope)
         }
-        Expression::Function { args, .. } => {
+        Expression::Function { args, .. } | Expression::Udf { args, .. } => {
             for a in args {
                 check_expr(a, scope)?;
             }
@@ -223,7 +223,7 @@ fn check_grounded(
             check_grounded(base, group_keys, bindings)?;
             check_grounded(value, group_keys, bindings)
         }
-        Expression::Function { args, .. } => {
+        Expression::Function { args, .. } | Expression::Udf { args, .. } => {
             for a in args {
                 check_grounded(a, group_keys, bindings)?;
             }

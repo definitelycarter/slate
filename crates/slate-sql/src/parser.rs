@@ -606,6 +606,21 @@ impl Parser {
             Token::LBrace => self.parse_object(),
             Token::LBracket => self.parse_array(),
             Token::Ident(name) => {
+                // `udf.NAME(args)` — a user-defined function call. The `udf`
+                // namespace (Cosmos syntax) is reserved: a leading `udf` followed
+                // by `.` is always a UDF call, never member access. The function
+                // name keeps its case (UDF names are case-sensitive); only the
+                // `udf` keyword is matched case-insensitively, like EXISTS/ARRAY.
+                if name.eq_ignore_ascii_case("udf") && self.peek() == &Token::Dot {
+                    self.advance(); // consume `.`
+                    let fn_name = self.parse_ident()?;
+                    self.expect(&Token::LParen)?;
+                    let args = self.parse_call_args()?;
+                    return Ok(Expression::Udf {
+                        name: fn_name,
+                        args,
+                    });
+                }
                 // `EXISTS (SELECT …)` / `ARRAY (SELECT …)` are subquery forms;
                 // otherwise these are ordinary identifiers/function calls.
                 let upper = name.to_ascii_uppercase();
@@ -962,6 +977,49 @@ mod tests {
         assert!(
             matches!(&from.joins[0].array, Expression::Member { field, .. } if field == "tags")
         );
+    }
+
+    #[test]
+    fn udf_call() {
+        let q = parse("SELECT VALUE udf.double(c.x) FROM c");
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        match expr {
+            Expression::Udf { name, args } => {
+                assert_eq!(name, "double");
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected Udf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn udf_keyword_case_insensitive_name_preserved() {
+        // The `udf` keyword matches case-insensitively (like EXISTS/ARRAY); the
+        // function name keeps its case, and multiple args parse.
+        let q = parse("SELECT VALUE UDF.MyFunc(c.a, c.b, 5) FROM c");
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        match expr {
+            Expression::Udf { name, args } => {
+                assert_eq!(name, "MyFunc");
+                assert_eq!(args.len(), 3);
+            }
+            other => panic!("expected Udf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn udf_as_field_is_member_not_namespace() {
+        // `udf` is the UDF namespace only as a *leading* identifier; after a `.`
+        // it is an ordinary field name (`c.udf` is member access, not a call).
+        let q = parse("SELECT VALUE c.udf FROM c");
+        let SelectClause::Value(expr) = q.select else {
+            panic!("expected SELECT VALUE")
+        };
+        assert!(matches!(expr, Expression::Member { ref field, .. } if field == "udf"));
     }
 
     #[test]

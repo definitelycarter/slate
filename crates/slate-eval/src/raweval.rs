@@ -184,6 +184,11 @@ pub fn eval<'a>(expr: &'a Expression, env: &RowEnv<'a>) -> Result<RawValue<'a>> 
         Expression::Subquery { .. } => Err(EvalError {
             message: "subquery must be lowered by the planner, not evaluated directly".into(),
         }),
+        // Resolved at plan build into a baked handle (a later slice); like a
+        // subquery, never seen here in a well-formed plan.
+        Expression::Udf { .. } => Err(EvalError {
+            message: "udf must be resolved by the planner, not evaluated directly".into(),
+        }),
 
         Expression::Member { base, field } => member_access(eval(base, env)?, field),
         Expression::Index { base, index } => {
@@ -830,6 +835,9 @@ pub fn compile(expr: &Expression, sole: Option<&str>) -> Compiled {
         Expression::Subquery { .. } => {
             Compiled::Unsupported("subquery must be lowered by the planner".into())
         }
+        Expression::Udf { .. } => Compiled::Unsupported(
+            "udf must be resolved by the planner, not compiled directly".into(),
+        ),
     }
 }
 

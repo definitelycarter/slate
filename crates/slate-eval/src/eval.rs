@@ -57,6 +57,11 @@ pub fn eval(expr: &Expression, env: &Env) -> Result<Value> {
         Expression::Subquery { .. } => Err(crate::EvalError {
             message: "subquery must be lowered by the planner, not evaluated directly".into(),
         }),
+        // UDFs are resolved at plan build into a baked handle (a later slice),
+        // so — like a subquery — the evaluator never sees this variant directly.
+        Expression::Udf { .. } => Err(crate::EvalError {
+            message: "udf must be resolved by the planner, not evaluated directly".into(),
+        }),
 
         Expression::Member { base, field } => Ok(member_access(eval(base, env)?, field)),
         Expression::Index { base, index } => Ok(index_access(eval(base, env)?, eval(index, env)?)),

@@ -536,6 +536,10 @@ fn expr(e: &Expression) -> String {
         Expression::Binary { op, lhs, rhs } => {
             format!("{} {} {}", operand(lhs), binop(*op), operand(rhs))
         }
+        Expression::Udf { name, args } => {
+            let args = args.iter().map(expr).collect::<Vec<_>>().join(", ");
+            format!("udf.{name}({args})")
+        }
         Expression::Function { name, args } => {
             let args = args.iter().map(expr).collect::<Vec<_>>().join(", ");
             format!("{name}({args})")
@@ -657,6 +661,30 @@ Project c.name
   Filter c.age > 21
     Bind c
       Scan default.users"
+        );
+    }
+
+    #[test]
+    fn udf_call_renders_with_namespace() {
+        // Project(udf.double(c.x)) <- Bind(c) <- Scan — the `udf.` namespace is
+        // preserved so a UDF call is never confused with a built-in function.
+        let plan = Plan::Query(Node::Project {
+            expr: Expression::Udf {
+                name: "double".to_string(),
+                args: vec![member("c", "x")],
+            },
+            binding: RowBinding::Alias("c".to_string()),
+            source: Box::new(Node::Bind {
+                alias: "c".to_string(),
+                source: Box::new(Node::Scan { collection: cref() }),
+            }),
+        });
+        assert_eq!(
+            plan.explain(),
+            "\
+Project udf.double(c.x)
+  Bind c
+    Scan default.users"
         );
     }
 

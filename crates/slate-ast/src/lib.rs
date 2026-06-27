@@ -68,8 +68,16 @@ pub enum Expression {
         lhs: Box<Expression>,
         rhs: Box<Expression>,
     },
-    /// `NAME(arg, ...)` — scalar function call.
+    /// `NAME(arg, ...)` — scalar function call (built-in).
     Function {
+        name: String,
+        args: Vec<Expression>,
+    },
+    /// `udf.NAME(arg, ...)` — a user-defined-function call. Distinct from
+    /// [`Function`](Self::Function): a UDF resolves against the registered UDFs
+    /// (the `slate-udf` bag), never the built-in scalar dispatch, and the
+    /// `udf.` namespace keeps the two from ever colliding.
+    Udf {
         name: String,
         args: Vec<Expression>,
     },
@@ -147,7 +155,9 @@ impl Expression {
                 base.collect_parameters(out);
                 value.collect_parameters(out);
             }
-            Expression::Function { args, .. } | Expression::Array(args) => {
+            Expression::Function { args, .. }
+            | Expression::Udf { args, .. }
+            | Expression::Array(args) => {
                 for e in args {
                     e.collect_parameters(out);
                 }

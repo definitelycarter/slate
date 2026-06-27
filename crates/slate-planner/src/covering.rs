@@ -418,7 +418,9 @@ fn collect_alias_refs(expr: &Expression, alias: &str, refs: &mut Refs) {
             collect_alias_refs(lhs, alias, refs);
             collect_alias_refs(rhs, alias, refs);
         }
-        Expression::Function { args, .. } | Expression::Array(args) => {
+        Expression::Function { args, .. }
+        | Expression::Udf { args, .. }
+        | Expression::Array(args) => {
             for e in args {
                 collect_alias_refs(e, alias, refs);
             }
@@ -469,9 +471,9 @@ fn touches_alias(expr: &Expression, alias: &str) -> bool {
         Expression::MultikeyEq { base, value, .. } => {
             touches_alias(base, alias) || touches_alias(value, alias)
         }
-        Expression::Function { args, .. } | Expression::Array(args) => {
-            args.iter().any(|e| touches_alias(e, alias))
-        }
+        Expression::Function { args, .. }
+        | Expression::Udf { args, .. }
+        | Expression::Array(args) => args.iter().any(|e| touches_alias(e, alias)),
         Expression::Object(fields) => fields.iter().any(|(_, e)| touches_alias(e, alias)),
         // Conservative: assume a subquery may correlate to the alias.
         Expression::Subquery { .. } => true,
