@@ -170,6 +170,15 @@ uninstrumented:
 - **[User-Defined Logic](./rfcs/user-defined-logic.md)** — *partially implemented.*
   Lua/JS triggers + validators shipped; computed fields, custom key extractors,
   partial-index filters, and transform pipelines remain.
+- **[Native Functions](./rfcs/native-functions.md)** — *UDFs done.* Native Rust
+  scalar UDFs callable as `udf.name(...)` in SQL: a database-scoped code bag
+  (`register` / `with_udf`) plus per-collection durable bindings
+  (`functions().create`), resolved at plan build and run under `catch_unwind`.
+  The binding maps a query name to a native function name; the bag supplies the
+  code. `dangling_bindings()` reports unresolved symbols. Converting
+  validators/triggers to native (and dropping the VM) remains. UDFs run in
+  compiled positions (`SELECT`/`WHERE`); `ORDER BY`/`UNWIND`/`GROUP BY` (which
+  interpret) are a follow-up.
 
 ## Storage & Durability
 

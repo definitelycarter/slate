@@ -74,7 +74,7 @@ Two opt-in instruments sit beside the planner/executor; both are zero-cost on th
 
 ### Overview
 
-A runtime-agnostic scripting engine for extending database behavior with user-defined logic. Scripts are used for triggers (side effects on mutations), validators (document-level constraints), and UDFs. The VM layer is completely decoupled from storage — it knows nothing about collections, indexes, or transactions.
+A runtime-agnostic scripting engine for extending database behavior with user-defined logic. Scripts back triggers (side effects on mutations) and validators (document-level constraints). (UDFs are no longer scripts — they are native Rust functions resolved through the catalog; see *User-Defined Functions* in the querying guide.) The VM layer is completely decoupled from storage — it knows nothing about collections, indexes, or transactions.
 
 Concrete runtimes are **pluggable and injected**: the database registers them into a `VmPool` and hands it to the engine via `DatabaseBuilder::with_scripting(pool)`. Everything below the database layer — including `slate-executor` — depends only on the trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`) and never links a concrete runtime. A build that registers no runtime (notably `wasm32`, which takes `slate-db` with `default-features = false`) therefore excludes the Lua runtime and its vendored C entirely. The Lua feature lives only in `slate-db`'s default features (native) and in `slate-executor`'s dev-dependencies (so tests can build a real `LuaScriptRuntime`).
 

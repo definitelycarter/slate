@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use slate_engine::{Catalog, FunctionKind, runtime_tag};
+use slate_engine::{Catalog, EngineError, FunctionKind, runtime_tag};
 use slate_store::Store;
 use slate_udf::{Udf, UdfBag};
 
@@ -278,9 +278,29 @@ impl<'a> Functions<'a> {
         RemoveScript::new(self.cf, self.collection, FunctionKind::Udf, name)
     }
 
-    /// List the registered UDF names.
-    pub fn list<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<Vec<String>, DbError> {
-        list_scripts(txn, self.cf, self.collection, FunctionKind::Udf)
+    /// List the collection's UDF bindings as `(query_name, native_function_name)`
+    /// pairs, sorted by query name — the durable symbol table from the catalog.
+    pub fn list<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        let mut bindings = txn
+            .engine_txn()
+            .load_functions(self.cf, self.collection, FunctionKind::Udf)?
+            .into_iter()
+            .filter(|e| e.runtime == runtime_tag::NATIVE)
+            .map(|e| {
+                let func = String::from_utf8(e.source).map_err(|_| {
+                    DbError::from(EngineError::InvalidDocument(format!(
+                        "a UDF binding on {}.{} has a non-UTF-8 target name",
+                        self.cf, self.collection
+                    )))
+                })?;
+                Ok((e.name, func))
+            })
+            .collect::<Result<Vec<(String, String)>, DbError>>()?;
+        bindings.sort();
+        Ok(bindings)
     }
 }
 
@@ -462,7 +482,7 @@ mod tests {
         );
         assert_eq!(
             users.functions().list(&txn).unwrap(),
-            vec!["add".to_string()]
+            vec![("add".to_string(), "add_impl".to_string())]
         );
 
         // remove is per-handle, unambiguous about the kind
@@ -475,7 +495,7 @@ mod tests {
         );
         assert_eq!(
             users.functions().list(&txn).unwrap(),
-            vec!["add".to_string()]
+            vec![("add".to_string(), "add_impl".to_string())]
         );
 
         txn.commit().unwrap();
@@ -619,7 +639,33 @@ mod tests {
         let txn = db.begin(true).unwrap();
         assert_eq!(
             db.collection("users").functions().list(&txn).unwrap(),
-            vec!["tax".to_string()]
+            vec![("tax".to_string(), "compute_tax".to_string())]
         );
+    }
+
+    #[test]
+    fn dangling_bindings_reports_unregistered_targets() {
+        let db = db_with_users();
+
+        // Bind `udf.tax -> compute_tax`, but never register `compute_tax`.
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .functions()
+            .create("tax", super::UdfFunction::from_name("compute_tax"))
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let dangling = db.dangling_bindings();
+        assert_eq!(dangling.len(), 1);
+        assert_eq!(dangling[0].collection, "users");
+        assert_eq!(dangling[0].name, "tax");
+        assert_eq!(dangling[0].func, "compute_tax");
+
+        // Register the target → no longer dangling.
+        db.collection("users")
+            .functions()
+            .register("compute_tax", |_: &[Value]| Ok(Value::defined(0_i32)));
+        assert!(db.dangling_bindings().is_empty());
     }
 }

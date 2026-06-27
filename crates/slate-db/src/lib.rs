@@ -14,7 +14,9 @@ pub(crate) mod watch;
 pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::{CollectionConfig, CollectionSchema};
 pub use cursor::{Cursor, CursorIter, RawCursorIter, RawValuesIter, ValuesIter};
-pub use database::{Database, DatabaseBuilder, Transaction as DatabaseTransaction};
+pub use database::{
+    DanglingBinding, Database, DatabaseBuilder, Transaction as DatabaseTransaction,
+};
 pub use error::DbError;
 pub use export::{
     CollectionDef, ExportOptions, ExportReport, ImportOptions, ImportReport, Manifest, OnCollision,

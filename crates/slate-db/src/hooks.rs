@@ -131,6 +131,12 @@ impl HookSnapshot {
         self.udf_bindings
             .get(&(cf.to_string(), collection.to_string()))
     }
+
+    /// All UDF bindings across every collection: `(cf, collection) -> {query_name
+    /// -> native_name}`. Used to find bindings whose target is unregistered.
+    pub fn all_udf_bindings(&self) -> &HashMap<(String, String), HashMap<String, String>> {
+        &self.udf_bindings
+    }
 }
 
 // ── HookRegistry ────────────────────────────────────────────

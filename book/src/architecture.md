@@ -14,6 +14,8 @@ slate/
   ├── slate-ast              → Shared query AST — the single IR every query surface targets
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort DTOs + filter→AST translation
   ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
+  ├── slate-value            → The shared value domain (`Value`) — function crates speak it without the evaluator
+  ├── slate-udf              → Native UDF trait + the database-scoped code bag (baked into the plan/executor)
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy raw evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction

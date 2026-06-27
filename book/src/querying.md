@@ -140,6 +140,64 @@ A terminal turns a `find` or `query` builder into a std [`Iterator`], so
 terminals are value-oriented (SQL can `SELECT VALUE` any scalar). Count with the
 iterator's own `.count()`; take the first row with `.next().transpose()?`.
 
+## User-Defined Functions (UDFs)
+
+A UDF is a native Rust scalar function callable from SQL as `udf.name(args...)`:
+
+```sql
+SELECT VALUE udf.tax(c.price) FROM c
+WHERE udf.is_valid(c)
+```
+
+UDFs use a two-level **dynamic-linking** model, so a function is written once and
+reused while *which* collections may call it stays explicit:
+
+- **The bag (code)** — a database-scoped map from a name to a Rust function,
+  mutated with no transaction. Register before open with
+  `DatabaseBuilder::with_udf(name, f)`, or at runtime with
+  `collection.functions().register(name, f)`. A bare closure works: a UDF is
+  `Fn(&[Value]) -> Result<Value, UdfError>`, pure over its arguments.
+- **The binding (intent)** — a per-collection, durable mapping from the
+  query-facing name to a bag function, written transactionally. `udf.tax`
+  resolves **only** on a collection that binds it.
+
+```rust
+// 1. register the code once (database-scoped, no transaction)
+db.collection("orders").functions().register("compute_tax", |args: &[Value]| {
+    let price = args.first().and_then(Value::as_bson);   // pure over its args
+    Ok(Value::defined(/* compute from price */ 0.0_f64))
+});
+
+// 2. bind it on the collection (durable, transactional)
+let txn = db.begin(false)?;
+db.collection("orders")
+    .functions()
+    .create("tax", UdfFunction::from_name("compute_tax"))
+    .execute(&txn)?;
+txn.commit()?;
+
+// 3. call it
+let txn = db.begin(true)?;
+db.collection("orders")
+    .query("SELECT VALUE udf.tax(c.price) FROM c")
+    .iter::<f64>(&txn)?;
+```
+
+**Resolution & errors.** The binding resolves at **plan build** — a `udf.name`
+with no binding is a plan error before any row runs, and `EXPLAIN` catches it.
+The bag resolves at **execution** — a binding whose target was never registered
+fails the query when it runs. A UDF is assumed **pure** (the engine may call it
+any number of times) and runs behind a `catch_unwind` boundary, so a panicking
+UDF fails the query, not the process.
+
+**Introspection.** `collection.functions().list(&txn)` returns the bindings as
+`(query_name, native_name)` pairs; `db.dangling_bindings()` lists bindings whose
+target isn't registered — to check at startup rather than at query time.
+
+> **Where UDFs run.** UDFs evaluate in compiled expression positions — `SELECT`
+> and `WHERE`. `ORDER BY`, `UNWIND`, and `GROUP BY` are interpreted per row, so a
+> `udf.*` there is not yet supported.
+
 ## Index Configuration
 
 Indexes are created per collection via `collection.indexes().create(field, IndexOptions::default())`. The order of indexed fields in the collection's handle determines **priority** — when multiple indexed fields appear in an AND group, the first one in the list wins.

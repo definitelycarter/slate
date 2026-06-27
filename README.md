@@ -12,7 +12,8 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Indexed queries** — single-field, compound (multi-field, leftmost-prefix), and unique indexes with automatic plan optimization (index scans, index-merge for AND/OR)
 - **Vector search** — flat (exact, brute-force) k-nearest-neighbour over embedding fields: `ORDER BY VECTORDISTANCE(c.embedding, @q) LIMIT k` seeks a per-field vector index (cosine / dot-product / euclidean), with `WHERE` pre-filtering before the top-k; on-device RAG / semantic search (the app supplies embeddings, Slate stores and searches them)
 - **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
-- **Lua scripting** — triggers, validators, and UDFs with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
+- **Native functions (UDFs)** — register Rust functions in a database-scoped bag (`with_udf` / `functions().register`) and bind them per-collection (`functions().create`), callable as `udf.name(...)` in SQL; the binding resolves at plan build (a dangling binding fails before execution, with per-collection isolation) and runs behind a panic boundary
+- **Lua scripting** — triggers and validators with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Logical export / import** — `db.export(path)` / `db.import(path)` write a portable BSON dump (manifest + per-collection document streams) that rebuilds indexes on load, for cross-backend migration (e.g. redb → RocksDB), seeding, and recovery
 - **Encryption at rest via the OS** — relies on the device's full-disk / file-level encryption (iOS Data Protection, FileVault/APFS, equivalents), which protects the whole on-disk file — keys, values, and `_id`s — on a locked or powered-off device; no app-level crypto. See [the guarantee and threat model](book/src/architecture-storage.md#encryption-at-rest)
@@ -32,6 +33,8 @@ slate/
   ├── slate-ast              → Shared query AST — the IR both query surfaces target
   ├── slate-query            → MongoDB find front-end: FindOptions/Sort + filter→AST translation
   ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
+  ├── slate-value            → The shared value domain (`Value`) — function crates speak it without the evaluator
+  ├── slate-udf              → Native UDF trait + the database-scoped code bag (baked into the plan/executor)
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction

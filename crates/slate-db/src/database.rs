@@ -204,6 +204,21 @@ impl DatabaseBuilder {
 
 // ── Database ───────────────────────────────────────────────
 
+/// A UDF binding whose target native function is not registered in the bag — an
+/// unresolved symbol. Returned by [`Database::dangling_bindings`] so an app can
+/// detect a misconfiguration at startup instead of at query time.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DanglingBinding {
+    /// The column family the binding lives on.
+    pub cf: String,
+    /// The collection the binding lives on.
+    pub collection: String,
+    /// The query-facing name (`udf.<name>`).
+    pub name: String,
+    /// The target native function name, which is absent from the bag.
+    pub func: String,
+}
+
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
     pool: Option<VmPool>,
@@ -312,6 +327,32 @@ impl<S: Store> Database<S> {
     /// share (no-txn `functions().register`), like the watch registry.
     pub(crate) fn udf_bag(&self) -> &Arc<UdfBag> {
         &self.udf_bag
+    }
+
+    /// Every UDF binding whose target native function is not registered in the
+    /// bag — the unresolved symbols (bindings minus bag). Empty when every
+    /// binding resolves. Call it at startup to surface a missing `register`
+    /// before a query hits it. Reflects committed state (the current snapshot).
+    pub fn dangling_bindings(&self) -> Vec<DanglingBinding> {
+        let Some(registry) = &self.registry else {
+            return Vec::new();
+        };
+        let snapshot = registry.snapshot();
+        let mut out = Vec::new();
+        for ((cf, collection), bindings) in snapshot.all_udf_bindings() {
+            for (name, func) in bindings {
+                if self.udf_bag.get(func).is_none() {
+                    out.push(DanglingBinding {
+                        cf: cf.clone(),
+                        collection: collection.clone(),
+                        name: name.clone(),
+                        func: func.clone(),
+                    });
+                }
+            }
+        }
+        out.sort();
+        out
     }
 
     /// Walk a collection's records and index structures and report any integrity
