@@ -37,12 +37,11 @@ pub mod bench;
 
 use std::rc::Rc;
 
+use bson::RawBson;
 use bson::raw::CString;
-use bson::{RawBson, RawDocumentBuf};
 use slate_engine::{Catalog, EngineTransaction};
 use slate_eval::EvalError;
 use slate_planner::{Node, Plan, PlanStats};
-use slate_vm::pool::VmPool;
 
 use analyze::Counting;
 pub use env::ExecEnv;
@@ -112,40 +111,12 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         }
     }
 
-    /// Construct an executor with no scripting pool (validators/triggers are
-    /// skipped if encountered).
+    /// Construct an executor with an empty [`ExecEnv`] (no pool, params, rand,
+    /// or watch). The capabilities are attached on the env via
+    /// [`with_env`](Self::with_env); the db layer's `Transaction::exec_env`
+    /// builds the populated bundle.
     pub fn new(txn: &'a T) -> Self {
         Self::with_env(txn, ExecEnv::new())
-    }
-
-    /// Construct an executor with a scripting pool for validators/triggers.
-    pub fn with_pool(txn: &'a T, pool: Option<&'a VmPool>) -> Self {
-        Self::with_env(txn, ExecEnv::new().with_pool(pool))
-    }
-
-    /// Construct an executor with a scripting pool and a document of query
-    /// `@`-parameters visible to expression evaluation.
-    pub fn with_pool_and_params(
-        txn: &'a T,
-        pool: Option<&'a VmPool>,
-        params: Option<Rc<RawDocumentBuf>>,
-    ) -> Self {
-        Self::with_env(txn, ExecEnv::new().with_pool(pool).with_params(params))
-    }
-
-    /// Attach the random source backing `RAND()` (see [`ExecEnv`]). The closure
-    /// owns its PRNG state, so the executor only ever *calls* it.
-    pub fn with_rand(mut self, rand: Option<Rc<dyn Fn() -> f64>>) -> Self {
-        self.env.rand = rand;
-        self
-    }
-
-    /// Attach a change-detection sink so the mutation nodes buffer matching
-    /// before/after documents for registered watch queries. `None` (the
-    /// default) disables capture at zero cost. See [`watch::WatchSink`].
-    pub fn with_watch(mut self, watch: Option<Rc<WatchSink>>) -> Self {
-        self.env.watch = watch;
-        self
     }
 
     /// Execute a plan into a streaming iterator. For write plans, the mutations
@@ -901,7 +872,7 @@ mod end_to_end {
 #[cfg(test)]
 mod hooks {
     use crate::nodes::test_support::seeded_people;
-    use crate::{ExecError, Executor};
+    use crate::{ExecEnv, ExecError, Executor};
     use bson::{RawBson, rawdoc};
     use slate_engine::{DEFAULT_CF, Engine};
     use slate_planner::{Node, Plan};
@@ -942,7 +913,7 @@ mod hooks {
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
         let pool = lua_pool();
-        let out = Executor::with_pool(&txn, Some(&pool))
+        let out = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
             .execute_collect(validate_plan(
                 "return function(ctx, event) return { ok = true } end",
             ))
@@ -955,7 +926,7 @@ mod hooks {
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
         let pool = lua_pool();
-        let err = Executor::with_pool(&txn, Some(&pool))
+        let err = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
             .execute_collect(validate_plan(
                 "return function(ctx, event) return { ok = false, reason = 'nope' } end",
             ))
@@ -987,7 +958,7 @@ mod hooks {
             hooks: vec![hook("t", "return function(ctx, event) error('boom') end")],
             source: Box::new(Node::Values(vec![doc()])),
         });
-        let err = Executor::with_pool(&txn, Some(&pool))
+        let err = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
             .execute_collect(plan)
             .unwrap_err();
         assert!(matches!(err, ExecError::Vm(_)), "got {err:?}");
@@ -1309,26 +1280,6 @@ mod exec_env {
             .execute_collect(plan)
             .unwrap();
         assert!(out.is_empty());
-    }
-
-    #[test]
-    fn with_pool_and_params_sugar_matches_with_env() {
-        // The `with_*` builders must produce the same execution as building the
-        // bundle directly — they are sugar over `ExecEnv`.
-        let engine = seeded_people();
-        let txn = engine.begin(true).unwrap();
-        let sql = "SELECT VALUE c.name FROM c WHERE c.name = @who";
-        let params = Rc::new(rawdoc! { "who": "grace" });
-
-        let via_sugar = Executor::with_pool_and_params(&txn, None, Some(Rc::clone(&params)))
-            .execute_collect(people_plan(&txn, sql))
-            .unwrap();
-        let via_env = Executor::with_env(&txn, ExecEnv::new().with_params(Some(params)))
-            .execute_collect(people_plan(&txn, sql))
-            .unwrap();
-
-        assert_eq!(via_sugar, via_env);
-        assert_eq!(via_sugar, vec![RawBson::String("grace".into())]);
     }
 
     #[test]

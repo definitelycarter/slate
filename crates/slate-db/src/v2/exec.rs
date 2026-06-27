@@ -28,20 +28,14 @@ pub(crate) fn analyze_plan<S: Store>(
     params: Option<RawDocumentBuf>,
     txn: &Transaction<'_, S>,
 ) -> Result<String, DbError> {
-    let mut doc: bson::Document = match &params {
-        Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
-        None => bson::Document::new(),
-    };
-    doc.insert("$now", txn.now_millis());
-    let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
-
     // Clone to render after execution consumes the plan — a one-off on the
-    // analyze (debug/observability) path, well outside any hot loop.
+    // analyze (debug/observability) path, well outside any hot loop. The env
+    // (pool/rand/watch + `$now`-injected params) comes from the same
+    // `exec_env` translation the cursor uses.
     let render_plan = plan.clone();
+    let env = txn.exec_env(params)?;
     let (_rows, stats) =
-        slate_executor::Executor::with_pool_and_params(txn.engine_txn(), txn.pool(), params)
-            .with_rand(txn.exec_rand())
-            .execute_analyze(plan)?;
+        slate_executor::Executor::with_env(txn.engine_txn(), env).execute_analyze(plan)?;
     Ok(render_plan.explain_analyze(&stats))
 }
 
@@ -83,23 +77,16 @@ pub(super) fn write_query(
 }
 
 /// Wrap a mutation plan in a [`Cursor`] — the cursor the flat `Transaction`
-/// mutation methods return (the caller drains it for the count). `.cloned()`
-/// rand/watch handles are `Arc`/`Rc` refcount bumps, the same handoff the v1
-/// mutation path made.
+/// mutation methods return (the caller drains it for the count). The env (with
+/// the watch sink so mutations capture changes) comes from `exec_env`.
 pub(crate) fn write_cursor<'t, 'db, S>(
     plan: slate_planner::Plan,
     txn: &'t Transaction<'db, S>,
-) -> Cursor<'db, 't, S>
+) -> Result<Cursor<'db, 't, S>, DbError>
 where
     S: Store + 'db,
 {
-    Cursor::new(
-        txn.engine_txn(),
-        plan,
-        txn.pool(),
-        txn.rand().cloned(),
-        txn.watch_sink().cloned(),
-    )
+    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)?))
 }
 
 /// Build a cursor over a mutation plan, drain it, and return the affected count —
@@ -112,5 +99,5 @@ pub(super) fn execute_write<'db, S>(
 where
     S: Store + 'db,
 {
-    write_cursor(plan, txn).drain()
+    write_cursor(plan, txn)?.drain()
 }

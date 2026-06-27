@@ -213,7 +213,7 @@ impl<F: Serialize, U: Serialize> UpdateBuilder<'_, F, U> {
     where
         S: Store + 'db,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter_raw()
     }
 
     /// Run the update and stream the affected documents deserialized into `T` (the
@@ -225,7 +225,7 @@ impl<F: Serialize, U: Serialize> UpdateBuilder<'_, F, U> {
     where
         T: DeserializeOwned,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -293,7 +293,7 @@ impl<F: Serialize> DeleteBuilder<'_, F> {
     where
         S: Store + 'db,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter_raw()
     }
 
     /// Run the delete and stream the removed documents deserialized into `T` (the
@@ -305,7 +305,7 @@ impl<F: Serialize> DeleteBuilder<'_, F> {
     where
         T: DeserializeOwned,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -375,7 +375,7 @@ impl<F: Serialize, R: Serialize> ReplaceBuilder<'_, F, R> {
     where
         S: Store + 'db,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter_raw()
     }
 
     /// Run the replace and stream the replaced document deserialized into `T` (the
@@ -387,7 +387,7 @@ impl<F: Serialize, R: Serialize> ReplaceBuilder<'_, F, R> {
     where
         T: DeserializeOwned,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -449,7 +449,7 @@ impl<D: Serialize> InsertBuilder<'_, D> {
     where
         S: Store + 'db,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter_raw()
     }
 
     /// Run the insert and stream the inserted documents deserialized into `T` (the
@@ -461,7 +461,7 @@ impl<D: Serialize> InsertBuilder<'_, D> {
     where
         T: DeserializeOwned,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter::<T>()
     }
 
     /// Render the mutation plan without running it.
@@ -526,7 +526,7 @@ impl<D: Serialize> UpsertBuilder<'_, D> {
     where
         S: Store + 'db,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter_raw()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter_raw()
     }
 
     /// Run the upsert/merge and stream the written documents deserialized into `T`
@@ -538,7 +538,7 @@ impl<D: Serialize> UpsertBuilder<'_, D> {
     where
         T: DeserializeOwned,
     {
-        super::exec::write_cursor(self.build_plan(txn)?, txn).iter::<T>()
+        super::exec::write_cursor(self.build_plan(txn)?, txn)?.iter::<T>()
     }
 
     /// Render the mutation plan without running it.

@@ -1,15 +1,12 @@
 use std::marker::PhantomData;
-use std::rc::Rc;
 
 use bson::RawDocumentBuf;
 use serde::de::DeserializeOwned;
-use slate_engine::{EngineTransaction, KvEngine};
-use slate_executor::watch::WatchSink;
+use slate_engine::KvEngine;
+use slate_executor::ExecEnv;
 use slate_store::Store;
 
-use crate::database::RandFn;
 use crate::error::DbError;
-use slate_vm::pool::VmPool;
 
 type KvTxn<'a, S> = <KvEngine<S> as slate_engine::Engine>::Txn<'a>;
 
@@ -19,78 +16,29 @@ type RawIter<'a> = Box<dyn Iterator<Item = Result<Option<bson::RawBson>, DbError
 
 /// A prepared query that can be iterated or executed.
 ///
-/// Owns a pre-built plan and a reference to the transaction. Call
-/// [`.iter()`](Cursor::iter) for deserialized iteration,
-/// [`.iter_raw()`](Cursor::iter_raw) for raw BSON documents, or
+/// Holds the engine transaction it reads from, a pre-built plan, and the
+/// per-query [`ExecEnv`] capability bundle (built once by
+/// `Transaction::exec_env`). Call [`.iter()`](Cursor::iter) for deserialized
+/// iteration, [`.iter_raw()`](Cursor::iter_raw) for raw BSON documents, or
 /// [`.drain()`](Cursor::drain) to consume all rows and return a count.
 pub struct Cursor<'db: 'txn, 'txn, S: Store + 'db> {
     txn: &'txn KvTxn<'db, S>,
     plan: slate_planner::Plan,
-    pool: Option<&'txn VmPool>,
-    /// SQL `@`-parameter values, supplied by `query_with_params`. Owned here and
-    /// shared into the executor (by `Rc`) at execution time.
-    params: Option<RawDocumentBuf>,
-    /// Random source for `RAND()`, inherited from the transaction.
-    rand: Option<RandFn>,
-    /// The transaction's watch-capture sink, threaded into the executor so the
-    /// mutation nodes buffer matching changes. `None` for reads and when no
-    /// watches are registered.
-    watch: Option<Rc<WatchSink>>,
+    env: ExecEnv<'db>,
 }
 
 impl<'db: 'txn, 'txn, S: Store + 'db> Cursor<'db, 'txn, S> {
     pub(crate) fn new(
         txn: &'txn KvTxn<'db, S>,
         plan: slate_planner::Plan,
-        pool: Option<&'txn VmPool>,
-        rand: Option<RandFn>,
-        watch: Option<Rc<WatchSink>>,
+        env: ExecEnv<'db>,
     ) -> Self {
-        Self {
-            txn,
-            plan,
-            pool,
-            params: None,
-            rand,
-            watch,
-        }
-    }
-
-    pub(crate) fn new_with_params(
-        txn: &'txn KvTxn<'db, S>,
-        plan: slate_planner::Plan,
-        pool: Option<&'txn VmPool>,
-        params: RawDocumentBuf,
-        rand: Option<RandFn>,
-        watch: Option<Rc<WatchSink>>,
-    ) -> Self {
-        Self {
-            txn,
-            plan,
-            pool,
-            params: Some(params),
-            rand,
-            watch,
-        }
+        Self { txn, plan, env }
     }
 
     /// Execute the plan, streaming `Result<Option<RawBson>, DbError>`.
     fn execute(self) -> Result<RawIter<'txn>, DbError> {
-        // Inject `$now` (epoch ms, captured when the txn began from the engine's
-        // injectable clock) so the SQL `GETCURRENT*` functions resolve against
-        // it — consistent across the txn and wasm-clean (no syscall in the
-        // evaluator). Threaded via the existing params channel, so it reaches
-        // every evaluating node.
-        let mut doc: bson::Document = match &self.params {
-            Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
-            None => bson::Document::new(),
-        };
-        doc.insert("$now", self.txn.now_millis());
-        let params = Some(std::rc::Rc::new(bson::serialize_to_raw_document_buf(&doc)?));
-        let iter = slate_executor::Executor::with_pool_and_params(self.txn, self.pool, params)
-            .with_rand(crate::database::rand_rc(&self.rand))
-            .with_watch(self.watch)
-            .execute(self.plan)?;
+        let iter = slate_executor::Executor::with_env(self.txn, self.env).execute(self.plan)?;
         Ok(Box::new(iter.map(|r| r.map_err(DbError::from))))
     }
 

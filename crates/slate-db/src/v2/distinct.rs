@@ -108,15 +108,7 @@ where
         triggers: Vec::new(),
     };
     let plan = slate_planner::plan(stmt, &ctx)?;
-    // `.cloned()` rand/watch handles are `Arc`/`Rc` refcount bumps, the same
-    // handoff the v1 read path made.
-    Ok(Cursor::new(
-        txn.engine_txn(),
-        plan,
-        txn.pool(),
-        txn.rand().cloned(),
-        txn.watch_sink().cloned(),
-    ))
+    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(None)?))
 }
 
 impl<F: Serialize> DistinctBuilder<'_, F> {

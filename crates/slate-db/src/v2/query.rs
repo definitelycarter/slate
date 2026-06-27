@@ -172,25 +172,7 @@ where
     S: Store + 'db,
 {
     let plan = query_plan(cf, collection, sql, params.as_deref(), txn)?;
-    // `.cloned()` rand/watch handles are `Arc`/`Rc` refcount bumps, the same
-    // handoff the v1 read path made.
-    Ok(match params {
-        Some(params) => Cursor::new_with_params(
-            txn.engine_txn(),
-            plan,
-            txn.pool(),
-            params,
-            txn.rand().cloned(),
-            txn.watch_sink().cloned(),
-        ),
-        None => Cursor::new(
-            txn.engine_txn(),
-            plan,
-            txn.pool(),
-            txn.rand().cloned(),
-            txn.watch_sink().cloned(),
-        ),
-    })
+    Ok(Cursor::new(txn.engine_txn(), plan, txn.exec_env(params)?))
 }
 
 impl<P: Serialize> QueryBuilder<'_, P> {

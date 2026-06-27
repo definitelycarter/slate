@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use slate_engine::{Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine};
+use slate_executor::ExecEnv;
 use slate_executor::watch::WatchSink;
 use slate_store::{BackupStore, Durability, Store};
 use slate_vm::pool::VmPool;
@@ -487,18 +488,6 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         &self.txn
     }
 
-    pub(crate) fn pool(&self) -> Option<&'db VmPool> {
-        self.pool
-    }
-
-    pub(crate) fn rand(&self) -> Option<&RandFn> {
-        self.rand.as_ref()
-    }
-
-    pub(crate) fn watch_sink(&self) -> Option<&Rc<WatchSink>> {
-        self.watch_sink.as_ref()
-    }
-
     pub(crate) fn now_millis(&self) -> i64 {
         self.txn.now_millis()
     }
@@ -508,6 +497,33 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// `Arc`-based [`rand`](Self::rand) instead).
     pub(crate) fn exec_rand(&self) -> Option<std::rc::Rc<dyn Fn() -> f64>> {
         rand_rc(&self.rand)
+    }
+
+    /// Build the per-query execution context ([`ExecEnv`]) for a plan run against
+    /// this transaction: the scripting pool, the `RAND()` source, and the
+    /// watch-capture sink, plus the query's `@`-parameters with the injected
+    /// `$now` clock folded in. The single translation point from a transaction's
+    /// capabilities to an executor env — the cursor and `analyze` both go through
+    /// it, so a new capability is wired here once.
+    pub(crate) fn exec_env(
+        &self,
+        params: Option<bson::RawDocumentBuf>,
+    ) -> Result<ExecEnv<'db>, DbError> {
+        // Inject `$now` (epoch ms, captured when the txn began from the engine's
+        // injectable clock) so the SQL `GETCURRENT*` functions resolve against
+        // it — consistent across the txn and wasm-clean (no syscall in the
+        // evaluator).
+        let mut doc: bson::Document = match params {
+            Some(p) => bson::deserialize_from_slice(p.as_bytes())?,
+            None => bson::Document::new(),
+        };
+        doc.insert("$now", self.now_millis());
+        let params = Rc::new(bson::serialize_to_raw_document_buf(&doc)?);
+        Ok(ExecEnv::new()
+            .with_pool(self.pool)
+            .with_params(Some(params))
+            .with_rand(self.exec_rand())
+            .with_watch(self.watch_sink.clone()))
     }
 
     /// Mark the trigger/validator hook snapshot stale — for v2's `triggers()` /
