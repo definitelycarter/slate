@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use slate_engine::{Catalog, EngineError, FunctionKind};
+use slate_engine::{Catalog, EngineError, FunctionKind, runtime_tag};
 
 // `ResolvedHook` now lives in `slate-vm` (shared with the executor).
 pub use slate_vm::ResolvedHook;
@@ -23,6 +23,12 @@ fn hash_source(source: &[u8]) -> u64 {
 pub struct HookSnapshot {
     triggers: HashMap<(String, String), Vec<ResolvedHook>>,
     validators: HashMap<(String, String), Vec<ResolvedHook>>,
+    /// Per-collection UDF *bindings*: `query_name -> native_function_name`. This
+    /// is the resolved identity the planner bakes into a plan — the UDF analog
+    /// of the `ResolvedHook` lists above — while the live bag supplies the code
+    /// at exec time. Deliberately *not* a `ResolvedHook`: a binding is just a
+    /// name mapping, with no source.
+    udf_bindings: HashMap<(String, String), HashMap<String, String>>,
 }
 
 impl HookSnapshot {
@@ -31,6 +37,7 @@ impl HookSnapshot {
         let collections = txn.list_collections(None)?;
         let mut triggers: HashMap<(String, String), Vec<ResolvedHook>> = HashMap::new();
         let mut validators: HashMap<(String, String), Vec<ResolvedHook>> = HashMap::new();
+        let mut udf_bindings: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
 
         for handle in &collections {
             let cf = handle.cf_name().to_string();
@@ -61,13 +68,34 @@ impl HookSnapshot {
                         source: e.source,
                     })
                     .collect();
-                validators.insert((cf, name), hooks);
+                validators.insert((cf.clone(), name.clone()), hooks);
+            }
+
+            // UDF *bindings*: native (`runtime_tag::NATIVE`) entries whose bytes
+            // are the target function name. Loaded as a plain `query_name ->
+            // native_name` map — no `ResolvedHook`, since a binding has no source.
+            let udf_entries = txn.load_functions(&cf, &name, FunctionKind::Udf)?;
+            let mut bindings: HashMap<String, String> = HashMap::new();
+            for entry in udf_entries {
+                if entry.runtime != runtime_tag::NATIVE {
+                    continue;
+                }
+                let func = String::from_utf8(entry.source).map_err(|_| {
+                    EngineError::InvalidDocument(format!(
+                        "a UDF binding on {cf}.{name} has a non-UTF-8 target name"
+                    ))
+                })?;
+                bindings.insert(entry.name, func);
+            }
+            if !bindings.is_empty() {
+                udf_bindings.insert((cf, name), bindings);
             }
         }
 
         Ok(Self {
             triggers,
             validators,
+            udf_bindings,
         })
     }
 
@@ -76,6 +104,7 @@ impl HookSnapshot {
         Self {
             triggers: HashMap::new(),
             validators: HashMap::new(),
+            udf_bindings: HashMap::new(),
         }
     }
 
@@ -93,6 +122,14 @@ impl HookSnapshot {
             .get(&(cf.to_string(), collection.to_string()))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// The UDF bindings for a (cf, collection): `query_name -> native_name`.
+    /// `None` when the collection has no bindings (so any `udf.*` reference there
+    /// is unbound).
+    pub fn udf_bindings_for(&self, cf: &str, collection: &str) -> Option<&HashMap<String, String>> {
+        self.udf_bindings
+            .get(&(cf.to_string(), collection.to_string()))
     }
 }
 

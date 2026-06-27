@@ -49,7 +49,8 @@ pub use index::{
 pub use query::QueryBuilder;
 pub use read::FindBuilder;
 pub use scripts::{
-    CreateFunction, CreateTrigger, CreateValidator, Functions, RemoveScript, Triggers, Validators,
+    CreateFunction, CreateTrigger, CreateValidator, Functions, RemoveScript, Triggers, UdfFunction,
+    Validators,
 };
 pub use write::{
     DeleteBuilder, InsertBuilder, ReplaceBuilder, UpdateBuilder, UpsertBuilder, WriteResult,

@@ -33,10 +33,15 @@ use slate_udf::{Udf, UdfBag};
 use crate::database::Transaction;
 use crate::error::DbError;
 
-/// Whether a function kind participates in the write-time hook snapshot. Triggers
-/// and validators do (so registering/removing one marks it stale); UDFs don't.
+/// Whether a function kind feeds the cached catalog snapshot, so
+/// registering/removing one must mark it stale. All three kinds do now: triggers
+/// and validators feed the write-time hooks, and UDF *bindings* feed the
+/// query-time resolution map — both live in `HookSnapshot`.
 fn affects_hooks(kind: FunctionKind) -> bool {
-    matches!(kind, FunctionKind::Trigger | FunctionKind::Validator)
+    matches!(
+        kind,
+        FunctionKind::Trigger | FunctionKind::Validator | FunctionKind::Udf
+    )
 }
 
 /// Store a Lua function of `kind`, marking the hook snapshot stale when the kind
@@ -252,14 +257,18 @@ impl<'a> Functions<'a> {
         self.udf_bag.unregister(name)
     }
 
-    /// Register a UDF named `name` with Lua `source`. Returns a builder; nothing
-    /// runs until `.execute(&txn)`.
-    pub fn create(&self, name: &str, source: &str) -> CreateFunction<'a> {
+    /// Bind the query-facing name `name` to a native function, durably and
+    /// per-collection — so `udf.name` resolves to it only on this collection. The
+    /// target is a [`UdfFunction`]; `UdfFunction::from_name(func)` references a
+    /// function registered in the bag (via `register` or `with_udf`). Returns a
+    /// builder; nothing runs until `.execute(&txn)`. Lazy: the target need not be
+    /// registered yet — a dangling binding is caught at resolution, not here.
+    pub fn create(&self, name: &str, func: UdfFunction) -> CreateFunction<'a> {
         CreateFunction {
             cf: self.cf,
             collection: self.collection,
             name: name.to_string(),
-            source: source.to_string(),
+            func,
         }
     }
 
@@ -275,26 +284,56 @@ impl<'a> Functions<'a> {
     }
 }
 
-/// A pending UDF registration, from [`Functions::create`].
+/// The target of a UDF binding — what `udf.name` resolves to.
+///
+/// A struct rather than a bare string so future options (timing, an inline
+/// closure variant, …) can land as constructors or builder stages without
+/// changing [`Functions::create`]'s signature. Today it carries one thing: the
+/// name of a native function registered in the bag.
+pub struct UdfFunction {
+    func: String,
+}
+
+impl UdfFunction {
+    /// Bind to the native function named `func` (registered in the bag via
+    /// `functions().register` or `DatabaseBuilder::with_udf`).
+    pub fn from_name(func: &str) -> Self {
+        Self {
+            func: func.to_string(),
+        }
+    }
+
+    /// The bytes stored in the catalog for this binding — currently just the
+    /// target function's name.
+    fn encode(&self) -> &[u8] {
+        self.func.as_bytes()
+    }
+}
+
+/// A pending UDF binding, from [`Functions::create`].
 #[must_use = "a create-function builder does nothing until .execute(&txn) runs it"]
 pub struct CreateFunction<'a> {
     cf: &'a str,
     collection: &'a str,
     name: String,
-    source: String,
+    func: UdfFunction,
 }
 
 impl CreateFunction<'_> {
-    /// Register the UDF.
+    /// Write the binding — a `runtime_tag::NATIVE` catalog entry whose bytes are
+    /// the target function name — and mark the catalog snapshot stale so the next
+    /// transaction resolves it.
     pub fn execute<S: Store>(self, txn: &Transaction<'_, S>) -> Result<(), DbError> {
-        create_script(
-            txn,
+        txn.engine_txn().create_function(
             self.cf,
             self.collection,
             FunctionKind::Udf,
             &self.name,
-            &self.source,
-        )
+            runtime_tag::NATIVE,
+            self.func.encode(),
+        )?;
+        txn.mark_hooks_dirty();
+        Ok(())
     }
 }
 
@@ -385,11 +424,10 @@ mod tests {
         db
     }
 
-    // Scripts are bare Lua bodies: a validator `assert`s with `doc` in scope, a
-    // trigger runs for side effects, a UDF `return`s from its named-global args.
+    // Trigger/validator scripts are bare Lua bodies; a UDF is now a native
+    // binding (`UdfFunction::from_name`), not source.
     const PASS_VALIDATOR: &str = "assert(true)";
     const NOOP_TRIGGER: &str = "print('write')";
-    const UDF_ADD: &str = "return a + b";
 
     #[test]
     fn create_list_remove_per_kind() {
@@ -409,7 +447,7 @@ mod tests {
             .unwrap();
         users
             .functions()
-            .create("add", UDF_ADD)
+            .create("add", super::UdfFunction::from_name("add_impl"))
             .execute(&txn)
             .unwrap();
 
@@ -528,6 +566,27 @@ mod tests {
         assert!(
             err.to_string().contains("udf.double"),
             "expected an unregistered-udf error after unregister, got: {err}"
+        );
+    }
+
+    #[test]
+    fn udf_binding_persists_and_lists_across_transactions() {
+        let db = db_with_users();
+
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .functions()
+            .create("tax", super::UdfFunction::from_name("compute_tax"))
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        // A fresh transaction still lists the binding — it persisted in the
+        // catalog through the commit (and the snapshot reload).
+        let txn = db.begin(true).unwrap();
+        assert_eq!(
+            db.collection("users").functions().list(&txn).unwrap(),
+            vec!["tax".to_string()]
         );
     }
 }

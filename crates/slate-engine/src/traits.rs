@@ -21,6 +21,10 @@ pub enum FunctionKind {
 pub mod runtime_tag {
     pub const LUA: u8 = 0x01;
     pub const WASM: u8 = 0x02;
+    /// A binding to a *registered native function* rather than stored source:
+    /// the entry's bytes are the target function's name, resolved against the
+    /// in-process bag at query time.
+    pub const NATIVE: u8 = 0x03;
 }
 
 /// A named function definition loaded from the catalog.

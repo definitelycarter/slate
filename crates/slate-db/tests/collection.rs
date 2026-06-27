@@ -2,7 +2,7 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::v2::IndexOptions;
+use slate_db::v2::{IndexOptions, UdfFunction};
 
 // ── Collection tests ────────────────────────────────────────────
 
@@ -156,7 +156,7 @@ fn register_udfs() {
     db.collections().create("users").execute(&txn).unwrap();
     db.collection("users")
         .functions()
-        .create("full_name", "return first .. ' ' .. last")
+        .create("full_name", UdfFunction::from_name("full_name_impl"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -189,7 +189,7 @@ fn register_all_function_types_with_indexes() {
         .unwrap();
     db.collection("users")
         .functions()
-        .create("full_name", "return first .. last")
+        .create("full_name", UdfFunction::from_name("full_name_impl"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
