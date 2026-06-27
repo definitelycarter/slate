@@ -1,0 +1,11 @@
+[package]
+name = "slate-udf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+slate-value = { path = "../slate-value" }
+thiserror = "2"
+
+[dev-dependencies]
+bson = { workspace = true }

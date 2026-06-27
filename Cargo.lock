@@ -1531,6 +1531,7 @@ dependencies = [
  "slate-ast",
  "slate-rawbson",
  "slate-sql",
+ "slate-value",
 ]
 
 [[package]]
@@ -1600,6 +1601,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-udf"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "slate-value",
+ "thiserror",
+]
+
+[[package]]
 name = "slate-uniffi"
 version = "0.1.0"
 dependencies = [
@@ -1607,6 +1617,13 @@ dependencies = [
  "slate-db",
  "slate-store",
  "uniffi",
+]
+
+[[package]]
+name = "slate-value"
+version = "0.1.0"
+dependencies = [
+ "bson",
 ]
 
 [[package]]
