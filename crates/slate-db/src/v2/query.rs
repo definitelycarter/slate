@@ -153,6 +153,7 @@ pub(crate) fn query_plan<S: Store>(
         meta,
         validators: Vec::new(),
         triggers: Vec::new(),
+        udfs: txn.udf_bindings_map(cf, collection),
     };
     Ok(slate_planner::plan(
         slate_planner::Statement::Query(query),

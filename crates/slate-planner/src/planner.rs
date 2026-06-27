@@ -7,13 +7,15 @@
 //! the catalog state ([`PlanContext`]: the target collection, its index
 //! metadata, and its resolved hooks); it builds no `Node`/`Plan` trees itself.
 
+use std::collections::HashMap;
+
 use slate_ast::{Assignment, Expression, OrderByItem, SortDirection, Statement};
 use slate_vm::ResolvedHook;
 
 use crate::lower::lower_query;
 use crate::plan::{CollectionRef, Node, Plan, RowBinding};
 use crate::sargable::CollectionMeta;
-use crate::validate::{PlanError, validate_bindings, validate_grouping};
+use crate::validate::{PlanError, validate_bindings, validate_grouping, validate_udfs};
 
 /// The catalog state a [`Statement`] is planned against: the target collection,
 /// the index metadata used to choose a scan source, and the collection's
@@ -31,6 +33,12 @@ pub struct PlanContext {
     /// attached with a per-action label (`inserting`/`inserted`, …); the
     /// executor fires only the hooks registered for that action.
     pub triggers: Vec<ResolvedHook>,
+    /// The collection's UDF bindings (`query_name -> native_name`), resolved
+    /// from the catalog. The planner checks that every `udf.NAME` reference is
+    /// bound — a dangling reference is a plan-build error — exactly as it
+    /// resolves triggers/validators through this context. The native name is
+    /// looked up later, in the executor's bag.
+    pub udfs: HashMap<String, String>,
 }
 
 /// Lower a statement into an executable [`Plan`] against `ctx`.
@@ -45,6 +53,7 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
             // validate it before lowering — the two checks Cosmos applies.
             validate_bindings(&query)?;
             validate_grouping(&query)?;
+            validate_udfs(&query, &ctx.udfs)?;
             let node = lower_query(query, ctx.container.clone(), &ctx.meta, &[]);
             // Covering applies only to reads: a single-field or compound index
             // scan whose query touches only indexed components and the pk skips
@@ -260,11 +269,33 @@ mod tests {
             },
             validators: Vec::new(),
             triggers: Vec::new(),
+            udfs: HashMap::new(),
         }
     }
 
     fn query(sql: &str) -> Statement {
         Statement::Query(slate_sql::parse(sql).unwrap())
+    }
+
+    #[test]
+    fn unbound_udf_is_a_plan_error() {
+        // `udf.tax` with no binding in the context → rejected at plan build,
+        // before execution.
+        let err = plan(query("SELECT VALUE udf.tax(c.x) FROM c"), &ctx()).unwrap_err();
+        assert!(
+            err.message.contains("udf.tax") && err.message.contains("not bound"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn bound_udf_plans() {
+        // With the binding present, planning succeeds; the native name is
+        // resolved later, in the executor's bag.
+        let mut c = ctx();
+        c.udfs.insert("tax".to_string(), "compute_tax".to_string());
+        assert!(plan(query("SELECT VALUE udf.tax(c.x) FROM c"), &c).is_ok());
     }
 
     #[test]

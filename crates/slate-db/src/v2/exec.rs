@@ -58,6 +58,7 @@ pub(super) fn write_context<S: Store>(
         meta,
         validators: txn.validators(cf, collection),
         triggers: txn.triggers(cf, collection),
+        udfs: txn.udf_bindings_map(cf, collection),
     }
 }
 

@@ -106,6 +106,7 @@ where
         meta: slate_planner::CollectionMeta::default(),
         validators: Vec::new(),
         triggers: Vec::new(),
+        udfs: txn.udf_bindings_map(cf, collection),
     };
     let plan = slate_planner::plan(stmt, &ctx)?;
     let env = txn

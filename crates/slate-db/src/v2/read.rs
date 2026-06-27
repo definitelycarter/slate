@@ -128,6 +128,7 @@ pub(crate) fn find_plan<F: Serialize, S: Store>(
         meta: txn.collection_meta(cf, collection)?,
         validators: Vec::new(),
         triggers: Vec::new(),
+        udfs: txn.udf_bindings_map(cf, collection),
     };
     Ok(slate_planner::plan(
         slate_planner::Statement::Query(query),

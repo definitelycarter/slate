@@ -6,6 +6,8 @@
 //! and surface a [`PlanError`]. The aggregate-detection helpers live here too,
 //! shared with lowering's group/aggregate rewrite.
 
+use std::collections::HashMap;
+
 use slate_ast::{Expression, FromSource, Query, SelectClause};
 
 /// A query the planner accepts syntactically but cannot plan.
@@ -121,6 +123,100 @@ fn check_expr(expr: &Expression, scope: &[&str]) -> Result<(), PlanError> {
         }
         // Literals, pre-converted values, and `@parameter`s bind no identifier.
         Expression::Literal(_) | Expression::Value(_) | Expression::Parameter(_) => Ok(()),
+    }
+}
+
+/// Reject any `udf.NAME` reference whose name is not bound on the collection.
+/// `udfs` is the per-query binding map (`query_name -> native_name`) the caller
+/// resolved from the catalog (via [`PlanContext`](crate::PlanContext)). A
+/// dangling reference is caught here, at plan build, before any row is touched —
+/// the same point triggers/validators resolve. The native name itself is looked
+/// up later, in the executor's bag.
+pub fn validate_udfs(query: &Query, udfs: &HashMap<String, String>) -> Result<(), PlanError> {
+    check_query_udfs(query, udfs)
+}
+
+fn check_query_udfs(query: &Query, udfs: &HashMap<String, String>) -> Result<(), PlanError> {
+    if let Some(from) = &query.from {
+        if let FromSource::Array { array, .. } = &from.source {
+            check_expr_udfs(array, udfs)?;
+        }
+        for join in &from.joins {
+            check_expr_udfs(&join.array, udfs)?;
+        }
+    }
+    match &query.select {
+        SelectClause::Star => {}
+        SelectClause::Value(e) => check_expr_udfs(e, udfs)?,
+        SelectClause::Projections(items) => {
+            for it in items {
+                check_expr_udfs(&it.expr, udfs)?;
+            }
+        }
+    }
+    if let Some(f) = &query.filter {
+        check_expr_udfs(f, udfs)?;
+    }
+    for k in &query.group_by {
+        check_expr_udfs(k, udfs)?;
+    }
+    if let Some(having) = &query.having {
+        check_expr_udfs(having, udfs)?;
+    }
+    for o in &query.order_by {
+        check_expr_udfs(&o.expr, udfs)?;
+    }
+    Ok(())
+}
+
+fn check_expr_udfs(expr: &Expression, udfs: &HashMap<String, String>) -> Result<(), PlanError> {
+    match expr {
+        Expression::Udf { name, args } => {
+            if !udfs.contains_key(name) {
+                return Err(PlanError {
+                    message: format!(
+                        "user-defined function `udf.{name}` is not bound on this collection"
+                    ),
+                });
+            }
+            for a in args {
+                check_expr_udfs(a, udfs)?;
+            }
+            Ok(())
+        }
+        Expression::Function { args, .. } | Expression::Array(args) => {
+            for a in args {
+                check_expr_udfs(a, udfs)?;
+            }
+            Ok(())
+        }
+        Expression::Member { base, .. } | Expression::PathGet { base, .. } => {
+            check_expr_udfs(base, udfs)
+        }
+        Expression::Index { base, index } => {
+            check_expr_udfs(base, udfs)?;
+            check_expr_udfs(index, udfs)
+        }
+        Expression::Unary { expr, .. } => check_expr_udfs(expr, udfs),
+        Expression::Binary { lhs, rhs, .. } => {
+            check_expr_udfs(lhs, udfs)?;
+            check_expr_udfs(rhs, udfs)
+        }
+        Expression::MultikeyEq { base, value, .. } => {
+            check_expr_udfs(base, udfs)?;
+            check_expr_udfs(value, udfs)
+        }
+        Expression::Object(fields) => {
+            for (_, v) in fields {
+                check_expr_udfs(v, udfs)?;
+            }
+            Ok(())
+        }
+        Expression::Subquery { query, .. } => check_query_udfs(query, udfs),
+        Expression::Literal(_)
+        | Expression::Value(_)
+        | Expression::Identifier(_)
+        | Expression::Parameter(_) => Ok(()),
     }
 }
 

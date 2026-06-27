@@ -563,6 +563,18 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .map(|m| Rc::new(m.clone()))
     }
 
+    /// The collection's UDF bindings as an owned map, for the planner's
+    /// `PlanContext` (it validates that every `udf.NAME` is bound). Empty when
+    /// the collection has no bindings. Cloned from the shared snapshot once per
+    /// plan — the planner needs an owned map, not a borrow into the snapshot.
+    pub(crate) fn udf_bindings_map(&self, cf: &str, collection: &str) -> HashMap<String, String> {
+        self.snapshot
+            .as_ref()
+            .and_then(|s| s.udf_bindings_for(cf, collection))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Mark the trigger/validator hook snapshot stale — for v2's `triggers()` /
     /// `validators()` sub-handles, which register/remove hooks that mutations
     /// consult (UDFs don't, so `functions()` never calls this). Mirrors the
