@@ -11,7 +11,7 @@ pub use error::{EncodingError, EngineError};
 pub use kv::{DEFAULT_CF, IntegrityIssue, IntegrityReport, KvEngine};
 pub use traits::{
     Catalog, CollectionHandle, CompoundRange, CompoundTail, CreateCollectionOptions, Engine,
-    EngineTransaction, FunctionEntry, FunctionKind, IndexEntry, IndexOptions, IndexRange,
-    IndexSpec, VectorScanEntry, runtime_tag,
+    EngineTransaction, FunctionEntry, FunctionKind, IndexCursor, IndexEntry, IndexOptions,
+    IndexRange, IndexSpec, VectorScanEntry, runtime_tag,
 };
 pub use vector::{VectorDataType, VectorIndexSpec, VectorMetric};

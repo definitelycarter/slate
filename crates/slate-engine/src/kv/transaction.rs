@@ -5,7 +5,7 @@ use std::ops::Bound;
 
 use bson::raw::{RawBsonRef, RawDocument, RawDocumentBuf};
 use bson::spec::ElementType;
-use slate_store::{Store, Transaction};
+use slate_store::{Store, StoreError, Transaction};
 
 use crate::encoding::bson_value::BsonValue;
 use crate::encoding::index_record::is_index_expired;
@@ -13,8 +13,8 @@ use crate::encoding::{IndexRecord, Key, KeyPrefix, Record};
 use crate::error::EngineError;
 use crate::index_sync::{IndexChanges, IndexDiff};
 use crate::traits::{
-    CollectionHandle, CompoundRange, CompoundTail, EngineTransaction, IndexEntry, IndexRange,
-    VectorScanEntry,
+    CollectionHandle, CompoundRange, CompoundTail, EngineTransaction, IndexCursor, IndexEntry,
+    IndexRange, VectorScanEntry,
 };
 use crate::validate::validate_raw_document;
 use crate::vector::{
@@ -258,6 +258,45 @@ fn is_numeric_tag(tag: ElementType) -> bool {
         ElementType::Int32 | ElementType::Int64 | ElementType::Double
     )
 }
+
+/// Decode one raw store entry into an `IndexEntry`, applying the single-field
+/// scan's per-entry filter: expiry first (the common drop), then the `Eq`
+/// exact-match (a byte range can't reject same-bytes-different-type or longer
+/// prefix-sharing values). `Ok(None)` ⇒ skip (expired / non-match), `Ok(Some)`
+/// ⇒ keep, `Err` ⇒ malformed key. Shared by `scan_index` and the seekable
+/// [`KvIndexCursor`] so both honour the identical contract.
+fn filter_entry(
+    key: Vec<u8>,
+    metadata: Vec<u8>,
+    field_prefix_len: usize,
+    exact: &Option<(ExactTag, Vec<u8>)>,
+    ttl: i64,
+) -> Result<Option<IndexEntry>, EngineError> {
+    // Single-field scan: one component (n = 1).
+    let Some(entry) = IndexEntry::from_raw(key, metadata, field_prefix_len, 1) else {
+        return Err(EngineError::InvalidKey("invalid index key".into()));
+    };
+    if entry.is_expired(ttl) {
+        return Ok(None);
+    }
+    if let Some((want_tag, want_bytes)) = exact {
+        let tag_ok = match want_tag {
+            ExactTag::Exact(t) => entry.element_type() == Some(*t),
+            ExactTag::Numeric => entry.element_type().is_some_and(is_numeric_tag),
+        };
+        if entry.value_bytes() != want_bytes.as_slice() || !tag_ok {
+            return Ok(None);
+        }
+    }
+    Ok(Some(entry))
+}
+
+/// Cheap `next()` steps a galloping [`IndexCursor::seek`] takes before paying one
+/// fresh range seek for the residual gap. Keeps the balanced (interleaved) case
+/// on sequential advances — a fresh seek costs several× a `next()` on every
+/// backend — while still bounding the skewed case to a per-output seek. The spike
+/// found `8` a good balance; revisit with the real intersection bench.
+const GALLOP_LIMIT: usize = 8;
 
 /// The exclusive successor of a byte key: its last non-`0xFF` byte incremented,
 /// trailing `0xFF`s carried. `None` when every byte is `0xFF`.
@@ -607,34 +646,16 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                         return Some(Err(EngineError::Store(e)));
                     }
                 };
-                // Single-field scan: one component (n = 1).
-                let Some(entry) =
-                    IndexEntry::from_raw(key_bytes, metadata_bytes, field_prefix_len, 1)
-                else {
-                    done = true;
-                    return Some(Err(EngineError::InvalidKey("invalid index key".into())));
-                };
-                // Expiry first — a cheap metadata check, the common reason to drop a row.
-                if entry.is_expired(ttl) {
-                    continue;
-                }
-                // Eq only: the byte range seeks the value prefix but can't filter
-                // by type or string length, so the recheck drops longer
-                // prefix-sharing entries (value-bytes) and type mismatches (tag).
-                // A numeric Eq accepts any numeric tag (cross-type collapse) but
-                // not a byte-coincident DateTime; a non-numeric Eq wants its exact
-                // tag. Ranges/Full need none — `scan_range` bounds them (and the
-                // executor's `compare_bson` recheck refines ranges).
-                if let Some((want_tag, want_bytes)) = &exact {
-                    let tag_ok = match want_tag {
-                        ExactTag::Exact(t) => entry.element_type() == Some(*t),
-                        ExactTag::Numeric => entry.element_type().is_some_and(is_numeric_tag),
-                    };
-                    if entry.value_bytes() != want_bytes.as_slice() || !tag_ok {
-                        continue;
+                // Per-entry filter (expiry, then `Eq` exact-match) — shared with
+                // the seekable cursor so both honour the identical contract.
+                match filter_entry(key_bytes, metadata_bytes, field_prefix_len, &exact, ttl) {
+                    Ok(Some(entry)) => return Some(Ok(entry)),
+                    Ok(None) => continue,
+                    Err(e) => {
+                        done = true;
+                        return Some(Err(e));
                     }
                 }
-                return Some(Ok(entry));
             }
             done = true;
             None
@@ -691,6 +712,52 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
             done = true;
             None
         })))
+    }
+
+    fn open_index_cursor<'b>(
+        &'b self,
+        handle: &CollectionHandle<Self::Cf>,
+        field: &str,
+        value: &bson::Bson,
+        reverse: bool,
+    ) -> Result<Box<dyn IndexCursor + 'b>, EngineError> {
+        let ttl = self.now_millis;
+        let ResolvedScan {
+            range,
+            exact,
+            field_prefix_len,
+        } = resolve_index_scan(handle.name(), field, IndexRange::Eq(value))?;
+        let (lower, upper) = range;
+        // An `Eq` scan always resolves to an inclusive value-prefix lower bound;
+        // the cursor seeks by appending raw doc-id bytes onto that prefix.
+        let Bound::Included(value_prefix) = lower else {
+            return Err(EngineError::InvalidKey(
+                "equality index scan must resolve to an inclusive lower bound".into(),
+            ));
+        };
+        // Clone the cf handle (a cheap Arc bump): the cursor outlives the borrowed
+        // `handle` and re-issues `scan_range` on the cf for every seek. The cloned
+        // `value_prefix`/`upper` feed the initial scan while the cursor keeps the
+        // originals for later seek-key construction (`scan_range` consumes its
+        // owned bounds).
+        let cf = handle.cf().clone();
+        let init: (Bound<Vec<u8>>, Bound<Vec<u8>>) =
+            (Bound::Included(value_prefix.clone()), upper.clone());
+        let iter = self.txn.scan_range(&cf, init, reverse)?;
+        let mut cursor: KvIndexCursor<'b, 'a, S> = KvIndexCursor {
+            txn: &self.txn,
+            cf,
+            value_prefix,
+            upper,
+            exact,
+            field_prefix_len,
+            ttl,
+            reverse,
+            iter,
+            current: None,
+        };
+        cursor.pull()?;
+        Ok(Box::new(cursor))
     }
 
     fn scan_vectors<'b>(
@@ -801,5 +868,127 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
 
     fn rollback(self) -> Result<(), EngineError> {
         Ok(self.txn.rollback()?)
+    }
+}
+
+// ── KvIndexCursor ───────────────────────────────────────────────
+
+/// The raw `(key, value)` iterator a store range scan yields, borrowed for `'t`.
+type ScanIter<'t> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 't>;
+
+/// A seekable cursor over one equality index range — the engine seam the
+/// index-intersection skip-merge zig-zags. Holds an open `scan_range` over the
+/// value's keyspace; `seek` carries a small gap with cheap `next()`s and re-issues
+/// a fresh range scan only to skip a large one (see [`IndexCursor`]).
+///
+/// `'t` is the borrow of the engine transaction; `'a` is the transaction's own
+/// lifetime (`'a: 't`).
+struct KvIndexCursor<'t, 'a: 't, S: Store + 'a> {
+    txn: &'t S::Txn<'a>,
+    cf: <S::Txn<'a> as Transaction>::Cf,
+    /// `i\0coll\0field\0value_bytes` — the fixed value prefix. A seek key is this
+    /// followed by the target's raw doc-id bytes.
+    value_prefix: Vec<u8>,
+    /// Exclusive successor of `value_prefix` (the value range's upper bound), or
+    /// `Unbounded` when the prefix is all-`0xFF`.
+    upper: Bound<Vec<u8>>,
+    exact: Option<(ExactTag, Vec<u8>)>,
+    field_prefix_len: usize,
+    ttl: i64,
+    reverse: bool,
+    iter: ScanIter<'t>,
+    current: Option<IndexEntry>,
+}
+
+impl<'t, 'a: 't, S: Store + 'a> KvIndexCursor<'t, 'a, S> {
+    /// Pull the next kept entry from the open iterator into `current` (skipping
+    /// expired / `Eq`-mismatched entries), or `None` at the range's end.
+    fn pull(&mut self) -> Result<(), EngineError> {
+        loop {
+            match self.iter.next() {
+                None => {
+                    self.current = None;
+                    return Ok(());
+                }
+                Some(Err(e)) => {
+                    self.current = None;
+                    return Err(EngineError::Store(e));
+                }
+                Some(Ok((key, metadata))) => {
+                    match filter_entry(key, metadata, self.field_prefix_len, &self.exact, self.ttl)?
+                    {
+                        Some(entry) => {
+                            self.current = Some(entry);
+                            return Ok(());
+                        }
+                        None => continue,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Re-open the underlying iterator positioned at the first entry at-or-past
+    /// `doc_id` in scan order, then pull. Forward: lower-bound the value range at
+    /// `value_prefix ++ doc_id`. Reverse: upper-bound it there (inclusive) and let
+    /// the reverse scan yield the largest ≤ entry first. The `value_prefix` /
+    /// `upper` clones are required — `scan_range` consumes its owned bounds and the
+    /// cursor keeps the originals for the next seek (both are short key prefixes).
+    fn reseek(&mut self, doc_id: &[u8]) -> Result<(), EngineError> {
+        let mut bound_key = self.value_prefix.clone();
+        bound_key.extend_from_slice(doc_id);
+        let range: (Bound<Vec<u8>>, Bound<Vec<u8>>) = if self.reverse {
+            (
+                Bound::Included(self.value_prefix.clone()),
+                Bound::Included(bound_key),
+            )
+        } else {
+            (Bound::Included(bound_key), self.upper.clone())
+        };
+        self.iter = self.txn.scan_range(&self.cf, range, self.reverse)?;
+        self.pull()
+    }
+
+    /// Whether `current` has reached `doc_id` in scan order — or the cursor is
+    /// exhausted, in which case there is nothing further to reach.
+    fn reached(&self, doc_id: &[u8]) -> Result<bool, EngineError> {
+        match &self.current {
+            None => Ok(true),
+            Some(entry) => {
+                let cur = entry.doc_id_bytes()?;
+                Ok(if self.reverse {
+                    cur <= doc_id
+                } else {
+                    cur >= doc_id
+                })
+            }
+        }
+    }
+}
+
+impl<'t, 'a: 't, S: Store + 'a> IndexCursor for KvIndexCursor<'t, 'a, S> {
+    fn peek(&self) -> Option<&IndexEntry> {
+        self.current.as_ref()
+    }
+
+    fn advance(&mut self) -> Result<(), EngineError> {
+        self.pull()
+    }
+
+    fn seek(&mut self, doc_id: &[u8]) -> Result<(), EngineError> {
+        // Gallop: cheap sequential advances carry a small gap (gaps ≈ 1 in the
+        // balanced/interleaved case, so this never seeks there)...
+        for _ in 0..GALLOP_LIMIT {
+            if self.reached(doc_id)? {
+                return Ok(());
+            }
+            self.pull()?;
+        }
+        // ...and one fresh range seek pays for a large residual gap (the skewed
+        // case), landing exactly at the target.
+        if !self.reached(doc_id)? {
+            self.reseek(doc_id)?;
+        }
+        Ok(())
     }
 }

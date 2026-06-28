@@ -228,6 +228,21 @@ pub trait EngineTransaction {
         reverse: bool,
     ) -> Result<Box<dyn Iterator<Item = Result<IndexEntry, EngineError>> + 'a>, EngineError>;
 
+    /// Open a seekable cursor over one **equality** index range (`field = value`),
+    /// positioned at the first entry. Reuses `scan_index`'s value-prefix
+    /// resolution and per-entry TTL-expiry + `Eq` exact-match filtering, so the
+    /// cursor yields exactly what an `Eq` `scan_index` would — but seekably, for
+    /// the index-intersection skip-merge (see the Index Intersection RFC). An
+    /// equality scan fixes the value bytes, so the stream is doc-id-sorted and the
+    /// cursor can `seek` within it by raw doc-id bytes.
+    fn open_index_cursor<'a>(
+        &'a self,
+        handle: &CollectionHandle<Self::Cf>,
+        field: &str,
+        value: &bson::Bson,
+        reverse: bool,
+    ) -> Result<Box<dyn IndexCursor + 'a>, EngineError>;
+
     // ── Vector operations ──────────────────────────────────────
 
     /// Scan a flat vector index, yielding `(doc_id, vector)` for every document
@@ -265,6 +280,32 @@ pub trait EngineTransaction {
 
     fn commit(self) -> Result<(), EngineError>;
     fn rollback(self) -> Result<(), EngineError>;
+}
+
+/// A forward-or-reverse cursor over one **equality** index range, seekable by
+/// raw doc-id bytes. The index-intersection skip-merge opens one per AND part
+/// and zig-zags them by their shared doc-id order, bounded by the smallest
+/// input (see the Index Intersection RFC).
+///
+/// Error handling: a store error or a malformed entry surfaces from
+/// [`open_index_cursor`](EngineTransaction::open_index_cursor), [`advance`](Self::advance),
+/// and [`seek`](Self::seek); once one of those returns `Ok`, [`peek`](Self::peek)
+/// is infallible (it returns the already-decoded current entry).
+pub trait IndexCursor {
+    /// The current entry, or `None` at end of the range.
+    fn peek(&self) -> Option<&IndexEntry>;
+
+    /// Advance one entry in scan order, skipping TTL-expired and `Eq`-mismatched
+    /// entries exactly as `scan_index` does.
+    fn advance(&mut self) -> Result<(), EngineError>;
+
+    /// Galloping seek to the first entry at-or-past `doc_id` in scan order
+    /// (forward: doc-id ≥ `doc_id`; reverse: doc-id ≤). `doc_id` is the **raw**
+    /// length-prefixed suffix taken verbatim from another cursor's entry
+    /// ([`IndexEntry::doc_id_bytes`]); it is matched bytewise. Advances by cheap
+    /// `next()` for a small gap and pays one fresh range seek only for a large
+    /// one, so the balanced case never regresses to a seek-per-step.
+    fn seek(&mut self, doc_id: &[u8]) -> Result<(), EngineError>;
 }
 
 /// Range filter for index scans.
@@ -459,9 +500,13 @@ impl IndexEntry {
         )
     }
 
-    /// Lazily decode the doc_id to `RawBson`. The doc_id begins at
-    /// `value_start + end_offset(n - 1)` (right after the last component value).
-    pub fn doc_id(&self) -> Result<RawBson, EngineError> {
+    /// The raw length-prefixed doc-id suffix bytes (`[tag][len_be16][bytes]`) —
+    /// everything in the key from `value_start + end_offset(n - 1)` onward (right
+    /// after the last component value). This is the suffix an equality scan sorts
+    /// on within its fixed value, so the index-intersection skip-merge compares
+    /// these bytes **bytewise** (the store's order) and reuses them verbatim as
+    /// the seek bound — no decode to BSON, whose order need not match byte order.
+    pub fn doc_id_bytes(&self) -> Result<&[u8], EngineError> {
         let last = self
             .n
             .checked_sub(1)
@@ -470,10 +515,15 @@ impl IndexEntry {
             .end_offset(last)
             .ok_or_else(|| EngineError::InvalidKey("missing doc_id offset in index key".into()))?;
         let doc_id_start = self.value_start + rel_end;
-        let tail = self
-            .key
+        self.key
             .get(doc_id_start..)
-            .ok_or_else(|| EngineError::InvalidKey("doc_id offset past end of index key".into()))?;
+            .ok_or_else(|| EngineError::InvalidKey("doc_id offset past end of index key".into()))
+    }
+
+    /// Lazily decode the doc_id to `RawBson`, parsing the length-prefixed suffix
+    /// [`doc_id_bytes`](Self::doc_id_bytes) carries.
+    pub fn doc_id(&self) -> Result<RawBson, EngineError> {
+        let tail = self.doc_id_bytes()?;
         let (bv, _) = crate::encoding::bson_value::BsonValue::parse_length_prefixed(tail)
             .ok_or_else(|| EngineError::InvalidKey("malformed doc_id in index key".into()))?;
         bv.to_raw_bson()
