@@ -1,12 +1,13 @@
 # RFC: Index Intersection Strategy (skip-merge for AND)
 
-> **Status: accepted (spike gate passed); phase 1 in progress.** Phase 1 is a
-> *stats-free* skip-merge for the intersection of two-or-more **equality** index
-> scans. Cost-based index selection (a cardinality/statistics catalog) is an
-> explicit non-goal here — see
-> [Two doors](#two-doors-and-why-we-take-the-stats-free-one). The spike confirmed
-> the doc-id ordering precondition and benched the skew win + balanced
-> non-regression on all three backends — see
+> **Status: phase 1 shipped.** Phase 1 — a *stats-free* galloping skip-merge for
+> the intersection of two-or-more **equality** index scans — is implemented: a
+> seekable `IndexCursor` (engine), a `Node::IndexIntersect` the planner emits for
+> all-equality `AND`, and the galloping zig-zag executor. Cost-based index
+> selection (a cardinality/statistics catalog — Door B) remains an explicit
+> non-goal — see [Two doors](#two-doors-and-why-we-take-the-stats-free-one). The
+> spike confirmed the doc-id ordering precondition and benched the skew win +
+> balanced non-regression on all three backends — see
 > [Spike outcome](#spike-outcome-gate-passed).
 
 ## Problem

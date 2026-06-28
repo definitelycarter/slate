@@ -128,7 +128,17 @@ uninstrumented:
 - **[Spatial Index](./rfcs/spatial-index.md)** — *proposed (design spike).*
   Geohash/S2 candidate-cell scan + recheck for `ST_DISTANCE`/`ST_WITHIN`.
 - **[Index Intersection Strategy](./rfcs/index-intersection-strategy.md)** —
-  *proposed.* How `IndexMerge` chooses and combines indexes.
+  *phase 1 (stats-free skip-merge) shipped; cost-based selection (Door B)
+  deferred.* An all-equality `AND` of ≥2 indexed parts now plans as a galloping
+  `IndexIntersect` — a zig-zag skip-merge over the streams' shared doc-id order,
+  bounded by the *smallest* input — instead of the asymmetric `IndexMerge(And)`
+  that read the *larger* side fully and hashed it. Equality index streams are
+  doc-id-sorted, so the merge seeks (a seekable `open_index_cursor` with
+  galloping `seek`) rather than materialises; any range/prefix/compound part
+  keeps the hash `IndexMerge(And)` fold. Invisible to results (asserted vs the
+  hash path, a full scan, and the Cosmos golden replay). Cost-based index
+  *selection* (a statistics catalog — the whale that fools uniform stats) stays
+  an explicit non-goal.
 - **[Vector Index & `VECTORDISTANCE`](./rfcs/vector-index.md)** — *function + flat
   index (Phase 1) done; quantization (Phase 2) + ANN (Phase 3) deferred.* The
   `VECTORDISTANCE` scalar (cosine/dotproduct/euclidean) plus a flat (exact,

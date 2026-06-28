@@ -22,7 +22,8 @@ use bson::{RawBson, rawdoc};
 use slate_ast::{Expression, OrderByItem};
 use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
 use slate_planner::{
-    AggregateExpr, CollectionRef, GroupKey, IndexScanRange, LogicalOp, RowBinding, ScanDirection,
+    AggregateExpr, CollectionRef, GroupKey, IndexIntersectPart, IndexScanRange, LogicalOp,
+    RowBinding, ScanDirection,
 };
 use slate_store::MemoryStore;
 
@@ -64,6 +65,53 @@ pub fn seeded_engine(n: usize) -> KvEngine<MemoryStore> {
                 "status": if i % 2 == 0 { "active" } else { "rejected" },
                 "age": (i % 100) as i32,
                 "score": (i % 1000) as i32,
+            };
+            txn.put(&handle, &doc).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    engine
+}
+
+/// The `(cf, name)` of the [`intersect_engine`] collection.
+pub fn intersect_collection_ref() -> CollectionRef {
+    CollectionRef {
+        cf: DEFAULT_CF.into(),
+        collection: "items".into(),
+    }
+}
+
+/// A `KvEngine` with an `items` collection of `n` documents, indexed on three
+/// string fields engineered for the index-intersection benchmark — each doc
+/// carries `"y"`/`"n"`:
+///
+/// - `big` = `"y"` on even `i` (≈ n/2 — the *large* side).
+/// - `sel` = `"y"` on `i % 50 == 0` (≈ n/50, a subset of `big` — the *selective*
+///   side). `big ∩ sel` is the **skew** case, bounded by `sel`.
+/// - `tri` = `"y"` on `i % 3 == 0` (≈ n/3). `big ∩ tri` (= `i % 6 == 0`) is the
+///   **balanced** case — two similar-size streams heavily interleaved in doc-id
+///   space (galloping's worst case for seeks).
+pub fn intersect_engine(n: usize) -> KvEngine<MemoryStore> {
+    let engine = KvEngine::new(MemoryStore::new());
+    {
+        let txn = engine.begin(false).unwrap();
+        txn.create_collection(DEFAULT_CF, "items", &Default::default())
+            .unwrap();
+        for field in ["big", "sel", "tri"] {
+            txn.create_index(DEFAULT_CF, "items", field).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    {
+        let txn = engine.begin(false).unwrap();
+        let handle = txn.collection(DEFAULT_CF, "items").unwrap();
+        let yn = |cond: bool| if cond { "y" } else { "n" };
+        for i in 0..n {
+            let doc = rawdoc! {
+                "_id": format!("rec-{i}"),
+                "big": yn(i % 2 == 0),
+                "sel": yn(i % 50 == 0),
+                "tri": yn(i % 3 == 0),
             };
             txn.put(&handle, &doc).unwrap();
         }
@@ -163,6 +211,15 @@ pub fn index_merge<'a, T: EngineTransaction + Catalog>(
     right: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
     nodes::index_merge::execute(txn, collection, logical, left, right)
+}
+
+/// `IndexIntersect` — the galloping all-equality skip-merge over `parts`.
+pub fn index_intersect<'a, T: EngineTransaction + Catalog>(
+    txn: &'a T,
+    collection: &CollectionRef,
+    parts: &[IndexIntersectPart],
+) -> Result<ValueIter<'a>, ExecError> {
+    nodes::index_intersect::execute(txn, collection, parts)
 }
 
 /// `Aggregate` — group by `group_keys`, fold `aggregates`, emit one environment

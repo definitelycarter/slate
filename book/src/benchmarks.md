@@ -20,8 +20,10 @@ It lives behind the `bench-internals` feature, which exposes `slate_executor::be
 
 Coverage is one scenario per node:
 
-- **Source / storage:** `scan`, `index_scan` (`eq`, `range_lower`/`range_upper`/`range_both`, `full`), `key_lookup`, `index_merge` (`or`, `and`). These read a seeded MemoryStore engine (collection `people`, indexed on `age` and `status`); the engine + read transaction are built once outside the timed loop (the `txn` must outlive the iterator), and only opening the iterator and draining it is timed.
+- **Source / storage:** `scan`, `index_scan` (`eq`, `range_lower`/`range_upper`/`range_both`, `full`), `key_lookup`, `index_merge` (`or`, `and`), `index_intersect` (`skew`, `balanced`). These read a seeded MemoryStore engine (collection `people`, indexed on `age` and `status`; the intersect cases use a second `items` fixture indexed on `big`/`sel`/`tri`); the engine + read transaction are built once outside the timed loop (the `txn` must outlive the iterator), and only opening the iterator and draining it is timed.
 - **In-memory transforms:** `bind`, `filter` (`cheap`/`expensive`), `project` (`identity`/`computed`), `sort` (`single`/`multi`), `limit_skip_take`, `distinct` (`flatten_false`/`flatten_true`), `unwind`, `aggregate` (`count`/`sum`). A transform consumes its source `ValueIter`, so the source is rebuilt each iteration from a once-built `Vec<RawBson>` via the `values` (or `bind`) wrapper. A `values_passthrough/<size>` baseline is included at each size so a transform's *marginal* cost is `transform − passthrough`.
+
+The `index_intersect` cases pair each galloping `IndexIntersect` with a `hashmerge_*` arm — the `IndexMerge(And)` it replaces over the same two `Eq` scans — so the `intersect_*` ÷ `hashmerge_*` ratio at each size *is* the [Index Intersection RFC](./rfcs/index-intersection-strategy.md)'s win: a large speedup under **skew** (`big` ≈ n/2 ∩ `sel` ≈ n/50 — the skip-merge is bounded by the selective side; the hash merge reads all of `big`) and no regression when **balanced** (`big` ∩ `tri`, heavily interleaved — galloping's worst case).
 
 Node iterators are lazy, so every scenario constructs the iterator **and** fully drains it (via `collect`) inside the timed closure. Machine-specific numbers aren't quoted here — run the suite locally and compare before/after on the same host.
 

@@ -41,7 +41,8 @@ use slate_ast::{BinOp, Expression, Literal, OrderByItem, SelectClause};
 use slate_engine::Engine;
 use slate_executor::bench;
 use slate_planner::{
-    AggregateExpr, GroupKey, IndexScanRange, LogicalOp, RowBinding, ScanDirection,
+    AggregateExpr, GroupKey, IndexIntersectPart, IndexScanRange, LogicalOp, RowBinding,
+    ScanDirection,
 };
 
 const SIZES: &[usize] = &[100, 1_000, 10_000];
@@ -548,10 +549,81 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
     }
 }
 
+// ── Index intersection (galloping skip-merge vs hash IndexMerge(And)) ─────────
+
+/// The all-equality `AND` intersection two ways over the same corpus: the new
+/// galloping [`IndexIntersect`](slate_planner::Node::IndexIntersect) (bounded by
+/// the smaller side) and the hash `IndexMerge(And)` it replaces (reads both sides
+/// fully). The `intersect_*` / `hashmerge_*` ratio at each size is the win.
+///
+/// - **skew**: `big` (≈n/2) ∩ `sel` (≈n/50) — the motivating case; the hash merge
+///   reads all of `big`, the skip-merge is bounded by `sel`.
+/// - **balanced**: `big` (≈n/2) ∩ `tri` (≈n/3), heavily interleaved — galloping's
+///   worst case (the gate that it must not regress vs the hash merge).
+fn bench_intersect(group: &mut BenchmarkGroup<'_, WallTime>) {
+    let coll = bench::intersect_collection_ref();
+    let eq_y = IndexScanRange::Eq(Bson::String("y".into()));
+    let part = |field: &str| IndexIntersectPart {
+        field: field.into(),
+        value: Bson::String("y".into()),
+    };
+    // (label, the two equality fields whose `= "y"` streams are intersected).
+    let cases: [(&str, &str, &str); 2] = [("skew", "big", "sel"), ("balanced", "big", "tri")];
+
+    for &n in SIZES {
+        let engine = bench::intersect_engine(n);
+        let txn = engine.begin(true).unwrap();
+        for (label, f1, f2) in cases {
+            let parts = [part(f1), part(f2)];
+            // Galloping skip-merge.
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!("intersect_{label}/{n}")),
+                &n,
+                |b, _| {
+                    b.iter(|| {
+                        let it = bench::index_intersect(&txn, &coll, &parts).unwrap();
+                        black_box(bench::collect(it).unwrap())
+                    })
+                },
+            );
+            // Hash IndexMerge(And) over the same two `Eq` scans.
+            group.bench_with_input(
+                BenchmarkId::from_parameter(format!("hashmerge_{label}/{n}")),
+                &n,
+                |b, _| {
+                    b.iter(|| {
+                        let l = bench::index_scan(
+                            &txn,
+                            &coll,
+                            f1.into(),
+                            &eq_y,
+                            ScanDirection::Forward,
+                            None,
+                        )
+                        .unwrap();
+                        let r = bench::index_scan(
+                            &txn,
+                            &coll,
+                            f2.into(),
+                            &eq_y,
+                            ScanDirection::Forward,
+                            None,
+                        )
+                        .unwrap();
+                        let it = bench::index_merge(&txn, &coll, LogicalOp::And, l, r).unwrap();
+                        black_box(bench::collect(it).unwrap())
+                    })
+                },
+            );
+        }
+    }
+}
+
 fn bench_nodes(c: &mut Criterion) {
     let mut group = c.benchmark_group("nodes");
     bench_storage(&mut group);
     bench_transforms(&mut group);
+    bench_intersect(&mut group);
     group.finish();
 }
 
