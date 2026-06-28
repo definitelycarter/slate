@@ -1,17 +1,34 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use slate_engine::{Catalog, EngineError, FunctionKind, runtime_tag};
+use slate_engine::{Catalog, EngineError, FunctionEntry, FunctionKind, runtime_tag};
 
-// `ResolvedHook` now lives in `slate-vm` (shared with the executor).
-pub use slate_vm::ResolvedHook;
-
-fn hash_source(source: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    source.hash(&mut hasher);
-    hasher.finish()
+/// Decode a kind's catalog entries into a sorted `(name, native_function_name)`
+/// binding list. Only native (`runtime_tag::NATIVE`) entries count — their bytes
+/// are the target function name; any other runtime is skipped. Shared by the
+/// trigger and validator loaders (identical shape). `role` names the kind for the
+/// error message on a non-UTF-8 target.
+fn native_bindings(
+    entries: Vec<FunctionEntry>,
+    cf: &str,
+    collection: &str,
+    role: &str,
+) -> Result<Vec<(String, String)>, EngineError> {
+    let mut bindings: Vec<(String, String)> = Vec::new();
+    for entry in entries {
+        if entry.runtime != runtime_tag::NATIVE {
+            continue;
+        }
+        let func = String::from_utf8(entry.source).map_err(|_| {
+            EngineError::InvalidDocument(format!(
+                "a {role} binding on {cf}.{collection} has a non-UTF-8 target name"
+            ))
+        })?;
+        bindings.push((entry.name, func));
+    }
+    bindings.sort();
+    Ok(bindings)
 }
 
 // ── HookSnapshot ────────────────────────────────────────────
@@ -19,20 +36,22 @@ fn hash_source(source: &[u8]) -> u64 {
 /// A frozen view of all hook definitions at a point in time.
 ///
 /// Captured at `begin()` time — transactions see a consistent snapshot
-/// regardless of concurrent modifications.
+/// regardless of concurrent modifications. All three kinds are now native
+/// *bindings* — `(name, native_function_name)` mappings (or `query_name ->
+/// native` for UDFs) — never code; the live bags supply the implementations at
+/// exec time.
 pub struct HookSnapshot {
-    triggers: HashMap<(String, String), Vec<ResolvedHook>>,
+    /// Per-collection trigger *bindings*: an ordered list of
+    /// `(trigger_name, native_function_name)`, mirroring the validator bindings.
+    /// A native trigger is resolved from the live bag at exec time, so the
+    /// snapshot holds only the name mapping, no source.
+    triggers: HashMap<(String, String), Vec<(String, String)>>,
     /// Per-collection validator *bindings*: an ordered list of
-    /// `(validator_name, native_function_name)`. Like the UDF bindings below — and
-    /// unlike triggers, still carried as `ResolvedHook` source — a native
-    /// validator is resolved from the live bag at exec time, so the snapshot holds
-    /// only the name mapping, no source.
+    /// `(validator_name, native_function_name)`. The live bag supplies the code.
     validators: HashMap<(String, String), Vec<(String, String)>>,
     /// Per-collection UDF *bindings*: `query_name -> native_function_name`. This
-    /// is the resolved identity the planner bakes into a plan — the UDF analog
-    /// of the trigger `ResolvedHook` lists above — while the live bag supplies the
-    /// code at exec time. Deliberately *not* a `ResolvedHook`: a binding is just a
-    /// name mapping, with no source.
+    /// is the resolved identity the planner bakes into a plan, while the live bag
+    /// supplies the code at exec time.
     udf_bindings: HashMap<(String, String), HashMap<String, String>>,
 }
 
@@ -40,7 +59,7 @@ impl HookSnapshot {
     /// Build a snapshot by loading all functions from the catalog.
     pub fn load_all<T: Catalog>(txn: &T) -> Result<Self, EngineError> {
         let collections = txn.list_collections(None)?;
-        let mut triggers: HashMap<(String, String), Vec<ResolvedHook>> = HashMap::new();
+        let mut triggers: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
         let mut validators: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
         let mut udf_bindings: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
 
@@ -48,39 +67,22 @@ impl HookSnapshot {
             let cf = handle.cf_name().to_string();
             let name = handle.name().to_string();
 
+            // Trigger *bindings*: native (`runtime_tag::NATIVE`) entries whose
+            // bytes are the target function name, loaded as an ordered
+            // `(trigger_name, native_name)` list (sorted for a deterministic firing
+            // order). Identical in shape to validators — the live bag supplies the
+            // code.
             let trigger_entries = txn.load_functions(&cf, &name, FunctionKind::Trigger)?;
-            if !trigger_entries.is_empty() {
-                let hooks: Vec<ResolvedHook> = trigger_entries
-                    .into_iter()
-                    .map(|e| ResolvedHook {
-                        source_hash: hash_source(&e.source),
-                        name: e.name,
-                        runtime: e.runtime,
-                        source: e.source,
-                    })
-                    .collect();
-                triggers.insert((cf.clone(), name.clone()), hooks);
+            let trigger_bindings = native_bindings(trigger_entries, &cf, &name, "trigger")?;
+            if !trigger_bindings.is_empty() {
+                triggers.insert((cf.clone(), name.clone()), trigger_bindings);
             }
 
-            // Validator *bindings*: native (`runtime_tag::NATIVE`) entries whose
-            // bytes are the target function name — the same shape as UDF bindings,
-            // loaded as an ordered `(validator_name, native_name)` list (sorted for
-            // a deterministic firing order). The live bag supplies the code.
+            // Validator *bindings*: same shape — native entries whose bytes are the
+            // target function name, sorted for a deterministic firing order.
             let validator_entries = txn.load_functions(&cf, &name, FunctionKind::Validator)?;
-            let mut validator_bindings: Vec<(String, String)> = Vec::new();
-            for entry in validator_entries {
-                if entry.runtime != runtime_tag::NATIVE {
-                    continue;
-                }
-                let func = String::from_utf8(entry.source).map_err(|_| {
-                    EngineError::InvalidDocument(format!(
-                        "a validator binding on {cf}.{name} has a non-UTF-8 target name"
-                    ))
-                })?;
-                validator_bindings.push((entry.name, func));
-            }
+            let validator_bindings = native_bindings(validator_entries, &cf, &name, "validator")?;
             if !validator_bindings.is_empty() {
-                validator_bindings.sort();
                 validators.insert((cf.clone(), name.clone()), validator_bindings);
             }
 
@@ -121,12 +123,22 @@ impl HookSnapshot {
         }
     }
 
-    /// Get triggers for a (cf, collection) pair.
-    pub fn triggers_for(&self, cf: &str, collection: &str) -> &[ResolvedHook] {
+    /// The trigger bindings for a (cf, collection): an ordered list of
+    /// `(trigger_name, native_name)`. Empty when the collection has none. The
+    /// executor resolves each native name against the live bag at fire time.
+    pub fn triggers_for(&self, cf: &str, collection: &str) -> &[(String, String)] {
         self.triggers
             .get(&(cf.to_string(), collection.to_string()))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// All trigger bindings across every collection:
+    /// `(cf, collection) -> [(trigger_name, native_name)]`. Used to find bindings
+    /// whose target function is unregistered (a dangling trigger blocks all writes
+    /// to its collection).
+    pub fn all_trigger_bindings(&self) -> &HashMap<(String, String), Vec<(String, String)>> {
+        &self.triggers
     }
 
     /// The validator bindings for a (cf, collection): an ordered list of

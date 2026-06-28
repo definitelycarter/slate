@@ -1,11 +1,11 @@
 //! The per-query execution capabilities — the evaluator's inputs, bundled.
 //!
 //! Every per-query capability the [`Executor`](crate::Executor) feeds to
-//! expression evaluation — an optional scripting pool for validators/triggers,
-//! the SQL `@`-parameters, the `RAND()` source, the injected clock reading, and
-//! the watch-capture sink — was threaded as a *separate* `Executor` field and
-//! constructor argument. Adding the next scoped capability (a UDF resolver, then
-//! triggers/validators) meant re-threading every layer again.
+//! expression evaluation — the SQL `@`-parameters, the `RAND()` source, the
+//! injected clock reading, the watch-capture sink, and the live UDF / validator
+//! / trigger bags — was threaded as a *separate* `Executor` field and
+//! constructor argument. Adding the next scoped capability meant re-threading
+//! every layer again.
 //!
 //! [`ExecEnv`] groups those capabilities into one value, so a new capability is a
 //! single field rather than a re-thread. The handles are the same `&`/`Rc` the
@@ -18,7 +18,7 @@
 //! `Executor` holds it as a peer of the env (together they are the query's
 //! execution context), exactly as the per-row [`RowEnv`](slate_eval::raweval)
 //! also carries no transaction. Keeping the txn out is also why this type needs
-//! no engine type parameter — only the `'a` of the borrowed pool.
+//! no engine type parameter — only the `'a` of the borrowed bags.
 //!
 //! This is the per-*query* env, distinct from the per-*row* helpers in
 //! [`nodes::env`](crate::nodes::env): those build the leaf `RowEnv` for a single
@@ -31,9 +31,9 @@ use std::rc::Rc;
 
 use bson::RawDocumentBuf;
 use slate_eval::raweval::UdfCtx;
+use slate_trigger::TriggerBag;
 use slate_udf::UdfBag;
 use slate_validator::ValidatorBag;
-use slate_vm::pool::VmPool;
 
 use crate::nodes::env::Rand;
 use crate::watch::WatchSink;
@@ -44,17 +44,16 @@ use crate::watch::WatchSink;
 /// An absent capability stays `None` and costs nothing — the empty/`None` state
 /// is the zero-cost default, attached only when the query needs it.
 ///
-/// `'a` ties the borrowed pool to the transaction it lives alongside; the
-/// remaining capabilities are `Rc`/owned and outlive nothing narrower.
+/// `'a` ties the borrowed bags (UDF/validator/trigger) to the transaction they
+/// live alongside; the remaining capabilities are `Rc`/owned and outlive nothing
+/// narrower.
 ///
 /// `Clone` is a handful of `Rc` refcount bumps plus a `Copy` of the borrowed
-/// pool — no allocation, no deep copy. The eval nodes each take an owned clone
+/// bag references — no allocation, no deep copy. The eval nodes each take an owned clone
 /// (so a node's result stream can outlive the executor, borrowing only the txn),
 /// exactly as they previously cloned the `params`/`rand` handles individually.
 #[derive(Default, Clone)]
 pub struct ExecEnv<'a> {
-    /// Scripting pool backing validators/triggers. `None` skips them.
-    pub(crate) pool: Option<&'a VmPool>,
     /// Query `@`-parameters, shared (by `Rc`) into each evaluating node so they
     /// outlive this executor. `None` means the query had no parameters.
     pub(crate) params: Option<Rc<RawDocumentBuf>>,
@@ -84,10 +83,16 @@ pub struct ExecEnv<'a> {
     /// collection has no bindings, so any `udf.*` reference there is unbound.
     pub(crate) udf_bindings: Option<Rc<HashMap<String, String>>>,
     /// The live, database-scoped validator bag, borrowed from the transaction for
-    /// the life of the query (treated like `pool`/`udf`). The `Validate` node
-    /// resolves each bound validator's native name against it at fire time. `None`
-    /// (the default) skips validation — the write path always attaches it.
+    /// the life of the query (treated like `udf`). The `Validate` node resolves
+    /// each bound validator's native name against it at fire time. `None` (the
+    /// default) skips validation — the write path always attaches it.
     pub(crate) validator: Option<&'a ValidatorBag>,
+    /// The live, database-scoped trigger bag, borrowed from the transaction for
+    /// the life of the query (treated like `validator`). The `Trigger` and
+    /// `Upsert` nodes resolve each bound trigger's native name against it once per
+    /// query, at fire time. `None` (the default) skips triggers — the write path
+    /// always attaches it.
+    pub(crate) trigger: Option<&'a TriggerBag>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -95,13 +100,6 @@ impl<'a> ExecEnv<'a> {
     /// absent (and zero-cost) until attached with a `with_*` builder.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Attach a scripting pool for validators/triggers. `None` (the default)
-    /// skips them.
-    pub fn with_pool(mut self, pool: Option<&'a VmPool>) -> Self {
-        self.pool = pool;
-        self
     }
 
     /// Attach the query's `@`-parameter document, shared by `Rc` into each
@@ -152,6 +150,13 @@ impl<'a> ExecEnv<'a> {
     /// bound validators. `None` (the default) skips validation.
     pub fn with_validator(mut self, validator: Option<&'a ValidatorBag>) -> Self {
         self.validator = validator;
+        self
+    }
+
+    /// Attach the live trigger bag, consulted by the `Trigger`/`Upsert` nodes to
+    /// resolve bound triggers. `None` (the default) skips triggers.
+    pub fn with_trigger(mut self, trigger: Option<&'a TriggerBag>) -> Self {
+        self.trigger = trigger;
         self
     }
 

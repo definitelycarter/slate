@@ -3,18 +3,16 @@
 //! Phase 0, slice D. A collection carries three kinds of hook, and they are *not*
 //! the same shape — triggers and validators feed the write-time hook snapshot
 //! (registering one marks it stale), while UDFs are called from SQL at query time
-//! and touch no hooks. They also differ in *what* the catalog stores: a
-//! **trigger** is still stored Lua source, while a **validator** and a **UDF** are
-//! native **bindings** — a `name -> native function` mapping resolved against a
-//! live, database-scoped bag at run time (the Lua trigger path is the last to
-//! migrate). So each kind gets its **own** sub-handle rather than one `scripts()`
-//! grouping:
+//! and touch no hooks. All three are now native **bindings** — a `name -> native
+//! function` mapping resolved against a live, database-scoped bag at run time,
+//! never code. So each kind gets its **own** sub-handle rather than one
+//! `scripts()` grouping:
 //!
 //! ```ignore
-//! collection.triggers().create(name, source).execute(&txn)?;          // Lua source
+//! collection.triggers().create(name, TriggerFunction::from_name(f)).execute(&txn)?;
 //! collection.validators().create(name, ValidatorFunction::from_name(f)).execute(&txn)?;
 //! collection.functions().create(name, UdfFunction::from_name(f)).execute(&txn)?;
-//! collection.validators().register(name, |ctx| …);  // no-txn: put native code in the bag
+//! collection.triggers().register(name, |ctx| …);  // no-txn: put native code in the bag
 //! collection.triggers().remove(name).execute(&txn)?;
 //! collection.triggers().list(&txn)?;
 //! ```
@@ -50,31 +48,6 @@ fn affects_hooks(kind: FunctionKind) -> bool {
     )
 }
 
-/// Store a Lua trigger's `source` under `kind`, marking the hook snapshot stale.
-/// Validators and UDFs are native bindings (see [`CreateValidator`] /
-/// [`CreateFunction`]); this Lua-source path now backs only triggers.
-fn create_script<S: Store>(
-    txn: &Transaction<'_, S>,
-    cf: &str,
-    collection: &str,
-    kind: FunctionKind,
-    name: &str,
-    source: &str,
-) -> Result<(), DbError> {
-    txn.engine_txn().create_function(
-        cf,
-        collection,
-        kind,
-        name,
-        runtime_tag::LUA,
-        source.as_bytes(),
-    )?;
-    if affects_hooks(kind) {
-        txn.mark_hooks_dirty();
-    }
-    Ok(())
-}
-
 /// Remove a function of `kind` by name, marking the hook snapshot stale when the
 /// kind feeds it.
 fn remove_script<S: Store>(
@@ -89,23 +62,6 @@ fn remove_script<S: Store>(
         txn.mark_hooks_dirty();
     }
     Ok(())
-}
-
-/// The names of every function of `kind` registered on the collection. Used by
-/// the still-scripted triggers; native bindings list as pairs (see
-/// [`list_bindings`]).
-fn list_scripts<S: Store>(
-    txn: &Transaction<'_, S>,
-    cf: &str,
-    collection: &str,
-    kind: FunctionKind,
-) -> Result<Vec<String>, DbError> {
-    Ok(txn
-        .engine_txn()
-        .load_functions(cf, collection, kind)?
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect())
 }
 
 /// List a kind's native bindings as `(name, func)` pairs, sorted by name — the
@@ -172,51 +128,88 @@ impl<'a> Triggers<'a> {
         self.trigger_bag.unregister(name)
     }
 
-    /// Register a trigger named `name` with Lua `source`. Returns a builder;
-    /// nothing runs until `.execute(&txn)`.
-    pub fn create(&self, name: &str, source: &str) -> CreateTrigger<'a> {
+    /// Bind the trigger `name` to a native function, durably and per-collection —
+    /// so writes to this collection fire it. The target is a [`TriggerFunction`];
+    /// `TriggerFunction::from_name(func)` references a trigger registered in the
+    /// bag (via `register` or `with_trigger`). Returns a builder; nothing runs
+    /// until `.execute(&txn)`. Lazy: the target need not be registered yet — a
+    /// dangling binding is caught when a write exercises it (fail-safe), not here.
+    pub fn create(&self, name: &str, func: TriggerFunction) -> CreateTrigger<'a> {
         CreateTrigger {
             cf: self.cf,
             collection: self.collection,
             name: name.to_string(),
-            source: source.to_string(),
+            func,
         }
     }
 
-    /// Remove the trigger named `name`. Returns a builder; nothing runs until
-    /// `.execute(&txn)`.
+    /// Remove the trigger binding named `name`. Returns a builder; nothing runs
+    /// until `.execute(&txn)`.
     pub fn remove(&self, name: &str) -> RemoveScript<'a> {
         RemoveScript::new(self.cf, self.collection, FunctionKind::Trigger, name)
     }
 
-    /// List the registered trigger names.
-    pub fn list<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<Vec<String>, DbError> {
-        list_scripts(txn, self.cf, self.collection, FunctionKind::Trigger)
+    /// List the collection's trigger bindings as `(trigger_name,
+    /// native_function_name)` pairs, sorted by name — the durable symbol table
+    /// from the catalog.
+    pub fn list<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        list_bindings(txn, self.cf, self.collection, FunctionKind::Trigger)
     }
 }
 
-/// A pending trigger registration, from [`Triggers::create`]. Its own type so
-/// future trigger-specific options (timing, operations) land here without
-/// touching validators or functions.
+/// A pending trigger binding, from [`Triggers::create`]. Its own type so future
+/// trigger-specific options (timing, operations) land here without touching
+/// validators or functions.
 #[must_use = "a create-trigger builder does nothing until .execute(&txn) runs it"]
 pub struct CreateTrigger<'a> {
     cf: &'a str,
     collection: &'a str,
     name: String,
-    source: String,
+    func: TriggerFunction,
 }
 
 impl CreateTrigger<'_> {
-    /// Register the trigger.
+    /// Write the binding — a `runtime_tag::NATIVE` catalog entry whose bytes are
+    /// the target function name — and mark the catalog snapshot stale so the next
+    /// transaction's writes resolve it.
     pub fn execute<S: Store>(self, txn: &Transaction<'_, S>) -> Result<(), DbError> {
-        create_script(
-            txn,
+        txn.engine_txn().create_function(
             self.cf,
             self.collection,
             FunctionKind::Trigger,
             &self.name,
-            &self.source,
-        )
+            runtime_tag::NATIVE,
+            self.func.encode(),
+        )?;
+        txn.mark_hooks_dirty();
+        Ok(())
+    }
+}
+
+/// The target of a trigger binding — the native trigger a write fires. A struct
+/// (not a bare string) so future options (timing, the operations it fires on)
+/// can land as constructors or builder stages without changing
+/// [`Triggers::create`]'s signature. Today it carries one thing: the name of a
+/// native trigger registered in the bag.
+pub struct TriggerFunction {
+    func: String,
+}
+
+impl TriggerFunction {
+    /// Bind to the native trigger named `func` (registered via
+    /// `triggers().register` or `DatabaseBuilder::with_trigger`).
+    pub fn from_name(func: &str) -> Self {
+        Self {
+            func: func.to_string(),
+        }
+    }
+
+    /// The bytes stored in the catalog for this binding — the target name.
+    fn encode(&self) -> &[u8] {
+        self.func.as_bytes()
     }
 }
 
@@ -544,10 +537,6 @@ mod tests {
         db
     }
 
-    // Triggers are still bare Lua bodies; validators and UDFs are now native
-    // bindings (`ValidatorFunction`/`UdfFunction::from_name`), not source.
-    const NOOP_TRIGGER: &str = "print('write')";
-
     #[test]
     fn create_list_remove_per_kind() {
         let db = db_with_users();
@@ -556,7 +545,10 @@ mod tests {
 
         users
             .triggers()
-            .create("on_write", NOOP_TRIGGER)
+            .create(
+                "on_write",
+                super::TriggerFunction::from_name("on_write_impl"),
+            )
             .execute(&txn)
             .unwrap();
         users
@@ -576,7 +568,7 @@ mod tests {
         // each kind lists only its own
         assert_eq!(
             users.triggers().list(&txn).unwrap(),
-            vec!["on_write".to_string()]
+            vec![("on_write".to_string(), "on_write_impl".to_string())]
         );
         assert_eq!(
             users.validators().list(&txn).unwrap(),

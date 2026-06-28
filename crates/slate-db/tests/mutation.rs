@@ -1,19 +1,10 @@
 mod common;
 use common::*;
 
-use std::sync::Arc;
-
 use bson::{Bson, doc, rawdoc};
-use slate_db::v2::IndexOptions;
-use slate_db::{DatabaseBuilder, RuntimeRegistry, VmPool};
+use slate_db::v2::{IndexOptions, TriggerFunction};
+use slate_db::{DatabaseBuilder, TriggerCtx, TriggerError};
 use slate_store::MemoryStore;
-use slate_vm::{LuaScriptRuntime, RuntimeKind};
-
-fn scripting_pool() -> VmPool {
-    let mut reg = RuntimeRegistry::new();
-    reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
-    VmPool::new(reg)
-}
 
 // ── Mutation operator tests ─────────────────────────────────────
 
@@ -1022,7 +1013,10 @@ fn mutation_id_rejected() {
 #[test]
 fn delete_fires_trigger_successfully() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1030,7 +1024,7 @@ fn delete_fires_trigger_successfully() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     db.collection(COLLECTION)
@@ -1082,7 +1076,10 @@ fn delete_fires_trigger_successfully() {
 #[test]
 fn delete_many_fires_trigger_successfully() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1090,7 +1087,7 @@ fn delete_many_fires_trigger_successfully() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("log_delete", "return function(ctx, event) return event end")
+        .create("log_delete", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     for i in 1..=5 {
@@ -1129,7 +1126,10 @@ fn delete_many_fires_trigger_successfully() {
 #[test]
 fn delete_trigger_error_propagates() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1146,10 +1146,7 @@ fn delete_trigger_error_propagates() {
     let txn = db.begin(false).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create(
-            "bad_trigger",
-            "return function(ctx, event) error('trigger failed!') end",
-        )
+        .create("bad_trigger", TriggerFunction::from_name("boom"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -1171,7 +1168,10 @@ fn delete_trigger_error_propagates() {
 #[test]
 fn insert_fires_trigger_successfully() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1179,7 +1179,7 @@ fn insert_fires_trigger_successfully() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -1208,7 +1208,10 @@ fn insert_fires_trigger_successfully() {
 #[test]
 fn insert_trigger_error_propagates() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1216,10 +1219,7 @@ fn insert_trigger_error_propagates() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create(
-            "bad_trigger",
-            "return function(ctx, event) error('trigger failed!') end",
-        )
+        .create("bad_trigger", TriggerFunction::from_name("boom"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -1237,7 +1237,10 @@ fn insert_trigger_error_propagates() {
 #[test]
 fn update_fires_trigger_successfully() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1245,7 +1248,7 @@ fn update_fires_trigger_successfully() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     db.collection(COLLECTION)
@@ -1280,7 +1283,10 @@ fn update_fires_trigger_successfully() {
 #[test]
 fn update_trigger_error_propagates() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1297,10 +1303,7 @@ fn update_trigger_error_propagates() {
     let txn = db.begin(false).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create(
-            "bad_trigger",
-            "return function(ctx, event) error('trigger failed!') end",
-        )
+        .create("bad_trigger", TriggerFunction::from_name("boom"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -1321,7 +1324,10 @@ fn update_trigger_error_propagates() {
 #[test]
 fn replace_fires_trigger_successfully() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1329,7 +1335,7 @@ fn replace_fires_trigger_successfully() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     db.collection(COLLECTION)
@@ -1366,7 +1372,10 @@ fn replace_fires_trigger_successfully() {
 #[test]
 fn upsert_fires_trigger_on_insert() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1374,7 +1383,7 @@ fn upsert_fires_trigger_on_insert() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -1403,7 +1412,10 @@ fn upsert_fires_trigger_on_insert() {
 #[test]
 fn upsert_fires_trigger_on_update() {
     let db = DatabaseBuilder::new()
-        .with_scripting(scripting_pool())
+        .with_trigger("noop", |_: &TriggerCtx<'_>| Ok(()))
+        .with_trigger("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("trigger failed!".into()))
+        })
         .open(MemoryStore::new())
         .unwrap();
 
@@ -1411,7 +1423,7 @@ fn upsert_fires_trigger_on_update() {
     db.collections().create(COLLECTION).execute(&txn).unwrap();
     db.collection(COLLECTION)
         .triggers()
-        .create("audit", "return function(ctx, event) return event end")
+        .create("audit", TriggerFunction::from_name("noop"))
         .execute(&txn)
         .unwrap();
     db.collection(COLLECTION)

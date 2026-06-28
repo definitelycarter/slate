@@ -2,8 +2,8 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::v2::{IndexOptions, UdfFunction, ValidatorFunction};
-use slate_db::{ValidatorCtx, Verdict};
+use slate_db::v2::{IndexOptions, TriggerFunction, UdfFunction, ValidatorFunction};
+use slate_db::{TriggerCtx, ValidatorCtx, Verdict};
 
 // ── Collection tests ────────────────────────────────────────────
 
@@ -111,14 +111,22 @@ fn register_triggers() {
     let (db, _dir) = temp_db();
     let txn = db.begin(false).unwrap();
     db.collections().create("users").execute(&txn).unwrap();
+    // Register the native triggers the bindings point at, so the later insert
+    // resolves them — an unregistered (dangling) binding would abort the write.
     db.collection("users")
         .triggers()
-        .create("audit", "print('audit')")
+        .register("audit_impl", |_: &TriggerCtx<'_>| Ok(()));
+    db.collection("users")
+        .triggers()
+        .register("notify_impl", |_: &TriggerCtx<'_>| Ok(()));
+    db.collection("users")
+        .triggers()
+        .create("audit", TriggerFunction::from_name("audit_impl"))
         .execute(&txn)
         .unwrap();
     db.collection("users")
         .triggers()
-        .create("notify", "print('notify')")
+        .create("notify", TriggerFunction::from_name("notify_impl"))
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -181,9 +189,14 @@ fn register_all_function_types_with_indexes() {
         .create("email", IndexOptions::default())
         .execute(&txn)
         .unwrap();
+    // Register the native trigger the binding points at (like the validator
+    // below) so the later insert isn't aborted by a dangling binding.
     db.collection("users")
         .triggers()
-        .create("audit", "print('audit')")
+        .register("audit_impl", |_: &TriggerCtx<'_>| Ok(()));
+    db.collection("users")
+        .triggers()
+        .create("audit", TriggerFunction::from_name("audit_impl"))
         .execute(&txn)
         .unwrap();
     // Register the native validator the binding points at, so the later insert

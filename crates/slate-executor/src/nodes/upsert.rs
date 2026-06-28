@@ -14,23 +14,26 @@ use slate_engine::{Catalog, CollectionHandle, EngineTransaction};
 use slate_eval::EvalError;
 use slate_planner::UpsertMode;
 use slate_rawbson::raw_merge;
-use slate_vm::{ResolvedHook, pool::VmPool};
+use slate_trigger::TriggerBag;
 
-use super::trigger::fire_hooks;
+use super::trigger::{fire, resolve};
 use crate::watch::WatchSink;
 use crate::{ExecError, ValueIter};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
-    pool: Option<&'a VmPool>,
-    hooks: Vec<ResolvedHook>,
+    bag: Option<&'a TriggerBag>,
+    triggers: Vec<(String, String)>,
     handle: CollectionHandle<T::Cf>,
     mode: UpsertMode,
     source: ValueIter<'a>,
     watch: Option<Rc<WatchSink>>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let cf = handle.cf_name().to_string();
+    // Resolve the bindings once, up front — a dangling trigger aborts the whole
+    // upsert before any document is touched (fail-safe).
+    let resolved = resolve(bag, triggers)?;
     let pk_key = CString::try_from(handle.pk_path()).map_err(|e| EvalError {
         message: format!("invalid pk path: {e}"),
     })?;
@@ -60,7 +63,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
         match txn.get(&handle, &raw_id)? {
             Some(old) => {
-                fire_hooks(txn, pool, &cf, &hooks, "updating", &old)?;
+                fire(txn, &cf, &resolved, "updating", &old)?;
                 let written = match build_doc(pk, &pk_key, mode, &new_doc, &old)? {
                     Some(doc) => doc,
                     // Merge no-op: nothing written, so nothing for a watch to
@@ -68,7 +71,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                     None => return Ok(Some(RawBson::Document(old.clone()))),
                 };
                 txn.put(&handle, &written)?;
-                fire_hooks(txn, pool, &cf, &hooks, "updated", &written)?;
+                fire(txn, &cf, &resolved, "updated", &written)?;
                 // Existing doc overwritten: both old and new states in hand.
                 if let Some(sink) = &watch {
                     sink.capture(
@@ -82,9 +85,9 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 Ok(Some(RawBson::Document(written)))
             }
             None => {
-                fire_hooks(txn, pool, &cf, &hooks, "inserting", &new_doc)?;
+                fire(txn, &cf, &resolved, "inserting", &new_doc)?;
                 txn.put_nx(&handle, &new_doc)?;
-                fire_hooks(txn, pool, &cf, &hooks, "inserted", &new_doc)?;
+                fire(txn, &cf, &resolved, "inserted", &new_doc)?;
                 // Absent before: a fresh insert (only the new state).
                 if let Some(sink) = &watch {
                     sink.capture(

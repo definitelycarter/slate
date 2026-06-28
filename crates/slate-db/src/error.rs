@@ -19,7 +19,6 @@ pub enum DbError {
         value: String,
         existing_id: String,
     },
-    Vm(slate_vm::VmError),
 }
 
 impl fmt::Display for DbError {
@@ -43,7 +42,6 @@ impl fmt::Display for DbError {
                 f,
                 "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
             ),
-            DbError::Vm(e) => write!(f, "vm error: {e}"),
         }
     }
 }
@@ -77,12 +75,6 @@ impl From<slate_sql::SqlError> for DbError {
 impl From<slate_planner::PlanError> for DbError {
     fn from(e: slate_planner::PlanError) -> Self {
         DbError::InvalidQuery(e.message)
-    }
-}
-
-impl From<slate_vm::VmError> for DbError {
-    fn from(e: slate_vm::VmError) -> Self {
-        DbError::Vm(e)
     }
 }
 
@@ -125,8 +117,10 @@ impl From<slate_executor::ExecError> for DbError {
             // `ExecError::Mutation` wraps a `slate_rawbson::RawMergeError` from the
             // upsert-merge path; surface its message without naming the type.
             E::Mutation(m) => DbError::Serialization(m.to_string()),
-            E::Vm(v) => DbError::Vm(v),
+            // A rejected validation or a failed trigger is a write-path abort —
+            // surface it as a document error (the write was refused).
             E::Validation(msg) => DbError::InvalidDocument(msg),
+            E::Trigger(msg) => DbError::InvalidDocument(msg),
         }
     }
 }

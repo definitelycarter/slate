@@ -21,7 +21,7 @@ pub use error::DbError;
 pub use export::{
     CollectionDef, ExportOptions, ExportReport, ImportOptions, ImportReport, Manifest, OnCollision,
 };
-pub use hooks::{HookRegistry, HookSnapshot, ResolvedHook};
+pub use hooks::{HookRegistry, HookSnapshot};
 pub use slate_engine::{
     DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport, VectorDataType, VectorIndexSpec,
     VectorMetric, join_index_fields, split_index_fields,
@@ -32,8 +32,6 @@ pub use slate_store::Durability;
 pub use slate_trigger::{Trigger, TriggerBag, TriggerCtx, TriggerError, TriggerTxn};
 pub use slate_udf::{Udf, UdfBag, UdfError, Value};
 pub use slate_validator::{Validator, ValidatorBag, ValidatorCtx, ValidatorError, Verdict};
-pub use slate_vm::VmError;
-pub use slate_vm::pool::{RuntimeRegistry, VmPool};
 pub use stats::{CollectionStats, DatabaseStats, IndexStats};
 pub use watch::{WatchHandle, WatchRegistry, WatchStream};
 

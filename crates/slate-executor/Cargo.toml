@@ -23,6 +23,7 @@ slate-ast = { path = "../slate-ast" }
 slate-eval = { path = "../slate-eval" }
 slate-udf = { path = "../slate-udf" }
 slate-validator = { path = "../slate-validator" }
+slate-trigger = { path = "../slate-trigger" }
 slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
 slate-rawbson = { path = "../slate-rawbson" }
@@ -31,21 +32,11 @@ slate-rawbson = { path = "../slate-rawbson" }
 tracing = { version = "0.1", optional = true, default-features = false, features = [
     "std",
 ] }
-# Runtime-agnostic: scripting is injected as `dyn ScriptRuntime` via a pre-built
-# `VmPool`, so the executor needs only `slate-vm`'s traits/errors — never a
-# concrete runtime. Leaving `lua` off here keeps mlua's vendored C out of the
-# normal build, so the query stack (and downstream `slate-wasm`) compiles to
-# wasm32. Tests build a real `LuaScriptRuntime` via the dev-dependency below.
-slate-vm = { path = "../slate-vm" }
 slate-store = { path = "../slate-store", features = ["memory"], optional = true }
 
 [dev-dependencies]
 slate-sql = { path = "../slate-sql" }
 slate-store = { path = "../slate-store", features = ["memory"] }
-# Tests instantiate `LuaScriptRuntime` (see the `hooks` module in lib.rs), so
-# the `lua` feature is enabled here only — it does not leak into the normal
-# build under resolver v2, keeping the library mlua-free.
-slate-vm = { path = "../slate-vm", features = ["lua"] }
 # Also listed as dev-deps so the external `nodes` bench target can name them
 # directly (they are regular deps too; Cargo dedups).
 slate-engine = { path = "../slate-engine" }

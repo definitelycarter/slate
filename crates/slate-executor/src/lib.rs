@@ -67,8 +67,8 @@ fn map_vector_metric(metric: slate_planner::VectorMetric) -> slate_eval::VectorM
 /// The `'a` lifetime ties a stream to the transaction it reads from.
 pub type ValueIter<'a> = Box<dyn Iterator<Item = Result<Option<RawBson>, ExecError>> + 'a>;
 
-/// Executes plans against a transaction, with an optional scripting pool for
-/// validators/triggers and an optional `@`-parameter document for SQL queries.
+/// Executes plans against a transaction, with the per-query capability bundle
+/// ([`ExecEnv`]) supplying validators, triggers, UDFs, `@`-parameters, and more.
 pub struct Executor<'a, T> {
     /// The engine transaction the query reads and (for writes) mutates — the
     /// data handle the source/mutation nodes run against. Held *beside* `env`,
@@ -78,9 +78,9 @@ pub struct Executor<'a, T> {
     /// no transaction). Keeping it here is also why [`ExecEnv`] needs no engine
     /// type parameter.
     txn: &'a T,
-    /// The per-query evaluator capabilities — pool, params, rand, and watch sink
-    /// — bundled so a new capability is one field rather than a re-thread through
-    /// every layer (see [`ExecEnv`]).
+    /// The per-query evaluator capabilities — params, rand, watch sink, and the
+    /// live UDF/validator/trigger bags — bundled so a new capability is one field
+    /// rather than a re-thread through every layer (see [`ExecEnv`]).
     env: ExecEnv<'a>,
     /// `EXPLAIN ANALYZE` collector, set *only* by
     /// [`execute_analyze`](Self::execute_analyze). When `None` (the normal path),
@@ -111,8 +111,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         }
     }
 
-    /// Construct an executor with an empty [`ExecEnv`] (no pool, params, rand,
-    /// or watch). The capabilities are attached on the env via
+    /// Construct an executor with an empty [`ExecEnv`] (no params, rand, watch,
+    /// or bags). The capabilities are attached on the env via
     /// [`with_env`](Self::with_env); the db layer's `Transaction::exec_env`
     /// builds the populated bundle.
     pub fn new(txn: &'a T) -> Self {
@@ -182,17 +182,17 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             Plan::Trigger {
                 cf,
                 action,
-                hooks,
+                triggers,
                 plan,
             } => {
                 let inner = self.execute(*plan)?;
-                nodes::trigger::execute(self.txn, self.env.pool, cf, action, hooks, inner)
+                nodes::trigger::execute(self.txn, self.env.trigger, cf, action, triggers, inner)
             }
 
             Plan::Upsert {
                 collection,
                 mode,
-                hooks,
+                triggers,
                 source,
             } => {
                 let handle = self
@@ -201,8 +201,8 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 let source = self.execute_node(source, None)?;
                 nodes::upsert::execute(
                     self.txn,
-                    self.env.pool,
-                    hooks,
+                    self.env.trigger,
+                    triggers,
                     handle,
                     mode,
                     source,
@@ -406,11 +406,11 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             Node::Trigger {
                 cf,
                 action,
-                hooks,
+                triggers,
                 source,
             } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::trigger::execute(self.txn, self.env.pool, cf, action, hooks, source)?
+                nodes::trigger::execute(self.txn, self.env.trigger, cf, action, triggers, source)?
             }
 
             Node::Validate { validators, source } => {
@@ -873,30 +873,12 @@ mod end_to_end {
 mod hooks {
     use crate::nodes::test_support::seeded_people;
     use crate::{ExecEnv, ExecError, Executor};
+    use bson::raw::RawBsonRef;
     use bson::{RawBson, rawdoc};
-    use slate_engine::{DEFAULT_CF, Engine};
+    use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction};
     use slate_planner::{Node, Plan};
+    use slate_trigger::{TriggerBag, TriggerCtx, TriggerError};
     use slate_validator::{ValidatorBag, ValidatorCtx, Verdict};
-    use slate_vm::pool::{RuntimeRegistry, VmPool};
-    use slate_vm::{LuaScriptRuntime, ResolvedHook, RuntimeKind};
-    use std::sync::Arc;
-
-    const LUA_TAG: u8 = 0x01;
-
-    fn lua_pool() -> VmPool {
-        let mut reg = RuntimeRegistry::new();
-        reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
-        VmPool::new(reg)
-    }
-
-    fn hook(name: &str, src: &str) -> ResolvedHook {
-        ResolvedHook {
-            name: name.into(),
-            runtime: LUA_TAG,
-            source: src.as_bytes().to_vec(),
-            source_hash: 0,
-        }
-    }
 
     fn doc() -> RawBson {
         RawBson::Document(rawdoc! { "_id": "1", "age": 50 })
@@ -973,21 +955,107 @@ mod hooks {
         assert_eq!(out, vec![doc()]);
     }
 
+    // A native trigger plan: bind the trigger named `t` to native function
+    // `func`, fired with `action`, which the executor resolves against the bag.
+    fn trigger_plan(func: &str, action: &str) -> Plan {
+        Plan::Query(Node::Trigger {
+            cf: DEFAULT_CF.into(),
+            action: action.into(),
+            triggers: vec![("t".to_string(), func.to_string())],
+            source: Box::new(Node::Values(vec![doc()])),
+        })
+    }
+
     #[test]
-    fn trigger_script_runs_and_errors_propagate() {
+    fn trigger_fires_and_passes_through() {
         let engine = seeded_people();
         let txn = engine.begin(false).unwrap();
-        let pool = lua_pool();
-        let plan = Plan::Query(Node::Trigger {
-            cf: DEFAULT_CF.into(),
-            action: "inserted".into(),
-            hooks: vec![hook("t", "return function(ctx, event) error('boom') end")],
-            source: Box::new(Node::Values(vec![doc()])),
+        let bag = TriggerBag::new();
+        bag.register("noop", |_: &TriggerCtx<'_>| Ok(()));
+        let out = Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("noop", "inserted"))
+            .unwrap();
+        assert_eq!(out, vec![doc()]);
+    }
+
+    #[test]
+    fn trigger_error_aborts_the_write() {
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        bag.register("boom", |_: &TriggerCtx<'_>| {
+            Err(TriggerError::Body("boom".into()))
         });
-        let err = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
-            .execute_collect(plan)
+        let err = Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("boom", "inserted"))
             .unwrap_err();
-        assert!(matches!(err, ExecError::Vm(_)), "got {err:?}");
+        assert!(matches!(err, ExecError::Trigger(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn trigger_panic_aborts_the_write() {
+        // A panicking trigger is caught at the seam and aborts the write.
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        bag.register("panic", |_: &TriggerCtx<'_>| panic!("kaboom"));
+        let err = Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("panic", "inserted"))
+            .unwrap_err();
+        assert!(matches!(err, ExecError::Trigger(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn dangling_trigger_aborts_the_write() {
+        // `absent` is never registered → the binding is dangling → abort up front
+        // (fail-safe), before any document is processed.
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        let err = Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("absent", "inserted"))
+            .unwrap_err();
+        assert!(matches!(err, ExecError::Trigger(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn no_bag_skips_triggers() {
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        // No trigger bag attached → triggers skipped → document passes, even
+        // though the plan names a (here unregistered) trigger.
+        let out = Executor::new(&txn)
+            .execute_collect(trigger_plan("whatever", "inserted"))
+            .unwrap();
+        assert_eq!(out, vec![doc()]);
+    }
+
+    #[test]
+    fn trigger_reads_and_writes_via_ctx() {
+        // The CfScopedTxn wires a trigger's get/put to the real transaction,
+        // confined to the firing column family: read a seeded doc, write a
+        // derived one back into the same cf.
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        bag.register("mirror", |ctx: &TriggerCtx<'_>| {
+            let seed = ctx
+                .get("people", RawBsonRef::String("1"))?
+                .expect("seeded doc 1 exists");
+            let name = seed.get_str("name").unwrap_or("?");
+            ctx.put("people", &rawdoc! { "_id": "mirror", "name": name })?;
+            Ok(())
+        });
+        Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("mirror", "inserted"))
+            .unwrap();
+
+        let handle = txn.collection(DEFAULT_CF, "people").unwrap();
+        let got = txn
+            .get(&handle, &RawBsonRef::String("mirror"))
+            .unwrap()
+            .expect("trigger wrote the mirror doc");
+        assert_eq!(got.get_str("name").unwrap(), "ada");
     }
 }
 
@@ -1154,7 +1222,7 @@ mod write_path {
         Plan::Upsert {
             collection: people_ref(),
             mode,
-            hooks: vec![],
+            triggers: vec![],
             source: Node::Values(vec![RawBson::Document(doc)]),
         }
     }

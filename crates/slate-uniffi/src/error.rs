@@ -49,9 +49,6 @@ impl From<DbError> for SlateError {
                     "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
                 ),
             },
-            DbError::Vm(e) => SlateError::Store {
-                message: e.to_string(),
-            },
         }
     }
 }

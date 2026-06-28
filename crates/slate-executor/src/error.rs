@@ -5,7 +5,6 @@ use std::fmt;
 use slate_engine::EngineError;
 use slate_eval::EvalError;
 use slate_rawbson::RawMergeError;
-use slate_vm::VmError;
 
 /// An error raised while executing a plan.
 #[derive(Debug)]
@@ -13,10 +12,11 @@ pub enum ExecError {
     Eval(EvalError),
     Engine(EngineError),
     Mutation(RawMergeError),
-    /// A script (validator/trigger) runtime error.
-    Vm(VmError),
-    /// A validator rejected a document.
+    /// A validator rejected a document, errored, or is bound to an unregistered
+    /// function.
     Validation(String),
+    /// A trigger errored, panicked, or is bound to an unregistered function.
+    Trigger(String),
 }
 
 impl fmt::Display for ExecError {
@@ -25,8 +25,8 @@ impl fmt::Display for ExecError {
             ExecError::Eval(e) => write!(f, "evaluation error: {e}"),
             ExecError::Engine(e) => write!(f, "engine error: {e}"),
             ExecError::Mutation(e) => write!(f, "mutation error: {e}"),
-            ExecError::Vm(e) => write!(f, "script error: {e}"),
             ExecError::Validation(m) => write!(f, "validation failed: {m}"),
+            ExecError::Trigger(m) => write!(f, "trigger failed: {m}"),
         }
     }
 }
@@ -36,12 +36,6 @@ impl std::error::Error for ExecError {}
 impl From<RawMergeError> for ExecError {
     fn from(e: RawMergeError) -> Self {
         ExecError::Mutation(e)
-    }
-}
-
-impl From<VmError> for ExecError {
-    fn from(e: VmError) -> Self {
-        ExecError::Vm(e)
     }
 }
 

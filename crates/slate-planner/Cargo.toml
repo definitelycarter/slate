@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 bson = { workspace = true }
 slate-ast = { path = "../slate-ast" }
-slate-vm = { path = "../slate-vm" }
 
 [dev-dependencies]
 slate-sql = { path = "../slate-sql" }

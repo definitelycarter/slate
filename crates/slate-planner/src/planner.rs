@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use slate_ast::{Assignment, Expression, OrderByItem, SortDirection, Statement};
-use slate_vm::ResolvedHook;
 
 use crate::lower::lower_query;
 use crate::plan::{CollectionRef, Node, Plan, RowBinding};
@@ -32,10 +31,13 @@ pub struct PlanContext {
     /// catalog by the caller. The executor looks up each native name in the live
     /// validator bag at fire time (a dangling binding aborts the write, fail-safe).
     pub validators: Vec<(String, String)>,
-    /// Before/after-mutation triggers to fire (empty = none). The same set is
-    /// attached with a per-action label (`inserting`/`inserted`, …); the
-    /// executor fires only the hooks registered for that action.
-    pub triggers: Vec<ResolvedHook>,
+    /// Before/after-mutation trigger *bindings* to fire (empty = none): an
+    /// ordered list of `(trigger_name, native_function_name)`, resolved from the
+    /// catalog by the caller. The same set is attached with a per-action label
+    /// (`inserting`/`inserted`, …); the executor resolves each native name in the
+    /// live trigger bag at fire time (a dangling binding aborts the write,
+    /// fail-safe) and the trigger body branches on the action.
+    pub triggers: Vec<(String, String)>,
     /// The collection's UDF bindings (`query_name -> native_name`), resolved
     /// from the catalog. The planner checks that every `udf.NAME` reference is
     /// bound — a dangling reference is a plan-build error — exactly as it
@@ -80,7 +82,7 @@ pub fn plan(stmt: Statement, ctx: &PlanContext) -> Result<Plan, PlanError> {
             Ok(Plan::Upsert {
                 collection: ctx.container.clone(),
                 mode,
-                hooks: ctx.triggers.clone(),
+                triggers: ctx.triggers.clone(),
                 source: Node::Values(docs),
             })
         }
@@ -174,7 +176,7 @@ fn wrap_before_triggers(ctx: &PlanContext, action: &str, source: Node) -> Node {
         Node::Trigger {
             cf: ctx.container.cf.clone(),
             action: action.to_string(),
-            hooks: ctx.triggers.clone(),
+            triggers: ctx.triggers.clone(),
             source: Box::new(source),
         }
     }
@@ -188,7 +190,7 @@ fn wrap_after(ctx: &PlanContext, action: &str, plan: Plan) -> Plan {
         Plan::Trigger {
             cf: ctx.container.cf.clone(),
             action: action.to_string(),
-            hooks: ctx.triggers.clone(),
+            triggers: ctx.triggers.clone(),
             plan: Box::new(plan),
         }
     }

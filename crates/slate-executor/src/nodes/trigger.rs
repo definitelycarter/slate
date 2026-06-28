@@ -1,161 +1,138 @@
-//! The `Trigger` node — fire trigger scripts on each document as a side effect.
+//! The `Trigger` node — fire native triggers on each document as a side effect.
 //!
 //! Used both before a mutation (a tap that passes documents through) and after
-//! (wrapping a mutation plan's output). Each hook receives `{ action, doc }`
-//! and a read-write `ctx` exposing `get`/`put`/`delete` over the transaction.
-//! With no scripting pool or no hooks, this is a passthrough.
+//! (wrapping a mutation plan's output). Each trigger receives the firing action,
+//! the candidate document, and a [`TriggerCtx`] exposing `get`/`put`/`delete`
+//! over the transaction — confined to the firing column family by [`CfScopedTxn`]
+//! (the trigger names a collection, never a cf). With no trigger bag or no
+//! bindings, this is a passthrough.
+//!
+//! Bindings resolve **once per query** (not per row): a dangling binding (bound
+//! but never registered) aborts up front, before any document is processed —
+//! fail-safe, mirroring the validator path. A trigger body that errors or panics
+//! likewise aborts the write (the panic is caught at this seam).
 
-use bson::RawBson;
-use bson::rawdoc;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use bson::raw::{RawBsonRef, RawDocumentBuf};
+use bson::{RawBson, RawDocument};
 use slate_engine::{Catalog, EngineTransaction};
-use slate_vm::pool::VmPool;
-use slate_vm::{ResolvedHook, ScopedMethod, ScriptCapabilities, runtime_kind};
+use slate_trigger::{Trigger, TriggerBag, TriggerCtx, TriggerError, TriggerTxn};
 
 use crate::{ExecError, ValueIter};
 
+/// A resolved trigger binding: the trigger's name (kept for error messages)
+/// paired with its live implementation, looked up from the bag once per query.
+type ResolvedTrigger = (String, Arc<dyn Trigger>);
+
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
-    pool: Option<&'a VmPool>,
+    bag: Option<&'a TriggerBag>,
     cf: String,
     action: String,
-    hooks: Vec<ResolvedHook>,
+    triggers: Vec<(String, String)>,
     source: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    if pool.is_none() || hooks.is_empty() {
+    let resolved = resolve(bag, triggers)?;
+    if resolved.is_empty() {
         return Ok(source);
     }
 
     Ok(Box::new(source.map(move |result| {
         let opt = result?;
         if let Some(RawBson::Document(ref d)) = opt {
-            fire_hooks(txn, pool, &cf, &hooks, &action, d)?;
+            fire(txn, &cf, &resolved, &action, d)?;
         }
         Ok(opt)
     })))
 }
 
-/// Fire `hooks` for `action` on `doc`. Exposed so mutation nodes that fire
-/// conditional triggers (upsert) can reuse it.
-// In a build with no script runtime compiled in (e.g. wasm32), `RuntimeKind`
-// is uninhabited, so `runtime_kind` and the dispatch below are unreachable and
-// the locals feeding them are unused. Mirrors the same allow on `VmPool`'s impl
-// in `slate-vm`.
-#[allow(unreachable_code, unused_variables)]
-pub(crate) fn fire_hooks<T: EngineTransaction + Catalog>(
+/// Resolve `(trigger_name, native_func)` bindings against the live bag, once per
+/// query. A dangling binding (bound but unregistered) is an error — caught here,
+/// before any document is processed, so it aborts the whole write (fail-safe).
+/// With no bag, nothing resolves (triggers are skipped), exactly as a database
+/// that never registers a trigger fires none.
+///
+/// Exposed so the upsert node (which fires conditional per-document actions)
+/// shares the same resolve-once + fail-fast behavior.
+pub(crate) fn resolve(
+    bag: Option<&TriggerBag>,
+    triggers: Vec<(String, String)>,
+) -> Result<Vec<ResolvedTrigger>, ExecError> {
+    let Some(bag) = bag else {
+        return Ok(Vec::new());
+    };
+    triggers
+        .into_iter()
+        .map(|(name, func)| match bag.get(&func) {
+            Some(trigger) => Ok((name, trigger)),
+            None => Err(ExecError::Trigger(format!(
+                "trigger '{name}' is bound to native function '{func}', which is not registered"
+            ))),
+        })
+        .collect()
+}
+
+/// Fire each resolved trigger for `action` on `doc`, under `catch_unwind`. A
+/// returned error or a panic aborts the write. Exposed so the upsert node reuses
+/// it for its conditional per-document actions.
+pub(crate) fn fire<T: EngineTransaction + Catalog>(
     txn: &T,
-    pool: Option<&VmPool>,
     cf: &str,
-    hooks: &[ResolvedHook],
+    triggers: &[ResolvedTrigger],
     action: &str,
-    doc: &bson::RawDocument,
+    doc: &RawDocument,
 ) -> Result<(), ExecError> {
-    let Some(pool) = pool else {
-        return Ok(());
-    };
-    if hooks.is_empty() {
-        return Ok(());
-    }
-
-    let get_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-        let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn("ctx.get: first argument must be a collection".into())
-        })?;
-        let doc_id = args.get(1).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn("ctx.get: second argument (id) required".into())
-        })?;
-        let handle = txn
-            .collection(cf, coll_name)
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        let wrapper = bson::raw::RawDocumentBuf::try_from(bson::doc! { "v": doc_id.clone() })
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        let raw_ref = wrapper
-            .get("v")
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?
-            .ok_or_else(|| {
-                slate_vm::VmError::InvalidReturn("ctx.get: failed to encode id".into())
-            })?;
-        match txn.get(&handle, &raw_ref) {
-            Ok(Some(doc)) => {
-                let document: bson::Document = bson::deserialize_from_slice(doc.as_bytes())
-                    .map_err(slate_vm::VmError::Bson)?;
-                Ok(bson::Bson::Document(document))
+    let scoped = CfScopedTxn { txn, cf };
+    let ctx = TriggerCtx::new(action, doc, &scoped);
+    for (name, trigger) in triggers {
+        match catch_unwind(AssertUnwindSafe(|| trigger.fire(&ctx))) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                return Err(ExecError::Trigger(format!(
+                    "trigger '{name}' failed: {err}"
+                )));
             }
-            Ok(None) => Ok(bson::Bson::Null),
-            Err(e) => Err(slate_vm::VmError::InvalidReturn(e.to_string())),
+            Err(_) => {
+                return Err(ExecError::Trigger(format!("trigger '{name}' panicked")));
+            }
         }
-    };
-
-    let put_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-        let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn("ctx.put: first argument must be a collection".into())
-        })?;
-        let doc_bson = args.get(1).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn("ctx.put: second argument (doc) required".into())
-        })?;
-        let doc = match doc_bson {
-            bson::Bson::Document(d) => d,
-            _ => {
-                return Err(slate_vm::VmError::InvalidReturn(
-                    "ctx.put: second argument must be a document".into(),
-                ));
-            }
-        };
-        let handle = txn
-            .collection(cf, coll_name)
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        let raw = bson::raw::RawDocumentBuf::try_from(doc).map_err(slate_vm::VmError::Bson)?;
-        txn.put(&handle, &raw)
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        Ok(bson::Bson::Null)
-    };
-
-    let delete_cb = |args: Vec<bson::Bson>| -> Result<bson::Bson, slate_vm::VmError> {
-        let coll_name = args.first().and_then(|b| b.as_str()).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn(
-                "ctx.delete: first argument must be a collection".into(),
-            )
-        })?;
-        let doc_id = args.get(1).ok_or_else(|| {
-            slate_vm::VmError::InvalidReturn("ctx.delete: second argument (id) required".into())
-        })?;
-        let handle = txn
-            .collection(cf, coll_name)
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        let wrapper = bson::raw::RawDocumentBuf::try_from(bson::doc! { "v": doc_id.clone() })
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        let raw_ref = wrapper
-            .get("v")
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?
-            .ok_or_else(|| {
-                slate_vm::VmError::InvalidReturn("ctx.delete: failed to encode id".into())
-            })?;
-        txn.delete(&handle, &raw_ref)
-            .map_err(|e| slate_vm::VmError::InvalidReturn(e.to_string()))?;
-        Ok(bson::Bson::Null)
-    };
-
-    let methods = [
-        ScopedMethod {
-            name: "get",
-            callback: &get_cb,
-        },
-        ScopedMethod {
-            name: "put",
-            callback: &put_cb,
-        },
-        ScopedMethod {
-            name: "delete",
-            callback: &delete_cb,
-        },
-    ];
-
-    let caps = ScriptCapabilities::ReadWrite { methods: &methods };
-    let input = rawdoc! { "action": action, "doc": doc.to_owned() };
-
-    for hook in hooks {
-        let runtime = runtime_kind(hook.runtime);
-        let handle = pool.get_or_load(runtime, &hook.name, hook.source_hash, &hook.source)?;
-        handle.call(&input, &caps)?;
     }
     Ok(())
+}
+
+/// The executor-side [`TriggerTxn`]: the column-family-confined read-write
+/// surface a trigger acts through. `cf` is fixed at construction (the firing
+/// collection's column family); the trait exposes only a *collection* argument,
+/// so a trigger structurally cannot reach across column families. A failing
+/// capability operation surfaces as [`TriggerError::Txn`], which aborts the write.
+struct CfScopedTxn<'a, T> {
+    txn: &'a T,
+    cf: &'a str,
+}
+
+impl<T: EngineTransaction + Catalog> TriggerTxn for CfScopedTxn<'_, T> {
+    fn get(
+        &self,
+        collection: &str,
+        id: RawBsonRef<'_>,
+    ) -> Result<Option<RawDocumentBuf>, TriggerError> {
+        let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
+        self.txn.get(&handle, &id).map_err(txn_err)
+    }
+
+    fn put(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
+        let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
+        self.txn.put(&handle, doc).map_err(txn_err)
+    }
+
+    fn delete(&self, collection: &str, id: RawBsonRef<'_>) -> Result<(), TriggerError> {
+        let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
+        self.txn.delete(&handle, &id).map_err(txn_err)
+    }
+}
+
+fn txn_err(e: impl std::fmt::Display) -> TriggerError {
+    TriggerError::Txn(e.to_string())
 }

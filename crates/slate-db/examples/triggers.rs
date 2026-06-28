@@ -1,16 +1,40 @@
-use std::sync::Arc;
-
 use bson::{doc, rawdoc};
-use slate_db::{DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
+use slate_db::v2::TriggerFunction;
+use slate_db::{DatabaseBuilder, DbError, TriggerCtx, TriggerError};
 use slate_store::MemoryStore;
-use slate_vm::{LuaScriptRuntime, RuntimeKind};
+
+/// A native trigger that mirrors every lifecycle event into an `audit`
+/// collection. It fires on each mutation (`inserting`/`inserted`,
+/// `updating`/`updated`, `deleting`/`deleted`); the audit record's `_id` is built
+/// from the document id + action so each event is stored separately. Writing to a
+/// *sibling* collection in the same column family is exactly what the trigger's
+/// `ctx` permits — it cannot reach across column families.
+fn audit(ctx: &TriggerCtx<'_>) -> Result<(), TriggerError> {
+    let action = ctx.action();
+    let id = ctx
+        .doc()
+        .get_str("_id")
+        .map_err(|e| TriggerError::Body(e.to_string()))?;
+
+    println!("[trigger] {action} → _id={id}");
+
+    ctx.put(
+        "audit",
+        &rawdoc! {
+            "_id": format!("{id}:{action}"),
+            "action": action,
+            "doc_id": id,
+        },
+    )?;
+    Ok(())
+}
 
 fn main() -> Result<(), DbError> {
-    // ── Open an in-memory database with Lua scripting ──────────
-    let mut reg = RuntimeRegistry::new();
-    reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
+    // ── Open an in-memory database with the native trigger registered ──
+    // `with_trigger` puts the closure in the database-scoped bag at open; the
+    // per-collection binding below points at it by name.
     let db = DatabaseBuilder::new()
-        .with_scripting(VmPool::new(reg))
+        .with_trigger("audit", audit)
         .open(MemoryStore::new())?;
 
     // ── Set up collections ────────────────────────────────────
@@ -19,37 +43,14 @@ fn main() -> Result<(), DbError> {
     db.cf("app").collections().create("audit").execute(&txn)?;
     txn.commit()?;
 
-    // ── Register a trigger on "users" ─────────────────────────
-    // The trigger fires on every mutation (insert, update, delete).
-    // It logs each action to the "audit" collection and prints
-    // the lifecycle event so you can see the before/after pairs.
+    // ── Bind the trigger on "users" ───────────────────────────
+    // The binding is durable (catalog) and names the native function `audit`
+    // registered in the bag above; it fires on every mutation to "users".
     let txn = db.begin(false)?;
     db.cf("app")
         .collection("users")
         .triggers()
-        .create(
-            "audit_trigger",
-            r#"
-        return function(ctx, event)
-          local action = event.action
-          local id     = event.doc._id
-
-          print("[trigger] " .. action .. " → _id=" .. tostring(id))
-
-          -- Write an audit record for every lifecycle event.
-          -- Build a unique _id from the doc id + action so that
-          -- each event is stored separately.
-          ctx.put("audit", {
-            _id       = tostring(id) .. ":" .. action,
-            action    = action,
-            doc_id    = id,
-            timestamp = bson.now(),
-          })
-
-          return event
-        end
-        "#,
-        )
+        .create("audit_trigger", TriggerFunction::from_name("audit"))
         .execute(&txn)?;
     txn.commit()?;
 
@@ -153,13 +154,11 @@ fn main() -> Result<(), DbError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     for entry in &audit {
-        let ts = entry.get_datetime("timestamp")?;
         println!(
-            "  {}: {} on {} at {}",
+            "  {}: {} on {}",
             entry.get_str("_id")?,
             entry.get_str("action")?,
             entry.get_str("doc_id")?,
-            ts.try_to_rfc3339_string().unwrap_or_default(),
         );
     }
     println!("Total audit entries: {}", audit.len());

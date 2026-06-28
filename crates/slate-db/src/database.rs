@@ -10,10 +10,9 @@ use slate_store::{BackupStore, Durability, Store};
 use slate_trigger::TriggerBag;
 use slate_udf::UdfBag;
 use slate_validator::ValidatorBag;
-use slate_vm::pool::VmPool;
 
 use crate::error::DbError;
-use crate::hooks::{HookRegistry, HookSnapshot, ResolvedHook};
+use crate::hooks::{HookRegistry, HookSnapshot};
 use crate::watch::{WatchRegistry, WatchSnapshot};
 
 /// The injected random source backing the SQL `RAND()` function: a callable
@@ -55,7 +54,6 @@ fn default_rand() -> f64 {
 // ── DatabaseBuilder ────────────────────────────────────────
 
 pub struct DatabaseBuilder {
-    pool: Option<VmPool>,
     /// UDF bag accumulated before open via `with_udf`; moved into the database.
     udf_bag: Arc<UdfBag>,
     /// Validator bag accumulated before open via `with_validator`; moved into the
@@ -80,7 +78,6 @@ impl Default for DatabaseBuilder {
 impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
-            pool: None,
             udf_bag: Arc::new(UdfBag::new()),
             validator_bag: Arc::new(ValidatorBag::new()),
             trigger_bag: Arc::new(TriggerBag::new()),
@@ -90,15 +87,6 @@ impl DatabaseBuilder {
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
-    }
-
-    /// Attach a script execution pool.
-    ///
-    /// Without a pool, function source is still stored in the engine
-    /// but no scripts will be executed.
-    pub fn with_scripting(mut self, pool: VmPool) -> Self {
-        self.pool = Some(pool);
-        self
     }
 
     /// Register a native UDF in the database-scoped bag before open. Equivalent
@@ -178,8 +166,9 @@ impl DatabaseBuilder {
 
     /// Open the database with the configured settings.
     ///
-    /// When a script pool is configured, loads an initial hook snapshot
-    /// from the engine so triggers and validators are available immediately.
+    /// Loads the initial catalog snapshot so the collections' trigger, validator,
+    /// and UDF *bindings* are resolved against the live bags from the first
+    /// transaction.
     pub fn open<S: Store + Send + Sync + 'static>(self, store: S) -> Result<Database<S>, DbError> {
         let engine = match self.clock {
             Some(clock) => Arc::new(KvEngine::with_clock(store, move || clock())),
@@ -203,10 +192,9 @@ impl DatabaseBuilder {
             None => None,
         };
 
-        // Load the initial catalog snapshot. It carries trigger/validator hooks
-        // (fired only when scripting is enabled) *and* native UDF bindings
-        // (resolved at query time with no VM), so it is needed even without a
-        // pool — a UDF database has bindings but no scripting.
+        // Load the initial catalog snapshot. It carries every collection's native
+        // trigger/validator/UDF *bindings* — name mappings resolved against the
+        // live bags at run time, no code or VM.
         let registry = {
             let txn = engine.begin(true)?;
             let snapshot = HookSnapshot::load_all(&txn)?;
@@ -222,7 +210,6 @@ impl DatabaseBuilder {
 
         Ok(Database {
             engine,
-            pool: self.pool,
             registry,
             watch_registry: Arc::new(WatchRegistry::new()),
             udf_bag: self.udf_bag,
@@ -247,6 +234,9 @@ pub enum BindingKind {
     /// A validator (write path): a dangling one blocks **all** writes to its
     /// collection — fail-safe.
     Validator,
+    /// A trigger (write path): a dangling one blocks **all** writes to its
+    /// collection — fail-safe.
+    Trigger,
 }
 
 /// A binding whose target native function is not registered in its bag — an
@@ -268,7 +258,6 @@ pub struct DanglingBinding {
 
 pub struct Database<S: Store> {
     engine: Arc<KvEngine<S>>,
-    pool: Option<VmPool>,
     registry: Option<HookRegistry>,
     /// Ephemeral registry of watch queries. Always present (cheap when empty);
     /// behind an `Arc` so a [`WatchHandle`] outlives any database borrow and can
@@ -361,9 +350,9 @@ impl<S: Store> Database<S> {
 
         Ok(Transaction {
             txn,
-            pool: self.pool.as_ref(),
             udf_bag: self.udf_bag.as_ref(),
             validator_bag: self.validator_bag.as_ref(),
+            trigger_bag: self.trigger_bag.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
             rand: self.rand.clone(),
@@ -399,9 +388,9 @@ impl<S: Store> Database<S> {
         &self.trigger_bag
     }
 
-    /// Every binding (UDF or validator) whose target native function is not
-    /// registered in its bag — the unresolved symbols (bindings minus bag). Empty
-    /// when every binding resolves. Call it at startup to surface a missing
+    /// Every binding (UDF, validator, or trigger) whose target native function is
+    /// not registered in its bag — the unresolved symbols (bindings minus bag).
+    /// Empty when every binding resolves. Call it at startup to surface a missing
     /// `register` before a query or write hits it. Reflects committed state (the
     /// current snapshot). The string clones are per-binding on an introspection
     /// path (not a hot path), and the result owns its strings independent of the
@@ -430,6 +419,19 @@ impl<S: Store> Database<S> {
                 if self.validator_bag.get(func).is_none() {
                     out.push(DanglingBinding {
                         kind: BindingKind::Validator,
+                        cf: cf.clone(),
+                        collection: collection.clone(),
+                        name: name.clone(),
+                        func: func.clone(),
+                    });
+                }
+            }
+        }
+        for ((cf, collection), bindings) in snapshot.all_trigger_bindings() {
+            for (name, func) in bindings {
+                if self.trigger_bag.get(func).is_none() {
+                    out.push(DanglingBinding {
+                        kind: BindingKind::Trigger,
                         cf: cf.clone(),
                         collection: collection.clone(),
                         name: name.clone(),
@@ -519,14 +521,17 @@ impl<S: Store> Database<S> {
 
 pub struct Transaction<'db, S: Store + 'db> {
     txn: <KvEngine<S> as Engine>::Txn<'db>,
-    pool: Option<&'db VmPool>,
-    /// The database's UDF bag, borrowed for the life of the transaction (like
-    /// `pool`). Consulted at `compile` to resolve `udf.*` references.
+    /// The database's UDF bag, borrowed for the life of the transaction.
+    /// Consulted at `compile` to resolve `udf.*` references.
     udf_bag: &'db UdfBag,
     /// The database's validator bag, borrowed for the life of the transaction
     /// (like `udf_bag`). The `Validate` node resolves each bound validator's
     /// native name against it at fire time.
     validator_bag: &'db ValidatorBag,
+    /// The database's trigger bag, borrowed for the life of the transaction (like
+    /// `validator_bag`). The `Trigger`/`Upsert` nodes resolve each bound trigger's
+    /// native name against it at fire time.
+    trigger_bag: &'db TriggerBag,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
     /// Random source for `RAND()`, handed to each cursor this transaction opens.
@@ -632,7 +637,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .unwrap_or_default()
     }
 
-    pub(crate) fn triggers(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+    pub(crate) fn triggers(&self, cf: &str, collection: &str) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
             .map(|s| s.triggers_for(cf, collection).to_vec())
@@ -663,17 +668,17 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     }
 
     /// Build the per-query execution context ([`ExecEnv`]) for a plan run against
-    /// this transaction: the scripting pool, the `RAND()` source, the watch sink,
-    /// the clock reading (epoch ms, captured at `begin`, backing `GETCURRENT*` —
-    /// consistent across the txn and wasm-clean, no syscall in the evaluator),
-    /// and the query's `@`-parameters. The single translation point from a
-    /// transaction's capabilities to an executor env — the cursor and `analyze`
-    /// both go through it, so a new capability is wired here once.
+    /// this transaction: the live UDF/validator/trigger bags, the `RAND()` source,
+    /// the watch sink, the clock reading (epoch ms, captured at `begin`, backing
+    /// `GETCURRENT*` — consistent across the txn and wasm-clean, no syscall in the
+    /// evaluator), and the query's `@`-parameters. The single translation point
+    /// from a transaction's capabilities to an executor env — the cursor and
+    /// `analyze` both go through it, so a new capability is wired here once.
     pub(crate) fn exec_env(&self, params: Option<bson::RawDocumentBuf>) -> ExecEnv<'db> {
         ExecEnv::new()
-            .with_pool(self.pool)
             .with_udf(Some(self.udf_bag))
             .with_validator(Some(self.validator_bag))
+            .with_trigger(Some(self.trigger_bag))
             .with_params(params.map(Rc::new))
             .with_rand(self.exec_rand())
             .with_watch(self.watch_sink.clone())

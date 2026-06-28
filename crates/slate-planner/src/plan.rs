@@ -7,7 +7,6 @@
 
 use bson::{Bson, RawBson, RawDocumentBuf};
 use slate_ast::{Expression, OrderByItem, SubqueryKind};
-use slate_vm::ResolvedHook;
 
 /// A top-level plan: a read query, or a write whose `source` is a read-node
 /// tree yielding the documents to write.
@@ -50,23 +49,27 @@ pub enum Plan {
         source: Node,
     },
 
-    /// After-mutation trigger wrapper: run `plan`, then fire `hooks` with
+    /// After-mutation trigger wrapper: run `plan`, then fire `triggers` with
     /// `action` on each document it yields (passing the documents through).
+    /// Each entry is a binding — `(trigger_name, native_function_name)` — the
+    /// executor resolves against the live trigger bag.
     Trigger {
         cf: String,
         action: String,
-        hooks: Vec<ResolvedHook>,
+        triggers: Vec<(String, String)>,
         plan: Box<Plan>,
     },
 
     /// Upsert each document yielded by `source`: insert if absent, else
     /// `Replace`/`Merge` the existing document. Fires `inserting`/`inserted`
     /// or `updating`/`updated` triggers depending on the per-document runtime
-    /// outcome (which is why hooks stay internal here). Yields the written docs.
+    /// outcome (which is why triggers stay internal here). Yields the written
+    /// docs. Each `(trigger_name, native_function_name)` binding is resolved by
+    /// the executor against the live trigger bag.
     Upsert {
         collection: CollectionRef,
         mode: UpsertMode,
-        hooks: Vec<ResolvedHook>,
+        triggers: Vec<(String, String)>,
         source: Node,
     },
 }
@@ -386,20 +389,21 @@ pub enum Node {
         source: Box<Node>,
     },
 
-    /// Before-mutation trigger tap: fire `hooks` with `action` on each document
-    /// as a side effect, passing the document through unchanged.
+    /// Before-mutation trigger tap: fire `triggers` with `action` on each
+    /// document as a side effect, passing the document through unchanged. Each
+    /// entry is a binding — `(trigger_name, native_function_name)` — the executor
+    /// resolves against the live trigger bag.
     Trigger {
         cf: String,
         action: String,
-        hooks: Vec<ResolvedHook>,
+        triggers: Vec<(String, String)>,
         source: Box<Node>,
     },
 
     /// Validation gate: run `validators` on each document; error if any rejects.
     /// Passes the document through on success. Each entry is a binding —
     /// `(validator_name, native_function_name)` — the executor resolves against
-    /// the live validator bag (triggers, by contrast, still carry `ResolvedHook`
-    /// source).
+    /// the live validator bag, exactly as the trigger nodes resolve theirs.
     Validate {
         validators: Vec<(String, String)>,
         source: Box<Node>,

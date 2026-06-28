@@ -42,7 +42,8 @@
 //! - Aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`) and `GROUP BY` — see [`agg`].
 //! - Cross-collection `JOIN` (a deliberate *extension* beyond Cosmos, which
 //!   only supports intra-document array unwind).
-//! - User-defined functions — the runtime exists in `slate-vm`; wiring is future.
+//! - User-defined functions (`udf.*`) — resolved to native Rust functions
+//!   (`slate-udf`) bound per collection.
 
 pub mod agg;
 pub mod error;

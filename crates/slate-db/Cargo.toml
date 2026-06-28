@@ -4,15 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["lua", "runtime"]
+default = ["runtime"]
 # `runtime` pulls in the native, OS-dependent pieces (background TTL sweep, and
 # the default seeded PRNG behind `RAND()`). It is deliberately OFF in the wasm
 # build (`default-features = false`) so `rand`/`getrandom` never reach
 # wasm32-unknown-unknown — the wasm host injects its own sources instead.
 runtime = ["dep:rand"]
 bench-internals = []
-lua = ["slate-vm/lua"]
-js = ["slate-vm/js"]
 # Feature-gated `tracing` instrumentation (see the executor's `trace` feature).
 # OFF by default; turns on spans/events in `slate-db` *and* `slate-executor`, so
 # a host enables tracing for the whole query stack with one flag. Zero cost when
@@ -30,7 +28,6 @@ slate-udf = { path = "../slate-udf" }
 slate-validator = { path = "../slate-validator" }
 slate-trigger = { path = "../slate-trigger" }
 slate-sql = { path = "../slate-sql" }
-slate-vm = { path = "../slate-vm" }
 serde = { version = "1", features = ["derive"] }
 bson = { workspace = true }
 regex = "1"
