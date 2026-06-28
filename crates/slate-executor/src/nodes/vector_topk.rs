@@ -56,7 +56,7 @@ use slate_planner::VectorDataType;
 use slate_rawbson::RawField;
 
 use super::env::row_env;
-use crate::budget::Ticker;
+use crate::budget::{self, Ticker};
 use crate::{ExecEnv, ExecError, ValueIter};
 
 /// One kept candidate: its score and doc-id. Ordered so a `BinaryHeap`'s max-root
@@ -166,7 +166,11 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     // lightweight; `source` yields documents or bare ids (extract the pk, like
     // `KeyLookup`). `None` → no constraint, the whole field is in play.
     let allowed = match source {
-        Some(src) => Some(materialize_candidate_ids(src, handle.pk_path())?),
+        Some(src) => Some(materialize_candidate_ids(
+            src,
+            handle.pk_path(),
+            env.materialization_cap,
+        )?),
         None => None,
     };
 
@@ -235,6 +239,10 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     // shortlist), never mis-order what we return.
     let mut rescored: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
     for cand in candidates {
+        // The rescore shortlist is `window`-bounded, not a long scan, so this is
+        // for symmetry, not load-bearing — but it keeps every per-entry loop on
+        // the deadline. Reuses the scan's ticker (one continuous row budget).
+        ticker.tick()?;
         let Some(doc) = txn.get(&handle, &cand.doc_id.as_raw_bson_ref())? else {
             // Vanished between the scan and the rescore (deleted/expired) — drop it.
             continue;
@@ -392,9 +400,16 @@ fn id_bytes(id: &bson::raw::RawBsonRef<'_>) -> Vec<u8> {
 /// Drain the pre-filter `source` into a set of candidate doc-id keys. Accepts a
 /// bare id (from an `IndexScan`) or a document carrying the pk (from a `Scan` /
 /// `Filter`), matching how `KeyLookup` reads its input.
+///
+/// `cap` is the materialization cap (Resource Limits RFC, B): this set is the
+/// unbounded buffer of the pre-filter path (the analogue of `IndexMerge`'s id
+/// set), so a non-selective `WHERE` feeding most of the collection trips
+/// `LimitExceeded` as the set grows past `cap`. The top-k/rescore heaps are
+/// separately bounded by `window`/`k`, so the cap does not touch them.
 fn materialize_candidate_ids(
     source: ValueIter<'_>,
     pk_path: &str,
+    cap: Option<usize>,
 ) -> Result<HashSet<IdKey>, ExecError> {
     let mut set = HashSet::new();
     for item in source {
@@ -411,6 +426,7 @@ fn materialize_candidate_ids(
                 set.insert(IdKey::from_ref(&other.as_raw_bson_ref()));
             }
         }
+        budget::check_cap(set.len(), cap, "VectorTopK")?;
     }
     Ok(set)
 }
@@ -1029,5 +1045,39 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn materialization_cap_trips_on_a_non_selective_prefilter() {
+        // The WHERE pre-filter set is the node's unbounded buffer (the analogue of
+        // IndexMerge's id set). `tenant = 'acme'` admits three candidates; a cap of
+        // 1 aborts with LimitExceeded as that set grows, before the top-k runs.
+        let engine = seeded_photos();
+        let env = ExecEnv::new().with_materialization_cap(Some(1));
+        let sql = "SELECT VALUE c FROM c WHERE c.tenant = 'acme' \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 3";
+        let result = run_with_env(&engine, sql, env);
+        assert!(
+            matches!(result, Err(ExecError::LimitExceeded(_))),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn materialization_cap_passes_under_the_limit() {
+        // The same pre-filtered kNN under a generous cap returns its top-k.
+        let engine = seeded_photos();
+        let env = ExecEnv::new().with_materialization_cap(Some(1000));
+        let sql = "SELECT VALUE c FROM c WHERE c.tenant = 'acme' \
+             ORDER BY VECTORDISTANCE(c.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 3";
+        let ids: Vec<String> = run_with_env(&engine, sql, env)
+            .unwrap()
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d.get_str("_id").unwrap().to_string(),
+                other => panic!("got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "d"]);
     }
 }
