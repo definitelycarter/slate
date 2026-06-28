@@ -1,11 +1,20 @@
 # RFC: Resource Limits & Safety Valves
 
-> **Status: proposed.** Surfaced in the "proper embedded database" survey. Slate
-> runs *in the host application's process*, yet has no guardrails: no query
-> timeout, no cap on rows examined or bytes materialized, no document/key size
-> limit. A single runaway query or a pathological document can OOM or wedge the
-> application that embedded it. A proper embedded DB ships safety valves so the
-> store can never take down its host.
+> **Status: A + B done; C + D deferred.** Surfaced in the "proper embedded
+> database" survey. The two valves that keep a runaway query from taking down the
+> host process have shipped: **A** a cooperative per-query **deadline**
+> (`DbError::Timeout`, checked between rows in every source node off the injectable
+> clock — wasm-safe) and **B** a **materialization cap** (`DbError::LimitExceeded`)
+> on every blocking buffer (`Sort` / `IndexMerge` / `Distinct` / `GroupBy` + the
+> vector kNN pre-filter set, checked as it grows). Both are a `DatabaseBuilder`
+> default (`with_limits` / `with_deadline` / `with_materialization_cap`) with an
+> optional per-query override (`.deadline(..)` / `.materialization_cap(..)` on
+> `find` / `query` / `distinct`); see
+> [Database → Resource Limits and Safety Valves](../architecture-database.md#resource-limits-and-safety-valves).
+> **Deferred:** **C** input-size limits (max document / key / value →
+> `DbError::TooLarge`, a write-path change) and **D** a rows-*examined* cap (best
+> landed with the [Observability RFC](./observability-and-introspection.md)'s
+> shared counter). The original framing follows.
 
 ## Problem
 

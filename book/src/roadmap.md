@@ -65,8 +65,17 @@ uninstrumented:
   the slow-query log (thread D) and `disk_size_bytes` backend plumbing (the slot
   is a reserved `Option`, `None` today).
 - **[Resource Limits & Safety Valves](./rfcs/resource-limits-and-safety-valves.md)**
-  — query deadline, materialization cap (the OOM guard), and document/key size
-  limits, so the store can't take down its host.
+  — *A + B done; C + D deferred.* Two cooperative safety valves so a runaway query
+  can't take down the host process: **A** a per-query **deadline**
+  (`DbError::Timeout`, checked between rows in every source node off the injectable
+  clock — wasm-safe) and **B** a **materialization cap** (`DbError::LimitExceeded`)
+  on every blocking buffer (`Sort` / `IndexMerge` / `Distinct` / `GroupBy` + the
+  vector kNN pre-filter set, checked as it grows). Configured as a `DatabaseBuilder`
+  default (`with_limits` / `with_deadline` / `with_materialization_cap`) with an
+  optional per-query override (`.deadline(..)` / `.materialization_cap(..)`); see
+  [Database → Resource Limits and Safety Valves](./architecture-database.md#resource-limits-and-safety-valves).
+  **Deferred:** C input-size limits (`DbError::TooLarge`) and D a rows-examined cap
+  (with the Observability counter).
 - **[Logical Export / Import](./rfcs/logical-export-import.md)** — *done (BSON path).*
   Manifest-driven BSON dump+reload for cross-backend migration, seeding, and
   recovery (complements physical `backup()`); see

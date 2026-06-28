@@ -186,6 +186,43 @@ three backends expose savepoints natively, so this would be engine-level
 write-buffering — deferred to its own RFC. The contract above is flat: begin →
 ops → commit/rollback, with no partial rollback implied.
 
+### Resource Limits and Safety Valves
+
+Slate runs *inside* the host application's process, so a runaway query must not be
+able to take it down. Two cooperative valves bound that risk. Both are **off by
+default** (unbounded) and configured as a database-wide default with an optional
+per-query override.
+
+**A — query deadline.** A per-query `Duration` after which a query aborts with
+`DbError::Timeout`. It is *cooperative*, not preemptive: each streaming **source
+node** (`Scan`, `IndexScan`, `CompoundIndexScan`, `IndexIntersect`, and the vector
+kNN scan) checks an elapsed-time budget *between rows* — one clock read every 1024
+rows, amortized to noise — so a long scan stops promptly, but a call already
+blocked off-CPU inside a backend syscall is not interrupted mid-syscall. The check
+reads the same injectable clock that backs TTL and `GETCURRENT*`
+(`DatabaseBuilder::with_clock`), so it is wasm-safe and deterministically testable.
+
+**B — materialization cap (the OOM guard).** A ceiling on the rows a *blocking*
+node may buffer before aborting with `DbError::LimitExceeded`. It bounds every
+unbounded-memory path: `Sort`, `IndexMerge`, `Distinct`, `GroupBy` (which caps the
+rows *consumed*, so an `ARRAY_AGG` folding every row into a single group is bounded
+too), and the vector kNN's `WHERE` pre-filter candidate set. The cap is checked *as
+each buffer grows*, so it trips before the memory is spent, not after.
+
+**Configuration.** Set a database-wide default with
+`DatabaseBuilder::with_limits(QueryLimits { … })`, or the field-at-a-time
+`with_deadline` / `with_materialization_cap`; override per query with `.deadline(..)`
+/ `.materialization_cap(..)` on the `find` / `query` / `distinct` builders. A field
+left unset on an override inherits the database default. `Timeout` and
+`LimitExceeded` are distinct error shapes so a caller can tell "too slow" from "too
+big"; neither is retryable — raise the limit, or narrow the query (add a `LIMIT` or
+an index) so it streams instead of materializing.
+
+**Scope.** The deadline bounds query *reads*; the write path (and the out-of-band
+`delete_range`) is not deadline-checked. Input-size limits (max document / key /
+value size → `DbError::TooLarge`) and a rows-*examined* cap are designed in the
+[Resource Limits RFC](./rfcs/resource-limits-and-safety-valves.md) but deferred.
+
 ### Query Execution
 
 `slate-planner` lowers a request to a `Plan` (a tree of `Node`s); `slate-executor` streams it with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.
