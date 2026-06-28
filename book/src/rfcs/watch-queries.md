@@ -1,12 +1,25 @@
 # RFC: Change Detection (Watch Queries)
 
-> **Status: design settled; ready to implement.** Expanded from the original roadmap
-> stub against the real write path (file:line citations throughout), then converged
-> through design discussion (2026-06-25). The [roadmap](../roadmap.md) tracks status at
-> a glance. This RFC delivers **change events** over a **2×2 public API** —
-> **{BSON filter, SQL filter} × {callback push, cursor pull}** — all over one
-> detection core; **reactive queries** (auto-maintained result sets) are specified as a
-> thin layer on top (§ Reactive queries) but are not implemented here.
+> **Status: IMPLEMENTED — change-event core (2026-06-25, merged + pushed `60f5924`,
+> commit `8c776bb`).** Originally expanded from the roadmap stub against the real write
+> path (file:line citations throughout), then converged through design discussion. **The
+> change-event core shipped essentially as designed** — the 2×2 surface, one detection
+> core + one registry, snapshot-at-`begin`, set-transition recasting, per-commit
+> coalescing, and the non-blocking lag-drop cursor — validated by 28 tests across the
+> executor and db layers. Two things changed between this design and the code, corrected
+> throughout below:
+>
+> - **The surface is the v2 builder, not flat `db.watch(...)` methods.** A watch hangs
+>   off the `find`/`query` builders as a terminal:
+>   `db.collection(c).find(filter).watch(cb)` / `.stream()` (BSON) and
+>   `db.collection(c).query(sql).watch(cb)` / `.stream()` (SQL). The BSON-vs-SQL split is
+>   *which builder you start from* (`find` vs `query`), so both expose the same
+>   `.watch`/`.stream` terminal names — the `_query`-suffix naming in the original draft
+>   was dropped.
+> - **What is still deferred (layers on top, none built here):** reactive result-sets
+>   (the § Reactive queries fold), shaping projections on the filter, an async
+>   `Stream` / blocking `Iterator` delivery, and a durable/replayable feed. See
+>   § Implementation notes → "Deferred layers."
 
 ## Concept
 
@@ -19,19 +32,21 @@ mirroring slate's `find`/`query` split: a **BSON filter document** (the Mongo `f
 filter form, via `slate_query::translate_filter`) or a **SQL `SELECT` string** (via the
 `slate-sql` parser). Each front-end pairs with **two delivery shapes** — a sync
 **callback** (push) or a long-lived **subscription cursor** (pull) — yielding a 2×2
-public API. The bare name takes a BSON filter; the `_query` suffix takes SQL:
+public API. You reach a BSON filter through `find(filter)` and a SQL filter through
+`query(sql)`; both builders expose the same `.watch`/`.stream` terminals:
 
 ```rust
 // Callback (push) — low-latency, in-process (e.g. an IoT reaction on the writer thread)
-let handle = db.watch("cf", "sensors", doc! { "temp": { "$gt": 80 } },
-    |events: &[ChangeEvent]| { /* matching changes from this commit, in write order */ })?;
-let handle = db.watch_query("cf", "sensors", "SELECT * FROM s WHERE s.temp > 80",
-    |events: &[ChangeEvent]| { /* … */ })?;
+let sensors = db.collection("sensors");      // or db.cf("telemetry").collection("sensors")
+let handle = sensors.find(doc! { "temp": { "$gt": 80 } })
+    .watch(|events: &[ChangeEvent]| { /* matching changes this commit, in write order */ })?;
+let handle = sensors.query("SELECT * FROM s WHERE s.temp > 80")
+    .watch(|events: &[ChangeEvent]| { /* … */ })?;
 handle.unwatch(); // or just drop it
 
 // Cursor (pull) — decoupled consumer, drains on its own thread (telemetry, sync, FFI)
-let stream = db.stream("cf", "sensors", doc! { "temp": { "$gt": 80 } })?;
-let stream = db.stream_query("cf", "sensors", "SELECT * FROM s WHERE s.temp > 80")?;
+let stream = sensors.find(doc! { "temp": { "$gt": 80 } }).stream()?;
+let stream = sensors.query("SELECT * FROM s WHERE s.temp > 80").stream()?;
 while let Some(batch) = stream.try_next() { /* Vec<ChangeEvent> per commit */ }
 // or block on a consumer thread: stream.next_blocking(); check stream.lagged().
 ```
@@ -266,26 +281,28 @@ naturally sees **one event per document**, never per index entry.
 
 1. **Filter surface → BSON *and* SQL, mirroring `find`/`query`.** Two front-ends lower
    to the *same* compiled predicate, so a watch can never drift from query semantics:
-   - **BSON** (`db.watch` / `db.stream`) — a Mongo `find` filter document, translated by
-     `slate_query::translate_filter` → `WHERE` `Expression` → `raweval::compile`. The
-     resulting field paths root at the same synthetic alias (`slate_query::ALIAS`) the
-     filter compiles against. **Filter-only** (no projection; the event carries the whole
-     document). An empty filter `{}` is match-all.
-   - **SQL** (`db.watch_query` / `db.stream_query`) — a `SELECT` string parsed by
-     `slate-sql`; the `WHERE` `Expression` (plus identity projection) is extracted.
-     Set-ops (`ORDER BY` / `GROUP BY` / `HAVING` / aggregate / `LIMIT` / `OFFSET` /
-     `DISTINCT`) and joins are rejected at registration.
+   - **BSON** (`find(filter).watch` / `.stream`) — a Mongo `find` filter document,
+     translated by `slate_query::translate_filter` → `WHERE` `Expression` →
+     `raweval::compile`. The resulting field paths root at the same synthetic alias
+     (`slate_query::ALIAS`) the filter compiles against. **Filter-only** (no projection;
+     the event carries the whole document). An empty filter `{}` is match-all.
+   - **SQL** (`query(sql).watch` / `.stream`) — a `SELECT` string parsed by `slate-sql`;
+     the `WHERE` `Expression` (plus identity projection) is extracted. Set-ops
+     (`ORDER BY` / `GROUP BY` / `HAVING` / aggregate / `LIMIT` / `OFFSET` / `DISTINCT`),
+     joins, and `@params` are rejected at registration.
 
-   Naming follows slate's existing surface: bare name = BSON filter, `_query` = SQL.
+   The BSON-vs-SQL split is the builder you start from (`find` vs `query`); both expose
+   the same `.watch`/`.stream` terminal names.
 2. **Two delivery shapes on one detection core → a 2×2 API.** Each filter front-end
    pairs with both deliveries, all over one registry + one detection core:
-   - **Callback (push)** — `db.watch` / `db.watch_query`: a sync `Fn(&[ChangeEvent])`
-     fired on the writer thread after commit, for low-latency in-process reactions.
-   - **Cursor (pull)** — `db.stream` / `db.stream_query`: a long-lived `WatchStream`
-     subscription the consumer drains on its own thread (`try_next` / `next_blocking`,
-     `lagged`) — decoupled, backpressure-friendly, the FFI-clean shape for the Swift/wasm
-     bindings. The cursor is a **subscription**, NOT a transaction-scoped query cursor —
-     it outlives any one commit.
+   - **Callback (push)** — `find(f).watch` / `query(sql).watch`: a sync
+     `Fn(&[ChangeEvent])` fired on the writer thread after commit, for low-latency
+     in-process reactions.
+   - **Cursor (pull)** — `find(f).stream` / `query(sql).stream`: a long-lived
+     `WatchStream` subscription the consumer drains on its own thread (`try_next` /
+     `next_blocking`, `lagged`) — decoupled, backpressure-friendly, the FFI-clean shape
+     for the Swift/wasm bindings. The cursor is a **subscription**, NOT a
+     transaction-scoped query cursor — it outlives any one commit.
 
    A cursor is implemented as a watch whose callback pushes the per-commit batch into the
    subscription's bounded buffer — so callback-vs-cursor is the *only* place delivery
@@ -316,6 +333,77 @@ naturally sees **one event per document**, never per index entry.
 11. **Ephemeral, feed-ready.** No durable log in v1, but the emit step assembles clean
     change *records* so "also append to a durable feed CF inside the txn" is additive
     when sync arrives.
+
+## Implementation notes (as shipped)
+
+The design above landed almost verbatim; this section pins the concrete surface and the
+few places the code names things differently from the prose.
+
+**Public surface — v2 builder terminals (no flat `db.*` methods).**
+
+- BSON: `Collection::find(filter).watch(cb)` / `.stream()` (`crates/slate-db/src/v2/read.rs`).
+  Filter-only — a `find` reshaped with `sort`/`offset`/`limit`/`project` is rejected at
+  the terminal by `ensure_filter_only`.
+- SQL: `Collection::query(sql).watch(cb)` / `.stream()` (`crates/slate-db/src/v2/query.rs`),
+  only on the no-parameter builder (`query(sql).params(..).watch(..)` does not compile — a
+  watch binds no `@params`). `WHERE` is the filter; `ORDER BY`/`GROUP BY`/`HAVING`/
+  aggregates/`LIMIT`/`OFFSET`/`DISTINCT`/joins/`@params`/shaping projections are rejected
+  at registration by `parse_watch_filter`.
+- The `Collection` handle carries an `Arc<WatchRegistry>` (cloned from the `Database`), so
+  the reactive terminals register with **no transaction**; the data terminals
+  (`iter_raw`/`iter`) still take one.
+
+**Detection core — `slate_executor::watch` (`crates/slate-executor/src/watch.rs`).**
+
+- `ChangeEvent { Insert { doc }, Update { old, new }, Delete { doc } }` is defined here and
+  re-exported from `slate-db`.
+- `WatchSink` is the per-transaction sink: `targets` grouped by `(cf, collection)` plus a
+  `RefCell<Vec<CapturedEvent>>` buffer. It is threaded into the `Executor` like
+  `params`/`rand` and shared by `Rc` — so the design's `Rc<RefCell<WatchBuffer>>` is, as
+  built, `Rc<WatchSink>` with the `RefCell` *inside*. `!Sync`, matching the executor.
+- The mutation nodes call `WatchSink::capture(cf, collection, pk_path, old, new)` — the one
+  place old+new co-exist. It evaluates each watch's compiled filter against both states,
+  recasts on the set boundary, and buffers a `CapturedEvent { handle_id, pk, event }`. A
+  watch is an **observer**: a filter that *errors* at eval time is a non-match, never a
+  write failure. The only hard error is a missing primary key.
+- Filters compile once via `compile_filter(expr, alias)` → `Arc<Compiled>`
+  (`slate_eval::raweval`), the same machinery the `Filter` node uses. `udf.*` inside a
+  watch filter is out of scope (no UDF bag is threaded through the registry path).
+
+**Registry, delivery, emit — `slate-db` (`crates/slate-db/src/watch.rs`).**
+
+- `WatchRegistry` = `ArcSwap<WatchSnapshot>`, lives on `Database` behind an `Arc`,
+  snapshotted at `begin()`. `register`/`unregister` rebuild the snapshot copy-on-write via
+  `ArcSwap::rcu`. `WatchSnapshot::build_sink()` produces the per-transaction `Rc<WatchSink>`
+  (`None` when no watches exist → zero write-path overhead).
+- `register_compiled` is the single registration core all four front-ends funnel through;
+  `watch_bson`/`watch_sql` (push) and `stream_bson`/`stream_sql` (pull) differ only in how
+  they produce `(alias, filter_expr)` and what the callback does.
+- `WatchHandle` unregisters on `Drop` (or explicit `unwatch()`); it holds no collection
+  lock, so a `drop_collection` proceeds independently and a watch on a dropped collection
+  simply goes cold.
+- Cursor delivery: `WatchStream` owns its `WatchHandle` + a bounded `Subscription`
+  (`Mutex<VecDeque<Vec<ChangeEvent>>>` + `Condvar`, `DEFAULT_STREAM_CAPACITY = 1024`). The
+  pull cursor's "callback" just pushes each commit batch into the buffer. Overflow is
+  non-blocking lag-drop: a full queue drops the batch and sets `lagged` (cleared on read).
+  API: `try_next()` (non-blocking), `next_blocking()` (blocks until a batch or close),
+  `lagged()`. It is **not** a std `Iterator` or a `futures::Stream` — that ergonomic upgrade
+  is a deferred layer (below).
+- `emit(snapshot, sink)` runs at the post-commit `registry.swap` slot: drains the sink,
+  `coalesce`s repeated changes to one net change per document per watch (last-write-wins,
+  first-seen order; in-and-out within a commit nets to nothing), and fires each callback
+  inside `catch_unwind` (the commit already succeeded, so a panicking callback is isolated).
+
+**Deferred layers** (named here so the next iteration can find them):
+
+- **Reactive result-sets** — the § Reactive queries fold (`events + a HashMap<pk, doc>`),
+  auto-maintained live views. Unbuilt.
+- **Stream / Iterator ergonomics** — `WatchStream` is a bespoke pull type today; a blocking
+  `Iterator` and/or an async `futures::Stream` adapter (the FFI-clean shape) are unbuilt.
+- **Shaping projections** on the watch filter — the event carries the whole document today;
+  a projection would have to keep the pk for coalescing/folding to work.
+- **Durable / replayable feed** — delivery is ephemeral, in-memory, and lossy under lag.
+  At-least-once with a resumable cursor position is the sync story (deferred).
 
 ## Spike validation (confirmed against code)
 
