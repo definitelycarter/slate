@@ -1113,9 +1113,31 @@ mod tests {
     }
 
     #[test]
-    fn and_of_two_indexed_fields_uses_index_merge_and() {
+    fn and_of_two_indexed_equalities_uses_index_intersect() {
+        // All-equality AND → the galloping skip-merge (Index Intersection RFC),
+        // not the left-associative IndexMerge(And) fold.
         let node = lower_with(
             r#"SELECT VALUE c FROM c WHERE c.age = 41 AND c.status = "active""#,
+            &age_status_indexed(),
+        );
+        match source_under_bind(node) {
+            Node::KeyLookup { source, .. } => match *source {
+                Node::IndexIntersect { parts, .. } => {
+                    let fields: Vec<&str> = parts.iter().map(|p| p.field.as_str()).collect();
+                    assert_eq!(fields, vec!["age", "status"]);
+                }
+                other => panic!("expected KeyLookup(IndexIntersect), got {other:?}"),
+            },
+            other => panic!("expected KeyLookup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn and_of_eq_and_range_keeps_index_merge_and() {
+        // A non-equality part (the range) disqualifies the doc-id skip-merge, so
+        // the intersection falls back to today's hash IndexMerge(And).
+        let node = lower_with(
+            r#"SELECT VALUE c FROM c WHERE c.age > 40 AND c.status = "active""#,
             &age_status_indexed(),
         );
         match source_under_bind(node) {

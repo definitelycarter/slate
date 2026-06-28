@@ -292,6 +292,25 @@ fn render_node(node: &Node, depth: usize, lines: &mut Vec<String>, ctx: &mut Ren
             render_node(lhs, depth + 1, lines, ctx);
             render_node(rhs, depth + 1, lines, ctx);
         }
+        Node::IndexIntersect { collection, parts } => {
+            // The galloping all-equality intersection. Render each equality part
+            // as a child line in the IndexScan `coll.field = value` form so the
+            // shape is observable; the parts aren't child nodes (no recursion).
+            let suffix = ctx.annotate(index, None);
+            line(lines, depth, format!("IndexIntersect{suffix}"));
+            for part in parts {
+                line(
+                    lines,
+                    depth + 1,
+                    format!(
+                        "{}.{} = {}",
+                        coll(collection),
+                        part.field,
+                        bson(&part.value)
+                    ),
+                );
+            }
+        }
         Node::Bind { alias, source } => {
             let suffix = ctx.annotate(index, child_examined());
             line(lines, depth, format!("Bind {alias}{suffix}"));

@@ -27,8 +27,8 @@ use bson::{Bson, RawBson};
 use slate_ast::{BinOp, Expression, Literal};
 
 use crate::plan::{
-    CollectionRef, CompoundScanRange, CompoundScanTail, IndexScanRange, LogicalOp, Node,
-    ScanDirection,
+    CollectionRef, CompoundScanRange, CompoundScanTail, IndexIntersectPart, IndexScanRange,
+    LogicalOp, Node, ScanDirection,
 };
 
 /// A flat vector index visible to the planner: the field it is on plus the
@@ -207,11 +207,7 @@ pub(crate) fn plan_source(
     }
 
     let residual = residual_excluding(conjuncts, &consumed);
-    let sources: Vec<Node> = accesses
-        .iter()
-        .map(|a| lower_access(a, container))
-        .collect();
-    match merge_sources(container, LogicalOp::And, sources) {
+    match merge_accesses(container, LogicalOp::And, &accesses) {
         Some(ids) => (key_lookup(container, ids), residual),
         None => (scan(container), residual),
     }
@@ -343,10 +339,9 @@ fn lower_access(access: &IndexAccess, container: &CollectionRef) -> Node {
             IndexScanRange::Eq(value.clone()),
         )),
         IndexAccess::Merge { op, parts } => {
-            let sources: Vec<Node> = parts.iter().map(|p| lower_access(p, container)).collect();
             // A `Merge` is always built with at least one part; the fallback is
             // unreachable but keeps this panic-free.
-            merge_sources(container, *op, sources).unwrap_or_else(|| scan(container))
+            merge_accesses(container, *op, parts).unwrap_or_else(|| scan(container))
         }
     }
 }
@@ -621,6 +616,63 @@ fn merge(op: LogicalOp, parts: Vec<IndexAccess>) -> IndexAccess {
 
 fn range_bound(lower: Option<(Bson, bool)>, upper: Option<(Bson, bool)>) -> IndexScanRange {
     IndexScanRange::Range { lower, upper }
+}
+
+/// Turn a set of index accesses under `logical` into one id-yielding node.
+///
+/// The all-equality `AND` of ≥2 parts becomes a single galloping
+/// [`Node::IndexIntersect`] (Index Intersection RFC, Door A) — bounded by the
+/// smallest input instead of materialising and hashing the largest. Every other
+/// shape (any `Or`, a single access, or an `AND` with a range/prefix/compound/
+/// nested-merge part) lowers each access and folds them into the
+/// `IndexMerge` tree, exactly as before.
+fn merge_accesses(
+    container: &CollectionRef,
+    logical: LogicalOp,
+    accesses: &[IndexAccess],
+) -> Option<Node> {
+    if logical == LogicalOp::And
+        && accesses.len() >= 2
+        && let Some(parts) = all_equality_parts(accesses)
+    {
+        return Some(Node::IndexIntersect {
+            collection: container.clone(),
+            parts,
+        });
+    }
+    let sources: Vec<Node> = accesses
+        .iter()
+        .map(|a| lower_access(a, container))
+        .collect();
+    merge_sources(container, logical, sources)
+}
+
+/// One `(field, value)` part per access iff *every* access is an equality
+/// (`Scan { Eq }` or `Multikey`) — the precondition for a doc-id skip-merge
+/// (each equality stream is doc-id-sorted). Any non-equality part ⇒ `None`,
+/// keeping the hash `IndexMerge(And)`.
+fn all_equality_parts(accesses: &[IndexAccess]) -> Option<Vec<IndexIntersectPart>> {
+    accesses.iter().map(equality_part).collect()
+}
+
+/// The `(field, value)` of one equality access, or `None` for any other shape.
+/// The `clone`s build owned IR from the borrowed access decision — the same move
+/// `lower_access` makes for every other node.
+fn equality_part(access: &IndexAccess) -> Option<IndexIntersectPart> {
+    match access {
+        IndexAccess::Scan {
+            field,
+            range: IndexScanRange::Eq(value),
+        } => Some(IndexIntersectPart {
+            field: field.clone(),
+            value: value.clone(),
+        }),
+        IndexAccess::Multikey { field, value } => Some(IndexIntersectPart {
+            field: field.clone(),
+            value: value.clone(),
+        }),
+        _ => None,
+    }
 }
 
 /// Fold ID sources into an `IndexMerge` tree (`None` if empty, the source

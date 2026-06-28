@@ -166,6 +166,16 @@ pub enum IndexScanRange {
     StringPrefix(String),
 }
 
+/// One equality part of a [`Node::IndexIntersect`]: an indexed `field = value`.
+/// `field` is a scalar index path or a `.[]` multikey path — the cursor opens an
+/// equality scan over either, and a `.[]` part's stream is doc-id-sorted just
+/// like a scalar's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexIntersectPart {
+    pub field: String,
+    pub value: Bson,
+}
+
 /// How a [`Node::CompoundIndexScan`] is bounded — the leftmost-prefix model.
 ///
 /// `eq_prefix` pins the leading components to exact values; `tail` optionally
@@ -309,6 +319,18 @@ pub enum Node {
         logical: LogicalOp,
         lhs: Box<Node>,
         rhs: Box<Node>,
+    },
+
+    /// Intersect ≥2 **equality** index streams by a galloping skip-merge over
+    /// their shared doc-id order, bounded by the *smallest* input — the stats-free
+    /// alternative to a left-associative `IndexMerge(And)` that reads the larger
+    /// side fully (Index Intersection RFC, Door A). Emitted only when every AND
+    /// part is an equality scan, so each stream is doc-id-sorted; any
+    /// range/prefix/compound part keeps the `IndexMerge(And)` fold. Yields deduped
+    /// bare doc-ids for a `KeyLookup`, exactly like `IndexMerge`.
+    IndexIntersect {
+        collection: CollectionRef,
+        parts: Vec<IndexIntersectPart>,
     },
 
     /// Attach the `FROM` alias to a bare-value source, producing the row

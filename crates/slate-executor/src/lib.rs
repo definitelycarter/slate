@@ -336,6 +336,10 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 nodes::index_merge::execute(self.txn, &collection, logical, left, right)?
             }
 
+            Node::IndexIntersect { collection, parts } => {
+                nodes::index_intersect::execute(self.txn, &collection, &parts)?
+            }
+
             Node::Bind { alias, source } => {
                 let source = self.execute_node(*source, current)?;
                 nodes::bind::execute(alias, source)

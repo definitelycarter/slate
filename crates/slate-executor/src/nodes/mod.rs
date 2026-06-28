@@ -23,6 +23,7 @@ pub(crate) mod delete;
 pub(crate) mod distinct;
 pub(crate) mod env;
 pub(crate) mod filter;
+pub(crate) mod index_intersect;
 pub(crate) mod index_merge;
 pub(crate) mod index_scan;
 pub(crate) mod insert;

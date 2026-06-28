@@ -98,6 +98,9 @@ fn count_node(node: &Node) -> usize {
         | Node::Scan { .. }
         | Node::IndexScan { .. }
         | Node::CompoundIndexScan { .. }
+        // An all-equality intersection: a single source node whose equality parts
+        // are field/value pairs, not child nodes.
+        | Node::IndexIntersect { .. }
         | Node::CurrentRow => 0,
 
         Node::KeyLookup { source, .. }
