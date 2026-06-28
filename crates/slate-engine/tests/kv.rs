@@ -1728,6 +1728,41 @@ fn float16_index_scan_yields_dequantized_vectors() {
 }
 
 #[test]
+fn int8_index_scan_yields_dequantized_vectors() {
+    // An `int8` index stores a per-vector-scaled approximate copy; `scan_vectors`
+    // resolves the dtype and dequantizes back to `f32` within int8's precision
+    // (~max|x| / 254). The scan is the approximate side — exactness is restored by
+    // the executor's rescore, so here we only assert the dequantization tolerance.
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(
+        DEFAULT_CF,
+        "photos",
+        &VectorIndexSpec::int8("embedding", 3, VectorMetric::Cosine),
+    )
+    .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, -0.5, 0.25] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    let scanned = sorted_vectors(&txn, &handle, "embedding");
+    assert_eq!(scanned.len(), 1);
+    assert_eq!(scanned[0].0, "a");
+    for (got, want) in scanned[0].1.iter().zip([1.0_f32, -0.5, 0.25]) {
+        assert!((got - want).abs() < 0.01, "got {got}, want {want}");
+    }
+    txn.rollback().unwrap();
+}
+
+#[test]
 fn vector_index_backfills_existing_records() {
     let engine = engine();
     let txn = engine.begin(false).unwrap();

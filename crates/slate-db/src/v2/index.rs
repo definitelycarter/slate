@@ -139,6 +139,18 @@ impl VectorIndexOptions {
             dtype: VectorDataType::Float16,
         }
     }
+
+    /// An `int8` vector index — quantized to ~a quarter of the footprint via a
+    /// per-vector scale (`dims + 4` bytes). The scan distance is approximate; the
+    /// seek over-samples and rescores against each document's exact float32, so
+    /// recall@k stays high (1.0 at a 2× window in the spike) with no training pass.
+    pub fn int8(dims: u32, metric: VectorMetric) -> Self {
+        Self {
+            dims,
+            metric,
+            dtype: VectorDataType::Int8,
+        }
+    }
 }
 
 mod sealed {

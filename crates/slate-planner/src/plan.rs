@@ -150,6 +150,8 @@ pub enum VectorDataType {
     /// Half-precision float16 — ~2× smaller and approximate; the shortlist is
     /// rescored with the document's exact float32.
     Float16,
+    /// Symmetric int8 — ~4× smaller and approximate; rescored like float16.
+    Int8,
 }
 
 impl VectorDataType {

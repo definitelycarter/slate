@@ -926,5 +926,6 @@ fn map_vector_dtype(dtype: slate_engine::VectorDataType) -> slate_planner::Vecto
     match dtype {
         slate_engine::VectorDataType::Float32 => slate_planner::VectorDataType::Float32,
         slate_engine::VectorDataType::Float16 => slate_planner::VectorDataType::Float16,
+        slate_engine::VectorDataType::Int8 => slate_planner::VectorDataType::Int8,
     }
 }

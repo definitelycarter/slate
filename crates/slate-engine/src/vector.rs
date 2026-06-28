@@ -58,46 +58,84 @@ pub enum VectorDataType {
     /// and near-lossless; the approximate scan is refined by a full-precision
     /// rescore from the document (recall@k ≈ 1.0 with a small rescore window).
     Float16,
+    /// Symmetric int8 with a per-vector scale: `[4-byte LE f32 scale][dims i8
+    /// codes]` → `dims + 4` bytes (~4× smaller). Approximate; the rescore restores
+    /// exact ordering (spike recall@k = 1.0 at a 2× window). The per-vector scale
+    /// needs no training pass, so it suits the incremental write path.
+    Int8,
 }
 
 impl VectorDataType {
-    /// Bytes per stored component for this width (`float32` → 4, `float16` → 2).
-    pub(crate) fn element_size(self) -> usize {
+    /// Pack a full `f32` vector into this width's little-endian blob. The whole
+    /// vector is taken (not one component at a time) because a per-vector scheme —
+    /// int8's `scale = max|x| / 127` — must see every component before encoding.
+    fn encode(self, v: &[f32]) -> Vec<u8> {
         match self {
-            VectorDataType::Float32 => 4,
-            VectorDataType::Float16 => 2,
+            VectorDataType::Float32 => {
+                let mut out = Vec::with_capacity(v.len() * 4);
+                for &x in v {
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+                out
+            }
+            VectorDataType::Float16 => {
+                let mut out = Vec::with_capacity(v.len() * 2);
+                for &x in v {
+                    out.extend_from_slice(&f16::from_f32(x).to_le_bytes());
+                }
+                out
+            }
+            VectorDataType::Int8 => encode_int8(v),
         }
     }
 
-    /// Encode one `f32` component into its packed little-endian bytes, appending
-    /// to `out`. The document's BSON array (always numeric, widened to `f32`) is
-    /// the input; the width is the only thing that changes per dtype.
-    fn encode_component(self, x: f32, out: &mut Vec<u8>) {
-        match self {
-            VectorDataType::Float32 => out.extend_from_slice(&x.to_le_bytes()),
-            VectorDataType::Float16 => out.extend_from_slice(&f16::from_f32(x).to_le_bytes()),
-        }
-    }
-
-    /// Decode a packed component blob back to (approximate) `f32` — the scan side
-    /// of quantization. `None` if the byte length is not a whole number of this
-    /// width's components (a corruption guard on the read path). `Float16`
-    /// dequantizes; `Float32` is exact.
+    /// Decode this width's packed blob back to (approximate) `f32` — the scan side
+    /// of quantization. `None` on a malformed length (a corruption guard on the
+    /// read path). `Float32` is exact; the quantized widths dequantize.
     pub(crate) fn decode_components(self, bytes: &[u8]) -> Option<Vec<f32>> {
-        if !bytes.len().is_multiple_of(self.element_size()) {
-            return None;
+        match self {
+            VectorDataType::Float32 => {
+                decode_chunks(bytes, 4, |c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            }
+            VectorDataType::Float16 => {
+                decode_chunks(bytes, 2, |c| f16::from_le_bytes([c[0], c[1]]).to_f32())
+            }
+            VectorDataType::Int8 => decode_int8(bytes),
         }
-        Some(match self {
-            VectorDataType::Float32 => bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-            VectorDataType::Float16 => bytes
-                .chunks_exact(2)
-                .map(|c| f16::from_le_bytes([c[0], c[1]]).to_f32())
-                .collect(),
-        })
     }
+}
+
+/// Decode a flat little-endian blob of fixed-`width` components. `None` if the
+/// length is not a whole number of components.
+fn decode_chunks(bytes: &[u8], width: usize, f: impl Fn(&[u8]) -> f32) -> Option<Vec<f32>> {
+    if !bytes.len().is_multiple_of(width) {
+        return None;
+    }
+    Some(bytes.chunks_exact(width).map(f).collect())
+}
+
+/// Pack a vector as symmetric int8 with a per-vector scale: `scale = max|x| / 127`
+/// (1.0 for an all-zero vector), stored as a leading little-endian `f32` followed
+/// by one `i8` code per component (`round(x / scale)` clamped to ±127). Total
+/// `v.len() + 4` bytes.
+fn encode_int8(v: &[f32]) -> Vec<u8> {
+    let maxabs = v.iter().fold(0f32, |m, &x| m.max(x.abs()));
+    let scale = if maxabs == 0.0 { 1.0 } else { maxabs / 127.0 };
+    let mut out = Vec::with_capacity(4 + v.len());
+    out.extend_from_slice(&scale.to_le_bytes());
+    for &x in v {
+        let code = (x / scale).round().clamp(-127.0, 127.0) as i8;
+        out.push(code as u8);
+    }
+    out
+}
+
+/// Decode the int8 layout: read the leading `f32` scale, then dequantize each
+/// `i8` code (`code * scale`). `None` if shorter than the 4-byte scale header.
+fn decode_int8(bytes: &[u8]) -> Option<Vec<f32>> {
+    let (scale, codes) = bytes.split_at_checked(4)?;
+    let scale = f32::from_le_bytes([scale[0], scale[1], scale[2], scale[3]]);
+    Some(codes.iter().map(|&b| (b as i8) as f32 * scale).collect())
 }
 
 /// A loaded vector index definition: the field path plus the embedding shape.
@@ -139,6 +177,17 @@ impl VectorIndexSpec {
             dtype: VectorDataType::Float16,
         }
     }
+
+    /// An `int8` spec (Phase 2 quantization — ~4× smaller via a per-vector scale,
+    /// high-recall with the full-precision rescore).
+    pub fn int8(path: impl Into<String>, dims: u32, metric: VectorMetric) -> Self {
+        VectorIndexSpec {
+            path: path.into(),
+            dims,
+            metric,
+            dtype: VectorDataType::Int8,
+        }
+    }
 }
 
 /// Extract a vector field from a document and pack it to a little-endian blob in
@@ -172,8 +221,10 @@ pub(crate) fn pack_vector(
         )));
     };
 
-    let mut bytes = Vec::with_capacity(dims as usize * dtype.element_size());
-    let mut count: u32 = 0;
+    // Collect the numeric array into an `f32` vector first, then encode in the
+    // width: int8's per-vector scale needs the whole vector, and f32/f16 cost only
+    // a transient `Vec<f32>` on the (cold, write-side) pack path.
+    let mut v: Vec<f32> = Vec::with_capacity(dims as usize);
     for element in arr.into_iter() {
         let el = element.map_err(|e| {
             EngineError::InvalidDocument(format!("vector field '{field}' is malformed: {e}"))
@@ -188,18 +239,17 @@ pub(crate) fn pack_vector(
                 )));
             }
         };
-        dtype.encode_component(f, &mut bytes);
-        count += 1;
+        v.push(f);
     }
 
-    if count != dims {
+    if v.len() != dims as usize {
         return Err(EngineError::VectorDimsMismatch {
             field: field.to_string(),
             expected: dims,
-            found: count,
+            found: v.len() as u32,
         });
     }
-    Ok(Some(bytes))
+    Ok(Some(dtype.encode(&v)))
 }
 
 // ── Stored vector entry (TTL header + packed blob) ───────────────
@@ -335,6 +385,38 @@ mod tests {
     }
 
     #[test]
+    fn pack_int8_footprint_and_dequantizes_within_tolerance() {
+        // int8 stores a 4-byte scale + one byte per component, and round-trips to
+        // within ~scale/2 (= max|x| / 254) of the original — the approximation the
+        // rescore refines. Here max|x| = 1.0, so the tolerance is ~0.004.
+        let doc = bson::rawdoc! { "_id": "a", "v": [1.0_f64, -0.5, 0.25, 0.0] };
+        let packed = pack_vector(&doc, "v", 4, VectorDataType::Int8)
+            .unwrap()
+            .unwrap();
+        // 4-byte scale + 4 i8 codes.
+        assert_eq!(packed.len(), 8);
+        let back = VectorDataType::Int8.decode_components(&packed).unwrap();
+        for (got, want) in back.iter().zip([1.0_f32, -0.5, 0.25, 0.0]) {
+            assert!((got - want).abs() < 0.01, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn pack_int8_all_zero_vector_is_safe() {
+        // An all-zero vector has no magnitude; the scale falls back to 1.0 (no
+        // divide-by-zero) and every code is 0, decoding back to zeros.
+        let doc = bson::rawdoc! { "_id": "a", "v": [0.0_f64, 0.0, 0.0] };
+        let packed = pack_vector(&doc, "v", 3, VectorDataType::Int8)
+            .unwrap()
+            .unwrap();
+        assert_eq!(packed.len(), 7);
+        assert_eq!(
+            VectorDataType::Int8.decode_components(&packed).unwrap(),
+            vec![0.0_f32, 0.0, 0.0]
+        );
+    }
+
+    #[test]
     fn pack_absent_field_is_sparse() {
         let doc = bson::rawdoc! { "_id": "a", "name": "no vector" };
         assert!(
@@ -397,14 +479,17 @@ mod tests {
                 .is_none()
         );
         assert!(VectorDataType::Float16.decode_components(&[0]).is_none());
+        // int8 needs at least the 4-byte scale header.
+        assert!(VectorDataType::Int8.decode_components(&[0, 1, 2]).is_none());
     }
 
     #[test]
     fn spec_serde_roundtrips_through_bson() {
-        // Both widths serialize whole into the catalog config value.
+        // Every width serializes whole into the catalog config value.
         for spec in [
             VectorIndexSpec::float32("embedding", 768, VectorMetric::Cosine),
             VectorIndexSpec::float16("embedding", 768, VectorMetric::Cosine),
+            VectorIndexSpec::int8("embedding", 768, VectorMetric::Cosine),
         ] {
             let blob = bson::serialize_to_vec(&spec).unwrap();
             let back: VectorIndexSpec = bson::deserialize_from_slice(&blob).unwrap();

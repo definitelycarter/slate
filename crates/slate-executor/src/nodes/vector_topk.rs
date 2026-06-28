@@ -824,4 +824,71 @@ mod tests {
 
         assert_eq!(got, want, "float16 rescore must match the exact ranking");
     }
+
+    #[test]
+    fn e2e_int8_topk_matches_exact_via_rescore() {
+        // int8 is coarser than float16, so its approximate scan order diverges more
+        // — but the rescore reads each shortlisted document's exact float32, so the
+        // returned order must still equal the exact (f64) brute-force ranking.
+        let corpus: [(&str, [f64; 3]); 5] = [
+            ("a", [0.11, 0.93, 0.21]),
+            ("b", [0.10, 0.95, 0.19]),
+            ("c", [0.90, 0.05, 0.10]),
+            ("d", [0.33, 0.33, 0.88]),
+            ("e", [0.12, 0.90, 0.25]),
+        ];
+        let engine = KvEngine::new(MemoryStore::new());
+        {
+            let txn = engine.begin(false).unwrap();
+            txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+                .unwrap();
+            txn.create_vector_index(
+                DEFAULT_CF,
+                "photos",
+                &VectorIndexSpec::int8("embedding", 3, slate_engine::VectorMetric::Cosine),
+            )
+            .unwrap();
+            let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+            for (id, e) in corpus {
+                let doc = bson::rawdoc! { "_id": id, "embedding": [e[0], e[1], e[2]] };
+                txn.put(&handle, &doc).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let meta = CollectionMeta {
+            indexes: Vec::new(),
+            compound_indexes: Vec::new(),
+            vector_indexes: vec![VectorIndexMeta {
+                field: "embedding".into(),
+                metric: slate_planner::VectorMetric::Cosine,
+                dtype: slate_planner::VectorDataType::Int8,
+            }],
+            pk_path: "_id".into(),
+        };
+        let txn = engine.begin(true).unwrap();
+        let sql = "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [0.1, 0.92, 0.2]) DESC LIMIT 3";
+        let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), photos_ref(), &meta);
+        let out = Executor::new(&txn).execute_collect(plan).unwrap();
+        let got: Vec<String> = out
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d.get_str("_id").unwrap().to_string(),
+                other => panic!("got {other:?}"),
+            })
+            .collect();
+
+        let q = [0.1_f64, 0.92, 0.2];
+        let mut scored: Vec<(f64, &str)> = corpus
+            .iter()
+            .map(|(id, e)| (VectorMetric::Cosine.measure(&q, e), *id))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then_with(|| a.1.cmp(b.1)));
+        let want: Vec<String> = scored
+            .iter()
+            .take(3)
+            .map(|(_, id)| id.to_string())
+            .collect();
+
+        assert_eq!(got, want, "int8 rescore must match the exact ranking");
+    }
 }

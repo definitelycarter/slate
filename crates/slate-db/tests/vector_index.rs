@@ -133,6 +133,46 @@ fn float16_vector_index_through_db_layer() {
 }
 
 #[test]
+fn int8_vector_index_through_db_layer() {
+    // The public `VectorIndexOptions::int8` surface: a ~quarter-footprint index
+    // (per-vector scale) whose seek over-samples then rescores against each
+    // document's exact float32, so its ranking matches an exact index.
+    let (db, _dir) = temp_db();
+    create_photos(&db);
+
+    let txn = db.begin(false).unwrap();
+    db.collection(PHOTOS)
+        .insert_many(vec![
+            doc! { "_id": "x", "embedding": [0.9, 0.1, 0.05] },
+            doc! { "_id": "y", "embedding": [0.1, 0.9, 0.2] },
+            doc! { "_id": "z", "embedding": [0.05, 0.2, 0.95] },
+        ])
+        .execute(&txn)
+        .unwrap();
+    db.collection(PHOTOS)
+        .indexes()
+        .create(
+            "embedding",
+            VectorIndexOptions::int8(3, VectorMetric::Cosine),
+        )
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+
+    for (query, want) in [
+        ("[1.0, 0.0, 0.0]", "x"),
+        ("[0.0, 1.0, 0.0]", "y"),
+        ("[0.0, 0.0, 1.0]", "z"),
+    ] {
+        let sql = format!(
+            "SELECT VALUE c._id FROM c \
+             ORDER BY VECTORDISTANCE(c.embedding, {query}) DESC LIMIT 1"
+        );
+        assert_eq!(knn_ids(&db, &sql), vec![want.to_string()], "query {query}");
+    }
+}
+
+#[test]
 fn create_vector_index_dims_mismatch_on_existing_data_is_invalid_document() {
     // A pre-existing document whose embedding has the wrong dimensionality must
     // fail the create — surfacing through the db layer as `DbError::InvalidDocument`
