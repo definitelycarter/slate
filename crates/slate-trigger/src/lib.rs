@@ -13,7 +13,7 @@
 //! Unlike a validator (which is `Pure` and sees only the candidate document), a
 //! trigger keeps full read-write power over *other* documents — the audit-log
 //! pattern, cascading writes, derived collections. That power is handed to it as
-//! a [`TriggerTxn`]: `get`/`put`/`delete` keyed by `(collection, id)`.
+//! a [`TriggerTxn`]: `get`/`put`/`delete`/`merge` keyed by `(collection, id)`.
 //!
 //! Crucially, [`TriggerTxn`] has **no column-family parameter**. The column
 //! family is baked into the implementor at construction (by `slate-executor`,
@@ -74,7 +74,7 @@ where
 /// the [`Trigger`] signature or breaking construction sites. The fields are
 /// private; construct with [`new`](TriggerCtx::new) and use the accessors and
 /// the delegating [`get`](TriggerCtx::get)/[`put`](TriggerCtx::put)/
-/// [`delete`](TriggerCtx::delete) methods.
+/// [`delete`](TriggerCtx::delete)/[`merge`](TriggerCtx::merge) methods.
 pub struct TriggerCtx<'a> {
     action: &'a str,
     doc: &'a RawDocument,
@@ -115,6 +115,14 @@ impl<'a> TriggerCtx<'a> {
         self.txn.put(collection, doc)
     }
 
+    /// Field-merge `doc` into the row with the same pk in `collection` (within
+    /// this trigger's column family): overlay each field onto the existing
+    /// document, leaving untouched fields intact and the pk unchanged; insert
+    /// `doc` as-is if no row exists.
+    pub fn merge(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
+        self.txn.merge(collection, doc)
+    }
+
     /// Delete the document with `id` from `collection` (within this trigger's
     /// column family).
     pub fn delete(&self, collection: &str, id: RawBsonRef<'_>) -> Result<(), TriggerError> {
@@ -127,10 +135,10 @@ impl<'a> TriggerCtx<'a> {
 ///
 /// Implemented by `slate-executor` over the live engine transaction. There is
 /// deliberately **no column-family parameter**: the implementor binds one column
-/// family at construction, so every `get`/`put`/`delete` is confined to it and a
-/// trigger cannot reach across column families. A failing capability operation
-/// surfaces as [`TriggerError::Txn`], which (like any trigger error) aborts the
-/// write.
+/// family at construction, so every `get`/`put`/`delete`/`merge` is confined to
+/// it and a trigger cannot reach across column families. A failing capability
+/// operation surfaces as [`TriggerError::Txn`], which (like any trigger error)
+/// aborts the write.
 pub trait TriggerTxn {
     /// Read a document by `id` from `collection`. `None` if absent.
     fn get(
@@ -141,6 +149,12 @@ pub trait TriggerTxn {
 
     /// Write `doc` into `collection`.
     fn put(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError>;
+
+    /// Field-merge `doc` into the row with the same pk in `collection`
+    /// (upsert): overlay each field onto the existing document, leaving
+    /// untouched fields intact and the pk unchanged; insert `doc` as-is if no
+    /// row exists.
+    fn merge(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError>;
 
     /// Delete the document with `id` from `collection`.
     fn delete(&self, collection: &str, id: RawBsonRef<'_>) -> Result<(), TriggerError>;
@@ -262,6 +276,37 @@ mod tests {
             Ok(())
         }
 
+        fn merge(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
+            let id = doc
+                .get("_id")
+                .map_err(|e| TriggerError::Txn(e.to_string()))?
+                .ok_or_else(|| TriggerError::Txn("missing _id".into()))?;
+            let key = (collection.to_string(), id_key(id));
+            let mut store = self.store.borrow_mut();
+            match store.get(&key) {
+                // Existing row → overlay each non-`_id` field of `doc` onto it,
+                // preserving the rest and the original `_id`.
+                Some(existing) => {
+                    let mut merged: bson::Document =
+                        bson::deserialize_from_slice(existing.as_bytes()).unwrap();
+                    let update: bson::Document =
+                        bson::deserialize_from_slice(doc.as_bytes()).unwrap();
+                    for (k, v) in update {
+                        if k != "_id" {
+                            merged.insert(k, v);
+                        }
+                    }
+                    let bytes = bson::serialize_to_vec(&merged).unwrap();
+                    store.insert(key, RawDocumentBuf::from_bytes(bytes).unwrap());
+                }
+                // No row → insert `doc` as-is (the upsert leg).
+                None => {
+                    store.insert(key, doc.to_owned());
+                }
+            }
+            Ok(())
+        }
+
         fn delete(&self, collection: &str, id: RawBsonRef<'_>) -> Result<(), TriggerError> {
             let key = (collection.to_string(), id_key(id));
             self.store.borrow_mut().remove(&key);
@@ -350,6 +395,75 @@ mod tests {
                 .is_none()
         );
         assert_eq!(txn.deletes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn merge_overlays_and_preserves_untouched_fields() {
+        let txn = MockTxn::default();
+        let seed = rawdoc! { "_id": "u1", "name": "ada", "age": 36 };
+        txn.put("people", &seed).unwrap();
+
+        // Overlay `age`, add `city`; `name` is untouched and `_id` unchanged.
+        let patch = rawdoc! { "_id": "u1", "age": 37, "city": "london" };
+        txn.merge("people", &patch).unwrap();
+
+        let got = txn
+            .get("people", RawBsonRef::String("u1"))
+            .unwrap()
+            .expect("row still present");
+        assert_eq!(got.get_str("_id").unwrap(), "u1");
+        assert_eq!(got.get_str("name").unwrap(), "ada"); // preserved
+        assert_eq!(got.get_i32("age").unwrap(), 37); // overlaid
+        assert_eq!(got.get_str("city").unwrap(), "london"); // added
+    }
+
+    #[test]
+    fn merge_with_no_existing_row_inserts() {
+        let txn = MockTxn::default();
+        // No row for `u9` yet → merge upserts it as-is.
+        txn.merge("people", &rawdoc! { "_id": "u9", "name": "grace" })
+            .unwrap();
+
+        let got = txn
+            .get("people", RawBsonRef::String("u9"))
+            .unwrap()
+            .expect("upsert inserted the row");
+        assert_eq!(got.get_str("name").unwrap(), "grace");
+    }
+
+    #[test]
+    fn trigger_maintains_a_derived_doc_via_merge() {
+        // A representative trigger: on `inserted`, fold the candidate into a
+        // derived `directory` row keyed by the same id. The directory row
+        // already carries a `tags` field the candidate never mentions; merge
+        // overlays `name` while preserving `tags`.
+        fn directory(ctx: &TriggerCtx<'_>) -> Result<(), TriggerError> {
+            if ctx.action() == "inserted" {
+                ctx.merge("directory", ctx.doc())?;
+            }
+            Ok(())
+        }
+
+        let txn = MockTxn::default();
+        txn.put(
+            "directory",
+            &rawdoc! { "_id": "u1", "name": "old", "tags": "vip" },
+        )
+        .unwrap();
+
+        let bag = TriggerBag::new();
+        bag.register("directory", directory);
+
+        let doc = rawdoc! { "_id": "u1", "name": "ada" };
+        let ctx = TriggerCtx::new("inserted", &doc, &txn);
+        bag.get("directory").unwrap().fire(&ctx).unwrap();
+
+        let got = txn
+            .get("directory", RawBsonRef::String("u1"))
+            .unwrap()
+            .expect("directory row present");
+        assert_eq!(got.get_str("name").unwrap(), "ada"); // overlaid
+        assert_eq!(got.get_str("tags").unwrap(), "vip"); // preserved
     }
 
     #[test]

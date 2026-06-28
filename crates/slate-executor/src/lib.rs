@@ -1057,6 +1057,72 @@ mod hooks {
             .expect("trigger wrote the mirror doc");
         assert_eq!(got.get_str("name").unwrap(), "ada");
     }
+
+    #[test]
+    fn trigger_merges_into_another_collection_via_ctx() {
+        // CfScopedTxn wires a trigger's merge to the real transaction, confined
+        // to the firing cf: a pre-existing `directory` row carries a field the
+        // candidate never mentions; on fire, the trigger merges the candidate
+        // in, overlaying its fields while preserving the rest and the pk.
+        let engine = seeded_people();
+        {
+            let txn = engine.begin(false).unwrap();
+            txn.create_collection(DEFAULT_CF, "directory", &Default::default())
+                .unwrap();
+            let handle = txn.collection(DEFAULT_CF, "directory").unwrap();
+            txn.put(&handle, &rawdoc! { "_id": "1", "region": "eu", "age": 0 })
+                .unwrap();
+            txn.commit().unwrap();
+        }
+
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        // The candidate doc is {_id:"1", age:50}; merge it onto the directory
+        // row, overlaying `age` and leaving `region` (and `_id`) intact.
+        bag.register("rollup", |ctx: &TriggerCtx<'_>| {
+            ctx.merge("directory", ctx.doc())?;
+            Ok(())
+        });
+        Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("rollup", "inserted"))
+            .unwrap();
+
+        let handle = txn.collection(DEFAULT_CF, "directory").unwrap();
+        let got = txn
+            .get(&handle, &RawBsonRef::String("1"))
+            .unwrap()
+            .expect("directory row present");
+        assert_eq!(got.get_i32("age").unwrap(), 50); // overlaid from candidate
+        assert_eq!(got.get_str("region").unwrap(), "eu"); // preserved
+        assert_eq!(got.get_str("_id").unwrap(), "1"); // pk intact
+    }
+
+    #[test]
+    fn trigger_merge_upserts_when_absent() {
+        // The merge target has no matching row → merge inserts the doc as-is
+        // (the upsert leg), written through the engine and read back.
+        let engine = seeded_people();
+        let txn = engine.begin(false).unwrap();
+        let bag = TriggerBag::new();
+        bag.register("seed", |ctx: &TriggerCtx<'_>| {
+            ctx.merge(
+                "people",
+                &rawdoc! { "_id": "new", "name": "linus", "age": 7 },
+            )?;
+            Ok(())
+        });
+        Executor::with_env(&txn, ExecEnv::new().with_trigger(Some(&bag)))
+            .execute_collect(trigger_plan("seed", "inserted"))
+            .unwrap();
+
+        let handle = txn.collection(DEFAULT_CF, "people").unwrap();
+        let got = txn
+            .get(&handle, &RawBsonRef::String("new"))
+            .unwrap()
+            .expect("merge inserted the absent row");
+        assert_eq!(got.get_str("name").unwrap(), "linus");
+        assert_eq!(got.get_i32("age").unwrap(), 7);
+    }
 }
 
 #[cfg(test)]

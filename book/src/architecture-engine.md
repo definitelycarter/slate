@@ -89,7 +89,7 @@ Resolution links the two — a binding's target name is looked up in the bag at 
 
 - **UDF** — `Fn(&[Value]) -> Result<Value, UdfError>`, pure and contextless. Documented as a pure function of its arguments, so the engine may call it zero or more times and cache the result.
 - **Validator** — `Fn(&ValidatorCtx) -> Result<Verdict, ValidatorError>`, `Pure`: `ctx.doc()` exposes only the candidate document, so a validator *structurally cannot* write.
-- **Trigger** — `Fn(&TriggerCtx) -> Result<(), TriggerError>`, `ReadWrite`: `ctx.action()` / `ctx.doc()` plus `ctx.get` / `ctx.put` / `ctx.delete` over the transaction, **confined to the firing column family** (the context names a collection, never a cf, so cross-cf access is structurally impossible).
+- **Trigger** — `Fn(&TriggerCtx) -> Result<(), TriggerError>`, `ReadWrite`: `ctx.action()` / `ctx.doc()` plus `ctx.get` / `ctx.put` / `ctx.delete` / `ctx.merge` (field-merge upsert) over the transaction, **confined to the firing column family** (the context names a collection, never a cf, so cross-cf access is structurally impossible).
 
 ### Hook Registry and Snapshot Isolation
 

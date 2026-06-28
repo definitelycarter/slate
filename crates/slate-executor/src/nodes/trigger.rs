@@ -2,8 +2,8 @@
 //!
 //! Used both before a mutation (a tap that passes documents through) and after
 //! (wrapping a mutation plan's output). Each trigger receives the firing action,
-//! the candidate document, and a [`TriggerCtx`] exposing `get`/`put`/`delete`
-//! over the transaction — confined to the firing column family by [`CfScopedTxn`]
+//! the candidate document, and a [`TriggerCtx`] exposing `get`/`put`/`delete`/
+//! `merge` over the transaction — confined to the firing column family by [`CfScopedTxn`]
 //! (the trigger names a collection, never a cf). With no trigger bag or no
 //! bindings, this is a passthrough.
 //!
@@ -125,6 +125,26 @@ impl<T: EngineTransaction + Catalog> TriggerTxn for CfScopedTxn<'_, T> {
     fn put(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
         let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
         self.txn.put(&handle, doc).map_err(txn_err)
+    }
+
+    fn merge(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
+        let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
+        let pk_path = handle.pk_path();
+        // Locate the existing row by `doc`'s own pk value.
+        let id = doc
+            .get(pk_path)
+            .map_err(txn_err)?
+            .ok_or_else(|| TriggerError::Txn(format!("merge doc missing pk field '{pk_path}'")))?;
+        match self.txn.get(&handle, &id).map_err(txn_err)? {
+            // Existing row → overlay `doc`'s fields onto it (pk preserved).
+            // `raw_merge` returns `None` when nothing changed — a no-op write.
+            Some(old) => match slate_rawbson::raw_merge(&old, doc, pk_path).map_err(txn_err)? {
+                Some(merged) => self.txn.put(&handle, &merged).map_err(txn_err),
+                None => Ok(()),
+            },
+            // No row → insert `doc` as-is (the upsert leg).
+            None => self.txn.put(&handle, doc).map_err(txn_err),
+        }
     }
 
     fn delete(&self, collection: &str, id: RawBsonRef<'_>) -> Result<(), TriggerError> {

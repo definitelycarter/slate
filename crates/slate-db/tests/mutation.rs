@@ -1232,6 +1232,60 @@ fn insert_trigger_error_propagates() {
     assert!(result.is_err());
 }
 
+#[test]
+fn insert_trigger_merges_into_another_collection() {
+    // A trigger bound to `events` folds a derived rollup into a separate
+    // `summary` collection (same cf) via `ctx.merge`: on insert it overlays a
+    // field onto the summary row while preserving a field it never mentions,
+    // exercising the full bind → write-path → merge route through the engine.
+    let db = DatabaseBuilder::new()
+        .with_trigger("rollup", |ctx: &TriggerCtx<'_>| {
+            if ctx.action() == "inserted" {
+                ctx.merge("summary", &rawdoc! { "_id": "all", "last": "click" })?;
+            }
+            Ok(())
+        })
+        .open(MemoryStore::new())
+        .unwrap();
+
+    let txn = db.begin(false).unwrap();
+    db.collections().create("events").execute(&txn).unwrap();
+    db.collections().create("summary").execute(&txn).unwrap();
+    // Seed the summary row with a field the trigger never touches.
+    db.collection("summary")
+        .insert_one(doc! { "_id": "all", "owner": "ops" })
+        .execute(&txn)
+        .unwrap();
+    db.collection("events")
+        .triggers()
+        .create("rollup", TriggerFunction::from_name("rollup"))
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Insert into events → the trigger merges into summary.
+    let txn = db.begin(false).unwrap();
+    db.collection("events")
+        .insert_one(doc! { "_id": "e1", "kind": "click" })
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+
+    // The summary row now carries `last` (overlaid) and still `owner` (preserved).
+    let txn = db.begin(true).unwrap();
+    let summary = db
+        .collection("summary")
+        .find(rawdoc! { "_id": "all" })
+        .iter_raw(&txn)
+        .unwrap()
+        .next()
+        .transpose()
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.get_str("last").unwrap(), "click"); // overlaid by merge
+    assert_eq!(summary.get_str("owner").unwrap(), "ops"); // preserved
+}
+
 // ── Update trigger tests ─────────────────────────────────────────
 
 #[test]
