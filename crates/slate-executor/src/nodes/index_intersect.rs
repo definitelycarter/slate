@@ -25,6 +25,16 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     collection: &CollectionRef,
     parts: &[IndexIntersectPart],
 ) -> Result<ValueIter<'a>, ExecError> {
+    // The planner only emits IndexIntersect for >=2 equality parts. Guard a
+    // directly-constructed degenerate node: with no parts there is nothing to
+    // intersect (and the zig-zag below would index into an empty cursor set),
+    // so yield no rows rather than panic. A *single* part is a valid degenerate
+    // the loop already handles correctly — it streams that one scan — so it
+    // needs no guard.
+    if parts.is_empty() {
+        return Ok(Box::new(std::iter::empty()));
+    }
+
     let handle = txn.collection(&collection.cf, &collection.collection)?;
 
     // One forward cursor per equality part, positioned at its first entry. The
@@ -335,5 +345,13 @@ mod tests {
             &[("a", s("x")), ("b", s("missing"))],
             &[],
         );
+    }
+
+    #[test]
+    fn degenerate_zero_parts_yields_no_rows() {
+        // The planner never emits a 0-part IndexIntersect, but the IR is publicly
+        // constructible — a degenerate node must yield nothing, not panic.
+        let engine = seed(&["a"], vec![rawdoc! { "_id": "d00", "a": "x" }]);
+        assert_eq!(intersect(&engine, vec![]), Vec::<String>::new());
     }
 }
