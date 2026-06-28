@@ -59,6 +59,24 @@ fn map_commit_error(e: rocksdb::Error) -> StoreError {
     }
 }
 
+/// Build a `ReadOptions` pinned to `txn`'s begin snapshot — the single place the
+/// snapshot is threaded into reads, so every read observes one consistent view
+/// (snapshot isolation) layered with the transaction's own staged writes
+/// (read-your-writes). A read that used latest-committed instead would silently
+/// downgrade the transaction to read-committed.
+///
+/// `snapshot()` only borrows `txn` for this call; `set_snapshot` copies the
+/// underlying begin-snapshot pointer into the options, and that pointer stays
+/// valid for `txn`'s whole life (the transaction owns the snapshot until
+/// commit/rollback). So the options can be cached alongside `txn` and reused for
+/// every read — they outlive the transient `snapshot()` wrapper, and dropping a
+/// `ReadOptions` frees only its own handle, never the snapshot.
+fn pinned_read_options(txn: &rocksdb::Transaction<'_, DB>) -> ReadOptions {
+    let mut opts = ReadOptions::default();
+    opts.set_snapshot(&txn.snapshot());
+    opts
+}
+
 /// Pre-resolved column family handle for reads.
 #[derive(Clone)]
 pub struct RocksCf<'db> {
@@ -70,17 +88,26 @@ pub struct RocksTransaction<'db> {
     db: &'db DB,
     read_only: bool,
     durability: Durability,
+    /// `ReadOptions` pinned to the begin snapshot, built once and reused by every
+    /// point read (`get` / `multi_get`) so they pay no per-read allocation.
+    /// Rebuilt whenever the inner txn is re-created (see `set_durability`). The
+    /// scan paths can't share it (their `iterator_cf_opt` takes `ReadOptions` by
+    /// value), so they mint a fresh one via [`pinned_read_options`] — amortized
+    /// over the whole scan, it's free.
+    read_opts: ReadOptions,
     cf_cache: RefCell<HashMap<String, Arc<BoundColumnFamily<'db>>>>,
 }
 
 impl<'db> RocksTransaction<'db> {
     pub fn new(db: &'db DB, read_only: bool, durability: Durability) -> Result<Self, StoreError> {
         let txn = begin_inner(db, durability);
+        let read_opts = pinned_read_options(&txn);
         Ok(Self {
             txn: Some(txn),
             db,
             read_only,
             durability,
+            read_opts,
             cf_cache: RefCell::new(HashMap::new()),
         })
     }
@@ -89,22 +116,11 @@ impl<'db> RocksTransaction<'db> {
         self.txn.as_ref().ok_or(StoreError::TransactionConsumed)
     }
 
-    /// A `ReadOptions` pinned to this transaction's begin snapshot, so every read
-    /// observes one consistent view (snapshot isolation) layered with the
-    /// transaction's own staged writes (read-your-writes). Every read path goes
-    /// through this — anything that reads latest-committed instead would silently
-    /// downgrade the transaction to read-committed.
-    ///
-    /// `snapshot()` only borrows the transaction for this call; `set_snapshot`
-    /// copies the underlying begin-snapshot pointer into the options, and that
-    /// pointer stays valid for the transaction's whole life (the transaction owns
-    /// the snapshot until commit/rollback). So the returned options outlive the
-    /// transient wrapper and can safely back an iterator that outlives this call.
+    /// A freshly-allocated `ReadOptions` pinned to the begin snapshot, for the
+    /// scan paths whose `iterator_cf_opt` consumes the options by value. Point
+    /// reads reuse the cached `read_opts` field instead.
     fn read_options(&self) -> Result<ReadOptions, StoreError> {
-        let mut opts = ReadOptions::default();
-        let snapshot = self.txn()?.snapshot();
-        opts.set_snapshot(&snapshot);
-        Ok(opts)
+        Ok(pinned_read_options(self.txn()?))
     }
 
     fn check_writable(&self) -> Result<(), StoreError> {
@@ -139,19 +155,17 @@ impl<'db> Transaction for RocksTransaction<'db> {
     }
 
     fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
-        let readopts = self.read_options()?;
         let data = self
             .txn()?
-            .get_cf_opt(&cf.handle, key, &readopts)
+            .get_cf_opt(&cf.handle, key, &self.read_opts)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
         Ok(data)
     }
 
     fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
-        let readopts = self.read_options()?;
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf.handle, *k)).collect();
-        let results = txn.multi_get_cf_opt(cf_keys, &readopts);
+        let results = txn.multi_get_cf_opt(cf_keys, &self.read_opts);
         results
             .into_iter()
             .map(|r| r.map_err(|e| StoreError::Storage(e.to_string())))
@@ -366,9 +380,13 @@ impl<'db> Transaction for RocksTransaction<'db> {
         }
         self.durability = durability;
         // A read-only txn makes no durability promise — keep its (empty) inner
-        // txn untouched. Otherwise swap in a fresh inner txn with the new level.
+        // txn untouched. Otherwise swap in a fresh inner txn with the new level,
+        // and re-pin `read_opts` to the *new* txn's begin snapshot before the old
+        // txn drops (releasing the old snapshot the stale options point at).
         if !self.read_only && self.txn.is_some() {
-            self.txn = Some(begin_inner(self.db, durability));
+            let txn = begin_inner(self.db, durability);
+            self.read_opts = pinned_read_options(&txn);
+            self.txn = Some(txn);
         }
     }
 
