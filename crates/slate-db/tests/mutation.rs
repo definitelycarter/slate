@@ -1286,6 +1286,89 @@ fn insert_trigger_merges_into_another_collection() {
     assert_eq!(summary.get_str("owner").unwrap(), "ops"); // preserved
 }
 
+#[test]
+fn trigger_merge_updates_a_secondary_index() {
+    // Merging an *indexed* field must update its index entry: the merge's
+    // `put` runs the full index-maintaining upsert. Pin it by querying the
+    // merge target through the index (an `IndexScan` plan) for the new value —
+    // a stale index would have no entry for it and miss the row.
+    let db = DatabaseBuilder::new()
+        .with_trigger("bump", |ctx: &TriggerCtx<'_>| {
+            if ctx.action() == "inserted" {
+                ctx.merge("summary", &rawdoc! { "_id": "all", "score": 99 })?;
+            }
+            Ok(())
+        })
+        .open(MemoryStore::new())
+        .unwrap();
+
+    let txn = db.begin(false).unwrap();
+    db.collections().create("events").execute(&txn).unwrap();
+    db.collections().create("summary").execute(&txn).unwrap();
+    db.collection("summary")
+        .indexes()
+        .create("score", IndexOptions::default())
+        .execute(&txn)
+        .unwrap();
+    // Seed with the *old* indexed value (and a field the trigger won't touch).
+    db.collection("summary")
+        .insert_one(doc! { "_id": "all", "score": 1, "owner": "ops" })
+        .execute(&txn)
+        .unwrap();
+    db.collection("events")
+        .triggers()
+        .create("bump", TriggerFunction::from_name("bump"))
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+
+    // Insert into events → the trigger merges score 99 into summary.
+    let txn = db.begin(false).unwrap();
+    db.collection("events")
+        .insert_one(doc! { "_id": "e1", "kind": "click" })
+        .execute(&txn)
+        .unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin(true).unwrap();
+    // The equality on the indexed `score` is pushed into an index scan.
+    let plan = db
+        .collection("summary")
+        .find(eq_filter("score", Bson::Int32(99)))
+        .explain(&txn)
+        .unwrap();
+    assert!(plan.contains("IndexScan"), "expected an index scan: {plan}");
+    assert!(
+        plan.contains("score"),
+        "index scan should name score: {plan}"
+    );
+
+    // The new value resolves through the index to the row (owner preserved)…
+    let hit = db
+        .collection("summary")
+        .find(eq_filter("score", Bson::Int32(99)))
+        .iter_raw(&txn)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        hit.len(),
+        1,
+        "new indexed value should match exactly one row"
+    );
+    assert_eq!(hit[0].get_str("owner").unwrap(), "ops"); // preserved through merge
+
+    // …and the old value no longer matches.
+    let stale = db
+        .collection("summary")
+        .find(eq_filter("score", Bson::Int32(1)))
+        .iter_raw(&txn)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(stale.is_empty(), "old indexed value should match nothing");
+}
+
 // ── Update trigger tests ─────────────────────────────────────────
 
 #[test]

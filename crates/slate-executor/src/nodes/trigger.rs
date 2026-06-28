@@ -130,7 +130,10 @@ impl<T: EngineTransaction + Catalog> TriggerTxn for CfScopedTxn<'_, T> {
     fn merge(&self, collection: &str, doc: &RawDocument) -> Result<(), TriggerError> {
         let handle = self.txn.collection(self.cf, collection).map_err(txn_err)?;
         let pk_path = handle.pk_path();
-        // Locate the existing row by `doc`'s own pk value.
+        // Locate the existing row by `doc`'s own pk value. Note the row is read
+        // twice on the existing-row leg: once here to feed `raw_merge`, then
+        // again inside `put`, which re-reads it to diff index entries. Collapsing
+        // that would need a merge-aware engine primitive — not worth it here.
         let id = doc
             .get(pk_path)
             .map_err(txn_err)?
