@@ -891,4 +891,85 @@ mod tests {
 
         assert_eq!(got, want, "int8 rescore must match the exact ranking");
     }
+
+    #[test]
+    fn e2e_quantized_index_composes_with_where_prefilter() {
+        // The WHERE pre-filter (rule 1) and the quantized rescore are orthogonal
+        // and must compose: the filter shrinks the candidate set *before* the
+        // top-k, then the int8 scan + exact rescore runs over only the filtered
+        // docs. The result must equal the exact f64 brute-force over the *acme*
+        // subset — never the globally-nearest `c` (tenant `other`), never fewer
+        // than k while the subset has them.
+        let corpus: [(&str, &str, [f64; 3]); 6] = [
+            ("a", "acme", [0.11, 0.93, 0.21]),
+            ("b", "acme", [0.10, 0.95, 0.19]),
+            ("c", "other", [0.10, 0.96, 0.18]), // globally nearest, but filtered out
+            ("d", "acme", [0.90, 0.05, 0.10]),
+            ("e", "other", [0.12, 0.90, 0.25]),
+            ("f", "acme", [0.13, 0.89, 0.26]),
+        ];
+        let engine = KvEngine::new(MemoryStore::new());
+        {
+            let txn = engine.begin(false).unwrap();
+            txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+                .unwrap();
+            txn.create_index(DEFAULT_CF, "photos", "tenant").unwrap();
+            txn.create_vector_index(
+                DEFAULT_CF,
+                "photos",
+                &VectorIndexSpec::int8("embedding", 3, slate_engine::VectorMetric::Cosine),
+            )
+            .unwrap();
+            let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+            for (id, tenant, e) in corpus {
+                let doc =
+                    bson::rawdoc! { "_id": id, "tenant": tenant, "embedding": [e[0], e[1], e[2]] };
+                txn.put(&handle, &doc).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let meta = CollectionMeta {
+            indexes: vec!["tenant".into()],
+            compound_indexes: Vec::new(),
+            vector_indexes: vec![VectorIndexMeta {
+                field: "embedding".into(),
+                metric: slate_planner::VectorMetric::Cosine,
+                dtype: slate_planner::VectorDataType::Int8,
+            }],
+            pk_path: "_id".into(),
+        };
+        let txn = engine.begin(true).unwrap();
+        let sql = "SELECT VALUE c FROM c WHERE c.tenant = 'acme' \
+             ORDER BY VECTORDISTANCE(c.embedding, [0.1, 0.92, 0.2]) DESC LIMIT 3";
+        let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), photos_ref(), &meta);
+        let out = Executor::new(&txn).execute_collect(plan).unwrap();
+        let got: Vec<String> = out
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d.get_str("_id").unwrap().to_string(),
+                other => panic!("got {other:?}"),
+            })
+            .collect();
+
+        // Exact (f64) brute-force over the ACME subset only.
+        let q = [0.1_f64, 0.92, 0.2];
+        let mut scored: Vec<(f64, &str)> = corpus
+            .iter()
+            .filter(|(_, tenant, _)| *tenant == "acme")
+            .map(|(id, _, e)| (VectorMetric::Cosine.measure(&q, e), *id))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then_with(|| a.1.cmp(b.1)));
+        let want: Vec<String> = scored
+            .iter()
+            .take(3)
+            .map(|(_, id)| id.to_string())
+            .collect();
+
+        assert_eq!(got, want, "int8 rescore over the WHERE-filtered set");
+        assert!(
+            !got.contains(&"c".to_string()),
+            "the globally-nearest but filtered-out doc must not leak in"
+        );
+        assert_eq!(got.len(), 3, "full k from the filtered subset");
+    }
 }
