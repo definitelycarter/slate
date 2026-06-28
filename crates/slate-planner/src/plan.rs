@@ -396,9 +396,12 @@ pub enum Node {
     },
 
     /// Validation gate: run `validators` on each document; error if any rejects.
-    /// Passes the document through on success.
+    /// Passes the document through on success. Each entry is a binding —
+    /// `(validator_name, native_function_name)` — the executor resolves against
+    /// the live validator bag (triggers, by contrast, still carry `ResolvedHook`
+    /// source).
     Validate {
-        validators: Vec<ResolvedHook>,
+        validators: Vec<(String, String)>,
         source: Box<Node>,
     },
 

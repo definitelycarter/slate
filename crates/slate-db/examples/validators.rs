@@ -1,16 +1,34 @@
-use std::sync::Arc;
-
 use bson::doc;
-use slate_db::{DatabaseBuilder, DbError, RuntimeRegistry, VmPool};
+use slate_db::v2::ValidatorFunction;
+use slate_db::{DatabaseBuilder, DbError, ValidatorCtx, Verdict};
 use slate_store::MemoryStore;
-use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
 fn main() -> Result<(), DbError> {
-    // ── Open an in-memory database with Lua scripting ──────────
-    let mut reg = RuntimeRegistry::new();
-    reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
+    // ── Open an in-memory database with native validators ──────
+    // A validator is a native Rust function that inspects the candidate
+    // document and returns `Verdict::Accept` to pass, or
+    // `Verdict::reject(reason)` to reject the write. They are registered in a
+    // database-scoped bag (here, before open via `with_validator`) and bound
+    // per-collection below.
     let db = DatabaseBuilder::new()
-        .with_scripting(VmPool::new(reg))
+        // 1) "name" must be a non-empty string.
+        .with_validator("require_name", |ctx: &ValidatorCtx<'_>| {
+            match ctx.doc().get_str("name") {
+                Ok(name) if !name.is_empty() => Ok(Verdict::Accept),
+                _ => Ok(Verdict::reject(
+                    "name is required and must be a non-empty string",
+                )),
+            }
+        })
+        // 2) "age", if present, must be a non-negative number.
+        .with_validator("valid_age", |ctx: &ValidatorCtx<'_>| {
+            match ctx.doc().get_i32("age") {
+                // Absent (or not an i32) → no constraint to enforce; age is optional.
+                Err(_) => Ok(Verdict::Accept),
+                Ok(age) if age >= 0 => Ok(Verdict::Accept),
+                Ok(_) => Ok(Verdict::reject("age must be a non-negative number")),
+            }
+        })
         .open(MemoryStore::new())?;
 
     // ── Create a "users" collection ─────────────────────────────
@@ -18,54 +36,21 @@ fn main() -> Result<(), DbError> {
     db.cf("app").collections().create("users").execute(&txn)?;
     txn.commit()?;
 
-    // ── Register validators ─────────────────────────────────────
-    // Validators are pure functions: they receive { doc = <the document> }
-    // and must return { ok = true } to pass, or { ok = false, reason = "..." }
-    // to reject the document.
+    // ── Bind the validators to the collection ───────────────────
+    // The binding is durable and per-collection: it maps the validator name to
+    // a native function in the bag. (The name and the bag function happen to
+    // match here, but they need not.)
     let txn = db.begin(false)?;
-
-    // 1) "name" must be a non-empty string
     db.cf("app")
         .collection("users")
         .validators()
-        .create(
-            "require_name",
-            r#"
-        return function(event)
-          local doc = event.doc
-          if type(doc.name) ~= "string" or doc.name == "" then
-            return { ok = false, reason = "name is required and must be a non-empty string" }
-          end
-          return { ok = true }
-        end
-        "#,
-        )
+        .create("require_name", ValidatorFunction::from_name("require_name"))
         .execute(&txn)?;
-
-    // 2) "age", if present, must be a non-negative number.
-    //    BSON i32 values arrive in Lua as userdata with a :value() method,
-    //    so we normalize before comparing.
     db.cf("app")
         .collection("users")
         .validators()
-        .create(
-            "valid_age",
-            r#"
-        return function(event)
-          local raw = event.doc.age
-          if raw == nil then return { ok = true } end
-
-          -- Normalize BSON integers (userdata) to plain Lua numbers.
-          local age = (type(raw) == "userdata") and raw:value() or raw
-          if type(age) ~= "number" or age < 0 then
-            return { ok = false, reason = "age must be a non-negative number" }
-          end
-          return { ok = true }
-        end
-        "#,
-        )
+        .create("valid_age", ValidatorFunction::from_name("valid_age"))
         .execute(&txn)?;
-
     txn.commit()?;
 
     // ── Successful insert ───────────────────────────────────────

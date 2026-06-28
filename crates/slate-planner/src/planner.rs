@@ -27,8 +27,11 @@ pub struct PlanContext {
     pub container: CollectionRef,
     /// Index/pk metadata for choosing a scan source.
     pub meta: CollectionMeta,
-    /// Schema validators to gate writes through (empty = none).
-    pub validators: Vec<ResolvedHook>,
+    /// Schema validator *bindings* to gate writes through (empty = none): an
+    /// ordered list of `(validator_name, native_function_name)`, resolved from the
+    /// catalog by the caller. The executor looks up each native name in the live
+    /// validator bag at fire time (a dangling binding aborts the write, fail-safe).
+    pub validators: Vec<(String, String)>,
     /// Before/after-mutation triggers to fire (empty = none). The same set is
     /// attached with a per-action label (`inserting`/`inserted`, …); the
     /// executor fires only the hooks registered for that action.

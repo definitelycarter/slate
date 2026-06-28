@@ -50,7 +50,7 @@ pub use query::QueryBuilder;
 pub use read::FindBuilder;
 pub use scripts::{
     CreateFunction, CreateTrigger, CreateValidator, Functions, RemoveScript, Triggers, UdfFunction,
-    Validators,
+    ValidatorFunction, Validators,
 };
 pub use write::{
     DeleteBuilder, InsertBuilder, ReplaceBuilder, UpdateBuilder, UpsertBuilder, WriteResult,

@@ -32,6 +32,7 @@ use std::rc::Rc;
 use bson::RawDocumentBuf;
 use slate_eval::raweval::UdfCtx;
 use slate_udf::UdfBag;
+use slate_validator::ValidatorBag;
 use slate_vm::pool::VmPool;
 
 use crate::nodes::env::Rand;
@@ -82,6 +83,11 @@ pub struct ExecEnv<'a> {
     /// evaluating node. `compile` consults it *before* the bag. `None` when the
     /// collection has no bindings, so any `udf.*` reference there is unbound.
     pub(crate) udf_bindings: Option<Rc<HashMap<String, String>>>,
+    /// The live, database-scoped validator bag, borrowed from the transaction for
+    /// the life of the query (treated like `pool`/`udf`). The `Validate` node
+    /// resolves each bound validator's native name against it at fire time. `None`
+    /// (the default) skips validation — the write path always attaches it.
+    pub(crate) validator: Option<&'a ValidatorBag>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -139,6 +145,13 @@ impl<'a> ExecEnv<'a> {
     /// by `Rc`. `None` (the default) leaves every `udf.*` reference unbound.
     pub fn with_udf_bindings(mut self, bindings: Option<Rc<HashMap<String, String>>>) -> Self {
         self.udf_bindings = bindings;
+        self
+    }
+
+    /// Attach the live validator bag, consulted by the `Validate` node to resolve
+    /// bound validators. `None` (the default) skips validation.
+    pub fn with_validator(mut self, validator: Option<&'a ValidatorBag>) -> Self {
+        self.validator = validator;
         self
     }
 

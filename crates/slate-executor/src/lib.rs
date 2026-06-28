@@ -415,7 +415,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Node::Validate { validators, source } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::validate::execute(self.env.pool, validators, source)?
+                nodes::validate::execute(self.env.validator, validators, source)?
             }
 
             // The single outer row fed in by an enclosing `Subquery`.
@@ -876,6 +876,7 @@ mod hooks {
     use bson::{RawBson, rawdoc};
     use slate_engine::{DEFAULT_CF, Engine};
     use slate_planner::{Node, Plan};
+    use slate_validator::{ValidatorBag, ValidatorCtx, Verdict};
     use slate_vm::pool::{RuntimeRegistry, VmPool};
     use slate_vm::{LuaScriptRuntime, ResolvedHook, RuntimeKind};
     use std::sync::Arc;
@@ -901,9 +902,11 @@ mod hooks {
         RawBson::Document(rawdoc! { "_id": "1", "age": 50 })
     }
 
-    fn validate_plan(src: &str) -> Plan {
+    // A native validate plan: bind the validator named `v` to the native
+    // function `func`, which the executor resolves against the supplied bag.
+    fn validate_plan(func: &str) -> Plan {
         Plan::Query(Node::Validate {
-            validators: vec![hook("v", src)],
+            validators: vec![("v".to_string(), func.to_string())],
             source: Box::new(Node::Values(vec![doc()])),
         })
     }
@@ -912,11 +915,10 @@ mod hooks {
     fn validator_passes_document_through() {
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
-        let pool = lua_pool();
-        let out = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
-            .execute_collect(validate_plan(
-                "return function(ctx, event) return { ok = true } end",
-            ))
+        let bag = ValidatorBag::new();
+        bag.register("pass", |_: &ValidatorCtx<'_>| Ok(Verdict::Accept));
+        let out = Executor::with_env(&txn, ExecEnv::new().with_validator(Some(&bag)))
+            .execute_collect(validate_plan("pass"))
             .unwrap();
         assert_eq!(out, vec![doc()]);
     }
@@ -925,24 +927,48 @@ mod hooks {
     fn validator_rejection_is_an_error() {
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
-        let pool = lua_pool();
-        let err = Executor::with_env(&txn, ExecEnv::new().with_pool(Some(&pool)))
-            .execute_collect(validate_plan(
-                "return function(ctx, event) return { ok = false, reason = 'nope' } end",
-            ))
+        let bag = ValidatorBag::new();
+        bag.register("reject", |_: &ValidatorCtx<'_>| Ok(Verdict::reject("nope")));
+        let err = Executor::with_env(&txn, ExecEnv::new().with_validator(Some(&bag)))
+            .execute_collect(validate_plan("reject"))
             .unwrap_err();
         assert!(matches!(err, ExecError::Validation(_)), "got {err:?}");
     }
 
     #[test]
-    fn no_pool_skips_validation() {
+    fn dangling_validator_aborts_the_write() {
+        // The binding points at `absent`, which is not in the bag — a dangling
+        // validator aborts the write (fail-safe), rather than silently passing.
         let engine = seeded_people();
         let txn = engine.begin(true).unwrap();
-        // A rejecting validator, but no pool → skipped → document passes.
+        let bag = ValidatorBag::new();
+        let err = Executor::with_env(&txn, ExecEnv::new().with_validator(Some(&bag)))
+            .execute_collect(validate_plan("absent"))
+            .unwrap_err();
+        assert!(matches!(err, ExecError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn validator_panic_aborts_the_write() {
+        // A panicking validator is caught at the seam and aborts the write.
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        let bag = ValidatorBag::new();
+        bag.register("boom", |_: &ValidatorCtx<'_>| panic!("kaboom"));
+        let err = Executor::with_env(&txn, ExecEnv::new().with_validator(Some(&bag)))
+            .execute_collect(validate_plan("boom"))
+            .unwrap_err();
+        assert!(matches!(err, ExecError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn no_bag_skips_validation() {
+        let engine = seeded_people();
+        let txn = engine.begin(true).unwrap();
+        // No validator bag attached → validation skipped → document passes,
+        // even though the plan names a (here unregistered) validator.
         let out = Executor::new(&txn)
-            .execute_collect(validate_plan(
-                "return function(ctx, event) return { ok = false } end",
-            ))
+            .execute_collect(validate_plan("reject"))
             .unwrap();
         assert_eq!(out, vec![doc()]);
     }

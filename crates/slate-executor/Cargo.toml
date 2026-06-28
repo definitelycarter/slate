@@ -22,6 +22,7 @@ bson = { workspace = true }
 slate-ast = { path = "../slate-ast" }
 slate-eval = { path = "../slate-eval" }
 slate-udf = { path = "../slate-udf" }
+slate-validator = { path = "../slate-validator" }
 slate-planner = { path = "../slate-planner" }
 slate-engine = { path = "../slate-engine" }
 slate-rawbson = { path = "../slate-rawbson" }

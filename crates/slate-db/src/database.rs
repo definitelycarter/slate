@@ -223,16 +223,29 @@ impl DatabaseBuilder {
 
 // ── Database ───────────────────────────────────────────────
 
-/// A UDF binding whose target native function is not registered in the bag — an
+/// Which role a [`DanglingBinding`] belongs to — they fail differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BindingKind {
+    /// A `udf.<name>` reference (read path): a dangling one fails only the
+    /// queries that call it; writes are never blocked.
+    Udf,
+    /// A validator (write path): a dangling one blocks **all** writes to its
+    /// collection — fail-safe.
+    Validator,
+}
+
+/// A binding whose target native function is not registered in its bag — an
 /// unresolved symbol. Returned by [`Database::dangling_bindings`] so an app can
-/// detect a misconfiguration at startup instead of at query time.
+/// detect a misconfiguration at startup instead of at use time.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DanglingBinding {
+    /// Which role the binding belongs to (they fail differently).
+    pub kind: BindingKind,
     /// The column family the binding lives on.
     pub cf: String,
     /// The collection the binding lives on.
     pub collection: String,
-    /// The query-facing name (`udf.<name>`).
+    /// The binding's name (`udf.<name>` for a UDF, the validator name otherwise).
     pub name: String,
     /// The target native function name, which is absent from the bag.
     pub func: String,
@@ -330,6 +343,7 @@ impl<S: Store> Database<S> {
             txn,
             pool: self.pool.as_ref(),
             udf_bag: self.udf_bag.as_ref(),
+            validator_bag: self.validator_bag.as_ref(),
             snapshot,
             registry: self.registry.as_ref(),
             rand: self.rand.clone(),
@@ -359,10 +373,13 @@ impl<S: Store> Database<S> {
         &self.validator_bag
     }
 
-    /// Every UDF binding whose target native function is not registered in the
-    /// bag — the unresolved symbols (bindings minus bag). Empty when every
-    /// binding resolves. Call it at startup to surface a missing `register`
-    /// before a query hits it. Reflects committed state (the current snapshot).
+    /// Every binding (UDF or validator) whose target native function is not
+    /// registered in its bag — the unresolved symbols (bindings minus bag). Empty
+    /// when every binding resolves. Call it at startup to surface a missing
+    /// `register` before a query or write hits it. Reflects committed state (the
+    /// current snapshot). The string clones are per-binding on an introspection
+    /// path (not a hot path), and the result owns its strings independent of the
+    /// snapshot `Arc`.
     pub fn dangling_bindings(&self) -> Vec<DanglingBinding> {
         let Some(registry) = &self.registry else {
             return Vec::new();
@@ -373,6 +390,20 @@ impl<S: Store> Database<S> {
             for (name, func) in bindings {
                 if self.udf_bag.get(func).is_none() {
                     out.push(DanglingBinding {
+                        kind: BindingKind::Udf,
+                        cf: cf.clone(),
+                        collection: collection.clone(),
+                        name: name.clone(),
+                        func: func.clone(),
+                    });
+                }
+            }
+        }
+        for ((cf, collection), bindings) in snapshot.all_validator_bindings() {
+            for (name, func) in bindings {
+                if self.validator_bag.get(func).is_none() {
+                    out.push(DanglingBinding {
+                        kind: BindingKind::Validator,
                         cf: cf.clone(),
                         collection: collection.clone(),
                         name: name.clone(),
@@ -466,6 +497,10 @@ pub struct Transaction<'db, S: Store + 'db> {
     /// The database's UDF bag, borrowed for the life of the transaction (like
     /// `pool`). Consulted at `compile` to resolve `udf.*` references.
     udf_bag: &'db UdfBag,
+    /// The database's validator bag, borrowed for the life of the transaction
+    /// (like `udf_bag`). The `Validate` node resolves each bound validator's
+    /// native name against it at fire time.
+    validator_bag: &'db ValidatorBag,
     snapshot: Option<Arc<HookSnapshot>>,
     registry: Option<&'db HookRegistry>,
     /// Random source for `RAND()`, handed to each cursor this transaction opens.
@@ -564,7 +599,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     // `pub(crate)` so v2's write builders can assemble their own write
     // `PlanContext` (container + validators + triggers) without calling a v1
     // verb — the hook snapshot is transaction state, reached like rand/watch.
-    pub(crate) fn validators(&self, cf: &str, collection: &str) -> Vec<ResolvedHook> {
+    pub(crate) fn validators(&self, cf: &str, collection: &str) -> Vec<(String, String)> {
         self.snapshot
             .as_ref()
             .map(|s| s.validators_for(cf, collection).to_vec())
@@ -612,6 +647,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
         ExecEnv::new()
             .with_pool(self.pool)
             .with_udf(Some(self.udf_bag))
+            .with_validator(Some(self.validator_bag))
             .with_params(params.map(Rc::new))
             .with_rand(self.exec_rand())
             .with_watch(self.watch_sink.clone())

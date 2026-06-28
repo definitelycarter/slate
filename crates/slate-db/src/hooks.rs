@@ -22,11 +22,16 @@ fn hash_source(source: &[u8]) -> u64 {
 /// regardless of concurrent modifications.
 pub struct HookSnapshot {
     triggers: HashMap<(String, String), Vec<ResolvedHook>>,
-    validators: HashMap<(String, String), Vec<ResolvedHook>>,
+    /// Per-collection validator *bindings*: an ordered list of
+    /// `(validator_name, native_function_name)`. Like the UDF bindings below — and
+    /// unlike triggers, still carried as `ResolvedHook` source — a native
+    /// validator is resolved from the live bag at exec time, so the snapshot holds
+    /// only the name mapping, no source.
+    validators: HashMap<(String, String), Vec<(String, String)>>,
     /// Per-collection UDF *bindings*: `query_name -> native_function_name`. This
     /// is the resolved identity the planner bakes into a plan — the UDF analog
-    /// of the `ResolvedHook` lists above — while the live bag supplies the code
-    /// at exec time. Deliberately *not* a `ResolvedHook`: a binding is just a
+    /// of the trigger `ResolvedHook` lists above — while the live bag supplies the
+    /// code at exec time. Deliberately *not* a `ResolvedHook`: a binding is just a
     /// name mapping, with no source.
     udf_bindings: HashMap<(String, String), HashMap<String, String>>,
 }
@@ -36,7 +41,7 @@ impl HookSnapshot {
     pub fn load_all<T: Catalog>(txn: &T) -> Result<Self, EngineError> {
         let collections = txn.list_collections(None)?;
         let mut triggers: HashMap<(String, String), Vec<ResolvedHook>> = HashMap::new();
-        let mut validators: HashMap<(String, String), Vec<ResolvedHook>> = HashMap::new();
+        let mut validators: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
         let mut udf_bindings: HashMap<(String, String), HashMap<String, String>> = HashMap::new();
 
         for handle in &collections {
@@ -57,18 +62,26 @@ impl HookSnapshot {
                 triggers.insert((cf.clone(), name.clone()), hooks);
             }
 
+            // Validator *bindings*: native (`runtime_tag::NATIVE`) entries whose
+            // bytes are the target function name — the same shape as UDF bindings,
+            // loaded as an ordered `(validator_name, native_name)` list (sorted for
+            // a deterministic firing order). The live bag supplies the code.
             let validator_entries = txn.load_functions(&cf, &name, FunctionKind::Validator)?;
-            if !validator_entries.is_empty() {
-                let hooks: Vec<ResolvedHook> = validator_entries
-                    .into_iter()
-                    .map(|e| ResolvedHook {
-                        source_hash: hash_source(&e.source),
-                        name: e.name,
-                        runtime: e.runtime,
-                        source: e.source,
-                    })
-                    .collect();
-                validators.insert((cf.clone(), name.clone()), hooks);
+            let mut validator_bindings: Vec<(String, String)> = Vec::new();
+            for entry in validator_entries {
+                if entry.runtime != runtime_tag::NATIVE {
+                    continue;
+                }
+                let func = String::from_utf8(entry.source).map_err(|_| {
+                    EngineError::InvalidDocument(format!(
+                        "a validator binding on {cf}.{name} has a non-UTF-8 target name"
+                    ))
+                })?;
+                validator_bindings.push((entry.name, func));
+            }
+            if !validator_bindings.is_empty() {
+                validator_bindings.sort();
+                validators.insert((cf.clone(), name.clone()), validator_bindings);
             }
 
             // UDF *bindings*: native (`runtime_tag::NATIVE`) entries whose bytes
@@ -116,12 +129,22 @@ impl HookSnapshot {
             .unwrap_or(&[])
     }
 
-    /// Get validators for a (cf, collection) pair.
-    pub fn validators_for(&self, cf: &str, collection: &str) -> &[ResolvedHook] {
+    /// The validator bindings for a (cf, collection): an ordered list of
+    /// `(validator_name, native_name)`. Empty when the collection has none. The
+    /// executor resolves each native name against the live bag at fire time.
+    pub fn validators_for(&self, cf: &str, collection: &str) -> &[(String, String)] {
         self.validators
             .get(&(cf.to_string(), collection.to_string()))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// All validator bindings across every collection:
+    /// `(cf, collection) -> [(validator_name, native_name)]`. Used to find
+    /// bindings whose target function is unregistered (a dangling validator
+    /// blocks all writes to its collection).
+    pub fn all_validator_bindings(&self) -> &HashMap<(String, String), Vec<(String, String)>> {
+        &self.validators
     }
 
     /// The UDF bindings for a (cf, collection): `query_name -> native_name`.

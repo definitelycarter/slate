@@ -1,16 +1,20 @@
-//! v2 schema surface: the per-kind script sub-handles.
+//! v2 schema surface: the per-kind hook sub-handles.
 //!
-//! Phase 0, slice D. A collection carries three kinds of stored Lua function,
-//! and they are *not* the same shape — triggers and validators feed the
-//! write-time hook snapshot (registering one marks it stale), while UDFs are
-//! called from SQL at query time and touch no hooks. They will diverge further:
-//! triggers in particular will grow timing/operation options. So each kind gets
-//! its **own** sub-handle rather than one `scripts()` grouping:
+//! Phase 0, slice D. A collection carries three kinds of hook, and they are *not*
+//! the same shape — triggers and validators feed the write-time hook snapshot
+//! (registering one marks it stale), while UDFs are called from SQL at query time
+//! and touch no hooks. They also differ in *what* the catalog stores: a
+//! **trigger** is still stored Lua source, while a **validator** and a **UDF** are
+//! native **bindings** — a `name -> native function` mapping resolved against a
+//! live, database-scoped bag at run time (the Lua trigger path is the last to
+//! migrate). So each kind gets its **own** sub-handle rather than one `scripts()`
+//! grouping:
 //!
 //! ```ignore
-//! collection.triggers().create(name, source).execute(&txn)?;
-//! collection.validators().create(name, source).execute(&txn)?;
-//! collection.functions().create(name, source).execute(&txn)?;   // UDFs
+//! collection.triggers().create(name, source).execute(&txn)?;          // Lua source
+//! collection.validators().create(name, ValidatorFunction::from_name(f)).execute(&txn)?;
+//! collection.functions().create(name, UdfFunction::from_name(f)).execute(&txn)?;
+//! collection.validators().register(name, |ctx| …);  // no-txn: put native code in the bag
 //! collection.triggers().remove(name).execute(&txn)?;
 //! collection.triggers().list(&txn)?;
 //! ```
@@ -45,9 +49,9 @@ fn affects_hooks(kind: FunctionKind) -> bool {
     )
 }
 
-/// Store a Lua function of `kind`, marking the hook snapshot stale when the kind
-/// feeds it. The engine call is identical across kinds today; the divergence is
-/// in the public `create` builders, not this lowering.
+/// Store a Lua trigger's `source` under `kind`, marking the hook snapshot stale.
+/// Validators and UDFs are native bindings (see [`CreateValidator`] /
+/// [`CreateFunction`]); this Lua-source path now backs only triggers.
 fn create_script<S: Store>(
     txn: &Transaction<'_, S>,
     cf: &str,
@@ -86,7 +90,9 @@ fn remove_script<S: Store>(
     Ok(())
 }
 
-/// The names of every function of `kind` registered on the collection.
+/// The names of every function of `kind` registered on the collection. Used by
+/// the still-scripted triggers; native bindings list as pairs (see
+/// [`list_bindings`]).
 fn list_scripts<S: Store>(
     txn: &Transaction<'_, S>,
     cf: &str,
@@ -99,6 +105,34 @@ fn list_scripts<S: Store>(
         .into_iter()
         .map(|entry| entry.name)
         .collect())
+}
+
+/// List a kind's native bindings as `(name, func)` pairs, sorted by name — the
+/// durable symbol table. Shared by `functions().list()` and `validators().list()`:
+/// both store a `runtime_tag::NATIVE` entry whose bytes are the target function
+/// name (non-native rows, if any, are skipped).
+fn list_bindings<S: Store>(
+    txn: &Transaction<'_, S>,
+    cf: &str,
+    collection: &str,
+    kind: FunctionKind,
+) -> Result<Vec<(String, String)>, DbError> {
+    let mut bindings = txn
+        .engine_txn()
+        .load_functions(cf, collection, kind)?
+        .into_iter()
+        .filter(|e| e.runtime == runtime_tag::NATIVE)
+        .map(|e| {
+            let func = String::from_utf8(e.source).map_err(|_| {
+                DbError::from(EngineError::InvalidDocument(format!(
+                    "a native binding on {cf}.{collection} has a non-UTF-8 target name"
+                )))
+            })?;
+            Ok((e.name, func))
+        })
+        .collect::<Result<Vec<(String, String)>, DbError>>()?;
+    bindings.sort();
+    Ok(bindings)
 }
 
 // ── Triggers ─────────────────────────────────────────────────────────
@@ -203,49 +237,87 @@ impl<'a> Validators<'a> {
         self.validator_bag.unregister(name)
     }
 
-    /// Register a validator named `name` with Lua `source`. Returns a builder;
-    /// nothing runs until `.execute(&txn)`.
-    pub fn create(&self, name: &str, source: &str) -> CreateValidator<'a> {
+    /// Bind the validator `name` to a native function, durably and
+    /// per-collection — so writes to this collection run it as a gate. The target
+    /// is a [`ValidatorFunction`]; `ValidatorFunction::from_name(func)` references
+    /// a validator registered in the bag (via `register` or `with_validator`).
+    /// Returns a builder; nothing runs until `.execute(&txn)`. Lazy: the target
+    /// need not be registered yet — a dangling binding is caught when a write
+    /// exercises it (fail-safe), not here.
+    pub fn create(&self, name: &str, func: ValidatorFunction) -> CreateValidator<'a> {
         CreateValidator {
             cf: self.cf,
             collection: self.collection,
             name: name.to_string(),
-            source: source.to_string(),
+            func,
         }
     }
 
-    /// Remove the validator named `name`. Returns a builder; nothing runs until
-    /// `.execute(&txn)`.
+    /// Remove the validator binding named `name`. Returns a builder; nothing runs
+    /// until `.execute(&txn)`.
     pub fn remove(&self, name: &str) -> RemoveScript<'a> {
         RemoveScript::new(self.cf, self.collection, FunctionKind::Validator, name)
     }
 
-    /// List the registered validator names.
-    pub fn list<S: Store>(&self, txn: &Transaction<'_, S>) -> Result<Vec<String>, DbError> {
-        list_scripts(txn, self.cf, self.collection, FunctionKind::Validator)
+    /// List the collection's validator bindings as `(validator_name,
+    /// native_function_name)` pairs, sorted by name — the durable symbol table
+    /// from the catalog.
+    pub fn list<S: Store>(
+        &self,
+        txn: &Transaction<'_, S>,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        list_bindings(txn, self.cf, self.collection, FunctionKind::Validator)
     }
 }
 
-/// A pending validator registration, from [`Validators::create`].
+/// A pending validator binding, from [`Validators::create`].
 #[must_use = "a create-validator builder does nothing until .execute(&txn) runs it"]
 pub struct CreateValidator<'a> {
     cf: &'a str,
     collection: &'a str,
     name: String,
-    source: String,
+    func: ValidatorFunction,
 }
 
 impl CreateValidator<'_> {
-    /// Register the validator.
+    /// Write the binding — a `runtime_tag::NATIVE` catalog entry whose bytes are
+    /// the target function name — and mark the catalog snapshot stale so the next
+    /// transaction's writes resolve it.
     pub fn execute<S: Store>(self, txn: &Transaction<'_, S>) -> Result<(), DbError> {
-        create_script(
-            txn,
+        txn.engine_txn().create_function(
             self.cf,
             self.collection,
             FunctionKind::Validator,
             &self.name,
-            &self.source,
-        )
+            runtime_tag::NATIVE,
+            self.func.encode(),
+        )?;
+        txn.mark_hooks_dirty();
+        Ok(())
+    }
+}
+
+/// The target of a validator binding — the native validator a write runs as a
+/// gate. A struct (not a bare string) so future options (timing, an inline
+/// closure variant, …) can land as constructors or builder stages without
+/// changing [`Validators::create`]'s signature. Today it carries one thing: the
+/// name of a native validator registered in the bag.
+pub struct ValidatorFunction {
+    func: String,
+}
+
+impl ValidatorFunction {
+    /// Bind to the native validator named `func` (registered via
+    /// `validators().register` or `DatabaseBuilder::with_validator`).
+    pub fn from_name(func: &str) -> Self {
+        Self {
+            func: func.to_string(),
+        }
+    }
+
+    /// The bytes stored in the catalog for this binding — the target name.
+    fn encode(&self) -> &[u8] {
+        self.func.as_bytes()
     }
 }
 
@@ -313,23 +385,7 @@ impl<'a> Functions<'a> {
         &self,
         txn: &Transaction<'_, S>,
     ) -> Result<Vec<(String, String)>, DbError> {
-        let mut bindings = txn
-            .engine_txn()
-            .load_functions(self.cf, self.collection, FunctionKind::Udf)?
-            .into_iter()
-            .filter(|e| e.runtime == runtime_tag::NATIVE)
-            .map(|e| {
-                let func = String::from_utf8(e.source).map_err(|_| {
-                    DbError::from(EngineError::InvalidDocument(format!(
-                        "a UDF binding on {}.{} has a non-UTF-8 target name",
-                        self.cf, self.collection
-                    )))
-                })?;
-                Ok((e.name, func))
-            })
-            .collect::<Result<Vec<(String, String)>, DbError>>()?;
-        bindings.sort();
-        Ok(bindings)
+        list_bindings(txn, self.cf, self.collection, FunctionKind::Udf)
     }
 }
 
@@ -416,15 +472,10 @@ impl<'a> RemoveScript<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use bson::{Bson, doc};
     use slate_store::MemoryStore;
-    use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
-    use crate::{
-        Database, DatabaseBuilder, RuntimeRegistry, UdfError, ValidatorCtx, Value, Verdict, VmPool,
-    };
+    use crate::{BindingKind, Database, DatabaseBuilder, UdfError, ValidatorCtx, Value, Verdict};
 
     /// A native UDF: read arg 0 as a number and double it.
     fn double(args: &[Value]) -> Result<Value, UdfError> {
@@ -459,14 +510,6 @@ mod tests {
         with_users(DatabaseBuilder::new())
     }
 
-    /// A database with the Lua runtime wired in, so registered validators and
-    /// triggers actually *execute* on writes.
-    fn scripting_db_with_users() -> Database<MemoryStore> {
-        let mut reg = RuntimeRegistry::new();
-        reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
-        with_users(DatabaseBuilder::new().with_scripting(VmPool::new(reg)))
-    }
-
     fn with_users(builder: DatabaseBuilder) -> Database<MemoryStore> {
         let db = builder.open(MemoryStore::new()).unwrap();
         let txn = db.begin(false).unwrap();
@@ -475,9 +518,8 @@ mod tests {
         db
     }
 
-    // Trigger/validator scripts are bare Lua bodies; a UDF is now a native
-    // binding (`UdfFunction::from_name`), not source.
-    const PASS_VALIDATOR: &str = "assert(true)";
+    // Triggers are still bare Lua bodies; validators and UDFs are now native
+    // bindings (`ValidatorFunction`/`UdfFunction::from_name`), not source.
     const NOOP_TRIGGER: &str = "print('write')";
 
     #[test]
@@ -493,7 +535,10 @@ mod tests {
             .unwrap();
         users
             .validators()
-            .create("must_pass", PASS_VALIDATOR)
+            .create(
+                "must_pass",
+                super::ValidatorFunction::from_name("pass_impl"),
+            )
             .execute(&txn)
             .unwrap();
         users
@@ -509,7 +554,7 @@ mod tests {
         );
         assert_eq!(
             users.validators().list(&txn).unwrap(),
-            vec!["must_pass".to_string()]
+            vec![("must_pass".to_string(), "pass_impl".to_string())]
         );
         assert_eq!(
             users.functions().list(&txn).unwrap(),
@@ -522,7 +567,7 @@ mod tests {
         // removing the trigger left the validator and udf alone
         assert_eq!(
             users.validators().list(&txn).unwrap(),
-            vec!["must_pass".to_string()]
+            vec![("must_pass".to_string(), "pass_impl".to_string())]
         );
         assert_eq!(
             users.functions().list(&txn).unwrap(),
@@ -534,25 +579,26 @@ mod tests {
 
     #[test]
     fn validator_runs_on_writes() {
-        // A validator registered through v2 is enforced on a later transaction's
-        // insert — proving the hook snapshot picked up the registration (the
-        // `hooks_dirty` flip `create()` makes for a validator).
-        let db = scripting_db_with_users();
+        // A native validator, registered in the bag and bound through v2, is
+        // enforced on a later transaction's insert — proving the catalog snapshot
+        // picked up the binding (the `hooks_dirty` flip `create()` makes) and the
+        // write path resolves it from the bag.
+        let db = db_with_users();
+        db.collection("users")
+            .validators()
+            .register("adults_only", |ctx: &ValidatorCtx<'_>| {
+                match ctx.doc().get_i32("age") {
+                    Ok(age) if age >= 18 => Ok(Verdict::Accept),
+                    _ => Ok(Verdict::reject("must be 18+")),
+                }
+            });
+
         let txn = db.begin(false).unwrap();
         db.collection("users")
             .validators()
             .create(
                 "adults_only",
-                r#"
-                return function(event)
-                  local raw = event.doc.age
-                  local age = (type(raw) == "userdata") and raw:value() or raw
-                  if type(age) ~= "number" or age < 18 then
-                    return { ok = false, reason = "must be 18+" }
-                  end
-                  return { ok = true }
-                end
-                "#,
+                super::ValidatorFunction::from_name("adults_only"),
             )
             .execute(&txn)
             .unwrap();
@@ -719,6 +765,61 @@ mod tests {
 
         assert!(users.validators().unregister("require_name"));
         assert!(!users.validators().unregister("require_name"));
+    }
+
+    #[test]
+    fn dangling_validator_binding_is_reported() {
+        // A validator bound but whose impl is never registered is an unresolved
+        // symbol — surfaced by `dangling_bindings()` with the `Validator` kind.
+        let db = db_with_users();
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .validators()
+            .create(
+                "adults_only",
+                super::ValidatorFunction::from_name("adults_impl"),
+            )
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let dangling = db.dangling_bindings();
+        assert_eq!(dangling.len(), 1);
+        assert_eq!(dangling[0].kind, BindingKind::Validator);
+        assert_eq!(dangling[0].collection, "users");
+        assert_eq!(dangling[0].name, "adults_only");
+        assert_eq!(dangling[0].func, "adults_impl");
+
+        // Register the impl → no longer dangling.
+        db.collection("users")
+            .validators()
+            .register("adults_impl", |_: &ValidatorCtx<'_>| Ok(Verdict::Accept));
+        assert!(db.dangling_bindings().is_empty());
+    }
+
+    #[test]
+    fn dangling_validator_aborts_writes() {
+        // The write-path counterpart to the read-path unbound-UDF error: a
+        // validator bound to an unregistered function blocks *all* writes to the
+        // collection (fail-safe), rather than silently allowing them.
+        let db = db_with_users();
+        let txn = db.begin(false).unwrap();
+        db.collection("users")
+            .validators()
+            .create(
+                "adults_only",
+                super::ValidatorFunction::from_name("adults_impl"),
+            )
+            .execute(&txn)
+            .unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.begin(false).unwrap();
+        let result = db
+            .collection("users")
+            .insert_one(doc! { "_id": 1, "age": 30 })
+            .execute(&txn);
+        assert!(result.is_err(), "a dangling validator must abort the write");
     }
 
     #[test]

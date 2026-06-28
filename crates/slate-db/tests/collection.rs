@@ -2,7 +2,8 @@ mod common;
 use common::*;
 
 use bson::{doc, rawdoc};
-use slate_db::v2::{IndexOptions, UdfFunction};
+use slate_db::v2::{IndexOptions, UdfFunction, ValidatorFunction};
+use slate_db::{ValidatorCtx, Verdict};
 
 // ── Collection tests ────────────────────────────────────────────
 
@@ -138,7 +139,10 @@ fn register_validators() {
     db.collections().create("users").execute(&txn).unwrap();
     db.collection("users")
         .validators()
-        .create("require_name", "assert(doc.name)")
+        .create(
+            "require_name",
+            ValidatorFunction::from_name("require_name_impl"),
+        )
         .execute(&txn)
         .unwrap();
     txn.commit().unwrap();
@@ -182,9 +186,14 @@ fn register_all_function_types_with_indexes() {
         .create("audit", "print('audit')")
         .execute(&txn)
         .unwrap();
+    // Register the native validator the binding points at, so the later insert
+    // resolves it — an unregistered (dangling) binding would abort the write.
     db.collection("users")
         .validators()
-        .create("check", "assert(doc.name)")
+        .register("check_impl", |_: &ValidatorCtx<'_>| Ok(Verdict::Accept));
+    db.collection("users")
+        .validators()
+        .create("check", ValidatorFunction::from_name("check_impl"))
         .execute(&txn)
         .unwrap();
     db.collection("users")
