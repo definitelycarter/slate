@@ -115,7 +115,8 @@ uninstrumented:
 - **[Multikey (Array) Indexes](./rfcs/multikey-indexes.md)** — *proposed.* Formalize
   `[]` fan-out; the open work is multikey-unique.
 - **[Partial Indexes](./rfcs/partial-indexes.md)** — *proposed.* Index a subset of
-  documents via a Lua filter predicate.
+  documents via a native filter predicate (a `Pure` function, same model as
+  validators — the RFC was refreshed off the deleted Lua runtime).
 - **[Spatial Index](./rfcs/spatial-index.md)** — *proposed (design spike).*
   Geohash/S2 candidate-cell scan + recheck for `ST_DISTANCE`/`ST_WITHIN`.
 - **[Index Intersection Strategy](./rfcs/index-intersection-strategy.md)** —
@@ -187,6 +188,22 @@ uninstrumented:
   the whole stack compiles to `wasm32`. UDFs run in compiled positions
   (`SELECT`/`WHERE`); `ORDER BY`/`UNWIND`/`GROUP BY` (which interpret) are a
   follow-up.
+
+## Public API
+
+- **[Public API Ergonomics — the `Collection` handle](./rfcs/db-api-cleanup.md)** —
+  *done; shipped and canonical.* The collection-scoped surface is now a `Collection`
+  handle off `db.collection(name)` / `txn.collection(name)` (with a `db.cf(…)` sub-scope)
+  on a **build-lazily / run-at-a-terminal** model: `find(f)` is Mongo-chainable, `query(sql)`
+  is SQL, reads consume with `.iter_raw`/`.iter::<T>`, writes/commands finish with
+  `.execute(&txn)` → `WriteResult`. Sub-handles group the schema surface — `indexes()`
+  (one `create(paths, opts)` folding all five `create_*_index` via the sealed `IndexBuild`
+  trait), per-kind `triggers()`/`validators()`/`functions()`, and `collections()`. The
+  ~40-method `Transaction` god-object is gone: the flat CRUD methods were **deleted** (v2 is
+  the one real implementation; consumers, benches, tests, and the uniffi/wasm bindings call
+  it directly), leaving only lifecycle + admin on `Transaction`/`Database`. **Deferred:** the
+  `begin_read()`/`begin_write()` distinct-types split (still a runtime check) and a db-wide
+  purge sweep.
 
 ## Storage & Durability
 

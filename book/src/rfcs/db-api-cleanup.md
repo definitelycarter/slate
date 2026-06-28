@@ -1,12 +1,19 @@
 # RFC: Public API Ergonomics — the `Collection` handle
 
-> **Status: draft — decisions pending review.** Reorganizes the collection-scoped public
-> API around a `Collection` handle (off `db`), a **build-lazily / run-at-a-terminal**
-> execution model, and a clean `create` / `remove` / `delete` verb set. v2 is built as a
-> real, fully self-contained surface and made canonical only after it's vetted
-> (**build-then-invert**); how consumers/FFI plug into it is a later, phased decision. The
-> ten design forks are
-> resolved in [Decisions](#decisions) (open sub-parts flagged).
+> **Status: done — shipped and canonical.** Reorganized the collection-scoped public
+> API around a `Collection` handle (off `db` / `txn`), a **build-lazily /
+> run-at-a-terminal** execution model, and a clean `create` / `remove` / `delete` verb set.
+> All phases landed on `main`: v2 was built standalone (Phase 0, slices A–E under
+> `crates/slate-db/src/v2/`), vetted at parity (Phase 1), then made canonical via the
+> **build-then-invert** migration (Phase 2) — the flat `Transaction`/`Database` CRUD methods
+> were **deleted** (route 1: consumers, benches, tests, and the uniffi/wasm bindings all
+> point at v2 directly), and the docs flipped to v2 (Phase 3). What remains on
+> `Transaction`/`Database` is exactly the lifecycle + admin census below (`begin`/`commit`/
+> `rollback`, `backup`/`verify`/`repair`, `stats`/`collection_stats`, `purge_expired`,
+> `list_collections`, `shutdown`, `dangling_bindings`). The ten design forks are resolved in
+> [Decisions](#decisions). **Deferred sub-parts** (not blockers): the `begin_read()` /
+> `begin_write()` distinct-types split (Decision 3 — still a runtime read-vs-write check), and
+> a db-wide "purge every collection" sweep (Decision 7).
 
 ## Problem
 

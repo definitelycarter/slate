@@ -114,7 +114,7 @@ they're flagged on export).
   same-backend snapshot; logical export is the slower, neutral, portable one.
   They coexist for different jobs.
 - **No schema transformation on import** — documents land as dumped; reshaping is
-  the Lua transform-pipeline roadmap item's job, not the importer's.
+  the native transform-pipeline roadmap item's job, not the importer's.
 
 ## What shipped
 

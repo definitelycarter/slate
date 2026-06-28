@@ -34,5 +34,5 @@ The query stack (`slate-ast` … `slate-executor`) is the engine: both query sur
 Slate is layered; each tier has its own page:
 
 - **[Storage Layer](./architecture-storage.md)** (`slate-store`) — the pluggable key-value backends (memory, redb, RocksDB).
-- **[Query Stack, Engine & Scripting](./architecture-engine.md)** — the parser, planner, executor, evaluator, the storage engine, and the scripting VM.
+- **[Query Stack, Engine & Scripting](./architecture-engine.md)** — the parser, planner, executor, evaluator, the storage engine, and the native function roles (UDFs, validators, triggers — no embedded VM).
 - **[Database & Bindings](./architecture-database.md)** (`slate-db`) — the public `Database`/`Transaction` API, plus the Swift and WASM bindings.
