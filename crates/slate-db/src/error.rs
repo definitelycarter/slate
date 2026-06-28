@@ -27,6 +27,17 @@ pub enum DbError {
     /// `book/src/architecture-database.md`), even those that serialize writers
     /// and so cannot raise it today.
     Conflict,
+    /// The query's cooperative deadline elapsed before it finished (Resource
+    /// Limits RFC, A — a per-query `Duration` checked between rows). Not
+    /// retryable; raise the deadline or narrow the query. Distinct from
+    /// [`LimitExceeded`](Self::LimitExceeded) so a caller can tell "too slow"
+    /// from "too big".
+    Timeout,
+    /// A query buffered more than its materialization cap (Resource Limits RFC,
+    /// B — the OOM guard on `Sort`/`IndexMerge`/`Distinct`/`GroupBy`). The
+    /// message names the node and the cap. Not retryable; raise the cap or add a
+    /// `LIMIT`/index so the query streams instead of materializing.
+    LimitExceeded(String),
 }
 
 impl fmt::Display for DbError {
@@ -54,6 +65,8 @@ impl fmt::Display for DbError {
                 f,
                 "transaction conflict: a concurrent write touched the same data; retry the transaction"
             ),
+            DbError::Timeout => write!(f, "query timed out: exceeded its time deadline"),
+            DbError::LimitExceeded(msg) => write!(f, "resource limit exceeded: {msg}"),
         }
     }
 }
@@ -151,6 +164,10 @@ impl From<slate_executor::ExecError> for DbError {
             E::Trigger(msg) => DbError::InvalidDocument(msg),
             // A malformed plan node is a query-construction fault.
             E::InvalidPlan(msg) => DbError::InvalidQuery(msg),
+            // The resource-limit aborts pass through as their own first-class
+            // shapes (not buried in InvalidQuery) so callers can act on them.
+            E::Timeout => DbError::Timeout,
+            E::LimitExceeded(msg) => DbError::LimitExceeded(msg),
         }
     }
 }
@@ -200,5 +217,27 @@ mod tests {
         let mapped: DbError = StoreError::Storage("disk gone".to_string()).into();
         assert!(!mapped.is_conflict(), "must not be a conflict: {mapped:?}");
         assert!(matches!(mapped, DbError::Store(_)));
+    }
+
+    #[test]
+    fn exec_timeout_maps_to_db_timeout() {
+        // The cooperative-deadline abort must surface as its own first-class
+        // `Timeout`, not get folded into the `InvalidQuery` wildcard.
+        let mapped: DbError = slate_executor::ExecError::Timeout.into();
+        assert!(matches!(mapped, DbError::Timeout), "got {mapped:?}");
+        // …and it is not mistaken for a retryable conflict.
+        assert!(!mapped.is_conflict());
+    }
+
+    #[test]
+    fn exec_limit_exceeded_maps_to_db_limit_exceeded_keeping_message() {
+        // The materialization-cap abort surfaces as `LimitExceeded`, preserving
+        // the node/cap detail for the caller.
+        let err = slate_executor::ExecError::LimitExceeded("Sort buffered > 10 rows".to_string());
+        let mapped: DbError = err.into();
+        match mapped {
+            DbError::LimitExceeded(msg) => assert!(msg.contains("Sort"), "message lost: {msg}"),
+            other => panic!("expected LimitExceeded, got {other:?}"),
+        }
     }
 }

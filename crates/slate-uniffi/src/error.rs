@@ -25,6 +25,18 @@ pub enum SlateError {
     Conflict {
         message: String,
     },
+    /// A query exceeded its cooperative time deadline (Resource Limits RFC, A).
+    /// Kept distinct so callers across the FFI boundary can tell "too slow" from
+    /// "too big" (`LimitExceeded`) and from a generic `Store` error.
+    Timeout {
+        message: String,
+    },
+    /// A query buffered more than its materialization cap (Resource Limits RFC,
+    /// B — the OOM guard). Distinct from `Timeout` and `Store` for the same
+    /// reason.
+    LimitExceeded {
+        message: String,
+    },
 }
 
 impl fmt::Display for SlateError {
@@ -36,6 +48,10 @@ impl fmt::Display for SlateError {
             SlateError::Store { message } => write!(f, "store error: {message}"),
             SlateError::Serialization { message } => write!(f, "serialization error: {message}"),
             SlateError::Conflict { message } => write!(f, "transaction conflict: {message}"),
+            SlateError::Timeout { message } => write!(f, "query timed out: {message}"),
+            SlateError::LimitExceeded { message } => {
+                write!(f, "resource limit exceeded: {message}")
+            }
         }
     }
 }
@@ -70,6 +86,10 @@ impl From<DbError> for SlateError {
                 message: "a concurrent write touched the same data; retry the transaction"
                     .to_string(),
             },
+            DbError::Timeout => SlateError::Timeout {
+                message: "the query exceeded its time deadline".to_string(),
+            },
+            DbError::LimitExceeded(msg) => SlateError::LimitExceeded { message: msg },
         }
     }
 }

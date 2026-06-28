@@ -21,6 +21,21 @@ pub enum ExecError {
     /// planner upholds, surfaced (rather than panicking) when a directly-built
     /// IR violates it (e.g. an `IndexIntersect` with fewer than two parts).
     InvalidPlan(String),
+    /// The query's cooperative deadline elapsed mid-execution (Resource Limits
+    /// RFC, A). Raised by a source node's between-rows check, so it aborts the
+    /// stream rather than running to completion. Distinct from
+    /// [`LimitExceeded`](Self::LimitExceeded) so a caller can tell "too slow"
+    /// from "too big".
+    Timeout,
+    /// A materializing node ([`Sort`]/[`IndexMerge`]/[`Distinct`]/[`Aggregate`])
+    /// buffered more rows than the configured materialization cap (Resource
+    /// Limits RFC, B) — the OOM guard. The message names the node and the cap.
+    ///
+    /// [`Sort`]: slate_planner::Node::Sort
+    /// [`IndexMerge`]: slate_planner::Node::IndexMerge
+    /// [`Distinct`]: slate_planner::Node::Distinct
+    /// [`Aggregate`]: slate_planner::Node::Aggregate
+    LimitExceeded(String),
 }
 
 impl fmt::Display for ExecError {
@@ -32,6 +47,8 @@ impl fmt::Display for ExecError {
             ExecError::Validation(m) => write!(f, "validation failed: {m}"),
             ExecError::Trigger(m) => write!(f, "trigger failed: {m}"),
             ExecError::InvalidPlan(m) => write!(f, "invalid plan: {m}"),
+            ExecError::Timeout => write!(f, "query exceeded its time deadline"),
+            ExecError::LimitExceeded(m) => write!(f, "resource limit exceeded: {m}"),
         }
     }
 }
