@@ -1,11 +1,13 @@
 # RFC: Index Intersection Strategy (skip-merge for AND)
 
-> **Status: proposed.** Phase 1 is a *stats-free* skip-merge for the intersection
-> of two-or-more **equality** index scans. Cost-based index selection (a
-> cardinality/statistics catalog) is an explicit non-goal here — see
-> [Two doors](#two-doors-and-why-we-take-the-stats-free-one). Pairs with a spike
-> (`tasks/index-intersection-spike.md`) that must confirm the doc-id ordering
-> precondition and bench the skew win before any code lands.
+> **Status: accepted (spike gate passed); phase 1 in progress.** Phase 1 is a
+> *stats-free* skip-merge for the intersection of two-or-more **equality** index
+> scans. Cost-based index selection (a cardinality/statistics catalog) is an
+> explicit non-goal here — see
+> [Two doors](#two-doors-and-why-we-take-the-stats-free-one). The spike confirmed
+> the doc-id ordering precondition and benched the skew win + balanced
+> non-regression on all three backends — see
+> [Spike outcome](#spike-outcome-gate-passed).
 
 ## Problem
 
@@ -223,25 +225,71 @@ buffer-and-hash of `index_merge.rs:47-65` for this case.
 `.explain` gains an `IndexIntersect` line so the new shape is observable (mirror the
 `IndexMerge` arm at `explain.rs:131-138`).
 
-## Open questions (for the spike)
+## Spike outcome (gate passed)
 
-The spike must resolve each against `file:line` before phase 1 builds on it.
+The spike resolved each precondition against `file:line` and benched the Q3 gate
+on all three backends. **Verdict: GO.** Summary below; these double as the
+implementation contract for phase 1.
 
-1. **doc-id total order across pk types.** The merge assumes one consistent bytewise
-   order on `doc_id_lp`. A collection's pk is a single type, but confirm the
-   length-prefixed `BsonValue` encoding (`IndexEntry::doc_id`, `traits.rs:299-306`)
-   gives an order the seek key can target exactly — especially that `encode(doc_id)`
-   for the seek bound round-trips the *same* bytes the entries carry.
-2. **Multikey participation.** Confirm a `.[]` `Eq` stream is doc-id-sorted and that
-   monotone advance correctly subsumes the existing multikey dedup (and doesn't
-   regress the `MultikeyEq` duplicate-row fix from the sargability work).
-3. **Galloping constant factor.** Bench seek-vs-sequential on memory/redb/rocks for
-   the *balanced* case — the one place galloping could lose to the hash merge on
-   constants. This is the gate for the whole RFC.
-4. **N-way (≥3 equality parts).** Zig-zag generalises, but confirm the multi-cursor
-   loop terminates and stays min-bounded; decide N-way vs pairwise.
-5. **Cursor lifetime.** The cursor borrows the txn (`'a`); confirm it composes with
-   the `ValueIter<'a>` the executor threads (`index_scan.rs:75-150`).
+**Q1 — doc-id total order & exact seek (SOUND).** The index key is
+`i\0{coll}\0{field}\0{value_bytes}{doc_id_lp}`, where `doc_id_lp` is appended by
+`doc_id.write_length_prefixed(buf)` (`encoding/key.rs:253-254`) as
+`[tag][len_be16][bytes]` (`encoding/bson_value.rs:205-210`); the doc-id starts at
+`value_start + end_offset(n-1)` (`IndexEntry::doc_id`, `traits.rs:464-481`). An
+`Eq` scan fixes `value_bytes` (`resolve_index_scan`'s `Eq` arm,
+`kv/transaction.rs:99-115`), so within a stream the only varying suffix is
+`doc_id_lp` and **equality streams are doc-id-sorted** by its bytewise order.
+Two equality streams share that order because both append the identical encoding.
+The seek **reuses the raw `doc_id_lp` bytes** taken straight from the other
+cursor's current entry — no decode→re-encode — so the seek key
+`Included(value_prefix ++ doc_id_lp)` is byte-identical to the targeted entry and
+lands exactly (or on the first greater entry when the target isn't present). Note
+doc-ids are *not* projected onto the f64 key (`bson_value.rs:276`), which raw-byte
+reuse sidesteps. *Decision:* add `IndexEntry::doc_id_bytes() -> &[u8]` and have
+the merge compare those raw slices (bytewise `Ord` = store order), **never
+decoded BSON**.
+
+**Q2 — multikey (SOUND).** A `.[]` `Eq` stream is doc-id-sorted exactly like a
+scalar `Eq`. Repeated array elements encode to the **identical key** (no element
+ordinal, `key.rs:235-255`) and **collapse** in the store, so a single `.[]` `Eq`
+cursor yields each doc-id at most once — verified by an engine probe
+(`tags: ["db","db"]` → id once). Neutralising the existing `dedup_ids`
+(`sargable.rs:662-674`) left the duplicate-element tests
+(`array_contains_index.rs:104-130`) green, confirming dedup is not load-bearing
+here. *Decision:* the merge advances **strictly past** each emitted doc-id, so
+`IndexIntersect` needs no downstream `Distinct`; a *lone* multikey scan (not ≥2
+parts) still routes through `dedup_ids` unchanged, so the `MultikeyEq` fix is
+untouched.
+
+**Q3 — galloping constant factor (THE GATE → PASS).** Throwaway store-level bench
+across memory/redb/rocks: hash-merge (today) vs naive always-seek leapfrog vs
+galloping (`next()` up to a small limit, then one `scan_range` seek for a large
+gap). A fresh seek costs `R` = 3.5–7.5× a sequential `next()`.
+
+| | skew (50k ∩ 500) | balanced (25k ∩ 17k, interleaved) |
+|---|---|---|
+| **memory** | gallop **7.1× faster** | gallop **−35%**; leapfrog **5.5× slower** |
+| **redb** | gallop **5.5× faster** | gallop **−27%**; leapfrog **6.5× slower** |
+| **rocks** | gallop **6.3× faster** | gallop **−13%**; leapfrog **4.6× slower** |
+
+Skew win is real and large on every backend; the balanced case does **not**
+regress under galloping (it's faster — it skips building/probing the hash set).
+Naive leapfrog regresses balanced 4.6–6.5× (it pays `R` per step), which is
+exactly why the design must **gallop**, not leapfrog. `GALLOP_LIMIT ≈ 8` worked
+well; it is a tunable knob, revisit with the real step-5 numbers.
+
+**Q4 — N-way (RESOLVED: N-way).** The zig-zag generalises to N cursors: take the
+max current doc-id, seek every other cursor to `≥` it, emit when all equal and
+advance all. Terminates (each step advances ≥1 cursor strictly forward) and stays
+min-bounded. Prefer **N-way over pairwise** — it never materialises an
+intermediate `A∩B`. The planner already builds a flat parts list
+(`IndexAccess::Merge` flattens same-op, `sargable.rs:608-620`), so
+`Node::IndexIntersect { parts }` drops in.
+
+**Q5 — cursor lifetime (RESOLVED).** The cursor borrows the txn for `'a`
+(`&'a txn`, `&'a cf`) and holds an open `scan_range` iterator; `seek` drops and
+re-opens it (still `'a`). This composes with the executor's `ValueIter<'a>`; the
+prototype compiled and ran with exactly this shape.
 
 ## Non-goals
 
@@ -255,9 +303,11 @@ The spike must resolve each against `file:line` before phase 1 builds on it.
 
 ## Sequencing
 
-1. **Spike** — confirm the doc-id ordering precondition (Q1–Q2) and bench the skew
-   *and* balanced cases (Q3) on a representative corpus. **Gate: the skew win must
-   be real and the balanced case must not regress materially** before any code.
+1. **Spike — DONE (gate passed).** Confirmed the doc-id ordering precondition
+   (Q1–Q2), resolved N-way + lifetime (Q4–Q5), and benched the skew *and*
+   balanced cases (Q3) on all three backends. **Gate met: skew win 5.5–7.1×,
+   balanced non-regressing under galloping.** See
+   [Spike outcome](#spike-outcome-gate-passed).
 2. **Engine seekable index cursor** — `open_index_cursor` + galloping `seek`,
    reusing `scan_index`'s prefix resolution and expiry filtering. Tests: seek lands
    exactly, expiry honoured, reverse direction.
