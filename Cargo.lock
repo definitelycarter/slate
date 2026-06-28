@@ -1606,6 +1606,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slate-trigger"
+version = "0.1.0"
+dependencies = [
+ "bson",
+ "thiserror",
+]
+
+[[package]]
 name = "slate-udf"
 version = "0.1.0"
 dependencies = [
