@@ -40,7 +40,7 @@ pub use lower::lower;
 pub use plan::{
     AggregateExpr, CollectionRef, CompoundScanRange, CompoundScanTail, GroupKey,
     IndexIntersectPart, IndexScanRange, LogicalOp, Node, Plan, RowBinding, ScanDirection,
-    UpsertMode, VectorMetric,
+    UpsertMode, VectorDataType, VectorMetric,
 };
 pub use planner::{PlanContext, plan};
 pub use sargable::{CollectionMeta, VectorIndexMeta};

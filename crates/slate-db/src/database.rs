@@ -747,6 +747,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .map(|spec| slate_planner::VectorIndexMeta {
                 field: spec.path.clone(),
                 metric: map_vector_metric(spec.metric),
+                dtype: map_vector_dtype(spec.dtype),
             })
             .collect();
         Ok(slate_planner::CollectionMeta {
@@ -915,5 +916,15 @@ fn map_vector_metric(metric: slate_engine::VectorMetric) -> slate_planner::Vecto
         slate_engine::VectorMetric::Cosine => slate_planner::VectorMetric::Cosine,
         slate_engine::VectorMetric::DotProduct => slate_planner::VectorMetric::DotProduct,
         slate_engine::VectorMetric::Euclidean => slate_planner::VectorMetric::Euclidean,
+    }
+}
+
+/// Map the engine's stored vector width into the planner's mirror, so the node
+/// knows whether the seek must rescore (a quantized width) or emit the scan's
+/// top-k directly (`Float32`).
+fn map_vector_dtype(dtype: slate_engine::VectorDataType) -> slate_planner::VectorDataType {
+    match dtype {
+        slate_engine::VectorDataType::Float32 => slate_planner::VectorDataType::Float32,
+        slate_engine::VectorDataType::Float16 => slate_planner::VectorDataType::Float16,
     }
 }

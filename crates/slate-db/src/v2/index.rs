@@ -118,12 +118,25 @@ pub struct VectorIndexOptions {
 }
 
 impl VectorIndexOptions {
-    /// A Phase-1 `float32` vector index of `dims` dimensions, built for `metric`.
+    /// A `float32` vector index of `dims` dimensions, built for `metric` — full
+    /// precision, exact scan, no rescore.
     pub fn float32(dims: u32, metric: VectorMetric) -> Self {
         Self {
             dims,
             metric,
             dtype: VectorDataType::Float32,
+        }
+    }
+
+    /// A `float16` vector index — quantized to half the footprint (2 bytes per
+    /// component). The scan distance is approximate; the seek over-samples and
+    /// rescores the shortlist against each document's exact float32, so results
+    /// are effectively lossless (recall@k ≈ 1.0 with a bounded rescore window).
+    pub fn float16(dims: u32, metric: VectorMetric) -> Self {
+        Self {
+            dims,
+            metric,
+            dtype: VectorDataType::Float16,
         }
     }
 }

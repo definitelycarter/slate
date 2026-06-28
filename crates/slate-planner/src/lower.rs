@@ -429,6 +429,7 @@ pub(crate) fn lower_query(
                     field: knn.field,
                     query_vector: knn.query_vector,
                     metric: knn.metric,
+                    dtype: knn.dtype,
                     k: knn.k,
                     source,
                 };
@@ -500,6 +501,7 @@ struct RecognizedKnn {
     field: String,
     query_vector: Expression,
     metric: VectorMetric,
+    dtype: crate::plan::VectorDataType,
     k: usize,
 }
 
@@ -578,6 +580,8 @@ fn recognize_vector_topk(
         // The query vector is arg1, evaluated once by the executor.
         query_vector: args[1].clone(),
         metric,
+        // The width decides whether the executor rescores the shortlist.
+        dtype: index.dtype,
         k,
     })
 }
@@ -1551,6 +1555,7 @@ mod tests {
             vector_indexes: vec![crate::sargable::VectorIndexMeta {
                 field: "embedding".into(),
                 metric,
+                dtype: crate::plan::VectorDataType::Float32,
             }],
             pk_path: "_id".into(),
         }
@@ -1590,6 +1595,24 @@ mod tests {
                 assert_eq!(metric, VectorMetric::Cosine);
                 assert_eq!(k, 5);
                 assert!(source.is_none(), "no WHERE → no pre-filter source");
+            }
+            other => panic!("expected VectorTopK, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn knn_carries_the_index_dtype() {
+        // The recogniser is metric-/dtype-agnostic, but it must thread the index's
+        // stored width onto the node so the executor knows whether to rescore.
+        let mut meta = vector_indexed(VectorMetric::Cosine);
+        meta.vector_indexes[0].dtype = crate::plan::VectorDataType::Float16;
+        let node = lower_with(
+            "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0,0.0]) DESC LIMIT 5",
+            &meta,
+        );
+        match vector_topk_of(node) {
+            Some(Node::VectorTopK { dtype, .. }) => {
+                assert_eq!(dtype, crate::plan::VectorDataType::Float16);
             }
             other => panic!("expected VectorTopK, got {other:?}"),
         }

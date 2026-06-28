@@ -137,6 +137,29 @@ impl VectorMetric {
     }
 }
 
+/// The stored element width of the vector index a [`Node::VectorTopK`] seeks —
+/// the planner's mirror of the engine's `VectorDataType` (carried in the IR so
+/// the planner stays free of slate-engine, like [`VectorMetric`]). It tells the
+/// executor whether the scan distance is *exact* (`Float32` → emit the top-k
+/// straight from the scan) or *approximate* (a quantized width → over-sample the
+/// scan, then rescore the shortlist against each document's exact float32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorDataType {
+    /// Full-precision float32 — the stored vector is exact, so no rescore runs.
+    Float32,
+    /// Half-precision float16 — ~2× smaller and approximate; the shortlist is
+    /// rescored with the document's exact float32.
+    Float16,
+}
+
+impl VectorDataType {
+    /// Whether the stored vector is exact (the seek needs no rescore). Only
+    /// `Float32` is; every quantized width is approximate.
+    pub fn is_exact(self) -> bool {
+        matches!(self, VectorDataType::Float32)
+    }
+}
+
 /// How an [`Node::IndexMerge`] combines its two child ID streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOp {
@@ -297,6 +320,10 @@ pub enum Node {
         /// The metric to measure by — the index's declared metric (which the
         /// recogniser proved matches the call's, if one was given).
         metric: VectorMetric,
+        /// The index's stored element width. `Float32` is exact (emit the scan's
+        /// top-k directly); a quantized width makes the scan approximate, so the
+        /// executor over-samples and rescores against the documents' exact f32.
+        dtype: VectorDataType,
         /// How many nearest neighbours to keep (the `LIMIT`/`TOP`).
         k: usize,
         /// The pre-filter candidate-id source, or `None` for a whole-field scan.

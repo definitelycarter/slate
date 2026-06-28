@@ -23,21 +23,37 @@
 //!
 //! ## The bounded heap
 //!
-//! A `BinaryHeap` of at most k entries holds the current best. The heap's
+//! A `BinaryHeap` of at most `window` entries holds the current best. The heap's
 //! ordering is arranged so its *root is the worst kept entry* — the one a new,
-//! better candidate evicts — so each candidate is an O(log k) compare-and-maybe-
-//! replace, never an O(n log n) full sort. At the end the heap is drained and
-//! reversed into nearest-first order.
+//! better candidate evicts — so each candidate is an O(log window) compare-and-
+//! maybe-replace, never an O(n log n) full sort. At the end the heap is drained
+//! and reversed into nearest-first order.
+//!
+//! ## Rescore (quantized widths)
+//!
+//! A `Float32` index stores exact vectors, so `window == k` and the heap's k are
+//! the answer. A *quantized* index (e.g. `Float16`) stores an approximate copy:
+//! the scan's distance is only approximate, so it would occasionally drop a true
+//! neighbour. The fix is **rescore** — over-sample the scan to `window > k`, then
+//! re-rank that shortlist against each document's **exact float32** (the BSON
+//! array, the canonical source) with the *same* shared metric, and keep k. The
+//! final ordering is then identical to a full scan over the shortlist, so
+//! quantization can only cost recall (a true neighbour missing the over-sampled
+//! shortlist), never mis-order what is returned. The rescore costs `window`
+//! point reads of the documents the scan already shortlisted.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashSet};
 
+use bson::raw::{RawBsonRef, RawDocument};
 use bson::{Bson, RawBson};
 use slate_ast::Expression;
 use slate_engine::{Catalog, EngineTransaction};
 use slate_eval::VectorMetric;
 use slate_eval::raweval;
 use slate_eval::value::Value;
+use slate_planner::VectorDataType;
+use slate_rawbson::RawField;
 
 use super::env::row_env;
 use crate::{ExecEnv, ExecError, ValueIter};
@@ -121,6 +137,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     field: String,
     query_vector: Expression,
     metric: VectorMetric,
+    dtype: VectorDataType,
     k: usize,
     source: Option<ValueIter<'a>>,
     env: ExecEnv<'a>,
@@ -153,10 +170,14 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     };
 
     let higher_is_closer = metric.higher_is_closer();
-    // Widen the query to f32 once (the stored side is f32) so the per-candidate
-    // measure compares both sides at the same precision.
+    // Widen the query to f32 once (the stored side decodes to f32) so the
+    // approximate per-candidate measure compares both sides at the same precision.
     let query_f32 = vector_to_f32(&query);
-    let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
+    // A quantized index's scan distance is only approximate, so over-sample: keep
+    // the top-`window` candidates and rescore them exactly below. An exact
+    // (float32) index uses `window == k` and skips the rescore.
+    let window = rescore_window(dtype, k);
+    let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(window + 1);
 
     for entry in txn.scan_vectors(&handle, &field)? {
         let (doc_id, vector) = entry?;
@@ -176,30 +197,114 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
         let score = metric.measure_f32(&query_f32, &vector);
         let id_order = id_bytes(&doc_id.as_raw_bson_ref());
-        let cand = Candidate {
-            score,
-            doc_id,
-            id_order,
-            higher_is_closer,
-        };
-
-        if heap.len() < k {
-            heap.push(cand);
-        } else if let Some(worst) = heap.peek()
-            && cand.goodness(worst) == Ordering::Greater
-        {
-            // Strictly better than the worst kept — evict it. (A tie keeps the
-            // incumbent, a stable, deterministic choice.)
-            heap.pop();
-            heap.push(cand);
-        }
+        push_bounded(
+            &mut heap,
+            Candidate {
+                score,
+                doc_id,
+                id_order,
+                higher_is_closer,
+            },
+            window,
+        );
     }
 
     // `into_sorted_vec` sorts ascending by `Ord`. Our `Ord` is `goodness`
     // *reversed* (so the heap root is the worst), which means ascending `Ord`
     // orders *best-first* — exactly the nearest-first output we want.
-    let kept: Vec<Candidate> = heap.into_sorted_vec();
+    let candidates: Vec<Candidate> = heap.into_sorted_vec();
+
+    // Exact index: the scan distance is already exact, so the `window == k`
+    // candidates *are* the final top-k.
+    if dtype.is_exact() {
+        return Ok(Box::new(candidates.into_iter().map(|c| Ok(Some(c.doc_id)))));
+    }
+
+    // Quantized index: re-rank the shortlist against each document's exact
+    // float32 (the canonical array) with the *same* shared metric, then keep the
+    // k nearest. This makes the returned order identical to a full scan over the
+    // shortlist — quantization can only cost recall (a true neighbour missing the
+    // shortlist), never mis-order what we return.
+    let mut rescored: BinaryHeap<Candidate> = BinaryHeap::with_capacity(k + 1);
+    for cand in candidates {
+        let Some(doc) = txn.get(&handle, &cand.doc_id.as_raw_bson_ref())? else {
+            // Vanished between the scan and the rescore (deleted/expired) — drop it.
+            continue;
+        };
+        let Some(exact) = exact_vector_f64(&doc, &field) else {
+            continue;
+        };
+        if exact.len() != query.len() {
+            continue;
+        }
+        let score = metric.measure(&query, &exact);
+        push_bounded(
+            &mut rescored,
+            Candidate {
+                score,
+                doc_id: cand.doc_id,
+                id_order: cand.id_order,
+                higher_is_closer,
+            },
+            k,
+        );
+    }
+    let kept: Vec<Candidate> = rescored.into_sorted_vec();
     Ok(Box::new(kept.into_iter().map(|c| Ok(Some(c.doc_id)))))
+}
+
+/// The scan's keep-count for a `dtype`: an exact index keeps exactly `k`; a
+/// quantized index over-samples to `max(OVERSAMPLE·k, FLOOR)` so the true top-k
+/// survive the approximate distance before the exact rescore narrows to k. The
+/// spike measured recall@k = 1.0 at 2·k for float16/int8; 4× plus a floor is
+/// comfortable margin at trivial cost (the window is also the count of document
+/// reads the rescore performs).
+fn rescore_window(dtype: VectorDataType, k: usize) -> usize {
+    if dtype.is_exact() {
+        k
+    } else {
+        k.saturating_mul(RESCORE_OVERSAMPLE).max(RESCORE_FLOOR)
+    }
+}
+
+const RESCORE_OVERSAMPLE: usize = 4;
+const RESCORE_FLOOR: usize = 64;
+
+/// Push `cand` into a max-heap-on-worst bounded to `cap`: keep it if the heap
+/// isn't full, else only if it is strictly better than the current worst (a tie
+/// keeps the incumbent — a stable, deterministic choice). O(log cap) per push.
+fn push_bounded(heap: &mut BinaryHeap<Candidate>, cand: Candidate, cap: usize) {
+    if heap.len() < cap {
+        heap.push(cand);
+    } else if let Some(worst) = heap.peek()
+        && cand.goodness(worst) == Ordering::Greater
+    {
+        heap.pop();
+        heap.push(cand);
+    }
+}
+
+/// Read a document's vector field as an exact `f64` vector — the canonical
+/// full-precision array the rescore measures against (bit-identical to what the
+/// scalar `VECTORDISTANCE` reads on a full scan). `None` if the field is absent,
+/// not an array, or holds a non-numeric element (not a comparable vector, so the
+/// candidate drops out of the rescore).
+fn exact_vector_f64(doc: &RawDocument, field: &str) -> Option<Vec<f64>> {
+    let RawBsonRef::Array(arr) = RawField::get_value(doc.as_bytes(), field)? else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for el in arr {
+        let v = match el {
+            Ok(RawBsonRef::Int32(i)) => i as f64,
+            Ok(RawBsonRef::Int64(i)) => i as f64,
+            Ok(RawBsonRef::Double(d)) => d,
+            // Non-numeric element or a decode error → not a usable vector.
+            _ => return None,
+        };
+        out.push(v);
+    }
+    Some(out)
 }
 
 /// Widen the query `f64` vector to `f32` for the shared `measure_f32`, so the
@@ -532,6 +637,7 @@ mod tests {
             vector_indexes: vec![VectorIndexMeta {
                 field: "embedding".into(),
                 metric: slate_planner::VectorMetric::Cosine,
+                dtype: slate_planner::VectorDataType::Float32,
             }],
             pk_path: "_id".into(),
         }
@@ -628,6 +734,7 @@ mod tests {
             vector_indexes: vec![VectorIndexMeta {
                 field: "embedding".into(),
                 metric: slate_planner::VectorMetric::Euclidean,
+                dtype: slate_planner::VectorDataType::Float32,
             }],
             pk_path: "_id".into(),
         };
@@ -645,5 +752,76 @@ mod tests {
             .collect();
         // Nearest to [1,0,0]: a (0), c (~0.14), then b.
         assert_eq!(ids, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn e2e_float16_topk_matches_exact_via_rescore() {
+        // A float16 index stores an approximate copy; the executor over-samples
+        // the scan and rescores the shortlist against each document's exact f32.
+        // The returned order must equal the exact (f64) brute-force ranking — the
+        // chosen values aren't f16-exact and sit in near-ties, so a broken rescore
+        // (emitting the approximate order) would diverge.
+        let corpus: [(&str, [f64; 3]); 5] = [
+            ("a", [0.11, 0.93, 0.21]),
+            ("b", [0.10, 0.95, 0.19]),
+            ("c", [0.90, 0.05, 0.10]),
+            ("d", [0.33, 0.33, 0.88]),
+            ("e", [0.12, 0.90, 0.25]),
+        ];
+        let engine = KvEngine::new(MemoryStore::new());
+        {
+            let txn = engine.begin(false).unwrap();
+            txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+                .unwrap();
+            txn.create_vector_index(
+                DEFAULT_CF,
+                "photos",
+                &VectorIndexSpec::float16("embedding", 3, slate_engine::VectorMetric::Cosine),
+            )
+            .unwrap();
+            let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+            for (id, e) in corpus {
+                let doc = bson::rawdoc! { "_id": id, "embedding": [e[0], e[1], e[2]] };
+                txn.put(&handle, &doc).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        let meta = CollectionMeta {
+            indexes: Vec::new(),
+            compound_indexes: Vec::new(),
+            vector_indexes: vec![VectorIndexMeta {
+                field: "embedding".into(),
+                metric: slate_planner::VectorMetric::Cosine,
+                dtype: slate_planner::VectorDataType::Float16,
+            }],
+            pk_path: "_id".into(),
+        };
+        let txn = engine.begin(true).unwrap();
+        let sql = "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [0.1, 0.92, 0.2]) DESC LIMIT 3";
+        let plan = slate_planner::lower(slate_sql::parse(sql).unwrap(), photos_ref(), &meta);
+        let out = Executor::new(&txn).execute_collect(plan).unwrap();
+        let got: Vec<String> = out
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d.get_str("_id").unwrap().to_string(),
+                other => panic!("got {other:?}"),
+            })
+            .collect();
+
+        // Exact (f64) brute-force expectation — the same shared metric the rescore
+        // uses, so float16 + rescore must reproduce this order exactly.
+        let q = [0.1_f64, 0.92, 0.2];
+        let mut scored: Vec<(f64, &str)> = corpus
+            .iter()
+            .map(|(id, e)| (VectorMetric::Cosine.measure(&q, e), *id))
+            .collect();
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then_with(|| a.1.cmp(b.1)));
+        let want: Vec<String> = scored
+            .iter()
+            .take(3)
+            .map(|(_, id)| id.to_string())
+            .collect();
+
+        assert_eq!(got, want, "float16 rescore must match the exact ranking");
     }
 }

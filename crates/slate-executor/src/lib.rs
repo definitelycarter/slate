@@ -307,6 +307,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 field,
                 query_vector,
                 metric,
+                dtype,
                 k,
                 source,
             } => {
@@ -319,6 +320,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                     field,
                     query_vector,
                     map_vector_metric(metric),
+                    dtype,
                     k,
                     source,
                     self.env.clone(),

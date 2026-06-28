@@ -31,12 +31,13 @@ use crate::plan::{
     LogicalOp, Node, ScanDirection,
 };
 
-/// A flat vector index visible to the planner: the field it is on plus the
-/// metric it was built for. The planner needs only these two — the field to
-/// route a `VECTORDISTANCE(c.<field>, …)` call to the right index, and the
-/// metric to check the call's metric and `ORDER BY` direction agree before
-/// seeking it (a self-contained subset of the engine's `VectorIndexSpec`, kept
-/// here so the planner needn't depend on `slate-engine`).
+/// A flat vector index visible to the planner: the field it is on, the metric it
+/// was built for, and its stored element width. The planner needs the field to
+/// route a `VECTORDISTANCE(c.<field>, …)` call to the right index, the metric to
+/// check the call's metric and `ORDER BY` direction agree before seeking it, and
+/// the dtype to tell the executor whether the seek must rescore (a self-contained
+/// subset of the engine's `VectorIndexSpec`, kept here so the planner needn't
+/// depend on `slate-engine`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VectorIndexMeta {
     /// The document field the embedding lives on (e.g. `"embedding"`).
@@ -44,6 +45,9 @@ pub struct VectorIndexMeta {
     /// The metric the index is built for; a `VECTORDISTANCE` call's metric must
     /// match it for the index to be used (else a correct full scan).
     pub metric: crate::plan::VectorMetric,
+    /// The stored element width — `Float32` (exact) or a quantized width (the
+    /// executor over-samples the scan and rescores against exact float32).
+    pub dtype: crate::plan::VectorDataType,
 }
 
 /// Index metadata for the queried collection, used to choose a scan source.
