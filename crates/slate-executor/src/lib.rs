@@ -26,6 +26,7 @@
 //! zero-copy rather than decoding each row to `Bson`.
 
 mod analyze;
+mod budget;
 mod env;
 mod error;
 mod nodes;
@@ -44,6 +45,8 @@ use slate_eval::EvalError;
 use slate_planner::{Node, Plan, PlanStats};
 
 use analyze::Counting;
+pub use budget::Deadline;
+use budget::Ticker;
 pub use env::ExecEnv;
 pub use error::ExecError;
 pub use watch::{CapturedEvent, ChangeEvent, Compiled, CompiledWatch, WatchSink};
@@ -238,6 +241,13 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         Ok((rows, stats))
     }
 
+    /// A fresh [`Ticker`] carrying the query's deadline (if any) for one source
+    /// node — the cooperative-timeout check it folds into its scan loop. Each
+    /// source node gets its own counter; `None` deadline makes it a no-op.
+    fn ticker(&self) -> Ticker {
+        Ticker::new(self.env.deadline.clone())
+    }
+
     /// Dispatch a node to its per-node executor, recursing into children first.
     ///
     /// `current` is the outer row supplied by an enclosing [`Node::Subquery`],
@@ -261,7 +271,9 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
         let iter: ValueIter<'a> = match node {
             Node::Values(values) => nodes::values::execute(values),
 
-            Node::Scan { collection } => nodes::scan::execute(self.txn, &collection)?,
+            Node::Scan { collection } => {
+                nodes::scan::execute(self.txn, &collection, self.ticker())?
+            }
 
             Node::IndexScan {
                 collection,
@@ -278,6 +290,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 direction,
                 limit,
                 covering,
+                self.ticker(),
             )?,
 
             Node::CompoundIndexScan {
@@ -295,6 +308,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
                 direction,
                 limit,
                 covering,
+                self.ticker(),
             )?,
 
             Node::KeyLookup { collection, source } => {
@@ -339,7 +353,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             }
 
             Node::IndexIntersect { collection, parts } => {
-                nodes::index_intersect::execute(self.txn, &collection, &parts)?
+                nodes::index_intersect::execute(self.txn, &collection, &parts, self.ticker())?
             }
 
             Node::Bind { alias, source } => {

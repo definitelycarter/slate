@@ -8,12 +8,17 @@ use bson::RawBson;
 use slate_engine::{Catalog, EngineTransaction};
 use slate_planner::CollectionRef;
 
+use crate::budget::Ticker;
 use crate::{ExecError, ValueIter};
 
 /// Open a full-collection scan, yielding each document as a value.
+///
+/// `ticker` folds the cooperative deadline check (Resource Limits RFC, A) into
+/// the per-row closure — no separate iterator layer (see [`crate::budget`]).
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
+    mut ticker: Ticker,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
     crate::trace::trace_event!(
@@ -22,9 +27,12 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
         "scan opened"
     );
     let iter = txn.scan(&handle)?;
-    Ok(Box::new(iter.map(|result| match result {
-        Ok(doc) => Ok(Some(RawBson::Document(doc))),
-        Err(e) => Err(ExecError::Engine(e)),
+    Ok(Box::new(iter.map(move |result| {
+        ticker.tick()?;
+        match result {
+            Ok(doc) => Ok(Some(RawBson::Document(doc))),
+            Err(e) => Err(ExecError::Engine(e)),
+        }
     })))
 }
 

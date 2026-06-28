@@ -19,7 +19,7 @@ use crate::cursor::{Cursor, RawValuesIter, ValuesIter};
 use crate::database::Transaction;
 use crate::error::DbError;
 use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
-use crate::{ChangeEvent, RawDocumentBuf, WatchHandle, WatchRegistry};
+use crate::{ChangeEvent, QueryLimits, RawDocumentBuf, WatchHandle, WatchRegistry};
 
 /// A lazily-built SQL read: parameters bind via [`params`](Self::params); a
 /// terminal runs it.
@@ -36,6 +36,20 @@ pub struct QueryBuilder<'a, P = ()> {
     watch: &'a Arc<WatchRegistry>,
     sql: &'a str,
     params: Option<P>,
+    /// Per-query resource-limit override (Resource Limits RFC); `None` fields
+    /// inherit the database-wide default.
+    limits: QueryLimits,
+}
+
+impl<'a, P> QueryBuilder<'a, P> {
+    /// Override the query *deadline* for this SQL read (Resource Limits RFC, A),
+    /// replacing the database-wide default: the query aborts with
+    /// [`DbError::Timeout`](crate::DbError::Timeout) if it runs longer. Chainable
+    /// before or after [`params`](QueryBuilder::params).
+    pub fn deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.limits.deadline = Some(deadline);
+        self
+    }
 }
 
 impl<'a> QueryBuilder<'a, ()> {
@@ -51,6 +65,7 @@ impl<'a> QueryBuilder<'a, ()> {
             watch,
             sql,
             params: None,
+            limits: QueryLimits::default(),
         }
     }
 
@@ -63,6 +78,7 @@ impl<'a> QueryBuilder<'a, ()> {
             watch: self.watch,
             sql: self.sql,
             params: Some(params),
+            limits: self.limits,
         }
     }
 
@@ -167,6 +183,7 @@ pub(crate) fn query_cursor<'t, 'db, S>(
     collection: &str,
     sql: &str,
     params: Option<RawDocumentBuf>,
+    limits: QueryLimits,
     txn: &'t Transaction<'db, S>,
 ) -> Result<Cursor<'db, 't, S>, DbError>
 where
@@ -174,7 +191,7 @@ where
 {
     let plan = query_plan(cf, collection, sql, params.as_deref(), txn)?;
     let env = txn
-        .exec_env(params)
+        .exec_env(params, limits)
         .with_udf_bindings(txn.udf_bindings(cf, collection));
     Ok(Cursor::new(txn.engine_txn(), plan, env))
 }
@@ -210,7 +227,14 @@ impl<P: Serialize> QueryBuilder<'_, P> {
     where
         S: Store + 'db,
     {
-        query_cursor(self.cf, self.collection, self.sql, self.params_raw()?, txn)
+        query_cursor(
+            self.cf,
+            self.collection,
+            self.sql,
+            self.params_raw()?,
+            self.limits,
+            txn,
+        )
     }
 
     /// Stream the result values as raw BSON ([`RawBson`] — SQL `SELECT VALUE` is

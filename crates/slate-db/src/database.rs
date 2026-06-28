@@ -13,7 +13,25 @@ use slate_validator::ValidatorBag;
 
 use crate::error::DbError;
 use crate::hooks::{HookRegistry, HookSnapshot};
+use crate::limits::QueryLimits;
 use crate::watch::{WatchRegistry, WatchSnapshot};
+
+/// The clock backing TTL, `GETCURRENT*`, and the query deadline: a callable
+/// returning epoch milliseconds. Shared (`Arc`) so the engine and the deadline
+/// builder read one source; `Send + Sync` so the database stays thread-safe.
+/// Injected via [`DatabaseBuilder::with_clock`], else [`default_clock`].
+pub(crate) type ClockFn = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// The native default clock: epoch milliseconds from the system time. Used when
+/// no clock is injected. On wasm the host always injects one (`SystemTime::now`
+/// is unavailable there), so this is never reached on that target.
+fn default_clock() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// The injected random source backing the SQL `RAND()` function: a callable
 /// returning a fresh value in `[0, 1)` per call. Shared (`Arc`) so it outlives
@@ -62,9 +80,12 @@ pub struct DatabaseBuilder {
     /// Trigger bag accumulated before open via `with_trigger`; moved into the
     /// database, mirroring `validator_bag`.
     trigger_bag: Arc<TriggerBag>,
-    clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
+    clock: Option<ClockFn>,
     rand: Option<RandFn>,
     durability: Option<Durability>,
+    /// Database-wide resource-limit defaults applied to every query (Resource
+    /// Limits RFC), overridable per query. Empty (unbounded) by default.
+    limits: QueryLimits,
     #[cfg(feature = "runtime")]
     sweep_interval: Option<std::time::Duration>,
 }
@@ -84,6 +105,7 @@ impl DatabaseBuilder {
             clock: None,
             rand: None,
             durability: None,
+            limits: QueryLimits::default(),
             #[cfg(feature = "runtime")]
             sweep_interval: None,
         }
@@ -157,6 +179,26 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Set the database-wide [`QueryLimits`] default — the safety valves applied
+    /// to every query unless a per-query override on the `find`/`query` builders
+    /// replaces them (Resource Limits RFC). Replaces any limits set so far; see
+    /// [`with_deadline`](Self::with_deadline) for the field-at-a-time knob.
+    pub fn with_limits(mut self, limits: QueryLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Set the database-wide default query *deadline* (Resource Limits RFC, A): a
+    /// query running longer than `deadline` aborts with
+    /// [`DbError::Timeout`](crate::DbError::Timeout). Checked cooperatively
+    /// between rows, reusing the injected [`with_clock`](Self::with_clock) source,
+    /// so it is wasm-safe. A per-query `.deadline(..)` on the `find`/`query`
+    /// builders overrides it.
+    pub fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.limits.deadline = Some(deadline);
+        self
+    }
+
     /// Enable background TTL sweep at the given interval.
     #[cfg(feature = "runtime")]
     pub fn with_sweep(mut self, interval: std::time::Duration) -> Self {
@@ -170,10 +212,14 @@ impl DatabaseBuilder {
     /// and UDF *bindings* are resolved against the live bags from the first
     /// transaction.
     pub fn open<S: Store + Send + Sync + 'static>(self, store: S) -> Result<Database<S>, DbError> {
-        let engine = match self.clock {
-            Some(clock) => Arc::new(KvEngine::with_clock(store, move || clock())),
-            None => Arc::new(KvEngine::new(store)),
-        };
+        // Resolve one clock source — injected or the native default — and share
+        // it between the engine (TTL/`GETCURRENT*`) and the query deadline, so a
+        // deadline reads exactly the clock the rest of the database uses.
+        let clock: ClockFn = self.clock.unwrap_or_else(|| Arc::new(default_clock));
+        let engine = Arc::new(KvEngine::with_clock(store, {
+            let clock = Arc::clone(&clock);
+            move || clock()
+        }));
 
         // Validate and migrate every on-disk format before serving transactions:
         // an un-migrated string index would silently undercount, and a store
@@ -216,6 +262,8 @@ impl DatabaseBuilder {
             validator_bag: self.validator_bag,
             trigger_bag: self.trigger_bag,
             rand,
+            clock,
+            limits: self.limits,
             durability: self.durability,
             #[cfg(feature = "runtime")]
             ttl_handle,
@@ -280,6 +328,12 @@ pub struct Database<S: Store> {
     trigger_bag: Arc<TriggerBag>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
+    /// The clock backing the query deadline (and shared with the engine), threaded
+    /// into each transaction so `exec_env` can build a live deadline reader.
+    clock: ClockFn,
+    /// Database-wide [`QueryLimits`] default, threaded into each transaction and
+    /// merged with any per-query override at `exec_env`.
+    limits: QueryLimits,
     /// The builder-level durability default applied to every write transaction,
     /// overriding the store's own default. `None` falls back to the store's.
     durability: Option<Durability>,
@@ -488,6 +542,8 @@ impl<S: Store> Database<S> {
             snapshot,
             registry: self.registry.as_ref(),
             rand: self.rand.clone(),
+            clock: Arc::clone(&self.clock),
+            limits: self.limits,
             hooks_dirty: Cell::new(false),
             watch_snapshot,
             watch_sink,
@@ -668,6 +724,12 @@ pub struct Transaction<'db, S: Store + 'db> {
     registry: Option<&'db HookRegistry>,
     /// Random source for `RAND()`, handed to each cursor this transaction opens.
     rand: Option<RandFn>,
+    /// The clock source (shared with the engine), used by [`exec_env`](Self::exec_env)
+    /// to build a live reader for the query deadline.
+    clock: ClockFn,
+    /// The database-wide [`QueryLimits`] default, merged with any per-query
+    /// override in [`exec_env`](Self::exec_env).
+    limits: QueryLimits,
     hooks_dirty: Cell<bool>,
     /// Watch registry snapshot frozen at `begin` — the source of callbacks at
     /// emit time. `None` for read transactions and when no watches are
@@ -804,10 +866,21 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
     /// this transaction: the live UDF/validator/trigger bags, the `RAND()` source,
     /// the watch sink, the clock reading (epoch ms, captured at `begin`, backing
     /// `GETCURRENT*` — consistent across the txn and wasm-clean, no syscall in the
-    /// evaluator), and the query's `@`-parameters. The single translation point
-    /// from a transaction's capabilities to an executor env — the cursor and
-    /// `analyze` both go through it, so a new capability is wired here once.
-    pub(crate) fn exec_env(&self, params: Option<bson::RawDocumentBuf>) -> ExecEnv<'db> {
+    /// evaluator), the query's `@`-parameters, and the resource-limit deadline
+    /// (Resource Limits RFC, A). The single translation point from a
+    /// transaction's capabilities to an executor env — the cursor and `analyze`
+    /// both go through it, so a new capability is wired here once.
+    ///
+    /// `limits` is the per-query override; each field it leaves `None` inherits
+    /// the database-wide default ([`QueryLimits::or`]). The read terminals pass
+    /// the builder's override; `analyze` and the write path pass
+    /// [`QueryLimits::default`] (inherit the default).
+    pub(crate) fn exec_env(
+        &self,
+        params: Option<bson::RawDocumentBuf>,
+        limits: QueryLimits,
+    ) -> ExecEnv<'db> {
+        let effective = limits.or(self.limits);
         ExecEnv::new()
             .with_udf(Some(self.udf_bag))
             .with_validator(Some(self.validator_bag))
@@ -816,6 +889,30 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .with_rand(self.exec_rand())
             .with_watch(self.watch_sink.clone())
             .with_clock(Some(self.now_millis()))
+            .with_deadline(self.build_deadline(effective.deadline))
+    }
+
+    /// Build the executor [`Deadline`](slate_executor::Deadline) for an effective
+    /// limit: an absolute epoch-ms instant (read live *now*, plus the configured
+    /// `Duration`) paired with a live clock reader, both off the one shared clock
+    /// source. `None` when no deadline is configured — the zero-cost default.
+    fn build_deadline(
+        &self,
+        deadline: Option<std::time::Duration>,
+    ) -> Option<Rc<slate_executor::Deadline>> {
+        let duration = deadline?;
+        let reader = self.deadline_clock();
+        // Saturate an absurd duration rather than wrap into the past.
+        let millis = i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
+        let at = reader().saturating_add(millis);
+        Some(Rc::new(slate_executor::Deadline::new(reader, at)))
+    }
+
+    /// A live epoch-ms reader over the shared clock, in the executor's `Rc` form —
+    /// the deadline reads it between rows (mirrors [`exec_rand`](Self::exec_rand)).
+    fn deadline_clock(&self) -> Rc<dyn Fn() -> i64> {
+        let clock = Arc::clone(&self.clock);
+        Rc::new(move || clock())
     }
 
     /// The collection's UDF bindings (`query_name -> native_name`) from this

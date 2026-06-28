@@ -4,6 +4,7 @@ pub(crate) mod database;
 mod error;
 mod export;
 pub(crate) mod hooks;
+mod limits;
 #[cfg(feature = "runtime")]
 pub(crate) mod runtime;
 pub(crate) mod stats;
@@ -23,6 +24,7 @@ pub use export::{
     CollectionDef, ExportOptions, ExportReport, ImportOptions, ImportReport, Manifest, OnCollision,
 };
 pub use hooks::{HookRegistry, HookSnapshot};
+pub use limits::QueryLimits;
 pub use slate_engine::{
     DEFAULT_CF, FunctionKind, IntegrityIssue, IntegrityReport, VectorDataType, VectorIndexSpec,
     VectorMetric, join_index_fields, split_index_fields,

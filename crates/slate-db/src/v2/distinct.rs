@@ -14,10 +14,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use slate_store::Store;
 
-use crate::SortDirection;
 use crate::cursor::{Cursor, RawValuesIter, ValuesIter};
 use crate::database::Transaction;
 use crate::error::DbError;
+use crate::{QueryLimits, SortDirection};
 
 /// A lazily-built distinct-values read. Built by
 /// [`FindBuilder::distinct`](super::FindBuilder::distinct); inert until a
@@ -31,6 +31,9 @@ pub struct DistinctBuilder<'a, F> {
     sort: Option<SortDirection>,
     skip: Option<usize>,
     take: Option<usize>,
+    /// Per-query resource-limit override (Resource Limits RFC); `None` fields
+    /// inherit the database-wide default.
+    limits: QueryLimits,
 }
 
 impl<'a, F> DistinctBuilder<'a, F> {
@@ -43,7 +46,16 @@ impl<'a, F> DistinctBuilder<'a, F> {
             sort: None,
             skip: None,
             take: None,
+            limits: QueryLimits::default(),
         }
+    }
+
+    /// Override the query *deadline* for this distinct read (Resource Limits RFC,
+    /// A), replacing the database-wide default: it aborts with
+    /// [`DbError::Timeout`](crate::DbError::Timeout) if it runs longer.
+    pub fn deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.limits.deadline = Some(deadline);
+        self
     }
 
     /// Order the distinct values ascending or descending.
@@ -82,6 +94,7 @@ pub(crate) fn distinct_cursor<'t, 'db, F, S>(
     sort: Option<slate_ast::SortDirection>,
     skip: Option<usize>,
     take: Option<usize>,
+    limits: QueryLimits,
     txn: &'t Transaction<'db, S>,
 ) -> Result<Cursor<'db, 't, S>, DbError>
 where
@@ -110,7 +123,7 @@ where
     };
     let plan = slate_planner::plan(stmt, &ctx)?;
     let env = txn
-        .exec_env(None)
+        .exec_env(None, limits)
         .with_udf_bindings(txn.udf_bindings(cf, collection));
     Ok(Cursor::new(txn.engine_txn(), plan, env))
 }
@@ -135,6 +148,7 @@ impl<F: Serialize> DistinctBuilder<'_, F> {
             sort,
             self.skip,
             self.take,
+            self.limits,
             txn,
         )
     }

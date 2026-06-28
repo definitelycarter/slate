@@ -16,7 +16,7 @@ use crate::cursor::{Cursor, CursorIter, RawCursorIter};
 use crate::database::Transaction;
 use crate::error::DbError;
 use crate::watch::{DEFAULT_STREAM_CAPACITY, WatchStream};
-use crate::{ChangeEvent, FindOptions, Sort, SortDirection};
+use crate::{ChangeEvent, FindOptions, QueryLimits, Sort, SortDirection};
 use crate::{WatchHandle, WatchRegistry};
 
 /// A lazily-built `find` read: stages reshape it, a terminal runs it.
@@ -34,6 +34,9 @@ pub struct FindBuilder<'a, F> {
     watch: &'a Arc<WatchRegistry>,
     filter: F,
     options: FindOptions,
+    /// Per-query resource-limit override (Resource Limits RFC); `None` fields
+    /// inherit the database-wide default.
+    limits: QueryLimits,
 }
 
 impl<'a, F> FindBuilder<'a, F> {
@@ -49,7 +52,16 @@ impl<'a, F> FindBuilder<'a, F> {
             watch,
             filter,
             options: FindOptions::default(),
+            limits: QueryLimits::default(),
         }
+    }
+
+    /// Override the query *deadline* for this read (Resource Limits RFC, A),
+    /// replacing the database-wide default: the read aborts with
+    /// [`DbError::Timeout`](crate::DbError::Timeout) if it runs longer.
+    pub fn deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.limits.deadline = Some(deadline);
+        self
     }
 
     /// Order the result by `field` (chainable; later calls append further keys).
@@ -144,6 +156,7 @@ pub(crate) fn find_cursor<'t, 'db, F, S>(
     collection: &str,
     filter: &F,
     options: &FindOptions,
+    limits: QueryLimits,
     txn: &'t Transaction<'db, S>,
 ) -> Result<Cursor<'db, 't, S>, DbError>
 where
@@ -152,7 +165,7 @@ where
 {
     let plan = find_plan(cf, collection, filter, options, txn)?;
     let env = txn
-        .exec_env(None)
+        .exec_env(None, limits)
         .with_udf_bindings(txn.udf_bindings(cf, collection));
     Ok(Cursor::new(txn.engine_txn(), plan, env))
 }
@@ -172,7 +185,14 @@ impl<F: Serialize> FindBuilder<'_, F> {
     where
         S: Store + 'db,
     {
-        find_cursor(self.cf, self.collection, &self.filter, &self.options, txn)
+        find_cursor(
+            self.cf,
+            self.collection,
+            &self.filter,
+            &self.options,
+            self.limits,
+            txn,
+        )
     }
 
     /// Stream the matching documents as raw BSON (`RawDocumentBuf`). The terminal

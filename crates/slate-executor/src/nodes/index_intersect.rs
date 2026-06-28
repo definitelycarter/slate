@@ -18,12 +18,14 @@
 use slate_engine::{Catalog, EngineTransaction, IndexCursor};
 use slate_planner::{CollectionRef, IndexIntersectPart};
 
+use crate::budget::Ticker;
 use crate::{ExecError, ValueIter};
 
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
     parts: &[IndexIntersectPart],
+    mut ticker: Ticker,
 ) -> Result<ValueIter<'a>, ExecError> {
     // IndexIntersect is the intersection of >=2 equality streams; the planner
     // only ever emits it so. A directly-constructed node with fewer parts is a
@@ -51,6 +53,12 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             return None;
         }
         loop {
+            // Cooperative deadline check, once per zig-zag iteration (each touches
+            // every cursor) — so a long galloping merge still aborts on time.
+            if let Err(e) = ticker.tick() {
+                done = true;
+                return Some(Err(e));
+            }
             // Phase 1 (immutable peeks): the max current doc-id across cursors and
             // whether they all already agree. Any exhausted cursor ends the
             // intersection. `max` is owned so the peek borrows release before the

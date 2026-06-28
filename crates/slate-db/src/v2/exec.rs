@@ -16,7 +16,7 @@ use slate_store::Store;
 use crate::cursor::Cursor;
 use crate::database::Transaction;
 use crate::error::DbError;
-use crate::{FindOptions, RawDocumentBuf};
+use crate::{FindOptions, QueryLimits, RawDocumentBuf};
 
 /// Run `plan` under EXPLAIN ANALYZE and render the annotated operator tree.
 ///
@@ -33,7 +33,8 @@ pub(crate) fn analyze_plan<S: Store>(
     // (pool/rand/watch + `$now`-injected params) comes from the same
     // `exec_env` translation the cursor uses.
     let render_plan = plan.clone();
-    let env = txn.exec_env(params);
+    // Analyze inherits the database-wide limits (no per-query override here).
+    let env = txn.exec_env(params, QueryLimits::default());
     let (_rows, stats) =
         slate_executor::Executor::with_env(txn.engine_txn(), env).execute_analyze(plan)?;
     Ok(render_plan.explain_analyze(&stats))
@@ -87,7 +88,13 @@ pub(crate) fn write_cursor<'t, 'db, S>(
 where
     S: Store + 'db,
 {
-    Cursor::new(txn.engine_txn(), plan, txn.exec_env(None))
+    // Writes inherit the database-wide limits (e.g. the default deadline still
+    // bounds a runaway DELETE/UPDATE over a full scan); no per-query override.
+    Cursor::new(
+        txn.engine_txn(),
+        plan,
+        txn.exec_env(None, QueryLimits::default()),
+    )
 }
 
 /// Build a cursor over a mutation plan, drain it, and return the affected count —

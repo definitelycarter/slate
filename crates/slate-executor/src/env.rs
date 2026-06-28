@@ -35,6 +35,7 @@ use slate_trigger::TriggerBag;
 use slate_udf::UdfBag;
 use slate_validator::ValidatorBag;
 
+use crate::budget::Deadline;
 use crate::nodes::env::Rand;
 use crate::watch::WatchSink;
 
@@ -93,6 +94,10 @@ pub struct ExecEnv<'a> {
     /// query, at fire time. `None` (the default) skips triggers — the write path
     /// always attaches it.
     pub(crate) trigger: Option<&'a TriggerBag>,
+    /// The query's cooperative deadline (Resource Limits RFC, A), shared (`Rc`)
+    /// into each source node so it folds the between-rows check into its scan
+    /// loop. `None` (the default) means no deadline and is zero-cost.
+    pub(crate) deadline: Option<Rc<Deadline>>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -157,6 +162,13 @@ impl<'a> ExecEnv<'a> {
     /// resolve bound triggers. `None` (the default) skips triggers.
     pub fn with_trigger(mut self, trigger: Option<&'a TriggerBag>) -> Self {
         self.trigger = trigger;
+        self
+    }
+
+    /// Attach the query's cooperative deadline (Resource Limits RFC, A), folded
+    /// into each source node's scan loop. `None` (the default) is zero-cost.
+    pub fn with_deadline(mut self, deadline: Option<Rc<Deadline>>) -> Self {
+        self.deadline = deadline;
         self
     }
 

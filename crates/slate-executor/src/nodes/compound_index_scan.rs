@@ -34,6 +34,7 @@ use slate_engine::{
 use slate_eval::compare_bson;
 use slate_planner::{CollectionRef, CompoundScanRange, CompoundScanTail, ScanDirection};
 
+use crate::budget::Ticker;
 use crate::{ExecError, ValueIter};
 
 /// Build the covering row for one compound entry: each `component` path carries
@@ -178,6 +179,10 @@ fn in_bounds(value: &Bson, lower: &Option<(Bson, bool)>, upper: &Option<(Bson, b
     within(lower, false) && within(upper, true)
 }
 
+// Each arg is a distinct, meaningful scan parameter (container + field + range +
+// direction + limit + covering) plus the deadline ticker; bundling them into a
+// struct just to satisfy the lint would add indirection without clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
@@ -186,6 +191,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     direction: ScanDirection,
     limit: Option<usize>,
     covering: Option<Vec<String>>,
+    mut ticker: Ticker,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
     let post_filter = CompoundFilter::for_range(range);
@@ -219,6 +225,12 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             return None;
         }
         for result in iter.by_ref() {
+            // Cooperative deadline check, once per *examined* entry — so a
+            // heavily post-filtered compound scan still aborts on time.
+            if let Err(e) = ticker.tick() {
+                done = true;
+                return Some(Err(e));
+            }
             let entry = match result {
                 Ok(e) => e,
                 Err(e) => {
@@ -282,6 +294,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 #[cfg(test)]
 mod tests {
     use super::{SynthNode, build_doc, execute, insert_path};
+    use crate::budget::Ticker;
     use crate::collect;
     use bson::{RawBson, RawDocumentBuf, rawdoc};
     use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
@@ -348,6 +361,7 @@ mod tests {
             ScanDirection::Forward,
             None,
             None,
+            Ticker::new(None),
         )
         .unwrap();
         collect(iter).unwrap()
@@ -414,6 +428,7 @@ mod tests {
             ScanDirection::Forward,
             None,
             Some(components),
+            Ticker::new(None),
         )
         .unwrap();
         collect(iter)

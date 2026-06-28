@@ -27,6 +27,7 @@ use slate_planner::{
 };
 use slate_store::MemoryStore;
 
+use crate::budget::Ticker;
 use crate::nodes;
 
 pub use crate::{ExecEnv, ExecError, ValueIter, collect};
@@ -127,12 +128,13 @@ pub fn values(values: Vec<RawBson>) -> ValueIter<'static> {
     nodes::values::execute(values)
 }
 
-/// `Scan` — full-collection scan over the transaction.
+/// `Scan` — full-collection scan over the transaction. Benches drive the
+/// no-deadline path (`Ticker::new(None)`), the common case.
 pub fn scan<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::scan::execute(txn, collection)
+    nodes::scan::execute(txn, collection, Ticker::new(None))
 }
 
 /// `IndexScan` — yields bare doc-IDs from a field index (non-covering; the
@@ -145,7 +147,16 @@ pub fn index_scan<'a, T: EngineTransaction + Catalog>(
     direction: ScanDirection,
     limit: Option<usize>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::index_scan::execute(txn, collection, field, range, direction, limit, false)
+    nodes::index_scan::execute(
+        txn,
+        collection,
+        field,
+        range,
+        direction,
+        limit,
+        false,
+        Ticker::new(None),
+    )
 }
 
 // ── Transform nodes ─────────────────────────────────────────────────────────
@@ -219,7 +230,7 @@ pub fn index_intersect<'a, T: EngineTransaction + Catalog>(
     collection: &CollectionRef,
     parts: &[IndexIntersectPart],
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::index_intersect::execute(txn, collection, parts)
+    nodes::index_intersect::execute(txn, collection, parts, Ticker::new(None))
 }
 
 /// `Aggregate` — group by `group_keys`, fold `aggregates`, emit one environment

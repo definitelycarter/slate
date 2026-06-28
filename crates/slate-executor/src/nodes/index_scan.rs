@@ -35,6 +35,7 @@ use slate_engine::{Catalog, EngineError, EngineTransaction, IndexEntry, IndexRan
 use slate_eval::compare_bson;
 use slate_planner::{CollectionRef, IndexScanRange, ScanDirection};
 
+use crate::budget::Ticker;
 use crate::{ExecError, ValueIter};
 
 /// Build the covering row for one entry: the indexed value at `field` — nested
@@ -121,6 +122,10 @@ impl CoercingFilter {
     }
 }
 
+// Each arg is a distinct, meaningful scan parameter (container + field + range +
+// direction + limit + covering) plus the deadline ticker; bundling them into a
+// struct just to satisfy the lint would add indirection without clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     txn: &'a T,
     collection: &CollectionRef,
@@ -129,6 +134,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     direction: ScanDirection,
     limit: Option<usize>,
     covering: bool,
+    mut ticker: Ticker,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
 
@@ -166,6 +172,12 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
             return None;
         }
         for result in iter.by_ref() {
+            // Cooperative deadline check, once per *examined* entry — so a
+            // heavily post-filtered range scan still aborts on time.
+            if let Err(e) = ticker.tick() {
+                done = true;
+                return Some(Err(e));
+            }
             let entry = match result {
                 Ok(e) => e,
                 Err(e) => {
@@ -220,6 +232,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 #[cfg(test)]
 mod tests {
     use super::{append_path, execute};
+    use crate::budget::Ticker;
     use crate::collect;
     use crate::nodes::test_support::{people_ref, seeded_people};
     use bson::{Bson, RawBson, RawDocumentBuf};
@@ -241,6 +254,7 @@ mod tests {
             direction,
             limit,
             false,
+            Ticker::new(None),
         )
         .unwrap();
         collect(iter).unwrap()
