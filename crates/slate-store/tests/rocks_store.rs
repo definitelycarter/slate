@@ -1,6 +1,6 @@
 #![cfg(feature = "rocksdb")]
 
-use slate_store::{BackupStore, Durability, RocksStore, Store, Transaction};
+use slate_store::{BackupStore, Durability, RocksStore, Store, StoreError, Transaction};
 
 fn temp_store() -> (RocksStore, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -771,6 +771,39 @@ fn per_transaction_override_commits() {
     assert_eq!(
         txn.get(&cf, b"money").unwrap().as_deref(),
         Some(b"moved".as_slice())
+    );
+}
+
+/// Two concurrent write transactions that touch the same key conflict at
+/// commit: the first wins, the second's `commit()` returns the distinct,
+/// retryable [`StoreError::Conflict`] (RocksDB's optimistic `Busy`), not a
+/// generic `Storage` error a caller couldn't tell apart from I/O.
+#[test]
+fn concurrent_writers_conflict_at_commit() {
+    let (store, _dir) = temp_store();
+
+    // Seed the contended key so both writers start from a committed value.
+    let seed = store.begin(false).unwrap();
+    let cf = seed.cf(CF).unwrap();
+    seed.put(&cf, b"k", b"v0").unwrap();
+    seed.commit().unwrap();
+
+    // Two writers begin against the same snapshot and both stage the same key.
+    let a = store.begin(false).unwrap();
+    let b = store.begin(false).unwrap();
+    let cf_a = a.cf(CF).unwrap();
+    let cf_b = b.cf(CF).unwrap();
+    a.put(&cf_a, b"k", b"va").unwrap();
+    b.put(&cf_b, b"k", b"vb").unwrap();
+
+    // First commit wins.
+    a.commit().unwrap();
+
+    // Second sees the key moved under it → a first-class Conflict.
+    let err = b.commit().unwrap_err();
+    assert!(
+        matches!(err, StoreError::Conflict),
+        "expected StoreError::Conflict, got {err:?}"
     );
 }
 

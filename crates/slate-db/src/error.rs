@@ -19,6 +19,14 @@ pub enum DbError {
         value: String,
         existing_id: String,
     },
+    /// A write transaction could not commit because a concurrent transaction
+    /// modified the same data (an optimistic write-write conflict). The
+    /// transaction made no changes and the operation can be retried from the
+    /// top — [`Database::transact`](crate::Database::transact) does this
+    /// automatically. Part of the concurrency contract on every backend (see
+    /// `book/src/architecture-database.md`), even those that serialize writers
+    /// and so cannot raise it today.
+    Conflict,
 }
 
 impl fmt::Display for DbError {
@@ -42,15 +50,33 @@ impl fmt::Display for DbError {
                 f,
                 "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
             ),
+            DbError::Conflict => write!(
+                f,
+                "transaction conflict: a concurrent write touched the same data; retry the transaction"
+            ),
         }
     }
 }
 
 impl std::error::Error for DbError {}
 
+impl DbError {
+    /// Whether this is a retryable optimistic write-write conflict
+    /// ([`DbError::Conflict`]). The retry predicate
+    /// [`Database::transact`](crate::Database::transact) loops on.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, DbError::Conflict)
+    }
+}
+
 impl From<StoreError> for DbError {
     fn from(e: StoreError) -> Self {
-        DbError::Store(e)
+        match e {
+            // A commit-time conflict is its own first-class, retryable shape —
+            // not a generic store/I-O error a caller can't act on.
+            StoreError::Conflict => DbError::Conflict,
+            other => DbError::Store(other),
+        }
     }
 }
 
@@ -81,7 +107,9 @@ impl From<slate_planner::PlanError> for DbError {
 impl From<slate_engine::EngineError> for DbError {
     fn from(e: slate_engine::EngineError) -> Self {
         match e {
-            slate_engine::EngineError::Store(se) => DbError::Store(se),
+            // Route through `From<StoreError>` so a commit-time `Conflict`
+            // surfaces as `DbError::Conflict` rather than an opaque `Store`.
+            slate_engine::EngineError::Store(se) => se.into(),
             slate_engine::EngineError::CollectionNotFound(name) => {
                 DbError::CollectionNotFound(name)
             }
@@ -145,5 +173,30 @@ mod tests {
             }
             other => panic!("expected InvalidDocument, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn store_conflict_maps_to_db_conflict() {
+        // A commit-time `StoreError::Conflict` must become `DbError::Conflict`,
+        // not get buried inside the opaque `DbError::Store`.
+        let mapped: DbError = StoreError::Conflict.into();
+        assert!(mapped.is_conflict(), "expected Conflict, got {mapped:?}");
+    }
+
+    #[test]
+    fn engine_store_conflict_propagates_as_db_conflict() {
+        // The same conflict reaching the db layer wrapped in `EngineError::Store`
+        // (the actual commit path) must still surface as `DbError::Conflict`.
+        let err = slate_engine::EngineError::Store(StoreError::Conflict);
+        let mapped: DbError = err.into();
+        assert!(mapped.is_conflict(), "expected Conflict, got {mapped:?}");
+    }
+
+    #[test]
+    fn non_conflict_store_error_stays_store() {
+        // A plain storage error must not be mistaken for a retryable conflict.
+        let mapped: DbError = StoreError::Storage("disk gone".to_string()).into();
+        assert!(!mapped.is_conflict(), "must not be a conflict: {mapped:?}");
+        assert!(matches!(mapped, DbError::Store(_)));
     }
 }

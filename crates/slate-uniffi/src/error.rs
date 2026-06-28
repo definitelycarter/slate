@@ -4,11 +4,27 @@ use slate_db::DbError;
 
 #[derive(Debug, uniffi::Error)]
 pub enum SlateError {
-    NotFound { message: String },
-    DuplicateKey { message: String },
-    InvalidQuery { message: String },
-    Store { message: String },
-    Serialization { message: String },
+    NotFound {
+        message: String,
+    },
+    DuplicateKey {
+        message: String,
+    },
+    InvalidQuery {
+        message: String,
+    },
+    Store {
+        message: String,
+    },
+    Serialization {
+        message: String,
+    },
+    /// A write transaction hit an optimistic write-write conflict at commit and
+    /// can be retried. Kept distinct from `Store` so callers across the FFI
+    /// boundary can detect "retryable conflict" too.
+    Conflict {
+        message: String,
+    },
 }
 
 impl fmt::Display for SlateError {
@@ -19,6 +35,7 @@ impl fmt::Display for SlateError {
             SlateError::InvalidQuery { message } => write!(f, "invalid query: {message}"),
             SlateError::Store { message } => write!(f, "store error: {message}"),
             SlateError::Serialization { message } => write!(f, "serialization error: {message}"),
+            SlateError::Conflict { message } => write!(f, "transaction conflict: {message}"),
         }
     }
 }
@@ -48,6 +65,10 @@ impl From<DbError> for SlateError {
                 message: format!(
                     "unique constraint violation on {index}: value {value} already exists for document {existing_id}"
                 ),
+            },
+            DbError::Conflict => SlateError::Conflict {
+                message: "a concurrent write touched the same data; retry the transaction"
+                    .to_string(),
             },
         }
     }

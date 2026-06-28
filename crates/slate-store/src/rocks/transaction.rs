@@ -4,7 +4,7 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use rocksdb::{
-    BoundColumnFamily, Direction, IteratorMode, MultiThreaded, OptimisticTransactionDB,
+    BoundColumnFamily, Direction, ErrorKind, IteratorMode, MultiThreaded, OptimisticTransactionDB,
     OptimisticTransactionOptions, Options, WriteOptions,
 };
 
@@ -37,6 +37,21 @@ fn begin_inner(db: &DB, durability: Durability) -> rocksdb::Transaction<'_, DB> 
         &write_options_for(durability),
         &OptimisticTransactionOptions::default(),
     )
+}
+
+/// Translate a RocksDB commit error into a [`StoreError`].
+///
+/// `OptimisticTransactionDB` validates a transaction's write set at commit and
+/// reports a write-write conflict as [`ErrorKind::Busy`]; [`ErrorKind::TryAgain`]
+/// means the memtable history was too short to *prove* there was no conflict.
+/// Both are resolved by retrying the whole transaction, so both surface as
+/// [`StoreError::Conflict`] — the distinct, retryable shape callers need.
+/// Anything else is a genuine storage failure and keeps its message.
+fn map_commit_error(e: rocksdb::Error) -> StoreError {
+    match e.kind() {
+        ErrorKind::Busy | ErrorKind::TryAgain => StoreError::Conflict,
+        _ => StoreError::Storage(e.to_string()),
+    }
 }
 
 /// Pre-resolved column family handle for reads.
@@ -327,8 +342,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
 
     fn commit(mut self) -> Result<(), StoreError> {
         let txn = self.txn.take().ok_or(StoreError::TransactionConsumed)?;
-        txn.commit()
-            .map_err(|e| StoreError::Storage(e.to_string()))?;
+        txn.commit().map_err(map_commit_error)?;
         Ok(())
     }
 
