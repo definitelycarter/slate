@@ -265,7 +265,7 @@ The rule is **exact-path match**: a referenced path is served only if it string-
 
 A **vector index** turns nearest-neighbour search over an embedding field into a seek. A vector is the numeric embedding an ML model produces for a piece of text or an image (an array of numbers); two pieces of similar content have embeddings that sit close together in that space. The application supplies the embeddings — Slate stores, indexes, and searches them, it never generates them.
 
-Create one with `indexes().create(field, VectorIndexOptions::float32(dims, metric))`, declaring the field, dimensionality, and metric:
+Create one with `indexes().create(field, VectorIndexOptions::float32(dims, metric))`, declaring the field, dimensionality, and metric (or `::float16(...)` / `::int8(...)` for a smaller quantized index — see below):
 
 ```rust
 use slate_db::VectorMetric;
@@ -278,7 +278,7 @@ db.collection("photos")
     .execute(&txn)?;
 ```
 
-The index is a derived `doc_id → packed-f32` copy of the field (the document's array stays canonical), maintained on every write. A kNN query is the CosmosDB shape — `VECTORDISTANCE` in `ORDER BY` with a `LIMIT`:
+The index is a derived `doc_id → packed-vector` copy of the field (the document's array stays canonical, full-precision; the stored copy is `float32`, or a narrower quantized width), maintained on every write. A kNN query is the CosmosDB shape — `VECTORDISTANCE` in `ORDER BY` with a `LIMIT`:
 
 ```text
 vector index on `embedding` (cosine):
@@ -291,7 +291,9 @@ vector index on `embedding` (cosine):
 
 The planner seeks the index only when the call's **metric matches** the index's declared metric and the **`ORDER BY` direction is the metric's nearest-first sense** — `DESC` for the similarity metrics (`cosine` / `dotproduct`, higher is closer), `ASC` for `euclidean` (lower is closer). Any mismatch falls back to a correct full `Sort` + `Limit`.
 
-The search is **exact** — a brute-force scan over the candidate vectors into a bounded top-k heap, not an approximate ANN graph — so it returns precisely the rows a full scan would. A `WHERE` is applied as a **pre-filter**: its matches constrain the candidate set *before* the top-k, so a filtered kNN never under-returns or silently loses recall (a guarantee approximate vector stores can't make). Quantized and approximate (ANN) indexes are planned for later phases — see the [Vector Index RFC](./rfcs/vector-index.md).
+The search is **exact** — a brute-force scan over the candidate vectors into a bounded top-k heap, not an approximate ANN graph — so it returns precisely the rows a full scan would. A `WHERE` is applied as a **pre-filter**: its matches constrain the candidate set *before* the top-k, so a filtered kNN never under-returns or silently loses recall (a guarantee approximate vector stores can't make).
+
+**Quantized storage** trades footprint for a small, bounded amount of work. `VectorIndexOptions::float16` (2× smaller) and `::int8` (~4×, via a per-vector scale) store an *approximate* copy of each vector; the seek scans that, keeps an over-sampled shortlist, then **rescores** it against each document's exact `float32` and returns the top-k. The ranking is therefore identical to a full scan over the shortlist — quantization can only cost recall (measured ≈ 1.0 with the default rescore window), never mis-order what it returns. `int8` is also a touch faster (a smaller scan blob); `float16` trades some latency for the footprint. Approximate (ANN) indexes remain planned for a later phase — see the [Vector Index RFC](./rfcs/vector-index.md) and the [benchmarks](./benchmarks.md#vector-search-knn).
 
 ## Plan Scenarios
 

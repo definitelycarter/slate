@@ -74,3 +74,8 @@ required-features = ["bench-internals"]
 name = "distinct"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "vector"
+harness = false
+required-features = ["bench-internals"]

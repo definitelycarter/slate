@@ -217,6 +217,38 @@ Queries scale ~10x for 10x data — near-linear. Point lookups are nearly consta
 
 Writers are serialized (global write lock per store). Readers use snapshot isolation via lazy CF snapshots — reads never block on writes.
 
+## Vector search (kNN)
+
+`cargo bench -p slate-db --features bench-internals --bench vector` — a flat vector
+index of 256-dim embeddings over 10,000 random vectors, queried as
+`ORDER BY VECTORDISTANCE(c.embedding, [...]) DESC LIMIT 10` (cosine), across the
+three stored widths. The numbers below are from the low-noise Pi 5 bench box (ARM
+Cortex-A76, `performance` governor); the *relative* shape is what matters.
+
+A `float32` index scans the exact vector and emits the top-k directly. A quantized
+index (`float16` / `int8`) stores a smaller **approximate** copy: the scan ranks by
+the approximate distance, then **rescores** an over-sampled shortlist
+(`max(4·k, 64)` candidates) against each document's exact `float32` — so the
+returned ranking is identical to a full scan over the shortlist. Quantization
+therefore costs only *recall* (did a true neighbour reach the shortlist), measured
+≈ 1.0 for both widths (see the [quantization spike](./rfcs/vector-index.md)).
+
+| Width | Footprint (bytes/vec) | 10k corpus | kNN query (10k × 256-d) | vs `float32` |
+|-------|----------------------:|-----------:|------------------------:|-------------:|
+| `float32` | 1024 | 10.2 MB | 15.31 ms | — |
+| `float16` |  512 |  5.1 MB | 19.46 ms | +27% |
+| `int8`    |  260 |  2.6 MB | 14.48 ms | −5.5% |
+
+**Footprint is the headline** — `float16` halves it, `int8` quarters it (a
+100K × 1536-d corpus drops ~600 MB → ~300 MB → ~150 MB). On latency the widths
+diverge: **`int8` is also faster** (the 4× smaller scan blob is less memory traffic
+and the i8→f32 dequant is cheap, outweighing the shortlist's ~64 document
+rescores), while **`float16` is slower on ARM** — software f16→f32 conversion per
+component dominates the 2× bandwidth saving there (it is ~parity on x86). So `int8`
+is the all-round win; `float16`'s value is the 2× footprint with near-exact recall,
+not speed. `binary` was prototyped and descoped (recall ≈ 0.5 even at a 16×
+window).
+
 ## Query Planner
 
 The query planner builds a two-tier plan tree:

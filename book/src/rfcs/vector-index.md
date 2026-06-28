@@ -1,17 +1,21 @@
 # RFC: Vector Index & `VECTORDISTANCE`
 
-> **Status: `VECTORDISTANCE` function shipped; index proposed (design spike).** The
-> scalar `VECTORDISTANCE(a, b, metric?)` (cosine / dotproduct / euclidean) has
-> shipped in `slate-eval` as the *function-first* slice — usable now over a full
-> scan (`ORDER BY VECTORDISTANCE(…) … LIMIT k` for kNN), the `ST_*` precedent. The
-> flat vector *index* that turns it into a seek is designed below but unbuilt
-> (it shares the query-engine spine with the covering-scan work, so it lands after
-> that). This RFC frames the design space and a recommended phasing; it does
-> **not** commit to an ANN implementation. The evidence behind every claim — how
-> Cosmos / MongoDB / pgvector / embedded stores lay vectors out on disk, the ANN
-> algorithm families, and the use cases — lives in the companion
-> [research notes](./vector-index-research-notes.md) (84 cited sources). The
-> [roadmap](../roadmap.md) tracks status at a glance.
+> **Status: Phase 1 (`VECTORDISTANCE` + flat index) and Phase 2 (`float16` /
+> `int8` quantization) shipped; ANN (Phase 3) deferred.** The scalar
+> `VECTORDISTANCE(a, b, metric?)` (cosine / dotproduct / euclidean) and a flat
+> (exact, brute-force) vector index ship: `ORDER BY VECTORDISTANCE(…) … LIMIT k`
+> seeks a per-field index instead of scanning. **Phase 2** adds quantized storage
+> widths — `float16` (2× smaller) and `int8` (~4× smaller, per-vector scale) —
+> with a full-precision **rescore**: the scan measures the small approximate copy,
+> then re-ranks an over-sampled shortlist against the document's exact `float32`,
+> so the returned ranking stays effectively exact (measured recall@k ≈ 1.0 with a
+> bounded rescore window). `binary` (sign-bit Hamming) was prototyped and
+> **descoped** — recall@10 ≈ 0.5 even at a 16× rescore window on clustered data, a
+> silently-lossy index. ANN (Phase 3) remains deferred; this RFC does **not**
+> commit to it. The evidence behind every claim — how Cosmos / MongoDB / pgvector /
+> embedded stores lay vectors out on disk, the ANN algorithm families, and the use
+> cases — lives in the companion [research notes](./vector-index-research-notes.md)
+> (84 cited sources). The [roadmap](../roadmap.md) tracks status at a glance.
 
 ## Concept
 
@@ -109,12 +113,37 @@ near-duplicate detection; kNN classification; hybrid search (combine BM25 full-t
   over hosted ANN stores, which must choose pre- vs post-filter and lose recall.
 - This is Cosmos's `flat` vector index type, on Slate's most natural access path.
 
-### Phase 2 — quantization (on-device footprint)
+### Phase 2 — quantization (on-device footprint) — **shipped (`float16`/`int8`)**
 
 A 1536-dim `float32` vector is ~6 KB; 100K of them ~600 MB of raw floats —
-material on a phone. Add `dataType` parity (`float16` = 2×, `int8` = 4×, binary =
-32× smaller) with the full-precision vector retained for rescoring. This is
-Cosmos's `quantizedFlat` direction and is where the on-device story gets serious.
+material on a phone. Phase 2 adds `dataType` parity so the index stores a smaller,
+*approximate* copy and the seek refines it:
+
+- **Widths.** `float16` (2 bytes/component, 2× smaller, via the pure-Rust `half`
+  crate), `int8` (`dims + 4` bytes, ~4× smaller, symmetric **per-vector** scale
+  `max|x| / 127` — no training pass, so it fits the incremental write path). The
+  packed blob carries the same TTL frame as the `float32` entry; the dtype is the
+  decode schema, persisted whole in the existing catalog config (no migration).
+- **Rescore (the key move).** The index stores *only* the quantized copy — the
+  document's BSON array remains the canonical full-precision source. So the seek is
+  *scan the approximate copy → keep an over-sampled shortlist of `N > k` →
+  re-rank that shortlist against each document's exact `float32` with the same
+  shared metric → return `k`*. The final ordering is identical to a full scan over
+  the shortlist, so quantization can only cost **recall** (a true neighbour missing
+  the shortlist), never mis-order what is returned. The rescore window is
+  `max(4·k, 64)` (the spike found recall@k = 1.0 already at `2·k`).
+- **`binary` descoped.** Sign-bit Hamming was prototyped and rejected: recall@10
+  ≈ 0.10 at `N = k` and only ≈ 0.50 even at a 16× window on clustered
+  near-duplicate data — a silently-lossy index, which the gate forbids. Revisit
+  only with a better scheme (asymmetric Hamming + large oversample, or a learned
+  rotation) if a corpus ever needs the 32×.
+
+Created via `indexes().create(path, VectorIndexOptions::float16(dims, metric))` /
+`::int8(...)` — no SQL grammar (parity rule; Cosmos can't see the index *type*).
+This is Cosmos's `quantizedFlat` direction and is where the on-device story gets
+serious: a 100K × 1536-d corpus drops from ~600 MB (`float32`) to ~300 MB
+(`float16`) or ~150 MB (`int8`). The recall, footprint, and latency numbers are in
+[benchmarks](../benchmarks.md#vector-search-knn).
 
 ### Phase 3 — ANN, only if a corpus demands it
 
@@ -140,8 +169,12 @@ persistence; bounded by corpus size). Graph search is serially-dependent *random
    C++ FFI with a per-target binding split — usable from `slate-uniffi` (iOS), not
    the `slate-wasm` Rust crate. **Phase 1 (flat) needs no ANN dependency at all**,
    so this decision can wait for Phase 3.
-4. **Quantization & dtype** — `float32` only in Phase 1; `float16`/`int8`/binary +
-   rescore in Phase 2 (Cosmos parity + the real on-device lever).
+4. **Quantization & dtype** — **resolved & shipped.** `float32` (Phase 1);
+   `float16` + `int8` with full-precision rescore (Phase 2). The exact vector is
+   *not* stored twice — it already lives on the document, which the rescore reads.
+   `binary` was prototyped and **descoped** for poor recall (see the spike). int8
+   uses a per-vector scale (no training pass) over a per-component codebook, to
+   keep the write path incremental.
 5. **`VECTORDISTANCE` surface & filtered semantics** — match Cosmos's signature and
    `TOP k` (parity, per the "Cosmos is the oracle" rule — no SQL surface Cosmos
    lacks); **pre-filter-into-brute-force** as the filtered-search model.

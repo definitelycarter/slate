@@ -140,21 +140,27 @@ uninstrumented:
   *selection* (a statistics catalog — the whale that fools uniform stats) stays
   an explicit non-goal.
 - **[Vector Index & `VECTORDISTANCE`](./rfcs/vector-index.md)** — *function + flat
-  index (Phase 1) done; quantization (Phase 2) + ANN (Phase 3) deferred.* The
+  index (Phase 1) and quantization (Phase 2: `float16` 2×, `int8` ~4×) done;
+  `binary` descoped; ANN (Phase 3) deferred.* The
   `VECTORDISTANCE` scalar (cosine/dotproduct/euclidean) plus a flat (exact,
   brute-force) vector index have shipped: `ORDER BY VECTORDISTANCE(c.field, @q)
   [DESC|ASC] LIMIT k` seeks a per-field index — a `doc_id → packed-f32` keyspace
   (TTL-header expiry-filtered) scanned into a bounded top-k heap, with a `WHERE`
   constraining the candidate set *before* the top-k (exact, no recall loss).
   Created via `indexes().create(path, VectorIndexOptions::float32(dims, metric))`
-  (no SQL `CREATE INDEX` grammar yet); the planner only seeks when
+  — or `::float16(...)` / `::int8(...)` for a quantized index (no SQL `CREATE
+  INDEX` grammar yet); the planner only seeks when
   the call's metric matches the index and the `ORDER BY` direction is the metric's
   nearest-first sense, else falls back to a correct full scan. The math is one
   shared definition (`slate-eval::VectorMetric`) the scalar function and the index
   both call, result-validated against an independent MongoDB Atlas exact-kNN oracle
   (the Cosmos emulator can't validate vector search). On-device nearest-neighbour
-  for RAG / semantic search. Quantization (float16/int8/binary widths) and ANN
-  (IVF/HNSW) deferred to later phases.
+  for RAG / semantic search. **Phase 2** stores a quantized copy (`float16` 2× /
+  `int8` ~4×) and rescores an over-sampled shortlist against the document's exact
+  `float32`, so the ranking stays effectively exact (recall@k ≈ 1.0) at 2–4× less
+  footprint; `int8` is also faster (smaller scan blob), `float16` trades some ARM
+  latency for footprint. `binary` was descoped (recall ≈ 0.5 even at a 16× rescore
+  window). ANN (IVF/HNSW, Phase 3) deferred — see [benchmarks](./benchmarks.md#vector-search-knn).
 - **Full-text indexes** — *proposed.* BM25 full-text (`FULLTEXTCONTAINS`,
   `FULLTEXTSCORE`, `RRF`); see the [SQL Query Surface RFC](./rfcs/sql-query-surface.md).
 
