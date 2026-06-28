@@ -18,7 +18,7 @@ use crate::traits::{
 };
 use crate::validate::validate_raw_document;
 use crate::vector::{
-    decode_vector_entry, encode_vector_entry, is_vector_entry_expired, pack_vector,
+    VectorDataType, decode_vector_entry, encode_vector_entry, is_vector_entry_expired, pack_vector,
 };
 
 /// A short name for a Bson value the index cannot encode as a key (the
@@ -417,7 +417,7 @@ impl<'a, S: Store + 'a> KvTransaction<'a, S> {
     ) -> Result<(), EngineError> {
         for spec in handle.vector_indexes() {
             let key = Key::encode_vector_key(handle.name(), &spec.path, doc_id);
-            match pack_vector(doc, &spec.path, spec.dims)? {
+            match pack_vector(doc, &spec.path, spec.dims, spec.dtype)? {
                 Some(packed) => {
                     let entry = encode_vector_entry(ttl_millis, &packed);
                     self.txn.put(handle.cf(), &key, &entry)?
@@ -767,6 +767,15 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
     ) -> Result<Box<dyn Iterator<Item = Result<VectorScanEntry, EngineError>> + 'b>, EngineError>
     {
         let now = self.now_millis;
+        // The dtype is the decode schema: a quantized index dequantizes its packed
+        // blob back to approximate `f32` here (the executor then rescores with the
+        // document's exact float32). Resolve it from the field's spec; an unknown
+        // field has no entries to decode, so the default is harmless.
+        let dtype = handle
+            .vector_indexes()
+            .iter()
+            .find(|s| s.path == field)
+            .map_or(VectorDataType::Float32, |s| s.dtype);
         let prefix =
             KeyPrefix::VectorField(Cow::Borrowed(handle.name()), Cow::Borrowed(field)).encode();
         let iter = self.txn.scan_prefix(handle.cf(), &prefix)?;
@@ -798,7 +807,7 @@ impl<'a, S: Store + 'a> EngineTransaction for KvTransaction<'a, S> {
                 },
                 _ => return Some(Err(EngineError::InvalidKey("invalid vector key".into()))),
             };
-            match decode_vector_entry(&value_bytes) {
+            match decode_vector_entry(&value_bytes, dtype) {
                 Some(vector) => Some(Ok((doc_id, vector))),
                 None => Some(Err(EngineError::InvalidDocument(format!(
                     "vector entry for '{field}' is malformed"

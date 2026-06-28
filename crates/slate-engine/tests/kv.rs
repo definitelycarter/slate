@@ -1687,6 +1687,47 @@ fn create_vector_index_then_scan_yields_packed_vectors() {
 }
 
 #[test]
+fn float16_index_scan_yields_dequantized_vectors() {
+    // A `float16` index stores a half-width approximate copy; `scan_vectors`
+    // resolves the dtype from the field's spec and dequantizes it back to `f32`.
+    // The values here are exactly representable in f16, so the scan returns them
+    // unchanged (the dtype wiring, not the approximation, is under test).
+    let engine = engine();
+    let txn = engine.begin(false).unwrap();
+    txn.create_collection(DEFAULT_CF, "photos", &Default::default())
+        .unwrap();
+    txn.create_vector_index(
+        DEFAULT_CF,
+        "photos",
+        &VectorIndexSpec::float16("embedding", 3, VectorMetric::Cosine),
+    )
+    .unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "a", "embedding": [1.0, 0.0, 0.5] },
+    )
+    .unwrap();
+    txn.put(
+        &handle,
+        &bson::rawdoc! { "_id": "b", "embedding": [0.5, 0.25, 0.0] },
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let txn = engine.begin(true).unwrap();
+    let handle = txn.collection(DEFAULT_CF, "photos").unwrap();
+    assert_eq!(
+        sorted_vectors(&txn, &handle, "embedding"),
+        vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.5]),
+            ("b".to_string(), vec![0.5, 0.25, 0.0]),
+        ]
+    );
+    txn.rollback().unwrap();
+}
+
+#[test]
 fn vector_index_backfills_existing_records() {
     let engine = engine();
     let txn = engine.begin(false).unwrap();

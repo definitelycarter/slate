@@ -1404,6 +1404,7 @@ version = "0.1.0"
 dependencies = [
  "bson",
  "criterion",
+ "half",
  "serde",
  "slate-rawbson",
  "slate-store",

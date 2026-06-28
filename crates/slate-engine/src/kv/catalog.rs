@@ -514,7 +514,7 @@ impl<'a, S: Store + 'a> Catalog for KvTransaction<'a, S> {
             // ownership, and the record isn't needed past this iteration.
             let record = Record::from_bytes(value_bytes)?;
             let doc = record.doc()?;
-            if let Some(packed) = pack_vector(doc, &spec.path, spec.dims)? {
+            if let Some(packed) = pack_vector(doc, &spec.path, spec.dims, spec.dtype)? {
                 let entry = encode_vector_entry(record.ttl_millis(), &packed);
                 let vec_key = Key::encode_vector_key(collection, &spec.path, &doc_id);
                 self.txn.put(&cf_handle, &vec_key, &entry)?;

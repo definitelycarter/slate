@@ -6,14 +6,19 @@
 //! copy of a scalar field — and the engine maintains this copy on the write path
 //! (and rebuilds it from records on backfill).
 //!
-//! The stored copy is a packed little-endian `f32` blob (not BSON): contiguous
-//! and scan-friendly for the brute-force top-k, and a width-only change away from
-//! Phase 2 quantization (the spec's [`VectorDataType`] is the decode schema).
+//! The stored copy is a packed little-endian blob (not BSON): contiguous and
+//! scan-friendly for the brute-force top-k. Its element width is the spec's
+//! [`VectorDataType`] — `float32` stores each component exactly; the Phase 2
+//! quantized widths (`float16`, …) pack a smaller, *approximate* copy that the
+//! executor refines with a full-precision rescore read from the document (the
+//! BSON array is the canonical source of truth, so no exact copy is stored
+//! separately).
 //!
 //! These types are catalog config, parallel to [`IndexSpec`](crate::IndexSpec) —
 //! the math that consumes them (`VECTORDISTANCE`) lives in `slate-eval`.
 
 use bson::raw::{RawBsonRef, RawDocument};
+use half::f16;
 use serde::{Deserialize, Serialize};
 use slate_rawbson::RawField;
 
@@ -37,13 +42,62 @@ pub enum VectorMetric {
 
 /// The on-disk element width of a stored vector.
 ///
-/// Phase 1 stores full-precision `float32` only; Phase 2 adds quantized widths
-/// (`float16`, `int8`, binary) for the on-device footprint. The variant is the
+/// `float32` stores full precision (the Phase 1 default — exact, no rescore);
+/// Phase 2 adds quantized widths for the on-device footprint. The variant is the
 /// decode schema for the packed blob, so it is carried in the persisted spec.
+///
+/// A quantized index stores only the *approximate* copy: the exact float32 stays
+/// on the document, and the executor reads it back to rescore the shortlist, so
+/// the final top-k is exact-scored regardless of width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorDataType {
-    /// IEEE-754 single precision (4 bytes/component). The Phase 1 default.
+    /// IEEE-754 single precision (4 bytes/component). The Phase 1 default —
+    /// stored exactly, so a `float32` index needs no rescore.
     Float32,
+    /// IEEE-754 half precision (2 bytes/component) via [`half::f16`]. ~2× smaller
+    /// and near-lossless; the approximate scan is refined by a full-precision
+    /// rescore from the document (recall@k ≈ 1.0 with a small rescore window).
+    Float16,
+}
+
+impl VectorDataType {
+    /// Bytes per stored component for this width (`float32` → 4, `float16` → 2).
+    pub(crate) fn element_size(self) -> usize {
+        match self {
+            VectorDataType::Float32 => 4,
+            VectorDataType::Float16 => 2,
+        }
+    }
+
+    /// Encode one `f32` component into its packed little-endian bytes, appending
+    /// to `out`. The document's BSON array (always numeric, widened to `f32`) is
+    /// the input; the width is the only thing that changes per dtype.
+    fn encode_component(self, x: f32, out: &mut Vec<u8>) {
+        match self {
+            VectorDataType::Float32 => out.extend_from_slice(&x.to_le_bytes()),
+            VectorDataType::Float16 => out.extend_from_slice(&f16::from_f32(x).to_le_bytes()),
+        }
+    }
+
+    /// Decode a packed component blob back to (approximate) `f32` — the scan side
+    /// of quantization. `None` if the byte length is not a whole number of this
+    /// width's components (a corruption guard on the read path). `Float16`
+    /// dequantizes; `Float32` is exact.
+    pub(crate) fn decode_components(self, bytes: &[u8]) -> Option<Vec<f32>> {
+        if !bytes.len().is_multiple_of(self.element_size()) {
+            return None;
+        }
+        Some(match self {
+            VectorDataType::Float32 => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+            VectorDataType::Float16 => bytes
+                .chunks_exact(2)
+                .map(|c| f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect(),
+        })
+    }
 }
 
 /// A loaded vector index definition: the field path plus the embedding shape.
@@ -74,14 +128,27 @@ impl VectorIndexSpec {
             dtype: VectorDataType::Float32,
         }
     }
+
+    /// A `float16` spec (Phase 2 quantization — ~2× smaller, near-lossless with
+    /// the full-precision rescore).
+    pub fn float16(path: impl Into<String>, dims: u32, metric: VectorMetric) -> Self {
+        VectorIndexSpec {
+            path: path.into(),
+            dims,
+            metric,
+            dtype: VectorDataType::Float16,
+        }
+    }
 }
 
-/// Extract a vector field from a document and pack it to a little-endian `f32`
-/// blob, ready to store under the doc's vector key.
+/// Extract a vector field from a document and pack it to a little-endian blob in
+/// the spec's `dtype` width, ready to store under the doc's vector key.
 ///
 /// - **Absent** field → `Ok(None)` — the index is sparse, exactly like a
 ///   secondary index skips a document missing the indexed field.
-/// - **Present and a numeric array of the declared length** → `Ok(Some(bytes))`.
+/// - **Present and a numeric array of the declared length** → `Ok(Some(bytes))`,
+///   each component widened to `f32` then encoded in `dtype` (exact for
+///   `float32`, quantized for the narrower widths).
 /// - **Wrong length** → `Err` ([`EngineError::VectorDimsMismatch`]) — Cosmos
 ///   rejects a vector whose dimensionality disagrees with the policy, and so do
 ///   we, loudly, rather than storing a vector the query math can't compare.
@@ -92,6 +159,7 @@ pub(crate) fn pack_vector(
     doc: &RawDocument,
     field: &str,
     dims: u32,
+    dtype: VectorDataType,
 ) -> Result<Option<Vec<u8>>, EngineError> {
     // `get_value` resolves dot-paths and returns `None` for a missing field or a
     // Null leaf — both mean "no embedding here", so the index stays sparse.
@@ -104,7 +172,7 @@ pub(crate) fn pack_vector(
         )));
     };
 
-    let mut bytes = Vec::with_capacity(dims as usize * 4);
+    let mut bytes = Vec::with_capacity(dims as usize * dtype.element_size());
     let mut count: u32 = 0;
     for element in arr.into_iter() {
         let el = element.map_err(|e| {
@@ -120,7 +188,7 @@ pub(crate) fn pack_vector(
                 )));
             }
         };
-        bytes.extend_from_slice(&f.to_le_bytes());
+        dtype.encode_component(f, &mut bytes);
         count += 1;
     }
 
@@ -132,22 +200,6 @@ pub(crate) fn pack_vector(
         });
     }
     Ok(Some(bytes))
-}
-
-/// Decode a packed little-endian `f32` blob back into a vector.
-///
-/// Returns `None` if the byte length is not a whole number of `f32`s — a
-/// corruption guard on the read path (the write path always packs whole floats).
-pub(crate) fn unpack_f32(bytes: &[u8]) -> Option<Vec<f32>> {
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
-    )
 }
 
 // ── Stored vector entry (TTL header + packed blob) ───────────────
@@ -212,15 +264,16 @@ pub(crate) fn is_vector_entry_expired(bytes: &[u8], now_millis: i64) -> bool {
 }
 
 /// Decode a stored vector entry's bytes (TTL header + packed blob) into its
-/// vector, skipping the header. Returns `None` if the header is malformed or the
-/// packed portion is not a whole number of `f32`s.
-pub(crate) fn decode_vector_entry(bytes: &[u8]) -> Option<Vec<f32>> {
+/// (approximate) `f32` vector, skipping the header and dequantizing per `dtype`.
+/// Returns `None` if the header is malformed or the packed portion is not a whole
+/// number of `dtype`'s components.
+pub(crate) fn decode_vector_entry(bytes: &[u8], dtype: VectorDataType) -> Option<Vec<f32>> {
     let packed = match *bytes.first()? {
         VEC_TAG_NO_TTL => &bytes[1..],
         VEC_TAG_TTL if bytes.len() >= VEC_TTL_HEADER_LEN => &bytes[VEC_TTL_HEADER_LEN..],
         _ => return None,
     };
-    unpack_f32(packed)
+    dtype.decode_components(packed)
 }
 
 #[cfg(test)]
@@ -230,35 +283,83 @@ mod tests {
     #[test]
     fn pack_then_unpack_roundtrips() {
         let doc = bson::rawdoc! { "_id": "a", "embedding": [1.0_f64, 2.0, 3.0] };
-        let packed = pack_vector(&doc, "embedding", 3).unwrap().unwrap();
+        let packed = pack_vector(&doc, "embedding", 3, VectorDataType::Float32)
+            .unwrap()
+            .unwrap();
         assert_eq!(packed.len(), 12);
-        assert_eq!(unpack_f32(&packed).unwrap(), vec![1.0_f32, 2.0, 3.0]);
+        assert_eq!(
+            VectorDataType::Float32.decode_components(&packed).unwrap(),
+            vec![1.0_f32, 2.0, 3.0]
+        );
     }
 
     #[test]
     fn pack_widens_mixed_numeric_elements() {
         let doc = bson::rawdoc! { "_id": "a", "v": [1_i32, 2_i64, 3.5_f64] };
-        let packed = pack_vector(&doc, "v", 3).unwrap().unwrap();
-        assert_eq!(unpack_f32(&packed).unwrap(), vec![1.0_f32, 2.0, 3.5]);
+        let packed = pack_vector(&doc, "v", 3, VectorDataType::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            VectorDataType::Float32.decode_components(&packed).unwrap(),
+            vec![1.0_f32, 2.0, 3.5]
+        );
+    }
+
+    #[test]
+    fn pack_float16_halves_the_blob_and_roundtrips_exact_for_representable() {
+        let doc = bson::rawdoc! { "_id": "a", "embedding": [1.0_f64, 2.0, 3.5] };
+        let packed = pack_vector(&doc, "embedding", 3, VectorDataType::Float16)
+            .unwrap()
+            .unwrap();
+        // 2 bytes/component vs 4 — half the float32 footprint.
+        assert_eq!(packed.len(), 6);
+        // 1.0/2.0/3.5 are exactly representable in f16, so this round trip is exact.
+        assert_eq!(
+            VectorDataType::Float16.decode_components(&packed).unwrap(),
+            vec![1.0_f32, 2.0, 3.5]
+        );
+    }
+
+    #[test]
+    fn pack_float16_dequantizes_within_tolerance() {
+        // Values not exactly representable in f16 round-trip to within f16's
+        // ~1e-3 precision — the approximation the executor's rescore refines.
+        let doc = bson::rawdoc! { "_id": "a", "v": [0.1_f64, 0.2, 0.333] };
+        let packed = pack_vector(&doc, "v", 3, VectorDataType::Float16)
+            .unwrap()
+            .unwrap();
+        let back = VectorDataType::Float16.decode_components(&packed).unwrap();
+        for (got, want) in back.iter().zip([0.1_f32, 0.2, 0.333]) {
+            assert!((got - want).abs() < 1e-3, "got {got}, want {want}");
+        }
     }
 
     #[test]
     fn pack_absent_field_is_sparse() {
         let doc = bson::rawdoc! { "_id": "a", "name": "no vector" };
-        assert!(pack_vector(&doc, "embedding", 3).unwrap().is_none());
+        assert!(
+            pack_vector(&doc, "embedding", 3, VectorDataType::Float32)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn pack_nested_dot_path() {
         let doc = bson::rawdoc! { "_id": "a", "meta": { "vec": [1.0_f64, 2.0] } };
-        let packed = pack_vector(&doc, "meta.vec", 2).unwrap().unwrap();
-        assert_eq!(unpack_f32(&packed).unwrap(), vec![1.0_f32, 2.0]);
+        let packed = pack_vector(&doc, "meta.vec", 2, VectorDataType::Float32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            VectorDataType::Float32.decode_components(&packed).unwrap(),
+            vec![1.0_f32, 2.0]
+        );
     }
 
     #[test]
     fn pack_wrong_dims_is_an_error() {
         let doc = bson::rawdoc! { "_id": "a", "embedding": [1.0_f64, 2.0] };
-        match pack_vector(&doc, "embedding", 3) {
+        match pack_vector(&doc, "embedding", 3, VectorDataType::Float32) {
             Err(EngineError::VectorDimsMismatch {
                 expected, found, ..
             }) => {
@@ -273,7 +374,7 @@ mod tests {
     fn pack_non_array_is_an_error() {
         let doc = bson::rawdoc! { "_id": "a", "embedding": "not a vector" };
         assert!(matches!(
-            pack_vector(&doc, "embedding", 3),
+            pack_vector(&doc, "embedding", 3, VectorDataType::Float32),
             Err(EngineError::InvalidDocument(_))
         ));
     }
@@ -282,22 +383,33 @@ mod tests {
     fn pack_non_numeric_element_is_an_error() {
         let doc = bson::rawdoc! { "_id": "a", "embedding": [1.0_f64, "x", 3.0] };
         assert!(matches!(
-            pack_vector(&doc, "embedding", 3),
+            pack_vector(&doc, "embedding", 3, VectorDataType::Float32),
             Err(EngineError::InvalidDocument(_))
         ));
     }
 
     #[test]
-    fn unpack_rejects_non_multiple_of_four() {
-        assert!(unpack_f32(&[0, 1, 2]).is_none());
+    fn decode_components_rejects_a_partial_component() {
+        // Not a whole number of components for the width → None (corruption guard).
+        assert!(
+            VectorDataType::Float32
+                .decode_components(&[0, 1, 2])
+                .is_none()
+        );
+        assert!(VectorDataType::Float16.decode_components(&[0]).is_none());
     }
 
     #[test]
     fn spec_serde_roundtrips_through_bson() {
-        let spec = VectorIndexSpec::float32("embedding", 768, VectorMetric::Cosine);
-        let blob = bson::serialize_to_vec(&spec).unwrap();
-        let back: VectorIndexSpec = bson::deserialize_from_slice(&blob).unwrap();
-        assert_eq!(spec, back);
+        // Both widths serialize whole into the catalog config value.
+        for spec in [
+            VectorIndexSpec::float32("embedding", 768, VectorMetric::Cosine),
+            VectorIndexSpec::float16("embedding", 768, VectorMetric::Cosine),
+        ] {
+            let blob = bson::serialize_to_vec(&spec).unwrap();
+            let back: VectorIndexSpec = bson::deserialize_from_slice(&blob).unwrap();
+            assert_eq!(spec, back);
+        }
     }
 
     #[test]
@@ -306,6 +418,7 @@ mod tests {
             &bson::rawdoc! { "_id": "a", "v": [1.0_f64, 2.0, 3.0] },
             "v",
             3,
+            VectorDataType::Float32,
         )
         .unwrap()
         .unwrap();
@@ -314,7 +427,7 @@ mod tests {
         // A TTL-free entry is never expired and decodes to the original vector.
         assert!(!is_vector_entry_expired(&entry, i64::MAX));
         assert_eq!(
-            decode_vector_entry(&entry).unwrap(),
+            decode_vector_entry(&entry, VectorDataType::Float32).unwrap(),
             vec![1.0_f32, 2.0, 3.0]
         );
     }
@@ -325,6 +438,7 @@ mod tests {
             &bson::rawdoc! { "_id": "a", "v": [4.0_f64, 5.0, 6.0] },
             "v",
             3,
+            VectorDataType::Float32,
         )
         .unwrap()
         .unwrap();
@@ -334,16 +448,36 @@ mod tests {
         assert!(!is_vector_entry_expired(&entry, 500));
         // The header is skipped on decode — the vector is intact regardless of TTL.
         assert_eq!(
-            decode_vector_entry(&entry).unwrap(),
+            decode_vector_entry(&entry, VectorDataType::Float32).unwrap(),
             vec![4.0_f32, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn float16_entry_roundtrips_through_the_ttl_frame() {
+        // A float16 entry frames + decodes like any other, just at half width.
+        let packed = pack_vector(
+            &bson::rawdoc! { "_id": "a", "v": [1.0_f64, 2.0, 3.5] },
+            "v",
+            3,
+            VectorDataType::Float16,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(packed.len(), 6);
+        let entry = encode_vector_entry(Some(1_000), &packed);
+        assert!(is_vector_entry_expired(&entry, 2_000));
+        assert_eq!(
+            decode_vector_entry(&entry, VectorDataType::Float16).unwrap(),
+            vec![1.0_f32, 2.0, 3.5]
         );
     }
 
     #[test]
     fn decode_vector_entry_rejects_malformed() {
         // Empty bytes, an unknown tag, and a truncated TTL header all decode to None.
-        assert!(decode_vector_entry(&[]).is_none());
-        assert!(decode_vector_entry(&[0x09, 0, 0, 0, 0]).is_none());
-        assert!(decode_vector_entry(&[VEC_TAG_TTL, 0, 0, 0]).is_none());
+        assert!(decode_vector_entry(&[], VectorDataType::Float32).is_none());
+        assert!(decode_vector_entry(&[0x09, 0, 0, 0, 0], VectorDataType::Float32).is_none());
+        assert!(decode_vector_entry(&[VEC_TAG_TTL, 0, 0, 0], VectorDataType::Float32).is_none());
     }
 }
