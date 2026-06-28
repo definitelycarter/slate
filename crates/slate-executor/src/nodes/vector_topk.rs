@@ -56,6 +56,7 @@ use slate_planner::VectorDataType;
 use slate_rawbson::RawField;
 
 use super::env::row_env;
+use crate::budget::Ticker;
 use crate::{ExecEnv, ExecError, ValueIter};
 
 /// One kept candidate: its score and doc-id. Ordered so a `BinaryHeap`'s max-root
@@ -179,7 +180,14 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     let window = rescore_window(dtype, k);
     let mut heap: BinaryHeap<Candidate> = BinaryHeap::with_capacity(window + 1);
 
+    // Cooperative deadline (Resource Limits RFC, A): the flat-index scan is a full
+    // scan — exactly the long source the deadline bounds — so fold the check into
+    // it per candidate. The top-k heap is `window`-bounded, so the materialization
+    // cap deliberately does not apply here.
+    let mut ticker = Ticker::new(env.deadline.clone());
+
     for entry in txn.scan_vectors(&handle, &field)? {
+        ticker.tick()?;
         let (doc_id, vector) = entry?;
 
         // Pre-filter membership: skip a vector whose doc is not in the WHERE set.
@@ -971,5 +979,55 @@ mod tests {
             "the globally-nearest but filtered-out doc must not leak in"
         );
         assert_eq!(got.len(), 3, "full k from the filtered subset");
+    }
+
+    // ── Cooperative deadline over the flat-vector scan (Resource Limits A) ──
+
+    use crate::budget::Deadline;
+    use std::rc::Rc;
+
+    /// Lower `sql` and run it with the given [`ExecEnv`] (carrying a deadline).
+    fn run_with_env(
+        engine: &KvEngine<MemoryStore>,
+        sql: &str,
+        env: ExecEnv<'_>,
+    ) -> Result<Vec<RawBson>, ExecError> {
+        let txn = engine.begin(true).unwrap();
+        let plan =
+            slate_planner::lower(slate_sql::parse(sql).unwrap(), photos_ref(), &photos_meta());
+        Executor::with_env(&txn, env).execute_collect(plan)
+    }
+
+    const KNN_SQL: &str =
+        "SELECT VALUE c FROM c ORDER BY VECTORDISTANCE(c.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 3";
+
+    #[test]
+    fn deadline_trips_during_vector_scan() {
+        // An already-expired deadline (clock reads past `at`): the scan's first
+        // candidate check (counter starts at 0) aborts the kNN with Timeout,
+        // proving the flat-vector source is now deadline-bounded.
+        let engine = seeded_photos();
+        let deadline = Rc::new(Deadline::new(Rc::new(|| 1_000_000_i64), 0));
+        let env = ExecEnv::new().with_deadline(Some(deadline));
+        let result = run_with_env(&engine, KNN_SQL, env);
+        assert!(matches!(result, Err(ExecError::Timeout)), "got {result:?}");
+    }
+
+    #[test]
+    fn generous_deadline_lets_the_knn_complete() {
+        // A deadline far in the future never trips: the kNN returns its top-3
+        // (a, c, b — the cosine ordering the e2e test pins).
+        let engine = seeded_photos();
+        let deadline = Rc::new(Deadline::new(Rc::new(|| 0_i64), i64::MAX));
+        let env = ExecEnv::new().with_deadline(Some(deadline));
+        let ids: Vec<String> = run_with_env(&engine, KNN_SQL, env)
+            .unwrap()
+            .into_iter()
+            .map(|v| match v {
+                RawBson::Document(d) => d.get_str("_id").unwrap().to_string(),
+                other => panic!("got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["a", "c", "b"]);
     }
 }
