@@ -807,6 +807,75 @@ fn concurrent_writers_conflict_at_commit() {
     );
 }
 
+/// With a begin snapshot, reads are repeatable: a transaction that reads a key,
+/// while a *concurrent* transaction commits a new value for it, still sees its
+/// begin-snapshot value on a re-read — snapshot isolation, not read-committed.
+#[test]
+fn reads_observe_a_stable_begin_snapshot() {
+    let (store, _dir) = temp_store();
+
+    // Seed k = v0.
+    let seed = store.begin(false).unwrap();
+    let cf = seed.cf(CF).unwrap();
+    seed.put(&cf, b"k", b"v0").unwrap();
+    seed.commit().unwrap();
+
+    // Reader begins and observes v0.
+    let reader = store.begin(true).unwrap();
+    let rcf = reader.cf(CF).unwrap();
+    assert_eq!(
+        reader.get(&rcf, b"k").unwrap().as_deref(),
+        Some(b"v0".as_slice())
+    );
+
+    // A concurrent writer commits k = v1 while the reader is still open.
+    let writer = store.begin(false).unwrap();
+    let wcf = writer.cf(CF).unwrap();
+    writer.put(&wcf, b"k", b"v1").unwrap();
+    writer.commit().unwrap();
+
+    // The reader re-reads and STILL sees its begin snapshot (v0), not v1.
+    assert_eq!(
+        reader.get(&rcf, b"k").unwrap().as_deref(),
+        Some(b"v0".as_slice()),
+        "a repeatable read must not observe a concurrent commit"
+    );
+}
+
+/// Read-your-writes survives the begin snapshot: a write staged in this
+/// transaction is visible to its own reads even though reads are pinned to the
+/// begin snapshot (the snapshot is associated with the transaction, so its
+/// write batch layers on top of the snapshot view).
+#[test]
+fn snapshot_reads_still_see_own_writes() {
+    let (store, _dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    // Never committed anywhere — purely this transaction's staged write.
+    txn.put(&cf, b"k", b"mine").unwrap();
+    assert_eq!(
+        txn.get(&cf, b"k").unwrap().as_deref(),
+        Some(b"mine".as_slice())
+    );
+}
+
+/// A snapshot-pinned scan still reflects the transaction's own staged writes —
+/// the begin snapshot must not hide them from an iterator either.
+#[test]
+fn snapshot_scan_still_sees_own_writes() {
+    let (store, _dir) = temp_store();
+    let txn = store.begin(false).unwrap();
+    let cf = txn.cf(CF).unwrap();
+    txn.put(&cf, b"p:1", b"a").unwrap();
+    txn.put(&cf, b"p:2", b"b").unwrap();
+    let found: Vec<_> = txn
+        .scan_prefix(&cf, b"p:")
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(found.len(), 2, "scan must see this txn's own staged writes");
+}
+
 /// `set_durability` after `begin` (before any writes) recreates the inner txn
 /// with the new level, and the commit still lands.
 #[test]

@@ -48,6 +48,16 @@ So **snapshot isolation + read-your-writes** is the common guarantee, but the
 optimistic-conflict-at-commit (rocks). A correct program written against redb
 (never expects a commit conflict) can start failing under load on RocksDB.
 
+> **Implementation note (gap found in review).** The "agree on reads" premise
+> did *not* actually hold for RocksDB as wired: `OptimisticTransactionDB` with
+> default options reads **latest-committed** (read-committed), not a begin
+> snapshot, so a transaction re-reading a key could observe a concurrent commit.
+> Snapshot isolation is now genuinely enforced — `begin` enables the optimistic
+> `set_snapshot` and `RocksTransaction` threads that begin snapshot into every
+> read path (`get` / `multi_get` / all scans). A repeatable-read test at both the
+> store and db level pins the behavior so the contract and the code can't drift
+> apart again.
+
 ### Conflicts have no first-class shape
 
 A RocksDB commit conflict surfaces as a generic `StoreError` wrapped into

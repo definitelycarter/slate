@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use rocksdb::{
     BoundColumnFamily, Direction, ErrorKind, IteratorMode, MultiThreaded, OptimisticTransactionDB,
-    OptimisticTransactionOptions, Options, WriteOptions,
+    OptimisticTransactionOptions, Options, ReadOptions, WriteOptions,
 };
 
 use crate::error::StoreError;
@@ -33,10 +33,15 @@ fn write_options_for(durability: Durability) -> WriteOptions {
 /// `WriteOptions`. Used at construction and to re-create the (empty) inner txn
 /// when `set_durability` changes the level before any writes.
 fn begin_inner(db: &DB, durability: Durability) -> rocksdb::Transaction<'_, DB> {
-    db.transaction_opt(
-        &write_options_for(durability),
-        &OptimisticTransactionOptions::default(),
-    )
+    // `set_snapshot(true)` pins a snapshot at `begin`. Reads threaded through it
+    // (see `RocksTransaction::read_options`) observe that one consistent view —
+    // snapshot isolation — and commit-time conflict detection validates the
+    // write set against the begin sequence. Without it, optimistic transactions
+    // read latest-committed (read-committed) and validate per-key-first-access,
+    // which would not match the snapshot-isolation contract memory/redb provide.
+    let mut txn_opts = OptimisticTransactionOptions::default();
+    txn_opts.set_snapshot(true);
+    db.transaction_opt(&write_options_for(durability), &txn_opts)
 }
 
 /// Translate a RocksDB commit error into a [`StoreError`].
@@ -84,6 +89,24 @@ impl<'db> RocksTransaction<'db> {
         self.txn.as_ref().ok_or(StoreError::TransactionConsumed)
     }
 
+    /// A `ReadOptions` pinned to this transaction's begin snapshot, so every read
+    /// observes one consistent view (snapshot isolation) layered with the
+    /// transaction's own staged writes (read-your-writes). Every read path goes
+    /// through this — anything that reads latest-committed instead would silently
+    /// downgrade the transaction to read-committed.
+    ///
+    /// `snapshot()` only borrows the transaction for this call; `set_snapshot`
+    /// copies the underlying begin-snapshot pointer into the options, and that
+    /// pointer stays valid for the transaction's whole life (the transaction owns
+    /// the snapshot until commit/rollback). So the returned options outlive the
+    /// transient wrapper and can safely back an iterator that outlives this call.
+    fn read_options(&self) -> Result<ReadOptions, StoreError> {
+        let mut opts = ReadOptions::default();
+        let snapshot = self.txn()?.snapshot();
+        opts.set_snapshot(&snapshot);
+        Ok(opts)
+    }
+
     fn check_writable(&self) -> Result<(), StoreError> {
         if self.read_only {
             return Err(StoreError::ReadOnly);
@@ -116,17 +139,19 @@ impl<'db> Transaction for RocksTransaction<'db> {
     }
 
     fn get(&self, cf: &Self::Cf, key: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        let readopts = self.read_options()?;
         let data = self
             .txn()?
-            .get_cf(&cf.handle, key)
+            .get_cf_opt(&cf.handle, key, &readopts)
             .map_err(|e| StoreError::Storage(e.to_string()))?;
         Ok(data)
     }
 
     fn multi_get(&self, cf: &Self::Cf, keys: &[&[u8]]) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
+        let readopts = self.read_options()?;
         let txn = self.txn()?;
         let cf_keys: Vec<_> = keys.iter().map(|k| (&cf.handle, *k)).collect();
-        let results = txn.multi_get_cf(cf_keys);
+        let results = txn.multi_get_cf_opt(cf_keys, &readopts);
         results
             .into_iter()
             .map(|r| r.map_err(|e| StoreError::Storage(e.to_string())))
@@ -140,9 +165,12 @@ impl<'db> Transaction for RocksTransaction<'db> {
     ) -> Result<Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StoreError>> + 'a>, StoreError>
     {
         let prefix_owned = prefix.to_vec();
-        let iter = self
-            .txn()?
-            .iterator_cf(&cf.handle, IteratorMode::From(prefix, Direction::Forward));
+        let readopts = self.read_options()?;
+        let iter = self.txn()?.iterator_cf_opt(
+            &cf.handle,
+            readopts,
+            IteratorMode::From(prefix, Direction::Forward),
+        );
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),
@@ -167,7 +195,8 @@ impl<'db> Transaction for RocksTransaction<'db> {
             Some(u) => IteratorMode::From(u, Direction::Reverse),
             None => IteratorMode::End,
         };
-        let iter = self.txn()?.iterator_cf(&cf.handle, mode);
+        let readopts = self.read_options()?;
+        let iter = self.txn()?.iterator_cf_opt(&cf.handle, readopts, mode);
         Ok(Box::new(
             iter.take_while(move |item| match item {
                 Ok((key, _)) => key.starts_with(&prefix_owned),
@@ -191,6 +220,9 @@ impl<'db> Transaction for RocksTransaction<'db> {
         // resolve the bounds to owned `Vec<u8>`s captured into the closures.
         let lo = range.start_bound().cloned();
         let hi = range.end_bound().cloned();
+        // One snapshot-pinned options for whichever direction runs; moved into
+        // the single `iterator_cf_opt` call the chosen branch makes.
+        let readopts = self.read_options()?;
         let txn = self.txn()?;
 
         if reverse {
@@ -201,7 +233,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
                 }
                 Bound::Unbounded => IteratorMode::End,
             };
-            let iter = txn.iterator_cf(&cf.handle, mode);
+            let iter = txn.iterator_cf_opt(&cf.handle, readopts, mode);
             // Drop an excluded upper-bound key (the seek lands exactly on it).
             let hi_excluded = match hi {
                 Bound::Excluded(e) => Some(e),
@@ -235,7 +267,7 @@ impl<'db> Transaction for RocksTransaction<'db> {
                 }
                 Bound::Unbounded => IteratorMode::Start,
             };
-            let iter = txn.iterator_cf(&cf.handle, mode);
+            let iter = txn.iterator_cf_opt(&cf.handle, readopts, mode);
             // Drop an excluded lower-bound key (the seek lands exactly on it).
             let lo_excluded = match lo {
                 Bound::Excluded(s) => Some(s),

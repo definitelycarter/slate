@@ -139,6 +139,13 @@ Reads agree across all three (snapshot isolation + read-your-writes); only the
 *write* model splits. On RocksDB a concurrent writer can make `commit()` fail
 with `DbError::Conflict`; the serialize-writers backends never raise it.
 
+Snapshot isolation is genuine on every backend, including RocksDB: memory and
+redb get a consistent read view from their native `ArcSwap` / MVCC snapshots,
+and RocksDB pins a snapshot at `begin` (optimistic `set_snapshot`) and threads
+it into every read, so a transaction that reads a key twice sees the same value
+even if another transaction commits a change in between — not the
+latest-committed value a plain optimistic read would return.
+
 **Retry with `transact`.** Rather than hand-roll a begin/commit/retry loop,
 wrap the unit of work in `Database::transact`. It begins a write transaction,
 runs the closure, commits, and on `DbError::Conflict` retries in a fresh
