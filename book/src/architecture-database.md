@@ -114,6 +114,71 @@ txn.commit()?;
 > distinct from the cf-scoped `collections().list()` above). `list_collections`
 > will move to a handle in a later pass.
 
+### Concurrency and the Transaction Contract
+
+A transaction makes the same guarantee on **every** backend:
+
+> A transaction observes a consistent snapshot taken at `begin`, sees its own
+> writes (read-your-writes), and commits atomically — all-or-nothing. Concurrent
+> writers are serialized **or** detected as conflicts at commit; in the conflict
+> case `commit()` returns `DbError::Conflict` and the transaction may be
+> retried.
+
+The conflict possibility is part of the contract **on every backend**, even
+those where it can't fire today — so a program written and tested against one
+backend stays correct on another. The write-concurrency model is where the
+backends differ:
+
+| Backend       | Writers                | Conflict at commit?                    |
+|---------------|------------------------|----------------------------------------|
+| `MemoryStore` | single (serialized)    | impossible by construction             |
+| `redb`        | single at a time (MVCC)| impossible by construction             |
+| `RocksDB`     | multiple (optimistic)  | **yes** — write-write detected, one side fails |
+
+Reads agree across all three (snapshot isolation + read-your-writes); only the
+*write* model splits. On RocksDB a concurrent writer can make `commit()` fail
+with `DbError::Conflict`; the serialize-writers backends never raise it.
+
+**Retry with `transact`.** Rather than hand-roll a begin/commit/retry loop,
+wrap the unit of work in `Database::transact`. It begins a write transaction,
+runs the closure, commits, and on `DbError::Conflict` retries in a fresh
+transaction up to a bounded budget — the safe-by-default home for the optimistic
+path:
+
+```rust
+// Begins, runs, commits; retries on a commit-time conflict (bounded).
+let moved = db.transact(|txn| {
+    let users = db.collection("users");
+    users.find(doc! { "_id": "alice" })
+        .update(doc! { "$inc": { "balance": -10 } }).one().execute(txn)?;
+    users.find(doc! { "_id": "bob" })
+        .update(doc! { "$inc": { "balance":  10 } }).one().execute(txn)?;
+    Ok(10)
+})?;
+```
+
+The closure is `FnMut` and may run more than once, so keep it idempotent across
+retries — route every read and write through the supplied `txn` and don't rely
+on side effects from an aborted attempt. Retries are **bounded and back off
+nothing by default**, so the helper needs no clock and is safe on `wasm32`
+(where `std::thread::sleep` is unavailable); a native caller that wants to space
+attempts out injects a sleep/backoff via `RetryPolicy::with_backoff` and
+`transact_with`. A persistent conflict surfaces as `DbError::Conflict` once the
+budget is exhausted.
+
+**`delete_range` is the one non-transactional operation.** `Store::delete_range`
+prunes a key range *outside* any transaction: in-flight transaction iterators
+(holding a snapshot) won't see the deletes, and — because it takes no part in
+conflict detection — a transaction can re-insert keys it just wiped. It exists
+because a coarse range prune is far cheaper than a transactional one; use it for
+user-scoped pruning (e.g. clearing one user's cache), not for global cleanup
+while transactions are in flight.
+
+**Not in v1:** savepoints / nested transactions (partial rollback). None of the
+three backends expose savepoints natively, so this would be engine-level
+write-buffering — deferred to its own RFC. The contract above is flat: begin →
+ops → commit/rollback, with no partial rollback implied.
+
 ### Query Execution
 
 `slate-planner` lowers a request to a `Plan` (a tree of `Node`s); `slate-executor` streams it with lazy materialization. See [Querying](./querying.md) for the full reference with all plan scenarios.

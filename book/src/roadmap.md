@@ -37,8 +37,16 @@ uninstrumented:
   mis-reads. The record-blob version is design-reserved (seam in place, the tag
   byte stays the backstop) until a second record format needs it.
 - **[Transaction & Concurrency Contract](./rfcs/transaction-concurrency-contract.md)**
-  — pin the isolation guarantee across backends, a first-class `DbError::Conflict`
-  + a `transact()` retry helper, and the `delete_range` exception.
+  — *done (parts 1–3; savepoints deferred).* The cross-backend guarantee is pinned
+  and written down in [Database → Concurrency and the Transaction Contract](./architecture-database.md#concurrency-and-the-transaction-contract):
+  snapshot isolation at `begin` + read-your-writes + atomic commit, with a
+  commit-time write-write conflict possible on **every** backend so a redb-tested
+  app stays correct on RocksDB. Backed by a first-class `DbError::Conflict`
+  (RocksDB's optimistic `Busy`/`TryAgain` mapped onto it at the store layer, with
+  the seam left for redb/memory) and a `db.transact(|txn| …)` retry helper
+  (bounded retries, `wasm32`-safe by default, optional injectable backoff via
+  `RetryPolicy`). `delete_range` is named as the one explicitly non-transactional
+  operation. **Deferred:** savepoints / nested transactions (their own RFC).
 - **[Encryption at Rest](./rfcs/encryption-at-rest.md)** — *v1 done (documentation
   deliverable).* The layer is decided and the guarantee is written down:
   OS / device-level encryption (iOS Data Protection, FileVault/APFS, equivalents) is

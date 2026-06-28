@@ -1,11 +1,18 @@
 # RFC: Transaction & Concurrency Contract
 
-> **Status: proposed.** Surfaced in the "proper embedded database" survey.
-> Multi-statement transactions exist and work, but the *guarantee* they make
-> differs by backend, is undocumented, and pushes conflict handling onto the
-> caller with no help. This RFC is mostly about pinning a contract and adding one
-> ergonomic helper — little new machinery, but it's the difference between
-> "transactions happen to work" and "transactions are a documented guarantee."
+> **Status: done (parts 1–3; savepoints deferred).** Surfaced in the "proper
+> embedded database" survey. Multi-statement transactions already worked, but the
+> *guarantee* they made differed by backend, was undocumented, and pushed conflict
+> handling onto the caller with no help. Parts 1+2 landed together: a first-class
+> `DbError::Conflict` (RocksDB's optimistic `Busy`/`TryAgain` mapped onto it at the
+> store layer, with the seam left for redb/memory busy conditions) and a
+> `db.transact(|txn| …)` retry helper (bounded retries, `wasm32`-safe by default,
+> optional injectable backoff via `RetryPolicy`). Part 3 took lean (b):
+> `delete_range` stays an out-of-band fast-path, named in the contract as the one
+> non-transactional operation. The cross-backend guarantee is written down in
+> [Database → Concurrency and the Transaction Contract](../architecture-database.md#concurrency-and-the-transaction-contract).
+> Part 4 (savepoints / nested transactions) remains deferred to its own RFC — see
+> §4 and Non-goals.
 
 ## Problem
 
