@@ -20,6 +20,7 @@ use super::Collection;
 use crate::WatchRegistry;
 use crate::database::Transaction;
 use crate::error::DbError;
+use slate_trigger::TriggerBag;
 use slate_udf::UdfBag;
 use slate_validator::ValidatorBag;
 
@@ -35,6 +36,8 @@ pub struct Collections {
     udf_bag: Arc<UdfBag>,
     /// The database's validator bag, carried for the same reason as the UDF bag.
     validator_bag: Arc<ValidatorBag>,
+    /// The database's trigger bag, carried for the same reason as the validator bag.
+    trigger_bag: Arc<TriggerBag>,
 }
 
 impl Collections {
@@ -43,12 +46,14 @@ impl Collections {
         watch: Arc<WatchRegistry>,
         udf_bag: Arc<UdfBag>,
         validator_bag: Arc<ValidatorBag>,
+        trigger_bag: Arc<TriggerBag>,
     ) -> Self {
         Self {
             cf,
             watch,
             udf_bag,
             validator_bag,
+            trigger_bag,
         }
     }
 
@@ -61,6 +66,7 @@ impl Collections {
             watch: &self.watch,
             udf_bag: &self.udf_bag,
             validator_bag: &self.validator_bag,
+            trigger_bag: &self.trigger_bag,
             name: name.to_string(),
             pk_path: "_id".to_string(),
             ttl_path: "ttl".to_string(),
@@ -95,6 +101,7 @@ pub struct CreateCollection<'a> {
     watch: &'a Arc<WatchRegistry>,
     udf_bag: &'a Arc<UdfBag>,
     validator_bag: &'a Arc<ValidatorBag>,
+    trigger_bag: &'a Arc<TriggerBag>,
     name: String,
     pk_path: String,
     ttl_path: String,
@@ -124,6 +131,7 @@ impl CreateCollection<'_> {
             watch: self.watch.clone(),
             udf_bag: self.udf_bag.clone(),
             validator_bag: self.validator_bag.clone(),
+            trigger_bag: self.trigger_bag.clone(),
         })
     }
 }

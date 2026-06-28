@@ -7,6 +7,7 @@ use slate_engine::{Catalog, Engine, EngineTransaction, IntegrityReport, KvEngine
 use slate_executor::ExecEnv;
 use slate_executor::watch::WatchSink;
 use slate_store::{BackupStore, Durability, Store};
+use slate_trigger::TriggerBag;
 use slate_udf::UdfBag;
 use slate_validator::ValidatorBag;
 use slate_vm::pool::VmPool;
@@ -60,6 +61,9 @@ pub struct DatabaseBuilder {
     /// Validator bag accumulated before open via `with_validator`; moved into the
     /// database, mirroring `udf_bag`.
     validator_bag: Arc<ValidatorBag>,
+    /// Trigger bag accumulated before open via `with_trigger`; moved into the
+    /// database, mirroring `validator_bag`.
+    trigger_bag: Arc<TriggerBag>,
     clock: Option<Arc<dyn Fn() -> i64 + Send + Sync>>,
     rand: Option<RandFn>,
     durability: Option<Durability>,
@@ -79,6 +83,7 @@ impl DatabaseBuilder {
             pool: None,
             udf_bag: Arc::new(UdfBag::new()),
             validator_bag: Arc::new(ValidatorBag::new()),
+            trigger_bag: Arc::new(TriggerBag::new()),
             clock: None,
             rand: None,
             durability: None,
@@ -115,6 +120,15 @@ impl DatabaseBuilder {
         validator: V,
     ) -> Self {
         self.validator_bag.register(name, validator);
+        self
+    }
+
+    /// Register a native trigger in the database-scoped bag before open.
+    /// Equivalent to `triggers().register` but at build time, for compiled
+    /// applications that carry their triggers in the binary. A bare closure is
+    /// accepted via the blanket [`Trigger`](slate_trigger::Trigger) impl.
+    pub fn with_trigger<T: slate_trigger::Trigger + 'static>(self, name: &str, trigger: T) -> Self {
+        self.trigger_bag.register(name, trigger);
         self
     }
 
@@ -213,6 +227,7 @@ impl DatabaseBuilder {
             watch_registry: Arc::new(WatchRegistry::new()),
             udf_bag: self.udf_bag,
             validator_bag: self.validator_bag,
+            trigger_bag: self.trigger_bag,
             rand,
             durability: self.durability,
             #[cfg(feature = "runtime")]
@@ -269,6 +284,11 @@ pub struct Database<S: Store> {
     /// (cheap when empty); behind an `Arc` so collection handles can share it for
     /// no-txn `validators().register`, exactly like the UDF bag.
     validator_bag: Arc<ValidatorBag>,
+    /// The database-scoped trigger bag — the live `name -> Arc<dyn Trigger>`
+    /// registry the write path resolves bound triggers against. Always present
+    /// (cheap when empty); behind an `Arc` so collection handles can share it for
+    /// no-txn `triggers().register`, exactly like the validator bag.
+    trigger_bag: Arc<TriggerBag>,
     /// Random source for `RAND()`, threaded into each transaction's cursors.
     rand: Option<RandFn>,
     /// The builder-level durability default applied to every write transaction,
@@ -371,6 +391,12 @@ impl<S: Store> Database<S> {
     /// handles to share (no-txn `validators().register`), like the UDF bag.
     pub(crate) fn validator_bag(&self) -> &Arc<ValidatorBag> {
         &self.validator_bag
+    }
+
+    /// The database-scoped trigger bag, behind its `Arc` — for collection handles
+    /// to share (no-txn `triggers().register`), like the validator bag.
+    pub(crate) fn trigger_bag(&self) -> &Arc<TriggerBag> {
+        &self.trigger_bag
     }
 
     /// Every binding (UDF or validator) whose target native function is not

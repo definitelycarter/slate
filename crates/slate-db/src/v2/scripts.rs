@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use slate_engine::{Catalog, EngineError, FunctionKind, runtime_tag};
 use slate_store::Store;
+use slate_trigger::{Trigger, TriggerBag};
 use slate_udf::{Udf, UdfBag};
 use slate_validator::{Validator, ValidatorBag};
 
@@ -141,11 +142,34 @@ fn list_bindings<S: Store>(
 pub struct Triggers<'a> {
     cf: &'a str,
     collection: &'a str,
+    /// The database-scoped trigger bag, for the no-txn native
+    /// `register`/`unregister` verbs (the `create`/`remove`/`list` binding verbs
+    /// go through the catalog).
+    trigger_bag: &'a Arc<TriggerBag>,
 }
 
 impl<'a> Triggers<'a> {
-    pub(crate) fn new(cf: &'a str, collection: &'a str) -> Self {
-        Self { cf, collection }
+    pub(crate) fn new(cf: &'a str, collection: &'a str, trigger_bag: &'a Arc<TriggerBag>) -> Self {
+        Self {
+            cf,
+            collection,
+            trigger_bag,
+        }
+    }
+
+    /// Register a native trigger named `name` in the database-scoped bag. No
+    /// transaction — this mutates live runtime state immediately, like
+    /// `watch`/`stream`. A bare closure is accepted via the blanket [`Trigger`]
+    /// impl. (Database-scoped even though it hangs off a collection handle: the
+    /// *binding* that fires it on one collection is a later, durable concern.)
+    pub fn register<T: Trigger + 'static>(&self, name: &str, trigger: T) {
+        self.trigger_bag.register(name, trigger);
+    }
+
+    /// Unregister the native trigger named `name` from the bag. Returns whether
+    /// one was present. No transaction.
+    pub fn unregister(&self, name: &str) -> bool {
+        self.trigger_bag.unregister(name)
     }
 
     /// Register a trigger named `name` with Lua `source`. Returns a builder;
@@ -475,7 +499,9 @@ mod tests {
     use bson::{Bson, doc};
     use slate_store::MemoryStore;
 
-    use crate::{BindingKind, Database, DatabaseBuilder, UdfError, ValidatorCtx, Value, Verdict};
+    use crate::{
+        BindingKind, Database, DatabaseBuilder, TriggerCtx, UdfError, ValidatorCtx, Value, Verdict,
+    };
 
     /// A native UDF: read arg 0 as a number and double it.
     fn double(args: &[Value]) -> Result<Value, UdfError> {
@@ -830,5 +856,25 @@ mod tests {
             DatabaseBuilder::new().with_validator("v", |_: &ValidatorCtx<'_>| Ok(Verdict::Accept)),
         );
         assert!(db.collection("users").validators().unregister("v"));
+    }
+
+    #[test]
+    fn native_trigger_register_round_trips_through_the_handle() {
+        // The collection handle's no-txn `register`/`unregister` reach the same
+        // database-scoped bag (slice 2 wiring); no durable binding is involved.
+        let db = db_with_users();
+        db.collection("users")
+            .triggers()
+            .register("audit", |_: &TriggerCtx<'_>| Ok(()));
+        assert!(db.collection("users").triggers().unregister("audit"));
+        assert!(!db.collection("users").triggers().unregister("audit"));
+    }
+
+    #[test]
+    fn native_trigger_registered_at_build_is_in_the_bag() {
+        // `DatabaseBuilder::with_trigger` populates the same database-scoped bag
+        // before open; the runtime handle sees it (unregister finds it).
+        let db = with_users(DatabaseBuilder::new().with_trigger("t", |_: &TriggerCtx<'_>| Ok(())));
+        assert!(db.collection("users").triggers().unregister("t"));
     }
 }

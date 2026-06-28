@@ -29,6 +29,7 @@ pub use slate_engine::{
 pub use slate_executor::ChangeEvent;
 pub use slate_query::{DistinctOptions, FindOptions, Sort, SortDirection};
 pub use slate_store::Durability;
+pub use slate_trigger::{Trigger, TriggerBag, TriggerCtx, TriggerError, TriggerTxn};
 pub use slate_udf::{Udf, UdfBag, UdfError, Value};
 pub use slate_validator::{Validator, ValidatorBag, ValidatorCtx, ValidatorError, Verdict};
 pub use slate_vm::VmError;
