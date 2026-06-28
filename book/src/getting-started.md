@@ -261,4 +261,4 @@ not yet available — use `mongoexport` / `.seed` for the lossy JSONL path.)
 - [Querying](./querying.md) — the query model, plan scenarios, distinct, subqueries.
 - [Mongo Operators](./mongo-operators.md) — find filters and update operators.
 - [Function Reference](./functions.md) — every built-in function.
-- [Architecture](./architecture.md) — how the crates fit together, and pluggable scripting.
+- [Architecture](./architecture.md) — how the crates fit together, and native triggers/validators/UDFs.

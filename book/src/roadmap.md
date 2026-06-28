@@ -168,21 +168,25 @@ uninstrumented:
 - **[Unique Indexes](./rfcs/unique-indexes.md)** — *done.* Single-field scalar
   uniqueness via a dual `i`/`u` key format; sparse; scalar-only.
 - **[User-Defined Logic](./rfcs/user-defined-logic.md)** — *partially implemented.*
-  Lua triggers shipped (validators moved to native — see Native Functions);
+  Triggers, validators, and UDFs are all native now (see Native Functions);
   computed fields, custom key extractors, partial-index filters, and transform
   pipelines remain.
-- **[Native Functions](./rfcs/native-functions.md)** — *UDFs + validators done.*
-  Native Rust hooks behind one model — a database-scoped code bag (`register` /
-  `with_udf` / `with_validator`) plus per-collection durable bindings
-  (`functions().create` / `validators().create`), resolved at plan build and run
-  under `catch_unwind`. The binding maps a name to a native function; the bag
-  supplies the code. `dangling_bindings()` reports unresolved symbols (tagged
-  `Udf` / `Validator`). **Validators** are now `dyn Validator` (`Pure`, a
-  write-path gate returning a `Verdict`); each binding resolves once per query and
-  a dangling one aborts all writes to its collection, fail-safe. **Converting
-  triggers to native (and dropping `slate-vm`) remains** — they are the last Lua
-  holdout. UDFs run in compiled positions (`SELECT`/`WHERE`);
-  `ORDER BY`/`UNWIND`/`GROUP BY` (which interpret) are a follow-up.
+- **[Native Functions](./rfcs/native-functions.md)** — *UDFs, validators, and
+  triggers done; `slate-vm` removed.* Native Rust hooks behind one model — a
+  database-scoped code bag (`register` / `with_udf` / `with_validator` /
+  `with_trigger`) plus per-collection durable bindings (`functions().create` /
+  `validators().create` / `triggers().create`), resolved at plan build (UDFs) or
+  once per query (validators, triggers) and run under `catch_unwind`. The binding
+  maps a name to a native function; the bag supplies the code.
+  `dangling_bindings()` reports unresolved symbols (tagged `Udf` / `Validator` /
+  `Trigger`). **Validators** are `dyn Validator` (`Pure`, a write-path gate
+  returning a `Verdict`); **triggers** are `dyn Trigger` (`ReadWrite`, a
+  column-family-confined `get`/`put`/`delete` context) — a dangling validator or
+  trigger aborts all writes to its collection, fail-safe. With triggers native,
+  `slate-vm` (the Lua/JS VM) is deleted: the core links no scripting runtime, so
+  the whole stack compiles to `wasm32`. UDFs run in compiled positions
+  (`SELECT`/`WHERE`); `ORDER BY`/`UNWIND`/`GROUP BY` (which interpret) are a
+  follow-up.
 
 ## Storage & Durability
 

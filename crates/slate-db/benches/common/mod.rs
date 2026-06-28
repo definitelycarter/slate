@@ -7,8 +7,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::DatabaseBuilder;
 use slate_db::bench::Database;
-use slate_db::v2::{IndexOptions, UdfFunction, ValidatorFunction};
-use slate_db::{UdfError, ValidatorCtx, ValidatorError, Value, Verdict};
+use slate_db::v2::{IndexOptions, TriggerFunction, UdfFunction, ValidatorFunction};
+use slate_db::{TriggerCtx, TriggerError, UdfError, ValidatorCtx, ValidatorError, Value, Verdict};
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -151,6 +151,38 @@ pub fn insert_validator_engine(validated: bool) -> Database<MemoryStore> {
             .collection("bench")
             .validators()
             .create("accept_all", ValidatorFunction::from_name("accept_all"))
+            .execute(&txn)
+            .unwrap();
+    }
+    txn.commit().unwrap();
+    engine
+}
+
+/// A pass-through native trigger — a no-op side effect. Lets the write bench
+/// isolate the per-write trigger dispatch cost (resolving once, building the ctx
+/// + `CfScopedTxn`, the `catch_unwind`, the trait call) from any real work.
+fn noop_trigger(_: &TriggerCtx<'_>) -> Result<(), TriggerError> {
+    Ok(())
+}
+
+/// An engine with the collection `bench`, optionally firing one bound
+/// pass-through native trigger (`noop_trigger`) on writes. `triggered == true` is
+/// the `native` arm of the insert-trigger bench; `false` is the `none` baseline —
+/// the same inserts with no trigger wrappers. (An insert fires the trigger twice,
+/// `inserting` + `inserted`.)
+pub fn insert_trigger_engine(triggered: bool) -> Database<MemoryStore> {
+    let mut builder = db_builder();
+    if triggered {
+        builder = builder.with_trigger("noop", noop_trigger);
+    }
+    let engine = builder.open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
+    if triggered {
+        engine
+            .collection("bench")
+            .triggers()
+            .create("noop", TriggerFunction::from_name("noop"))
             .execute(&txn)
             .unwrap();
     }

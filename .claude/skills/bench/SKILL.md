@@ -20,7 +20,6 @@ We benchmark **targeted before/after** by default: capture the affected benches 
 | `slate-store`   | `memory`      | Memory backend write/scan                   |
 | `slate-store`   | `rocks`       | RocksDB backend write/scan                  |
 | `slate-store`   | `redb`        | redb backend write/scan                     |
-| `slate-vm`      | `vm`          | Lua/JS hook execution                       |
 
 Run a single harness:
 
@@ -43,7 +42,7 @@ Use this to pick which benches to run. **Widen when uncertain** — running an e
 | `slate-engine/src/encoding/`                               | `engine`, `executor`, `mutation`, all `slate-store` |
 | `slate-engine/src/kv/`, `index_sync.rs`                    | `engine`, `mutation`, all `slate-store` |
 | `slate-store/src/<backend>.rs`                             | that backend's bench + `mutation`    |
-| `slate-vm/`, hooks/triggers/validators                     | `vm`, `mutation` (triggers fire on writes) |
+| `slate-trigger` / `slate-validator`, hook firing           | `mutation`, `write` (hooks fire on writes) |
 | Cross-cutting: error types, traits in `lib.rs`             | run the parent crate's full set      |
 
 If a change touches multiple rows, take the union.

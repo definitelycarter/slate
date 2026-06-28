@@ -83,5 +83,41 @@ fn bench_insert_validated(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_bulk_insert, bench_insert_validated);
+// ── Insert with a native trigger ────────────────────────────
+
+fn bench_insert_triggered(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert_triggered");
+    let n = 1_000;
+    let docs = generate_realistic_batch(n);
+    // `none` = inserts with no trigger (the untouched write path); `native` = the
+    // same inserts firing one bound pass-through trigger (twice per insert:
+    // `inserting` + `inserted`). The delta is the per-write native-trigger
+    // overhead (resolve once, then per-fire ctx + CfScopedTxn + catch_unwind +
+    // trait call).
+    for (label, triggered) in [("none", false), ("native", true)] {
+        let engine = insert_trigger_engine(triggered);
+        group.bench_function(label, |b| {
+            b.iter_batched(
+                || (engine.begin(false).unwrap(), docs.clone()),
+                |(txn, docs)| {
+                    engine
+                        .collection("bench")
+                        .insert_many(docs)
+                        .execute(&txn)
+                        .unwrap();
+                    // Don't commit — let txn drop so the engine stays empty.
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_bulk_insert,
+    bench_insert_validated,
+    bench_insert_triggered
+);
 criterion_main!(benches);

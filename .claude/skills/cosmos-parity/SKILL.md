@@ -232,8 +232,9 @@ per the [emulator feature matrix](https://learn.microsoft.com/en-us/azure/cosmos
 
 - **Stored Procedures, Triggers, and UDFs are ❌ Not planned.** So the Cosmos
   oracle can **never** cover slate's hooks — triggers, validators, and UDFs are
-  slate's own Lua extensions with no Cosmos analogue. Those keep their own
-  `slate-db` / `slate-vm` tests; don't expect or chase parity for them here.
+  slate's own native-Rust extensions with no Cosmos analogue. Those keep their own
+  `slate-db` / `slate-trigger` / `slate-validator` / `slate-udf` tests; don't
+  expect or chase parity for them here.
 - **Index choice isn't checkable.** "Create collection with custom index policy"
   and "Update collection" are ⚠️ No-ops, so the emulator ignores index policy
   entirely — only query *results* are comparable, which is exactly what we want

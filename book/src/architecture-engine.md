@@ -70,98 +70,32 @@ Two opt-in instruments sit beside the planner/executor; both are zero-cost on th
 
 `UPDATE` assignments are applied by `slate_eval::apply_assignments`: a raw byte-edit fast path splices each evaluated value into the document in place for the simple shapes (single-segment scalar writes, `$push`/`$pop` on the field's own array), falling back to a deserialize-mutate-reserialize rebuild for dotted paths, whole document/array values, and `$lpush`. Upsert *merges* — overlaying an update document's fields onto an existing one — use `slate_rawbson::raw_merge`, which overwrites in place when a value keeps its BSON type and width and splices otherwise. Both paths return "unchanged" so the write node can drop an untouched row.
 
-## Tier 2.5: Scripting Engine (`slate-vm`)
+## Tier 2.5: Native Hooks (`slate-udf`, `slate-validator`, `slate-trigger`)
 
 ### Overview
 
-A runtime-agnostic scripting engine for extending database behavior with user-defined logic. Scripts back triggers (side effects on mutations) and validators (document-level constraints). (UDFs are no longer scripts — they are native Rust functions resolved through the catalog; see *User-Defined Functions* in the querying guide.) The VM layer is completely decoupled from storage — it knows nothing about collections, indexes, or transactions.
+Slate extends database behavior with three kinds of **native Rust function** — a **UDF** (called from SQL), a **validator** (a write-path gate), and a **trigger** (a write-path side effect). Each role is its own low crate (`slate-udf`, `slate-validator`, `slate-trigger`) holding a trait, a context type, and a database-scoped **bag**. There is no embedded VM: the core links none of `mlua`/wasmtime/etc., so the whole stack compiles to `wasm32`. A scripting language can return one of these role-typed functions as a companion adapter (see the [native-functions RFC](./rfcs/native-functions.md)), but the core never links one.
 
-Concrete runtimes are **pluggable and injected**: the database registers them into a `VmPool` and hands it to the engine via `DatabaseBuilder::with_scripting(pool)`. Everything below the database layer — including `slate-executor` — depends only on the trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`) and never links a concrete runtime. A build that registers no runtime (notably `wasm32`, which takes `slate-db` with `default-features = false`) therefore excludes the Lua runtime and its vendored C entirely. The Lua feature lives only in `slate-db`'s default features (native) and in `slate-executor`'s dev-dependencies (so tests can build a real `LuaScriptRuntime`).
+### The bag + binding model
 
-### Architecture
+Two levels, think dynamic linking:
 
-```
-slate-vm/
-  ├── ScriptRuntime trait     → compile source bytes → ScriptHandle
-  ├── ScriptHandle trait      → execute compiled script with capabilities
-  ├── VmPool                  → runtime registry + compile cache (hash-keyed)
-  └── lua/                    → LuaScriptRuntime (feature-gated behind "lua")
-```
+- **The bag (code)** — a flat, database-scoped `name -> Arc<dyn Role>` map, populated by `register(name, closure)` (no transaction) or the pre-open `with_udf` / `with_validator` / `with_trigger`. This is the *shared library*: one function, reused everywhere.
+- **The binding (intent)** — a per-collection, durable `(cf, collection, name) -> func_name` mapping in the catalog, written by `create(name, func)` (transactional) and stored as a `runtime_tag::NATIVE` row whose bytes are the target function name. This is the *symbol reference*.
 
-### Runtime Traits
+Resolution links the two — a binding's target name is looked up in the bag at plan build (UDFs) or once per query (validators, triggers). A dangling binding (bound but never registered) is an unresolved symbol: a UDF fails its query, a validator or trigger aborts the write (fail-safe). Every role runs behind a `catch_unwind` panic boundary, so user code at the seam can't violate the no-panic contract.
 
-Two traits define the contract between the database and any scripting language:
+### Per-role contracts
 
-```rust
-/// Compiles source bytes into executable handles.
-pub trait ScriptRuntime: Send + Sync {
-    fn load(&self, name: &str, source: &[u8]) -> Result<Box<dyn ScriptHandle>, VmError>;
-    fn runtime_kind(&self) -> RuntimeKind;
-}
-
-/// A compiled script ready to execute.
-pub trait ScriptHandle: Send + Sync {
-    fn call(
-        &self,
-        input: &RawDocumentBuf,
-        capabilities: &ScriptCapabilities<'_>,
-    ) -> Result<RawDocumentBuf, VmError>;
-}
-```
-
-Scripts receive BSON in, return BSON out. The database controls what a script can do through `ScriptCapabilities`:
-
-- **`Pure`** — no external access; a script only sees the input document. (Validators, the former `Pure` user, are now native Rust functions outside this VM — see [Triggers & Validators](./scripting.md); the tier is kept for a future read-only scripted hook.)
-- **`ReadOnly`** — scoped read methods (`ctx.get`). For future use (computed fields, projections).
-- **`ReadWrite`** — scoped read-write methods (`ctx.get`, `ctx.put`, `ctx.delete`). Used for triggers that need to read/write other collections.
-
-Capabilities are provided at call time, not compile time. A compiled script is cached once and reused across transactions with different capability sets.
-
-### VmPool
-
-The `VmPool` manages runtime registration and compiled script caching:
-
-- **Runtime registry** — maps `RuntimeKind` → `Arc<dyn ScriptRuntime>`. Currently Lua; Wasm is defined but not yet implemented.
-- **Compile cache** — `DashMap<(RuntimeKind, u64), Arc<dyn ScriptHandle>>` keyed by runtime + source hash. Scripts are compiled once and shared across all transactions. Cache invalidation is automatic — if the source hash changes (e.g., a trigger is updated), the new source is compiled and cached.
-- **`get_or_load()`** — the primary entry point. Checks the cache by source hash; on miss, compiles via the appropriate runtime and caches the result.
-
-### Lua Runtime
-
-The default scripting runtime (feature-gated behind `lua`). Scripts follow a factory pattern — the source returns a function:
-
-```lua
-return function(ctx, event)
-  -- ctx provides scoped methods (get, put, delete) when capabilities allow
-  -- event is the BSON input document
-  return event  -- return value is converted back to BSON
-end
-```
-
-**Key properties:**
-
-- **Sandboxed** — `os`, `io`, `debug`, `loadfile`, and `dofile` are removed. Scripts can't access the filesystem or network.
-- **Instruction-limited** — a configurable instruction count limit prevents infinite loops. Exceeding it returns `VmError::InstructionLimit`.
-- **BSON type preservation** — i32, i64, DateTime, ObjectId, and other BSON types round-trip through Lua via userdata wrappers with metamethods for comparison and string conversion.
-- **`bson` global** — provides constructors (`bson.datetime()`, `bson.objectid()`, `bson.now()`, `bson.i32()`) for creating typed BSON values from Lua.
-
-### Scoped Callbacks
-
-`ScopedMethod` enables trigger scripts to interact with the database without requiring `'static` closures:
-
-```rust
-pub struct ScopedMethod<'a> {
-    pub name: &'a str,
-    pub callback: &'a dyn Fn(Vec<Bson>) -> Result<Bson, VmError>,
-}
-```
-
-The callbacks capture borrowed transaction references. They're injected as methods on a `ctx` table passed to the script function. This avoids the need for `Arc<Mutex<...>>` patterns — the callbacks are scoped to a single script invocation and borrow directly from the transaction.
+- **UDF** — `Fn(&[Value]) -> Result<Value, UdfError>`, pure and contextless. Documented as a pure function of its arguments, so the engine may call it zero or more times and cache the result.
+- **Validator** — `Fn(&ValidatorCtx) -> Result<Verdict, ValidatorError>`, `Pure`: `ctx.doc()` exposes only the candidate document, so a validator *structurally cannot* write.
+- **Trigger** — `Fn(&TriggerCtx) -> Result<(), TriggerError>`, `ReadWrite`: `ctx.action()` / `ctx.doc()` plus `ctx.get` / `ctx.put` / `ctx.delete` over the transaction, **confined to the firing column family** (the context names a collection, never a cf, so cross-cf access is structurally impossible).
 
 ### Hook Registry and Snapshot Isolation
 
 At the database layer (`slate-db`), hooks are managed by a `HookRegistry` backed by `ArcSwap<HookSnapshot>`:
 
-- **`HookSnapshot`** — a frozen per-collection map, built by scanning the catalog: `Vec<ResolvedHook>` (Lua source) for triggers, and `(validator_name, native_function)` bindings for validators (now native — the code lives in the validator bag, not here). UDF bindings ride along too.
+- **`HookSnapshot`** — a frozen per-collection map, built by scanning the catalog: `(name, native_function)` bindings for triggers and validators (the code lives in the respective bag, not here), plus UDF bindings. All three are native — the snapshot holds name mappings, never code.
 - **`HookRegistry`** — wraps `ArcSwap` for lock-free snapshot reads. Transactions capture a snapshot at `begin()` time and see a consistent view regardless of concurrent hook modifications.
 - **Invalidation** — when a transaction that modified hooks (register/drop) commits, a fresh snapshot is loaded and swapped in. Subsequent transactions see the updated hooks.
 
