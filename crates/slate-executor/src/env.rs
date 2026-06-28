@@ -98,6 +98,11 @@ pub struct ExecEnv<'a> {
     /// into each source node so it folds the between-rows check into its scan
     /// loop. `None` (the default) means no deadline and is zero-cost.
     pub(crate) deadline: Option<Rc<Deadline>>,
+    /// The query's materialization cap (Resource Limits RFC, B): the max rows a
+    /// blocking node (`Sort`/`IndexMerge`/`Distinct`/`Aggregate`) may buffer
+    /// before aborting with [`ExecError::LimitExceeded`](crate::ExecError::LimitExceeded).
+    /// `None` (the default) is unbounded and zero-cost.
+    pub(crate) materialization_cap: Option<usize>,
 }
 
 impl<'a> ExecEnv<'a> {
@@ -169,6 +174,13 @@ impl<'a> ExecEnv<'a> {
     /// into each source node's scan loop. `None` (the default) is zero-cost.
     pub fn with_deadline(mut self, deadline: Option<Rc<Deadline>>) -> Self {
         self.deadline = deadline;
+        self
+    }
+
+    /// Attach the query's materialization cap (Resource Limits RFC, B), enforced
+    /// by the blocking nodes. `None` (the default) is unbounded and zero-cost.
+    pub fn with_materialization_cap(mut self, cap: Option<usize>) -> Self {
+        self.materialization_cap = cap;
         self
     }
 

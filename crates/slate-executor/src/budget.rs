@@ -77,3 +77,20 @@ impl Ticker {
         Ok(())
     }
 }
+
+/// The materialization cap (Resource Limits RFC, B): the OOM guard on the
+/// blocking nodes. `Err(LimitExceeded)` once a node's buffered-row count `count`
+/// exceeds `cap`; `None` cap is unbounded — the zero-cost default. `node` names
+/// the blocking node for the message. Folded into each node's existing buffering
+/// loop (the spike showed a per-row counter + compare is hot-path noise).
+#[inline]
+pub(crate) fn check_cap(count: usize, cap: Option<usize>, node: &str) -> Result<(), ExecError> {
+    if let Some(cap) = cap
+        && count > cap
+    {
+        return Err(ExecError::LimitExceeded(format!(
+            "{node} exceeded the materialization cap of {cap} rows"
+        )));
+    }
+    Ok(())
+}

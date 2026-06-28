@@ -58,6 +58,15 @@ impl<'a, F> DistinctBuilder<'a, F> {
         self
     }
 
+    /// Override the *materialization cap* for this distinct read (Resource Limits
+    /// RFC, B), replacing the database-wide default: it aborts with
+    /// [`DbError::LimitExceeded`](crate::DbError::LimitExceeded) if the distinct
+    /// set grows past `rows`.
+    pub fn materialization_cap(mut self, rows: usize) -> Self {
+        self.limits.materialization_cap = Some(rows);
+        self
+    }
+
     /// Order the distinct values ascending or descending.
     pub fn sort(mut self, direction: SortDirection) -> Self {
         self.sort = Some(direction);

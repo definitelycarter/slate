@@ -17,6 +17,7 @@ use slate_eval::raweval;
 use slate_planner::RowBinding;
 
 use super::env::with_row_env;
+use crate::budget;
 use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Buffer, sort by `keys` (evaluated against each row environment), emit.
@@ -33,6 +34,8 @@ pub(crate) fn execute<'a>(
         let Some(row) = item? else { continue };
         let key_values = eval_keys(&row, &binding, &keys, &env)?;
         rows.push((key_values, row));
+        // OOM guard: cap the buffered rows (Resource Limits RFC, B).
+        budget::check_cap(rows.len(), env.materialization_cap, "Sort")?;
     }
 
     rows.sort_by(|a, b| order_cmp(&a.0, &b.0, &keys));

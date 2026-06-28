@@ -50,6 +50,16 @@ impl<'a, P> QueryBuilder<'a, P> {
         self.limits.deadline = Some(deadline);
         self
     }
+
+    /// Override the *materialization cap* for this SQL read (Resource Limits RFC,
+    /// B), replacing the database-wide default: the query aborts with
+    /// [`DbError::LimitExceeded`](crate::DbError::LimitExceeded) if a blocking
+    /// node buffers more than `rows`. Chainable before or after
+    /// [`params`](QueryBuilder::params).
+    pub fn materialization_cap(mut self, rows: usize) -> Self {
+        self.limits.materialization_cap = Some(rows);
+        self
+    }
 }
 
 impl<'a> QueryBuilder<'a, ()> {

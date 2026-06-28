@@ -14,6 +14,7 @@ use bson::raw::RawBsonRef;
 use slate_engine::{Catalog, EngineTransaction};
 use slate_planner::{CollectionRef, LogicalOp};
 
+use crate::budget;
 use crate::{ExecError, ValueIter};
 
 pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
@@ -22,14 +23,17 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     logical: LogicalOp,
     left: ValueIter<'a>,
     right: ValueIter<'a>,
+    cap: Option<usize>,
 ) -> Result<ValueIter<'a>, ExecError> {
     let handle = txn.collection(&collection.cf, &collection.collection)?;
     let pk_path = handle.pk_path().to_string();
 
+    // OOM guard (Resource Limits RFC, B): both legs are buffered eagerly, so cap
+    // the rows pulled from each side as they accumulate.
     let merged: Vec<Option<RawBson>> = match logical {
         LogicalOp::Or => {
-            let left: Vec<Option<RawBson>> = left.collect::<Result<_, _>>()?;
-            let right: Vec<Option<RawBson>> = right.collect::<Result<_, _>>()?;
+            let left = collect_capped(left, cap)?;
+            let right = collect_capped(right, cap)?;
 
             let mut seen = HashSet::with_capacity(left.len() + right.len());
             let mut result = Vec::with_capacity(left.len() + right.len());
@@ -52,8 +56,9 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
                 {
                     right_set.insert(id);
                 }
+                budget::check_cap(right_set.len(), cap, "IndexMerge")?;
             }
-            left.collect::<Result<Vec<_>, _>>()?
+            collect_capped(left, cap)?
                 .into_iter()
                 .filter(|val| {
                     val.as_ref()
@@ -66,6 +71,19 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     };
 
     Ok(Box::new(merged.into_iter().map(Ok)))
+}
+
+/// Drain a side into a buffer, tripping the materialization cap as it grows.
+fn collect_capped(
+    side: ValueIter<'_>,
+    cap: Option<usize>,
+) -> Result<Vec<Option<RawBson>>, ExecError> {
+    let mut out = Vec::new();
+    for item in side {
+        out.push(item?);
+        budget::check_cap(out.len(), cap, "IndexMerge")?;
+    }
+    Ok(out)
 }
 
 /// Hash a row's identity: the pk for documents, the value itself for bare IDs.

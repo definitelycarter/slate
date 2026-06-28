@@ -199,6 +199,17 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Set the database-wide default *materialization cap* (Resource Limits RFC,
+    /// B): the OOM guard. A query whose `Sort`/`IndexMerge`/`Distinct`/`GroupBy`
+    /// buffers more than `rows` aborts with
+    /// [`DbError::LimitExceeded`](crate::DbError::LimitExceeded) instead of
+    /// allocating without bound. A per-query `.materialization_cap(..)` on the
+    /// `find`/`query` builders overrides it.
+    pub fn with_materialization_cap(mut self, rows: usize) -> Self {
+        self.limits.materialization_cap = Some(rows);
+        self
+    }
+
     /// Enable background TTL sweep at the given interval.
     #[cfg(feature = "runtime")]
     pub fn with_sweep(mut self, interval: std::time::Duration) -> Self {
@@ -890,6 +901,7 @@ impl<'db, S: Store + 'db> Transaction<'db, S> {
             .with_watch(self.watch_sink.clone())
             .with_clock(Some(self.now_millis()))
             .with_deadline(self.build_deadline(effective.deadline))
+            .with_materialization_cap(effective.materialization_cap)
     }
 
     /// Build the executor [`Deadline`](slate_executor::Deadline) for an effective

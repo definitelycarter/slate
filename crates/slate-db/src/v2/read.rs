@@ -64,6 +64,15 @@ impl<'a, F> FindBuilder<'a, F> {
         self
     }
 
+    /// Override the *materialization cap* for this read (Resource Limits RFC, B),
+    /// replacing the database-wide default: the read aborts with
+    /// [`DbError::LimitExceeded`](crate::DbError::LimitExceeded) if a blocking
+    /// node buffers more than `rows`.
+    pub fn materialization_cap(mut self, rows: usize) -> Self {
+        self.limits.materialization_cap = Some(rows);
+        self
+    }
+
     /// Order the result by `field` (chainable; later calls append further keys).
     pub fn sort(mut self, field: &str, direction: SortDirection) -> Self {
         self.options.sort.push(Sort {

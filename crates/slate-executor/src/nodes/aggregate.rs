@@ -15,6 +15,7 @@ use slate_eval::{EvalError, Value};
 use slate_planner::{AggregateExpr, GroupKey, RowBinding};
 
 use super::env::with_row_env;
+use crate::budget;
 use crate::{ExecEnv, ExecError, ValueIter};
 
 /// Buffer `source`, group by `group_keys`, accumulate `aggregates`, emit one
@@ -39,9 +40,16 @@ pub(crate) fn execute<'a>(
 
     // Each group is its key tuple plus one accumulator per aggregate.
     let mut groups: Vec<(Vec<Value>, Vec<Accumulator>)> = Vec::new();
+    // OOM guard (Resource Limits RFC, B): cap the *rows consumed*, which bounds
+    // both the group vector and the per-group accumulator buffers (e.g. an
+    // ARRAY_AGG folding every row into a single group) — the one number that
+    // bounds the aggregate's total materialization.
+    let mut consumed = 0usize;
 
     for item in source {
         let Some(row) = item? else { continue };
+        consumed += 1;
+        budget::check_cap(consumed, env.materialization_cap, "GroupBy")?;
         let (keys, args) = with_row_env(&row, &binding, &env, |renv| {
             let mut keys = Vec::with_capacity(group_keys.len());
             for gk in &group_keys {

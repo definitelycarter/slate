@@ -349,7 +349,14 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
             } => {
                 let left = self.execute_node(*lhs, current)?;
                 let right = self.execute_node(*rhs, current)?;
-                nodes::index_merge::execute(self.txn, &collection, logical, left, right)?
+                nodes::index_merge::execute(
+                    self.txn,
+                    &collection,
+                    logical,
+                    left,
+                    right,
+                    self.env.materialization_cap,
+                )?
             }
 
             Node::IndexIntersect { collection, parts } => {
@@ -404,7 +411,7 @@ impl<'a, T: EngineTransaction + Catalog> Executor<'a, T> {
 
             Node::Distinct { source, flatten } => {
                 let source = self.execute_node(*source, current)?;
-                nodes::distinct::execute(source, flatten)
+                nodes::distinct::execute(source, flatten, self.env.materialization_cap)
             }
 
             Node::Aggregate {

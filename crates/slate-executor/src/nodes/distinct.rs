@@ -18,19 +18,33 @@ use bson::raw::RawBsonRef;
 
 use slate_eval::EvalError;
 
+use crate::budget;
 use crate::{ExecError, ValueIter};
 
 /// Wrap `source`, emitting each distinct value once. When `flatten` is set an
 /// array row is flattened one level (Mongo `distinct` multikey); otherwise the
 /// whole array is one value (SQL `SELECT DISTINCT`, matching Cosmos).
-pub(crate) fn execute<'a>(source: ValueIter<'a>, flatten: bool) -> ValueIter<'a> {
+///
+/// `cap` is the materialization cap (Resource Limits RFC, B): the distinct set
+/// (`seen`) is the buffer that grows, so the stream aborts with `LimitExceeded`
+/// once it exceeds `cap`. `None` is unbounded.
+pub(crate) fn execute<'a>(
+    source: ValueIter<'a>,
+    flatten: bool,
+    cap: Option<usize>,
+) -> ValueIter<'a> {
     let mut seen = HashSet::new();
     Box::new(source.flat_map(move |item| {
-        let emitted: Vec<Result<Option<RawBson>, ExecError>> = match item {
+        let mut emitted: Vec<Result<Option<RawBson>, ExecError>> = match item {
             Ok(Some(value)) => emit_distinct(value, flatten, &mut seen),
             Ok(None) => Vec::new(),
             Err(e) => vec![Err(e)],
         };
+        // OOM guard: the distinct set is the buffer. Surface the cap breach on the
+        // stream right after this row's values; the consumer stops on the error.
+        if let Err(e) = budget::check_cap(seen.len(), cap, "Distinct") {
+            emitted.push(Err(e));
+        }
         emitted.into_iter()
     }))
 }
@@ -139,6 +153,7 @@ mod tests {
                 RawBson::Int32(2),
             ]),
             true,
+            None,
         ))
         .unwrap();
         assert_eq!(
@@ -153,6 +168,7 @@ mod tests {
         let out = collect(execute(
             values::execute(vec![doc.clone(), doc.clone()]),
             true,
+            None,
         ))
         .unwrap();
         assert_eq!(out, vec![doc]);
@@ -172,7 +188,7 @@ mod tests {
             bind_c(docs),
             crate::ExecEnv::new(),
         );
-        let out = collect(execute(projected, true)).unwrap();
+        let out = collect(execute(projected, true, None)).unwrap();
         assert_eq!(
             out,
             vec![RawBson::String("a".into()), RawBson::String("b".into())]
@@ -183,7 +199,7 @@ mod tests {
     fn flatten_true_unwraps_arrays_one_level() {
         // Mongo `distinct("tags")`: [a,b] and [b,c] → a, b, c.
         let rows = vec![bson::rawbson!(["a", "b"]), bson::rawbson!(["b", "c"])];
-        let out = collect(execute(values::execute(rows), true)).unwrap();
+        let out = collect(execute(values::execute(rows), true, None)).unwrap();
         assert_eq!(
             out,
             vec![
@@ -201,7 +217,7 @@ mod tests {
         let ab = bson::rawbson!(["a", "b"]);
         let bc = bson::rawbson!(["b", "c"]);
         let rows = vec![ab.clone(), ab.clone(), bc.clone()];
-        let out = collect(execute(values::execute(rows), false)).unwrap();
+        let out = collect(execute(values::execute(rows), false, None)).unwrap();
         assert_eq!(out, vec![ab, bc]);
     }
 }

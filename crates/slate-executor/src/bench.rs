@@ -195,8 +195,9 @@ pub fn limit<'a>(skip: usize, take: Option<usize>, source: ValueIter<'a>) -> Val
 }
 
 /// `Distinct` — emit each distinct value once (one level of array flatten when set).
+/// Benches drive the uncapped path (`None`), the common case.
 pub fn distinct<'a>(source: ValueIter<'a>, flatten: bool) -> ValueIter<'a> {
-    nodes::distinct::execute(source, flatten)
+    nodes::distinct::execute(source, flatten, None)
 }
 
 /// `Unwind` — emit one row per element of `array`, extending the environment.
@@ -221,7 +222,7 @@ pub fn index_merge<'a, T: EngineTransaction + Catalog>(
     left: ValueIter<'a>,
     right: ValueIter<'a>,
 ) -> Result<ValueIter<'a>, ExecError> {
-    nodes::index_merge::execute(txn, collection, logical, left, right)
+    nodes::index_merge::execute(txn, collection, logical, left, right, None)
 }
 
 /// `IndexIntersect` — the galloping all-equality skip-merge over `parts`.
