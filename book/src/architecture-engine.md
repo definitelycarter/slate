@@ -111,7 +111,7 @@ pub trait ScriptHandle: Send + Sync {
 
 Scripts receive BSON in, return BSON out. The database controls what a script can do through `ScriptCapabilities`:
 
-- **`Pure`** — no external access. Used for validators — the script only sees the input document.
+- **`Pure`** — no external access; a script only sees the input document. (Validators, the former `Pure` user, are now native Rust functions outside this VM — see [Triggers & Validators](./scripting.md); the tier is kept for a future read-only scripted hook.)
 - **`ReadOnly`** — scoped read methods (`ctx.get`). For future use (computed fields, projections).
 - **`ReadWrite`** — scoped read-write methods (`ctx.get`, `ctx.put`, `ctx.delete`). Used for triggers that need to read/write other collections.
 
@@ -161,7 +161,7 @@ The callbacks capture borrowed transaction references. They're injected as metho
 
 At the database layer (`slate-db`), hooks are managed by a `HookRegistry` backed by `ArcSwap<HookSnapshot>`:
 
-- **`HookSnapshot`** — a frozen map of `(cf, collection) → Vec<ResolvedHook>` for both triggers and validators. Built by scanning the catalog.
+- **`HookSnapshot`** — a frozen per-collection map, built by scanning the catalog: `Vec<ResolvedHook>` (Lua source) for triggers, and `(validator_name, native_function)` bindings for validators (now native — the code lives in the validator bag, not here). UDF bindings ride along too.
 - **`HookRegistry`** — wraps `ArcSwap` for lock-free snapshot reads. Transactions capture a snapshot at `begin()` time and see a consistent view regardless of concurrent hook modifications.
 - **Invalidation** — when a transaction that modified hooks (register/drop) commits, a fresh snapshot is loaded and swapped in. Subsequent transactions see the updated hooks.
 

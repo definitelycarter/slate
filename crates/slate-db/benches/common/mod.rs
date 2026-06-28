@@ -7,8 +7,8 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use slate_db::DatabaseBuilder;
 use slate_db::bench::Database;
-use slate_db::v2::{IndexOptions, UdfFunction};
-use slate_db::{UdfError, Value};
+use slate_db::v2::{IndexOptions, UdfFunction, ValidatorFunction};
+use slate_db::{UdfError, ValidatorCtx, ValidatorError, Value, Verdict};
 use slate_store::MemoryStore;
 
 // ── Constants ───────────────────────────────────────────────
@@ -123,6 +123,37 @@ pub fn udf_engine(n: usize) -> Database<MemoryStore> {
         .insert_many(docs)
         .execute(&txn)
         .unwrap();
+    txn.commit().unwrap();
+    engine
+}
+
+/// A pass-through native validator — accepts every document. Lets the write
+/// bench isolate the per-write validator dispatch cost (building the ctx, the
+/// `catch_unwind`, the trait call) from any real validation logic.
+fn accept_all(_: &ValidatorCtx<'_>) -> Result<Verdict, ValidatorError> {
+    Ok(Verdict::Accept)
+}
+
+/// An engine with the collection `bench`, optionally guarded by one bound
+/// pass-through native validator (`accept_all`). `validated == true` is the
+/// `native` arm of the insert-validator bench; `false` is the `none` baseline —
+/// the same inserts with no `Node::Validate` wrapper.
+pub fn insert_validator_engine(validated: bool) -> Database<MemoryStore> {
+    let mut builder = db_builder();
+    if validated {
+        builder = builder.with_validator("accept_all", accept_all);
+    }
+    let engine = builder.open(MemoryStore::new()).unwrap();
+    let txn = engine.begin(false).unwrap();
+    engine.collections().create("bench").execute(&txn).unwrap();
+    if validated {
+        engine
+            .collection("bench")
+            .validators()
+            .create("accept_all", ValidatorFunction::from_name("accept_all"))
+            .execute(&txn)
+            .unwrap();
+    }
     txn.commit().unwrap();
     engine
 }

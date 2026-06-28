@@ -53,5 +53,35 @@ fn bench_bulk_insert(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_bulk_insert);
+// ── Insert with a native validator ──────────────────────────
+
+fn bench_insert_validated(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert_validated");
+    let n = 1_000;
+    let docs = generate_realistic_batch(n);
+    // `none` = inserts with no validator (the untouched write path); `native` =
+    // the same inserts behind one bound pass-through validator. The delta is the
+    // per-write native-validator overhead (resolve once, then per-row
+    // ctx + catch_unwind + trait call).
+    for (label, validated) in [("none", false), ("native", true)] {
+        let engine = insert_validator_engine(validated);
+        group.bench_function(label, |b| {
+            b.iter_batched(
+                || (engine.begin(false).unwrap(), docs.clone()),
+                |(txn, docs)| {
+                    engine
+                        .collection("bench")
+                        .insert_many(docs)
+                        .execute(&txn)
+                        .unwrap();
+                    // Don't commit — let txn drop so the engine stays empty.
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_bulk_insert, bench_insert_validated);
 criterion_main!(benches);

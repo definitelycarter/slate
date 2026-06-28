@@ -89,21 +89,18 @@ users.indexes().create("email", IndexOptions::default()).execute(&txn)?; // back
 users.indexes().remove("email").execute(&txn)?;
 users.indexes().list(&txn)?;                       // -> Vec<String>
 
-// Triggers and validators (requires DatabaseBuilder with scripting)
+// Triggers — Lua (requires DatabaseBuilder with scripting)
 users.triggers().create("audit_trigger", r#"
     return function(ctx, event)
       ctx.put("audit", { _id = event.doc._id .. ":" .. event.action, action = event.action })
       return event
     end
 "#).execute(&txn)?;
-users.validators().create("require_name", r#"
-    return function(event)
-      if type(event.doc.name) ~= "string" then
-        return { ok = false, reason = "name is required" }
-      end
-      return { ok = true }
-    end
-"#).execute(&txn)?;
+// Validators — native: register a Rust fn in the bag (with_validator /
+// validators().register), then bind it to the collection here.
+users.validators()
+    .create("require_name", ValidatorFunction::from_name("require_name"))
+    .execute(&txn)?;
 
 // Collection management
 db.collections().list(&txn)?;                      // -> Vec<String> (this column family)
@@ -144,7 +141,7 @@ For a join-free query the planner binds the whole row to a single alias (`RowBin
 - **Index union for OR** — OR queries with indexed branches use `IndexMerge(Or)` to combine ID sets, avoiding full scans.
 - **Dot-notation field access** — filters, sorts, and projections support nested paths like `"address.city"`.
 - **Plan-time hook resolution** — triggers and validators are resolved from a snapshot at plan time and wired into the plan tree as `Node::Trigger`, `Node::Validate`, and `Plan::Trigger` nodes. Zero overhead for collections without hooks. See [Querying — Mutation Pipeline](./querying.md#mutation-pipeline--triggers-and-validators).
-- **Runtime-agnostic scripting** — trigger/validator dispatch goes through `slate-vm`'s trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`); the executor never names a concrete runtime, so it builds without `mlua` and the whole query stack compiles to `wasm32`. Scripting is injected from above via `DatabaseBuilder::with_scripting`; tests register a `LuaScriptRuntime` through a dev-dependency.
+- **Native validators, runtime-agnostic triggers** — validators are native Rust (`dyn Validator` from a database-scoped bag, resolved once per query and run behind a panic boundary). Trigger dispatch still goes through `slate-vm`'s trait objects (`VmPool`, `dyn ScriptRuntime`/`ScriptHandle`, `VmError`); the executor never names a concrete runtime, so it builds without `mlua` and the whole query stack compiles to `wasm32`. Triggers are injected from above via `DatabaseBuilder::with_scripting`; tests register a `LuaScriptRuntime` through a dev-dependency.
 
 ### Logical Export / Import
 

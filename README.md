@@ -13,7 +13,8 @@ A document database built in Rust. Schema-flexible BSON documents with pluggable
 - **Vector search** — flat (exact, brute-force) k-nearest-neighbour over embedding fields: `ORDER BY VECTORDISTANCE(c.embedding, @q) LIMIT k` seeks a per-field vector index (cosine / dot-product / euclidean), with `WHERE` pre-filtering before the top-k; on-device RAG / semantic search (the app supplies embeddings, Slate stores and searches them)
 - **Observability** — `EXPLAIN` plus `EXPLAIN ANALYZE` (the plan tree annotated with per-node `rows=`/`examined=` counts), a `stats()` size/cardinality surface, and feature-gated `tracing` spans (off by default, zero-cost when off)
 - **Native functions (UDFs)** — register Rust functions in a database-scoped bag (`with_udf` / `functions().register`) and bind them per-collection (`functions().create`), callable as `udf.name(...)` in SQL; the binding resolves at plan build (a dangling binding fails before execution, with per-collection isolation) and runs behind a panic boundary
-- **Lua scripting** — triggers and validators with sandboxed execution, BSON type preservation, and snapshot-isolated hook resolution
+- **Native validators** — register Rust functions in a database-scoped bag and bind them per collection (`with_validator` / `validators().register` + `validators().create`) to gate writes: a validator returns `Verdict::accept`/`reject`, runs behind a panic boundary, and a dangling binding fails writes safely (the binding resolves once per query, then runs per row)
+- **Lua triggers** — collection side-effect hooks with sandboxed execution, BSON type preservation, and snapshot-isolated resolution (the last hook still scripted; validators and UDFs are native)
 - **Online backup** — `db.backup(path)` for hot snapshots (RocksDB checkpoint, redb file copy)
 - **Logical export / import** — `db.export(path)` / `db.import(path)` write a portable BSON dump (manifest + per-collection document streams) that rebuilds indexes on load, for cross-backend migration (e.g. redb → RocksDB), seeding, and recovery
 - **Encryption at rest via the OS** — relies on the device's full-disk / file-level encryption (iOS Data Protection, FileVault/APFS, equivalents), which protects the whole on-disk file — keys, values, and `_id`s — on a locked or powered-off device; no app-level crypto. See [the guarantee and threat model](book/src/architecture-storage.md#encryption-at-rest)
@@ -35,6 +36,7 @@ slate/
   ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
   ├── slate-value            → The shared value domain (`Value`) — function crates speak it without the evaluator
   ├── slate-udf              → Native UDF trait + the database-scoped code bag (baked into the plan/executor)
+  ├── slate-validator        → Native validator trait + the database-scoped validator bag (write-path gate)
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction
@@ -141,33 +143,38 @@ txn.commit()?;
 
 ### Triggers and Validators
 
-Attach Lua scripts to collections for side effects (triggers) and constraints (validators). Requires `DatabaseBuilder` with a scripting pool.
+Validators are **native Rust functions**: register one in the database-scoped bag
+and bind it per collection. Triggers are still **Lua scripts** (so a trigger needs
+a scripting pool). Both are resolved from a snapshot at plan time.
 
 ```rust
 use std::sync::Arc;
-use slate_db::{DatabaseBuilder, RuntimeRegistry, VmPool};
+use slate_db::{DatabaseBuilder, RuntimeRegistry, ValidatorCtx, Verdict, VmPool};
+use slate_db::v2::ValidatorFunction;
 use slate_vm::{LuaScriptRuntime, RuntimeKind};
 
 let mut reg = RuntimeRegistry::new();
 reg.register(RuntimeKind::Lua, Arc::new(LuaScriptRuntime::new()));
 let db = DatabaseBuilder::new()
-    .with_scripting(VmPool::new(reg))
+    .with_scripting(VmPool::new(reg))                          // for Lua triggers
+    // Native validator — reject documents missing a "name" field
+    .with_validator("require_name", |ctx: &ValidatorCtx| {
+        match ctx.doc().get_str("name") {
+            Ok(name) if !name.is_empty() => Ok(Verdict::Accept),
+            _ => Ok(Verdict::reject("name is required")),
+        }
+    })
     .open(store)?;
 
 let accounts = db.collection("accounts");
 
-// Validator — reject documents missing a "name" field
 let txn = db.begin(false)?;
-accounts.validators().create("require_name", r#"
-    return function(event)
-      if type(event.doc.name) ~= "string" or event.doc.name == "" then
-        return { ok = false, reason = "name is required" }
-      end
-      return { ok = true }
-    end
-"#).execute(&txn)?;
+// Bind the registered native validator to this collection
+accounts.validators()
+    .create("require_name", ValidatorFunction::from_name("require_name"))
+    .execute(&txn)?;
 
-// Trigger — log every mutation to an audit collection
+// Trigger — log every mutation to an audit collection (Lua)
 accounts.triggers().create("audit_log", r#"
     return function(ctx, event)
       ctx.put("audit", {

@@ -16,10 +16,11 @@ slate/
   ├── slate-sql              → CosmosDB-style SQL front-end: SQL text → AST
   ├── slate-value            → The shared value domain (`Value`) — function crates speak it without the evaluator
   ├── slate-udf              → Native UDF trait + the database-scoped code bag (baked into the plan/executor)
+  ├── slate-validator        → Native validator trait + the database-scoped validator bag (write-path gate)
   ├── slate-eval             → Evaluation semantics for the AST (owned + zero-copy raw evaluators)
   ├── slate-planner          → Logical planning: AST → Plan/Node IR (sargability, index choice)
   ├── slate-executor         → Physical execution: streams a Plan against a transaction
-  ├── slate-vm               → Scripting engine: runtime-agnostic VM pool, Lua runtime (feature-gated)
+  ├── slate-vm               → Scripting engine for triggers: runtime-agnostic VM pool, Lua runtime (feature-gated)
   ├── slate-db               → Database layer: public API + query-stack wiring
   ├── slate-uniffi           → UniFFI bindings for Swift/Kotlin (XCFramework builds)
   └── slate-wasm             → wasm-bindgen bindings for JavaScript/WebAssembly

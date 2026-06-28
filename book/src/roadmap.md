@@ -168,17 +168,21 @@ uninstrumented:
 - **[Unique Indexes](./rfcs/unique-indexes.md)** — *done.* Single-field scalar
   uniqueness via a dual `i`/`u` key format; sparse; scalar-only.
 - **[User-Defined Logic](./rfcs/user-defined-logic.md)** — *partially implemented.*
-  Lua/JS triggers + validators shipped; computed fields, custom key extractors,
-  partial-index filters, and transform pipelines remain.
-- **[Native Functions](./rfcs/native-functions.md)** — *UDFs done.* Native Rust
-  scalar UDFs callable as `udf.name(...)` in SQL: a database-scoped code bag
-  (`register` / `with_udf`) plus per-collection durable bindings
-  (`functions().create`), resolved at plan build and run under `catch_unwind`.
-  The binding maps a query name to a native function name; the bag supplies the
-  code. `dangling_bindings()` reports unresolved symbols. Converting
-  validators/triggers to native (and dropping the VM) remains. UDFs run in
-  compiled positions (`SELECT`/`WHERE`); `ORDER BY`/`UNWIND`/`GROUP BY` (which
-  interpret) are a follow-up.
+  Lua triggers shipped (validators moved to native — see Native Functions);
+  computed fields, custom key extractors, partial-index filters, and transform
+  pipelines remain.
+- **[Native Functions](./rfcs/native-functions.md)** — *UDFs + validators done.*
+  Native Rust hooks behind one model — a database-scoped code bag (`register` /
+  `with_udf` / `with_validator`) plus per-collection durable bindings
+  (`functions().create` / `validators().create`), resolved at plan build and run
+  under `catch_unwind`. The binding maps a name to a native function; the bag
+  supplies the code. `dangling_bindings()` reports unresolved symbols (tagged
+  `Udf` / `Validator`). **Validators** are now `dyn Validator` (`Pure`, a
+  write-path gate returning a `Verdict`); each binding resolves once per query and
+  a dangling one aborts all writes to its collection, fail-safe. **Converting
+  triggers to native (and dropping `slate-vm`) remains** — they are the last Lua
+  holdout. UDFs run in compiled positions (`SELECT`/`WHERE`);
+  `ORDER BY`/`UNWIND`/`GROUP BY` (which interpret) are a follow-up.
 
 ## Storage & Durability
 

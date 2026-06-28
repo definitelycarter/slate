@@ -10,7 +10,7 @@
 - [Mongo Operators](./mongo-operators.md)
 - [SQL Reference](./sql-support.md)
 - [Function Reference](./functions.md)
-- [Scripting](./scripting.md)
+- [Triggers & Validators](./scripting.md)
 - [Playground](./playground.md)
 - [Swift / Apple Platforms](./swift.md)
 - [Benchmarks](./benchmarks.md)
