@@ -149,6 +149,8 @@ impl From<slate_executor::ExecError> for DbError {
             // surface it as a document error (the write was refused).
             E::Validation(msg) => DbError::InvalidDocument(msg),
             E::Trigger(msg) => DbError::InvalidDocument(msg),
+            // A malformed plan node is a query-construction fault.
+            E::InvalidPlan(msg) => DbError::InvalidQuery(msg),
         }
     }
 }

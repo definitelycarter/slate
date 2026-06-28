@@ -25,14 +25,15 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
     collection: &CollectionRef,
     parts: &[IndexIntersectPart],
 ) -> Result<ValueIter<'a>, ExecError> {
-    // The planner only emits IndexIntersect for >=2 equality parts. Guard a
-    // directly-constructed degenerate node: with no parts there is nothing to
-    // intersect (and the zig-zag below would index into an empty cursor set),
-    // so yield no rows rather than panic. A *single* part is a valid degenerate
-    // the loop already handles correctly — it streams that one scan — so it
-    // needs no guard.
-    if parts.is_empty() {
-        return Ok(Box::new(std::iter::empty()));
+    // IndexIntersect is the intersection of >=2 equality streams; the planner
+    // only ever emits it so. A directly-constructed node with fewer parts is a
+    // malformed plan (and the zig-zag below would index into a degenerate cursor
+    // set) — fail loudly rather than panic or silently return nothing.
+    if parts.len() < 2 {
+        return Err(ExecError::InvalidPlan(format!(
+            "IndexIntersect requires at least two equality parts, got {}",
+            parts.len()
+        )));
     }
 
     let handle = txn.collection(&collection.cf, &collection.collection)?;
@@ -121,7 +122,7 @@ pub(crate) fn execute<'a, T: EngineTransaction + Catalog>(
 
 #[cfg(test)]
 mod tests {
-    use crate::Executor;
+    use crate::{ExecError, Executor};
     use bson::{Bson, RawBson, RawDocumentBuf, rawdoc};
     use slate_engine::{Catalog, DEFAULT_CF, Engine, EngineTransaction, KvEngine};
     use slate_planner::{
@@ -348,10 +349,24 @@ mod tests {
     }
 
     #[test]
-    fn degenerate_zero_parts_yields_no_rows() {
-        // The planner never emits a 0-part IndexIntersect, but the IR is publicly
-        // constructible — a degenerate node must yield nothing, not panic.
+    fn too_few_parts_is_an_error() {
+        // The planner never emits an IndexIntersect with <2 parts, but the IR is
+        // publicly constructible — a malformed node must error (loudly), not
+        // panic or silently yield nothing. Both 0 and 1 part are rejected.
         let engine = seed(&["a"], vec![rawdoc! { "_id": "d00", "a": "x" }]);
-        assert_eq!(intersect(&engine, vec![]), Vec::<String>::new());
+        let txn = engine.begin(true).unwrap();
+        for parts in [Vec::new(), vec![part("a", s("x"))]] {
+            let plan = Plan::Query(Node::IndexIntersect {
+                collection: coll(),
+                parts,
+            });
+            assert!(
+                matches!(
+                    Executor::new(&txn).execute_collect(plan),
+                    Err(ExecError::InvalidPlan(_))
+                ),
+                "IndexIntersect with <2 parts must be an InvalidPlan error"
+            );
+        }
     }
 }

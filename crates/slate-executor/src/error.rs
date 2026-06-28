@@ -17,6 +17,10 @@ pub enum ExecError {
     Validation(String),
     /// A trigger errored, panicked, or is bound to an unregistered function.
     Trigger(String),
+    /// A structurally invalid plan node reached execution — an invariant the
+    /// planner upholds, surfaced (rather than panicking) when a directly-built
+    /// IR violates it (e.g. an `IndexIntersect` with fewer than two parts).
+    InvalidPlan(String),
 }
 
 impl fmt::Display for ExecError {
@@ -27,6 +31,7 @@ impl fmt::Display for ExecError {
             ExecError::Mutation(e) => write!(f, "mutation error: {e}"),
             ExecError::Validation(m) => write!(f, "validation failed: {m}"),
             ExecError::Trigger(m) => write!(f, "trigger failed: {m}"),
+            ExecError::InvalidPlan(m) => write!(f, "invalid plan: {m}"),
         }
     }
 }
