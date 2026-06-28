@@ -287,6 +287,62 @@ pub struct Database<S: Store> {
     ttl_handle: Option<crate::runtime::sweep::TtlHandle>,
 }
 
+/// How [`Database::transact`] retries a transaction whose `commit` fails with
+/// [`DbError::Conflict`] (an optimistic write-write conflict).
+///
+/// Retries are **bounded by default and take no backoff**, so the helper needs
+/// no clock and is safe on every target — including `wasm32`, where
+/// `std::thread::sleep` is unavailable. A caller that wants to space attempts
+/// out (sleep, exponential backoff, a cooperative yield) injects it with
+/// [`with_backoff`](RetryPolicy::with_backoff); the default path then carries no
+/// timing dependency and allocates nothing.
+pub struct RetryPolicy {
+    /// Maximum number of *retries* after the first attempt. `0` runs the body at
+    /// most once (no retry); the default is [`RetryPolicy::DEFAULT_MAX_RETRIES`].
+    max_retries: u32,
+    /// Hook invoked after a conflict, just before the next attempt, with the
+    /// 0-based retry index (`0` precedes the first retry). The home for a
+    /// sleep/backoff/yield, kept injectable so the default carries no timing
+    /// dependency. `None` retries immediately.
+    backoff: Option<Box<dyn Fn(u32) + Send + Sync>>,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: Self::DEFAULT_MAX_RETRIES,
+            backoff: None,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// The default retry bound used by [`Database::transact`]: 8 retries (9
+    /// attempts in all) before a persistent conflict surfaces to the caller.
+    pub const DEFAULT_MAX_RETRIES: u32 = 8;
+
+    /// A policy that retries up to `max_retries` times with no backoff. `0`
+    /// disables retrying — the body runs at most once.
+    pub fn new(max_retries: u32) -> Self {
+        Self {
+            max_retries,
+            backoff: None,
+        }
+    }
+
+    /// Attach a backoff/yield hook, invoked with the 0-based retry index after a
+    /// conflict and before the next attempt. The natural home for a sleep or
+    /// exponential backoff on native targets; omit it (the default) for an
+    /// immediate, `wasm32`-safe retry.
+    pub fn with_backoff<F>(mut self, backoff: F) -> Self
+    where
+        F: Fn(u32) + Send + Sync + 'static,
+    {
+        self.backoff = Some(Box::new(backoff));
+        self
+    }
+}
+
 impl<S: Store + BackupStore> Database<S> {
     /// Create a physical backup of the database at the given path.
     ///
@@ -320,6 +376,82 @@ impl<S: Store> Database<S> {
     pub fn begin_with(&self, durability: Durability) -> Result<Transaction<'_, S>, DbError> {
         let txn = self.engine.begin_with_durability(durability)?;
         self.wrap_txn(txn, false)
+    }
+
+    /// Run `body` inside a write transaction, committing on success and retrying
+    /// on an optimistic conflict.
+    ///
+    /// `transact` owns the whole begin → run → commit lifecycle: it begins a
+    /// write transaction, hands it to `body`, then commits. If `commit` (or
+    /// `body` itself) reports [`DbError::Conflict`], it rolls the attempt back
+    /// and re-runs `body` in a **fresh** transaction — a fresh `begin` snapshot
+    /// each time — up to the retry bound; any other error aborts immediately.
+    /// The closure's value is returned from the committing attempt.
+    ///
+    /// This is the safe-by-default home for the optimistic path. On RocksDB a
+    /// concurrent writer can make `commit` conflict, and without a retry loop
+    /// that is a footgun (see the concurrency contract in
+    /// `book/src/architecture-database.md`). The serialize-writers backends
+    /// (memory, redb) never conflict, so there `body` runs exactly once.
+    ///
+    /// `body` is `FnMut` and may run more than once, so keep it idempotent
+    /// across retries: don't rely on side effects from an aborted attempt, and
+    /// route every read and write through the supplied transaction so each retry
+    /// sees the latest committed state.
+    ///
+    /// Uses [`RetryPolicy::default`]; see [`transact_with`](Self::transact_with)
+    /// for an explicit bound or a backoff hook.
+    pub fn transact<F, T>(&self, body: F) -> Result<T, DbError>
+    where
+        F: FnMut(&Transaction<'_, S>) -> Result<T, DbError>,
+    {
+        self.transact_with(&RetryPolicy::default(), body)
+    }
+
+    /// [`transact`](Self::transact) with an explicit [`RetryPolicy`] — a retry
+    /// bound and an optional backoff hook.
+    ///
+    /// On a *persistent* conflict (every attempt through the bound conflicts)
+    /// the final [`DbError::Conflict`] is returned, so the caller can surface or
+    /// escalate it rather than spin forever.
+    pub fn transact_with<F, T>(&self, policy: &RetryPolicy, mut body: F) -> Result<T, DbError>
+    where
+        F: FnMut(&Transaction<'_, S>) -> Result<T, DbError>,
+    {
+        let mut retries = 0u32;
+        loop {
+            let txn = self.begin(false)?;
+            // A conflict can come from either side: `body` (e.g. a
+            // read-validated write) or — far more often — the `commit`. On the
+            // body-error path the transaction is still live, so roll it back
+            // before deciding whether to retry; `commit` consumes it itself.
+            let outcome = match body(&txn) {
+                Ok(value) => txn.commit().map(|()| value),
+                Err(e) => {
+                    // We're already unwinding this attempt; a rollback error is
+                    // not actionable (matches the `let _ = rollback()` pattern
+                    // used elsewhere in this module).
+                    let _ = txn.rollback();
+                    Err(e)
+                }
+            };
+
+            match outcome {
+                Ok(value) => return Ok(value),
+                Err(e) if e.is_conflict() => {
+                    // Retry while the budget lasts; otherwise surface the
+                    // conflict so the caller can decide what to do.
+                    if retries >= policy.max_retries {
+                        return Err(e);
+                    }
+                    if let Some(backoff) = &policy.backoff {
+                        backoff(retries);
+                    }
+                    retries += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Wrap an engine transaction in a database [`Transaction`] (the shared tail

@@ -15,7 +15,8 @@ pub use bson::{Bson, Document, RawBson, RawDocumentBuf};
 pub use collection::{CollectionConfig, CollectionSchema};
 pub use cursor::{Cursor, CursorIter, RawCursorIter, RawValuesIter, ValuesIter};
 pub use database::{
-    BindingKind, DanglingBinding, Database, DatabaseBuilder, Transaction as DatabaseTransaction,
+    BindingKind, DanglingBinding, Database, DatabaseBuilder, RetryPolicy,
+    Transaction as DatabaseTransaction,
 };
 pub use error::DbError;
 pub use export::{
