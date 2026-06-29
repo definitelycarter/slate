@@ -79,6 +79,29 @@ scan 20k rows: 142ms → 98ms (-31%)
 
 Don't pad commit bodies with bench numbers when nothing meaningfully moved.
 
+### Between-run noise: why an "A/A" can show big regressions
+
+Criterion is extremely precise **within a single process** — its per-run confidence intervals are routinely ~0.1%. But the number it labels "regressed/improved" compares *this* run to a *previous* run — i.e. **across two process launches** — and that gap is far larger. In practice an **A/A test — the same binary run twice, with zero code change — routinely flags "regressed" on many benchmarks** (we've measured 6 of 9, up to +8%).
+
+So before trusting any delta, measure your **noise floor**:
+
+```bash
+# True A/A: build once, run twice, NO recompile between → any delta is pure noise
+cargo bench -p <crate> --bench <name> -- --save-baseline aa1 <filter>
+cargo bench -p <crate> --bench <name> -- --baseline   aa1 <filter>   # deltas = the floor
+```
+
+Only believe a code-change delta that **exceeds the A/A floor** for that bench. Criterion's default `noise_threshold` is **1%**, well below the real floor — which is why its "Performance has regressed" verdict over-fires. Read the change% and apply the §4 thresholds yourself; the label lies.
+
+### What makes a bench noisy (two sources, two fixes)
+
+- **Layout / core-migration** — hits small, cheap, sub-50µs benches hardest (fixed per-process overhead and cache placement dominate a tiny measurement). Recompiling reshuffles code layout; the scheduler bounces the thread across cores. **Fix: pin one core** — on Linux, `taskset -c 3 cargo bench …` (no macOS equivalent). In testing this roughly halved the worst small-case A/A swing (`project_identity/100`: +8.2% → +3.7%).
+- **Allocation / memory state** — hits benches dominated by per-iteration heap churn (e.g. cloning a big input *inside* `b.iter`). Swings ±10% and **pinning does NOT help** (it's allocator/page/THP state, not the CPU). **Fix: take the allocation out of the timed region** with `iter_batched(|| input.clone(), |inp| …, BatchSize::SmallInput)` so you time only the work, not the `clone`. Beware **subtraction baselines** (`marginal = transform − passthrough`): if the baseline is pure allocation, its ±10% contaminates *every* marginal measured against it.
+
+### Compare only same-build runs
+
+The change% is "this run vs. whatever ran last under this exact benchmark ID" in `CRITERION_HOME` — even if that previous run was a different branch, **a different feature set**, or a different compile. Cross-build comparisons are meaningless: a `--features rocksdb,redb` build vs a `default` build shows double-digit "regressions" in the *unrelated* memory backend purely from codegen/layout. Always pair `--baseline` against a `--save-baseline` taken on the *same* build/branch/feature-set.
+
 ## 5. README numbers
 
 `README.md` quotes specific bench results. If a change moves any of those numbers materially, update the README **in the same commit** (precedent: `52d64db`). Don't let README drift from reality across commits.
