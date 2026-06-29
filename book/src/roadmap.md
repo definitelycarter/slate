@@ -275,9 +275,14 @@ uninstrumented:
 
 ## Bindings & Tooling
 
-- **[WebAssembly Support](./rfcs/webassembly-support.md)** — *partially implemented.*
-  The full stack compiles to `wasm32`; MemoryStore + the JS scripting bridge work.
-  Platform adapters, browser storage (OPFS/IndexedDB), and `getrandom` entropy remain.
+- **WebAssembly (`wasm32`)** — *shipped.* The full database stack compiles to
+  `wasm32-unknown-unknown` on the MemoryStore backend (no C deps, threads, or
+  filesystem), guarded by a CI build of `slate-wasm`. Scripted functions on wasm
+  are no longer a built-in bridge — they belong to the
+  [Native Functions](./rfcs/native-functions.md) companion-adapter story (a
+  wasm / JS / Lua runtime supplied as a `dyn Udf` / `dyn Trigger`). Browser
+  persistence (OPFS / IndexedDB) is tracked by the
+  [MemoryStore Persistence](./rfcs/memorystore-persistence.md) RFC.
 - **Interactive Shell (CLI)** — *done.* `slate-cli` REPL: meta-commands + SQL,
   `.seed` bulk-load, online `.backup`, logical `.export` / `.import`,
   `.explain` / `.explain analyze`, `.stats`, multi-line statements,

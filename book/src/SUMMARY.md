@@ -18,6 +18,7 @@
 
 # RFCs
 
+- [RFC Index](./rfcs/index.md)
 - [Spatial Index](./rfcs/spatial-index.md)
 - [Vector Index & VECTORDISTANCE](./rfcs/vector-index.md)
 - [Index Sargability](./rfcs/index-sargability.md)
@@ -45,5 +46,4 @@
 - [Execution Context (env bundle & plan-derived scope)](./rfcs/execution-context.md)
 - [MemoryStore Persistence](./rfcs/memorystore-persistence.md)
 - [Change Detection (Watch Queries)](./rfcs/watch-queries.md)
-- [WebAssembly Support](./rfcs/webassembly-support.md)
 - [Public API Ergonomics (Collection handle)](./rfcs/db-api-cleanup.md)
