@@ -20,13 +20,16 @@
 //!   (`KeyLookup`, `IndexMerge`) read storage: the engine + read transaction are
 //!   built once outside (the `txn` must outlive the iterator), and only the
 //!   open-iterator-plus-drain is timed.
-//! - **Transform nodes** consume their source `ValueIter`, so the source must be
-//!   rebuilt every iteration. The input documents are built once as a
-//!   `Vec<RawBson>`; inside the loop a fresh source is created via the `values`
-//!   (or `bind`) wrapper — `bench::values(docs.clone())` — then the transform,
-//!   then the drain. A `values_passthrough/<size>` baseline is included at each
-//!   size so a transform's *marginal* cost is `transform − passthrough` (the
-//!   `clone` + `values` drain is the shared overhead both pay; `distinct`/`unwind`
+//! - **Transform nodes** consume their source `ValueIter`, so a *fresh* source
+//!   must be built every iteration. The input documents are built once as a
+//!   `Vec<RawBson>`; the per-iteration `docs.clone()` that feeds a fresh source
+//!   runs in criterion's *untimed* `iter_batched` setup (`BatchSize::PerIteration`),
+//!   so the heap churn of cloning N docs is **not** measured — only building the
+//!   `values` source over the clone, the transform, and the drain are timed.
+//!   (Timing the clone made these cases swing ±10% run-to-run; that is allocator/
+//!   page noise, not node cost.) A `values_passthrough/<size>` baseline is included
+//!   at each size so a transform's *marginal* cost is `transform − passthrough`
+//!   (the `values` build + drain is the shared overhead both pay; `distinct`/`unwind`
 //!   read differently-shaped inputs but the same rebuild mechanism).
 //!
 //! Sizes sweep 100 / 1k / 10k rows. The storage fixture indexes `age` (numeric,
@@ -36,7 +39,9 @@ use std::hint::black_box;
 
 use bson::{Bson, RawBson};
 use criterion::measurement::WallTime;
-use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{
+    BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
+};
 use slate_ast::{BinOp, Expression, Literal, OrderByItem, SelectClause};
 use slate_engine::Engine;
 use slate_executor::bench;
@@ -209,11 +214,14 @@ fn bench_storage(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("key_lookup/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::values(id_vec.clone());
-                    let it = bench::key_lookup(&txn, &coll, src).unwrap();
-                    black_box(bench::collect(it).unwrap())
-                })
+                b.iter_batched(
+                    || id_vec.clone(),
+                    |d| {
+                        let it = bench::key_lookup(&txn, &coll, bench::values(d)).unwrap();
+                        black_box(bench::collect(it).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -338,11 +346,18 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             rhs: Box::new(Expression::Literal(Literal::Int((n / 4) as i64))),
         };
 
-        // Baseline: rebuild + drain a `values` source — the shared per-iter cost.
+        // Baseline: build + drain a `values` source — the shared per-iter cost.
+        // The `docs.clone()` feeding a fresh source is done in untimed setup.
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("values_passthrough/{n}")),
             &n,
-            |b, _| b.iter(|| black_box(bench::collect(bench::values(docs.clone())).unwrap())),
+            |b, _| {
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| black_box(bench::collect(bench::values(d)).unwrap()),
+                    BatchSize::PerIteration,
+                )
+            },
         );
 
         // Bind — wrap each value as `{c: value}`.
@@ -350,10 +365,14 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("bind/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::bind("c".into(), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::bind("c".into(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -362,21 +381,28 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("filter_cheap/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::filter(cheap.clone(), alias(), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::filter(cheap.clone(), alias(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("filter_expensive/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src =
-                        bench::filter(expensive.clone(), alias(), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::filter(expensive.clone(), alias(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -385,22 +411,28 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("project_identity/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src =
-                        bench::project(identity.clone(), alias(), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::project(identity.clone(), alias(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("project_computed/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src =
-                        bench::project(computed.clone(), alias(), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::project(computed.clone(), alias(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -409,22 +441,28 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("sort_single/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::sort(sort_one.clone(), alias(), bench::values(docs.clone()))
-                        .unwrap();
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::sort(sort_one.clone(), alias(), bench::values(d)).unwrap();
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("sort_multi/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::sort(sort_two.clone(), alias(), bench::values(docs.clone()))
-                        .unwrap();
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::sort(sort_two.clone(), alias(), bench::values(d)).unwrap();
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -433,10 +471,14 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("limit_skip_take/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::limit(n / 10, Some(n / 2), bench::values(docs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::limit(n / 10, Some(n / 2), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -445,20 +487,28 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("distinct_flatten_false/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::distinct(bench::values(scalars.clone()), false);
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || scalars.clone(),
+                    |d| {
+                        let src = bench::distinct(bench::values(d), false);
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("distinct_flatten_true/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::distinct(bench::values(arrays.clone()), true);
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || arrays.clone(),
+                    |d| {
+                        let src = bench::distinct(bench::values(d), true);
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -467,11 +517,14 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("unwind/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src =
-                        bench::unwind("t".into(), unwind_arr.clone(), bench::values(envs.clone()));
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || envs.clone(),
+                    |d| {
+                        let src = bench::unwind("t".into(), unwind_arr.clone(), bench::values(d));
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -480,32 +533,40 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("aggregate_count/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::aggregate(
-                        count_keys.clone(),
-                        count_aggs.clone(),
-                        alias(),
-                        bench::values(docs.clone()),
-                    )
-                    .unwrap();
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::aggregate(
+                            count_keys.clone(),
+                            count_aggs.clone(),
+                            alias(),
+                            bench::values(d),
+                        )
+                        .unwrap();
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("aggregate_sum/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::aggregate(
-                        sum_keys.clone(),
-                        sum_aggs.clone(),
-                        alias(),
-                        bench::values(docs.clone()),
-                    )
-                    .unwrap();
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::aggregate(
+                            sum_keys.clone(),
+                            sum_aggs.clone(),
+                            alias(),
+                            bench::values(d),
+                        )
+                        .unwrap();
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -514,16 +575,20 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("aggregate_array_agg/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let src = bench::aggregate(
-                        count_keys.clone(),
-                        array_agg_aggs.clone(),
-                        alias(),
-                        bench::values(docs.clone()),
-                    )
-                    .unwrap();
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let src = bench::aggregate(
+                            count_keys.clone(),
+                            array_agg_aggs.clone(),
+                            alias(),
+                            bench::values(d),
+                        )
+                        .unwrap();
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
 
@@ -533,17 +598,21 @@ fn bench_transforms(group: &mut BenchmarkGroup<'_, WallTime>) {
             BenchmarkId::from_parameter(format!("having/{n}")),
             &n,
             |b, _| {
-                b.iter(|| {
-                    let agg = bench::aggregate(
-                        count_keys.clone(),
-                        count_aggs.clone(),
-                        alias(),
-                        bench::values(docs.clone()),
-                    )
-                    .unwrap();
-                    let src = bench::filter(having_pred.clone(), RowBinding::Env, agg);
-                    black_box(bench::collect(src).unwrap())
-                })
+                b.iter_batched(
+                    || docs.clone(),
+                    |d| {
+                        let agg = bench::aggregate(
+                            count_keys.clone(),
+                            count_aggs.clone(),
+                            alias(),
+                            bench::values(d),
+                        )
+                        .unwrap();
+                        let src = bench::filter(having_pred.clone(), RowBinding::Env, agg);
+                        black_box(bench::collect(src).unwrap())
+                    },
+                    BatchSize::PerIteration,
+                )
             },
         );
     }
