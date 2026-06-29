@@ -1,7 +1,10 @@
 # RFC: Execution Context (env bundle & plan-derived scope)
 
-> **Status: in progress — steps 1–2 shipped, 3–4 pending** (see Migration /
-> sequencing). Extracted from the design discussion around the
+> **Status: shipped — all steps landed.** Steps 1–2 (the env bundle +
+> plan-derived scope) are on `main`; steps 3–4 (the per-query udf / validator /
+> trigger resolvers landing on the bundle) shipped with the
+> [Native Functions RFC](./native-functions.md) (see Migration / sequencing).
+> Extracted from the design discussion around the
 > [Native Functions RFC](./native-functions.md). On `main`, each per-query
 > capability — SQL `@`-params, the `RAND()` source, the injected `$now` clock, the
 > watch-capture sink — is threaded **individually** through the execution stack.
@@ -10,13 +13,13 @@
 > re-thread, and sources a query's collection **scope** from the plan (which
 > already encodes it) instead of from the call site.
 >
-> **This lands first — before the native-function work.** The native-UDF spike
-> (which threaded a UDF resolver, used as the running example below) is set aside
-> as a reference donor, *not* shipped to `main`; so the bundle is built on the
-> four capabilities that *are* on `main`, and the native-function capabilities
-> (udf, validator, trigger) then land **on** it — one field each — and resolve at
-> plan-build. The udf-resolver examples below show the shape udf takes once it
-> lands on the bundle.
+> **This landed first — before the native-function work.** The native-UDF spike
+> (which threaded a UDF resolver, used as the running example below) was set aside
+> as a reference donor, *not* shipped to `main`; so the bundle was built on the
+> four capabilities that were already on `main`, and the native-function
+> capabilities (udf, validator, trigger) then landed **on** it — one field each —
+> resolving at plan-build. The udf-resolver examples below show the shape udf
+> takes on the bundle.
 
 ## Summary
 

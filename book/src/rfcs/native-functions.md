@@ -1,6 +1,8 @@
 # RFC: Native Functions — runtime-agnostic hooks & UDFs
 
-> **Status: proposed.** This is *the* native-hooks RFC. It absorbs and replaces two
+> **Status: implemented — the native core is shipped on `main`** (the `slate-udf`
+> / `slate-trigger` / `slate-validator` crates; `slate-vm` deleted). This is *the*
+> native-hooks RFC. It absorbs and replaces two
 > earlier drafts — "Native Functions (first-class Rust hooks)" and "Native Function
 > Core (runtime-agnostic hooks & UDFs)" — into one design. It builds on:
 >
@@ -13,7 +15,8 @@
 > - [User-Defined Logic RFC](./user-defined-logic.md) — the stored-script (Lua/JS)
 >   triggers/validators this RFC reframes as one backend among many.
 >
-> **Scope now: the native core.** Lua and Wasmtime as companion runtimes are
+> **Shipped: the native core** — UDFs, validators, and triggers are all native
+> Rust functions on `main`. Lua and Wasmtime as companion runtimes remain
 > **deferred** — their shape is captured here so the core doesn't paint them out,
 > but they are not built. The near-term integration targets after the native core
 > are **`slate-wasm` (a JavaScript function)** and **`slate-uniffi` (a Swift

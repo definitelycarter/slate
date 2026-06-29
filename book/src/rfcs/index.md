@@ -63,7 +63,7 @@ status at a glance; this table is organised by theme.
 | RFC | Status | Summary |
 |-----|--------|---------|
 | [Native Functions](./native-functions.md) | ✅ Shipped | Role-typed native Rust hooks — UDFs, validators, triggers — replacing the scripted VM (`slate-vm` deleted). |
-| [User-Defined Logic](./user-defined-logic.md) | 🟢 Superseded | Umbrella for triggers/validators/UDFs; realised by Native Functions, scripting runtime deferred. |
+| [User-Defined Logic](./user-defined-logic.md) | 🟡 Partial | Umbrella for user-defined logic; triggers/validators/UDFs shipped native (via Native Functions); computed fields, key extractors, partial-index filters, and transform pipelines remain. |
 
 ## Public API
 
